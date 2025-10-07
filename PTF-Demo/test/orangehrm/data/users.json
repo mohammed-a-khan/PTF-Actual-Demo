@@ -1,0 +1,74 @@
+{
+  "data": [
+    {
+      "username": "Admin",
+      "password": "admin123",
+      "role": "Admin",
+      "expectedResult": "success",
+      "description": "Valid admin login - JSON"
+    },
+    {
+      "username": "HR_Manager",
+      "password": "hrmanager123",
+      "role": "HR Manager",
+      "expectedResult": "success",
+      "description": "HR Manager login"
+    },
+    {
+      "username": "Employee",
+      "password": "emp123",
+      "role": "Employee",
+      "expectedResult": "success",
+      "description": "Regular employee login"
+    },
+    {
+      "username": "test_<random>",
+      "password": "pass_<random>",
+      "role": "Test",
+      "expectedResult": "failure",
+      "description": "Random test user"
+    },
+    {
+      "username": "user_<date:YYYY-MM-DD>",
+      "password": "pass123",
+      "role": "Daily",
+      "expectedResult": "failure",
+      "description": "User with current date"
+    },
+    {
+      "username": "<generate:username>",
+      "password": "<generate:password>",
+      "role": "Generated",
+      "expectedResult": "failure",
+      "description": "Fully generated credentials"
+    },
+    {
+      "username": "config_user",
+      "password": "<config:ADMIN_PASSWORD_ENCRYPTED>",
+      "role": "Config",
+      "expectedResult": "failure",
+      "description": "Password from config"
+    },
+    {
+      "username": "",
+      "password": "",
+      "role": "Empty",
+      "expectedResult": "failure",
+      "description": "Both fields empty"
+    },
+    {
+      "username": "special!@#$",
+      "password": "special!@#$",
+      "role": "Special",
+      "expectedResult": "failure",
+      "description": "Special characters"
+    },
+    {
+      "username": "very_long_username_that_exceeds_normal_length_limits_test",
+      "password": "very_long_password_that_exceeds_normal_length_limits_test",
+      "role": "LongInput",
+      "expectedResult": "failure",
+      "description": "Very long inputs"
+    }
+  ]
+}

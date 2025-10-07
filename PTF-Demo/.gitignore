@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Claude AI
+.claude/
+
+# Backup folders
+backup/
+backup_framework/
+Backup*/
+BACKUP*/
+
+# Test results and reports
+test-results/
+playwright-report/
+reports/
+allure-results/
+allure-report/
+test-reports/
+
+# Runtime artifacts
+screenshots/
+videos/
+har/
+traces/
+
+# Images
+logo.png
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment files with secrets
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# IDE files
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
+
+# Package lock files (optional - remove this line if you want to track them)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml

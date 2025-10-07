@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CS Framework - Encryption/Decryption Tool</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            max-width: 800px;
+            width: 100%;
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #333 0%, #555 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 16px;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid #f0f0f0;
+            margin-bottom: 30px;
+        }
+        
+        .tab {
+            flex: 1;
+            background: none;
+            border: none;
+            padding: 15px 20px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            color: #666;
+            transition: all 0.3s ease;
+        }
+        
+        .tab.active {
+            color: #667eea;
+            border-bottom: 3px solid #667eea;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .form-group {
+            margin-bottom: 25px;
+        }
+        
+        .form-label {
+            display: block;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+        
+        .form-input,
+        .form-textarea {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .form-input:focus,
+        .form-textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+        
+        .form-textarea {
+            min-height: 120px;
+            resize: vertical;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 16px rgba(102, 126, 234, 0.3);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            margin-left: 10px;
+        }
+        
+        .result-section {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .result-label {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 10px;
+        }
+        
+        .result-value {
+            background: white;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 12px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            word-break: break-all;
+            line-height: 1.5;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        
+        .copy-btn {
+            margin-top: 10px;
+            background: #28a745;
+            padding: 8px 16px;
+            font-size: 14px;
+        }
+        
+        .alert {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border: 1px solid;
+        }
+        
+        .alert-error {
+            background-color: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+        }
+        
+        .alert-success {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+        
+        .alert-info {
+            background-color: #d1ecf1;
+            border-color: #bee5eb;
+            color: #0c5460;
+        }
+        
+        .instructions {
+            background: #e9ecef;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+        
+        .instructions h3 {
+            color: #333;
+            margin-bottom: 15px;
+        }
+        
+        .instructions ul {
+            padding-left: 20px;
+        }
+        
+        .instructions li {
+            margin-bottom: 8px;
+            color: #555;
+        }
+        
+        .usage-example {
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            color: #333;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        @media (max-width: 768px) {
+            .content {
+                padding: 20px;
+            }
+            
+            .header {
+                padding: 20px;
+            }
+            
+            .header h1 {
+                font-size: 24px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔐 CS Framework Encryption Tool</h1>
+            <p>Secure encryption and decryption for passwords, PAT tokens, and sensitive data</p>
+        </div>
+        
+        <div class="content">
+            <div class="instructions">
+                <h3>📝 How to Use</h3>
+                <ul>
+                    <li><strong>Encrypt:</strong> Simply enter your sensitive data (password, PAT token, etc.) to get an encrypted string</li>
+                    <li><strong>Decrypt:</strong> Enter the encrypted string to get the original data back</li>
+                    <li><strong>Framework Integration:</strong> Use encrypted strings in your config files with the <code>ENCRYPTED:</code> prefix</li>
+                    <li><strong>Simple & Secure:</strong> No master passwords needed - encryption happens automatically</li>
+                </ul>
+                <div class="usage-example">
+# Example configuration file usage:<br>
+ADO_PERSONAL_ACCESS_TOKEN=ENCRYPTED:eyJlbmNyeXB0ZWQiOiJhYmMxMjMiLCJpdiI6ImdoaTc4OSIsInRhZyI6ImprbDEyMyJ9<br>
+DATABASE_PASSWORD=ENCRYPTED:eyJlbmNyeXB0ZWQiOiJ4eXo5ODciLCJpdiI6InVpb3BhcyIsInRhZyI6ImRmZ2hqayJ9
+                </div>
+            </div>
+            
+            <div class="tabs">
+                <button class="tab active" data-tab="encrypt">🔒 Encrypt</button>
+                <button class="tab" data-tab="decrypt">🔓 Decrypt</button>
+            </div>
+            
+            <!-- Encrypt Tab -->
+            <div class="tab-content active" id="encrypt-tab">
+                <form id="encrypt-form">
+                    <div class="form-group">
+                        <label class="form-label" for="plaintext">Data to Encrypt (Password, PAT Token, etc.)</label>
+                        <textarea 
+                            id="plaintext" 
+                            class="form-textarea" 
+                            placeholder="Enter your sensitive data here..."
+                            required
+                        ></textarea>
+                    </div>
+                    
+                    <!-- Master password removed - using internal key -->
+                    
+                    <button type="submit" class="btn">
+                        🔒 Encrypt Data
+                    </button>
+                    <button type="button" class="btn btn-secondary" onclick="clearEncryptForm()">
+                        🗑️ Clear
+                    </button>
+                </form>
+                
+                <div id="encrypt-result" class="result-section hidden">
+                    <div class="result-label">🎯 Encrypted Result (Copy this to your config file)</div>
+                    <div id="encrypt-output" class="result-value"></div>
+                    <button class="copy-btn btn" onclick="copyToClipboard('encrypt-output')">
+                        📋 Copy to Clipboard
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Decrypt Tab -->
+            <div class="tab-content" id="decrypt-tab">
+                <form id="decrypt-form">
+                    <div class="form-group">
+                        <label class="form-label" for="encrypted-data">Encrypted Data</label>
+                        <textarea 
+                            id="encrypted-data" 
+                            class="form-textarea" 
+                            placeholder="Paste the encrypted string here..."
+                            required
+                        ></textarea>
+                    </div>
+                    
+                    <!-- Master password removed - using internal key -->
+                    
+                    <button type="submit" class="btn">
+                        🔓 Decrypt Data
+                    </button>
+                    <button type="button" class="btn btn-secondary" onclick="clearDecryptForm()">
+                        🗑️ Clear
+                    </button>
+                </form>
+                
+                <div id="decrypt-result" class="result-section hidden">
+                    <div class="result-label">🔍 Decrypted Result</div>
+                    <div id="decrypt-output" class="result-value"></div>
+                    <button class="copy-btn btn" onclick="copyToClipboard('decrypt-output')">
+                        📋 Copy to Clipboard
+                    </button>
+                </div>
+            </div>
+            
+            <div id="alerts"></div>
+        </div>
+    </div>
+
+    <script>
+        // Tab switching
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabName = tab.dataset.tab;
+                
+                // Update active tab
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                
+                // Update active content
+                document.querySelectorAll('.tab-content').forEach(content => {
+                    content.classList.remove('active');
+                });
+                document.getElementById(`${tabName}-tab`).classList.add('active');
+                
+                // Clear alerts
+                clearAlerts();
+            });
+        });
+
+        // Encryption functionality
+        document.getElementById('encrypt-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const plaintext = document.getElementById('plaintext').value;
+            
+            if (!plaintext) {
+                showAlert('Please enter data to encrypt', 'error');
+                return;
+            }
+
+            try {
+                const result = await encryptData(plaintext);
+                const base64Result = btoa(JSON.stringify(result));
+                const finalResult = `ENCRYPTED:${base64Result}`;
+                
+                document.getElementById('encrypt-output').textContent = finalResult;
+                document.getElementById('encrypt-result').classList.remove('hidden');
+                
+                showAlert('✅ Data encrypted successfully!', 'success');
+            } catch (error) {
+                showAlert(`❌ Encryption failed: ${error.message}`, 'error');
+            }
+        });
+
+        // Decryption functionality
+        document.getElementById('decrypt-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            let encryptedData = document.getElementById('encrypted-data').value.trim();
+            
+            if (!encryptedData) {
+                showAlert('Please enter encrypted data', 'error');
+                return;
+            }
+
+            try {
+                // Handle ENCRYPTED: prefix
+                if (encryptedData.startsWith('ENCRYPTED:')) {
+                    encryptedData = encryptedData.substring(10);
+                }
+                
+                const encryptionData = JSON.parse(atob(encryptedData));
+                const result = await decryptData(encryptionData);
+                
+                document.getElementById('decrypt-output').textContent = result;
+                document.getElementById('decrypt-result').classList.remove('hidden');
+                
+                showAlert('✅ Data decrypted successfully!', 'success');
+            } catch (error) {
+                showAlert(`❌ Decryption failed: ${error.message}`, 'error');
+            }
+        });
+
+        // Crypto functions using Web Crypto API with fixed internal key
+        const INTERNAL_KEY = 'CS-Framework-2024-Internal-Encryption-Key-V1'; // Fixed key for simplicity
+        
+        async function encryptData(data) {
+            const encoder = new TextEncoder();
+            
+            // Generate IV (no salt needed since we use fixed key)
+            const iv = crypto.getRandomValues(new Uint8Array(16));
+            
+            // Derive key from fixed internal key
+            const keyMaterial = await crypto.subtle.importKey(
+                'raw',
+                encoder.encode(INTERNAL_KEY),
+                'PBKDF2',
+                false,
+                ['deriveBits', 'deriveKey']
+            );
+            
+            const key = await crypto.subtle.deriveKey(
+                {
+                    name: 'PBKDF2',
+                    salt: encoder.encode('CS-Framework-Salt'),
+                    iterations: 10000, // Reduced iterations for performance
+                    hash: 'SHA-256'
+                },
+                keyMaterial,
+                { name: 'AES-GCM', length: 256 },
+                false,
+                ['encrypt']
+            );
+            
+            // Encrypt data
+            const encrypted = await crypto.subtle.encrypt(
+                {
+                    name: 'AES-GCM',
+                    iv: iv
+                },
+                key,
+                encoder.encode(data)
+            );
+            
+            // Extract auth tag (last 16 bytes for GCM)
+            const encryptedArray = new Uint8Array(encrypted);
+            const ciphertext = encryptedArray.slice(0, -16);
+            const tag = encryptedArray.slice(-16);
+            
+            return {
+                encrypted: btoa(String.fromCharCode(...ciphertext)),
+                iv: btoa(String.fromCharCode(...iv)),
+                tag: btoa(String.fromCharCode(...tag))
+            };
+        }
+
+        async function decryptData(encryptionData) {
+            const encoder = new TextEncoder();
+            const decoder = new TextDecoder();
+            
+            // Decode base64 data
+            const encrypted = new Uint8Array(atob(encryptionData.encrypted).split('').map(c => c.charCodeAt(0)));
+            const iv = new Uint8Array(atob(encryptionData.iv).split('').map(c => c.charCodeAt(0)));
+            const tag = new Uint8Array(atob(encryptionData.tag).split('').map(c => c.charCodeAt(0)));
+            
+            // Combine encrypted data and tag for GCM
+            const encryptedWithTag = new Uint8Array(encrypted.length + tag.length);
+            encryptedWithTag.set(encrypted);
+            encryptedWithTag.set(tag, encrypted.length);
+            
+            // Derive key from fixed internal key
+            const keyMaterial = await crypto.subtle.importKey(
+                'raw',
+                encoder.encode(INTERNAL_KEY),
+                'PBKDF2',
+                false,
+                ['deriveBits', 'deriveKey']
+            );
+            
+            const key = await crypto.subtle.deriveKey(
+                {
+                    name: 'PBKDF2',
+                    salt: encoder.encode('CS-Framework-Salt'),
+                    iterations: 10000,
+                    hash: 'SHA-256'
+                },
+                keyMaterial,
+                { name: 'AES-GCM', length: 256 },
+                false,
+                ['decrypt']
+            );
+            
+            // Decrypt data
+            const decrypted = await crypto.subtle.decrypt(
+                {
+                    name: 'AES-GCM',
+                    iv: iv
+                },
+                key,
+                encryptedWithTag
+            );
+            
+            return decoder.decode(decrypted);
+        }
+
+        // Utility functions
+        function showAlert(message, type) {
+            const alertsContainer = document.getElementById('alerts');
+            const alert = document.createElement('div');
+            alert.className = `alert alert-${type}`;
+            alert.textContent = message;
+            
+            alertsContainer.appendChild(alert);
+            
+            // Auto-remove after 5 seconds
+            setTimeout(() => {
+                if (alert.parentNode) {
+                    alert.parentNode.removeChild(alert);
+                }
+            }, 5000);
+        }
+
+        function clearAlerts() {
+            document.getElementById('alerts').innerHTML = '';
+        }
+
+        function clearEncryptForm() {
+            document.getElementById('plaintext').value = '';
+            document.getElementById('encrypt-result').classList.add('hidden');
+            clearAlerts();
+        }
+
+        function clearDecryptForm() {
+            document.getElementById('encrypted-data').value = '';
+            document.getElementById('decrypt-result').classList.add('hidden');
+            clearAlerts();
+        }
+
+        async function copyToClipboard(elementId) {
+            const element = document.getElementById(elementId);
+            const text = element.textContent;
+            
+            try {
+                await navigator.clipboard.writeText(text);
+                showAlert('📋 Copied to clipboard!', 'success');
+            } catch (err) {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                showAlert('📋 Copied to clipboard!', 'success');
+            }
+        }
+    </script>
+</body>
+</html> 

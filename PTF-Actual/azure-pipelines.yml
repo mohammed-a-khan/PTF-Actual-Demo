@@ -1,0 +1,75 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pool:
+  name: 'Default'
+
+variables:
+  buildConfiguration: 'Release'
+  artifactName: 'cs-test-automation-framework'
+
+stages:
+  - stage: Build
+    displayName: 'Build and Package Framework'
+    jobs:
+      - job: BuildJob
+        displayName: 'Build Framework'
+        steps:
+          - task: NodeTool@0
+            displayName: 'Install Node.js'
+            inputs:
+              versionSpec: '18.x'
+
+          - script: |
+              npm install
+            displayName: 'Install Dependencies'
+
+          - script: |
+              npm run build
+            displayName: 'Build TypeScript'
+
+          - powershell: |
+              "registry=https://pkgs.dev.azure.com/mdakhan/_packaging/cs-framework/npm/registry/" | Out-File -FilePath .npmrc -Encoding utf8
+              "always-auth=true" | Out-File -FilePath .npmrc -Append -Encoding utf8
+            displayName: 'Create .npmrc file'
+
+          - task: npmAuthenticate@0
+            displayName: 'Authenticate to Azure Artifacts feed'
+            inputs:
+              workingFile: '.npmrc'
+
+          - powershell: |
+              Get-Content .npmrc
+            displayName: 'Display .npmrc after authentication'
+
+          - task: CopyFiles@2
+            displayName: 'Copy Framework Files'
+            inputs:
+              Contents: |
+                dist/**
+                package.json
+                README.md
+              TargetFolder: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
+
+          - task: ArchiveFiles@2
+            displayName: 'Create Archive'
+            inputs:
+              rootFolderOrFile: '$(Build.ArtifactStagingDirectory)/$(artifactName)'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName)-$(Build.BuildNumber).zip'
+              replaceExistingArchive: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Build Artifact (for download)'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: '$(artifactName)'
+              publishLocation: 'Container'
+
+          - script: |
+              npm publish
+            displayName: 'Publish to Azure Artifacts npm feed'

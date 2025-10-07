@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testdata>
+  <user>
+    <username>Admin</username>
+    <password>admin123</password>
+    <role>Admin</role>
+    <expectedResult>success</expectedResult>
+    <description>Valid admin login - XML</description>
+  </user>
+  <user>
+    <username>Manager</username>
+    <password>manager123</password>
+    <role>Manager</role>
+    <expectedResult>success</expectedResult>
+    <description>Manager login test</description>
+  </user>
+  <user>
+    <username>Supervisor</username>
+    <password>super123</password>
+    <role>Supervisor</role>
+    <expectedResult>success</expectedResult>
+    <description>Supervisor login test</description>
+  </user>
+  <user>
+    <username>xml_test_&lt;uuid&gt;</username>
+    <password>xmlpass123</password>
+    <role>XMLTest</role>
+    <expectedResult>failure</expectedResult>
+    <description>XML test with UUID</description>
+  </user>
+  <user>
+    <username>&lt;generate:email&gt;</username>
+    <password>&lt;generate:password&gt;</password>
+    <role>Generated</role>
+    <expectedResult>failure</expectedResult>
+    <description>Generated credentials in XML</description>
+  </user>
+  <user>
+    <username>timestamp_&lt;timestamp&gt;</username>
+    <password>pass123</password>
+    <role>Timestamp</role>
+    <expectedResult>failure</expectedResult>
+    <description>User with timestamp</description>
+  </user>
+  <user>
+    <username>sql_injection</username>
+    <password>' OR '1'='1</password>
+    <role>Security</role>
+    <expectedResult>failure</expectedResult>
+    <description>SQL injection test</description>
+  </user>
+  <user>
+    <username>xss_test</username>
+    <password>&lt;script&gt;alert('XSS')&lt;/script&gt;</password>
+    <role>Security</role>
+    <expectedResult>failure</expectedResult>
+    <description>XSS test</description>
+  </user>
+</testdata>

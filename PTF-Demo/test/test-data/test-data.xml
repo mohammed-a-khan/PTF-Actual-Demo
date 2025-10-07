@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testData>
+  <testCase id="TC001">
+    <username>testuser1</username>
+    <password>password123</password>
+    <expected>Login successful</expected>
+  </testCase>
+  <testCase id="TC002">
+    <username>testuser2</username>
+    <password>pass456</password>
+    <expected>Welcome testuser2</expected>
+  </testCase>
+  <testCase id="TC003">
+    <username>admin</username>
+    <password>admin123</password>
+    <expected>Dashboard</expected>
+  </testCase>
+</testData>

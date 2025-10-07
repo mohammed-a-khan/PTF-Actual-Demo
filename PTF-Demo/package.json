@@ -1,0 +1,35 @@
+{
+  "name": "ptf-demo-project",
+  "version": "1.0.0",
+  "description": "Demo project utilizing cs-test-automation-framework",
+  "main": "index.js",
+  "scripts": {
+    "cs-framework": "node node_modules/cs-test-automation-framework/dist/index.js",
+    "test": "npm run cs-framework -- --project=orangehrm",
+    "test:orangehrm": "npm run cs-framework -- --project=orangehrm",
+    "test:api": "npm run cs-framework -- --project=api --tags=@api",
+    "test:ui": "npm run cs-framework -- --project=orangehrm --tags=@ui",
+    "test:database": "npm run cs-framework -- --project=database --tags=@database",
+    "test:parallel": "npm run cs-framework -- --project=orangehrm --parallel --workers=4",
+    "test:debug": "npm run cs-framework -- --project=orangehrm --env=dev",
+    "test:headless": "npm run cs-framework -- --project=orangehrm --headless=true"
+  },
+  "keywords": [
+    "automation",
+    "testing",
+    "playwright",
+    "cucumber",
+    "bdd"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@faker-js/faker": "^10.0.0",
+    "cs-test-automation-framework": "^3.0.21"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  }
+}

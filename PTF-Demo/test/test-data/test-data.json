@@ -1,0 +1,10 @@
+{
+  "TC001": {
+    "username": "jsonuser1",
+    "password": "jsonpass1"
+  },
+  "TC002": {
+    "username": "jsonuser2",
+    "password": "jsonpass2"
+  }
+}

@@ -1,0 +1,13 @@
+username,password,expectedResult,executeTest,priority,tags,role,status
+Admin,admin123,success,true,1,smoke,Admin,active
+User1,user123,success,true,2,regression,User,active
+InvalidUser,wrongpass,failure,true,3,negative,None,active
+SkipUser1,skip123,success,false,4,skip,User,inactive
+TestManager,mgr123,success,true,1,smoke,Manager,active
+SkipUser2,skip456,success,false,5,skip,User,disabled
+PowerUser,power123,success,true,2,regression|smoke,PowerUser,active
+DisabledUser,disabled123,failure,true,3,negative,User,disabled
+LockedUser,locked123,failure,true,3,negative|security,User,locked
+AdminBackup,admin456,success,false,1,backup,Admin,standby
+TestUser2,test234,success,true,4,integration,User,active
+TestUser3,test345,success,true,5,performance,User,active

@@ -1,0 +1,106 @@
+# Source files - only publish dist/
+src/
+
+# Config files (users create their own)
+config/
+
+# Test files and directories
+test/
+tests/
+__tests__/
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+
+# Example files
+examples/
+example/
+demo/
+demos/
+
+# Documentation (except README)
+docs/
+*.md
+!README.md
+
+# Build tools
+tsconfig.json
+.editorconfig
+.prettierrc
+.eslintrc*
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+azure-pipelines.yml
+.circleci/
+.travis.yml
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Development tools
+tools/
+scripts/
+
+# Logs and temp files
+*.log
+logs/
+*.tmp
+*.temp
+.cache/
+tmp/
+temp/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Environment files
+.env*
+!.env.example
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Test artifacts
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+screenshots/
+videos/
+traces/
+reports/
+
+# Backup files
+*.bak
+backup/
+Backup*/
+BACKUP*/
+
+# OS files
+Thumbs.db
+Desktop.ini
+
+# Claude AI
+.claude/
+
+# Lock files (optional - keep package-lock.json)
+yarn.lock
+pnpm-lock.yaml
+
+# Images (except those needed for package)
+*.png
+*.jpg
+*.jpeg
+*.gif
+!logo.png

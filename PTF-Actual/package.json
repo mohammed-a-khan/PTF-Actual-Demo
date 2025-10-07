@@ -1,0 +1,92 @@
+{
+  "name": "cs-test-automation-framework",
+  "version": "3.0.22",
+  "description": "CS Test Automation Framework - Lightning-fast, configurable, self-healing test automation",
+  "main": "dist/lib.js",
+  "types": "dist/lib.d.ts",
+  "bin": {
+    "cs-playwright-run": "dist/index.js",
+    "cs-playwright-framework": "dist/index.js"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && node scripts/post-build.js",
+    "prepublishOnly": "npm run build",
+    "clean": "rm -rf dist",
+    "postinstall": "playwright install"
+  },
+  "keywords": [
+    "test-automation",
+    "testing-framework",
+    "playwright",
+    "cucumber",
+    "bdd",
+    "api-testing",
+    "soap-testing",
+    "database-testing",
+    "self-healing",
+    "ai-testing",
+    "azure-devops",
+    "test-framework",
+    "e2e-testing",
+    "integration-testing"
+  ],
+  "author": "CS Team",
+  "license": "MIT",
+  "dependencies": {
+    "@cucumber/cucumber": "^10.0.0",
+    "@cucumber/gherkin": "^27.0.0",
+    "@cucumber/messages": "^24.0.0",
+    "@playwright/test": "^1.55.0",
+    "@types/xml2js": "^0.4.14",
+    "archiver": "^3.1.1",
+    "csv-parse": "^5.5.2",
+    "dotenv": "^16.3.1",
+    "exceljs": "^4.4.0",
+    "glob": "^10.3.10",
+    "https-proxy-agent": "^7.0.2",
+    "js-yaml": "^4.1.0",
+    "jszip": "^3.10.1",
+    "minimist": "^1.2.8",
+    "mongodb": "^6.0.0",
+    "mssql": "^10.0.0",
+    "mysql2": "^3.6.0",
+    "oracledb": "^6.0.0",
+    "pg": "^8.11.0",
+    "redis": "^4.6.0",
+    "reflect-metadata": "^0.2.2",
+    "sharp": "^0.33.1",
+    "socks-proxy-agent": "^8.0.2",
+    "ws": "^8.14.2",
+    "xlsx": "^0.18.5",
+    "xml2js": "^0.6.2"
+  },
+  "devDependencies": {
+    "@faker-js/faker": "^10.0.0",
+    "@types/archiver": "^6.0.3",
+    "@types/js-yaml": "^4.0.9",
+    "@types/minimist": "^1.2.5",
+    "@types/mssql": "^9.1.0",
+    "@types/node": "^20.19.19",
+    "@types/oracledb": "^6.0.0",
+    "@types/pg": "^8.10.0",
+    "@types/ws": "^8.5.10",
+    "ajv": "^8.17.1",
+    "cross-env": "^7.0.3",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://dev.azure.com/mdakhan/myproject/_git/ptf-ado-repo"
+  },
+  "publishConfig": {
+    "registry": "https://pkgs.dev.azure.com/mdakhan/_packaging/cs-framework/npm/registry/"
+  }
+}
