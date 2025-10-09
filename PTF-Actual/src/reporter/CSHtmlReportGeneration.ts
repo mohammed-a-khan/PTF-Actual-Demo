@@ -5,6 +5,7 @@ import { CSReporter } from './CSReporter';
 import { htmlEscape, attrEscape, jsEscape } from './utils/HtmlSanitizer';
 import { CSExcelReportGenerator } from './CSExcelReportGenerator';
 import { CSPdfReportGenerator } from './CSPdfReportGenerator';
+import { CSAIReportAggregator } from './CSAIReportAggregator';
 
 // Test result types
 interface TestStep {
@@ -1433,6 +1434,139 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         .toggle-icon.expanded {
             transform: rotate(90deg);
         }
+
+        /* AI Operations Styles */
+        .ai-operations-section {
+            margin-bottom: 2rem;
+        }
+
+        .ai-stats-container {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            box-shadow: 0 4px 15px var(--shadow);
+            margin-bottom: 2rem;
+        }
+
+        .ai-stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin-top: 1.5rem;
+        }
+
+        .ai-stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .ai-stat-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
+        }
+
+        .ai-stat-card.success {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3);
+        }
+
+        .ai-stat-card.warning {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            box-shadow: 0 4px 15px rgba(245, 158, 11, 0.3);
+        }
+
+        .ai-stat-card.danger {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            box-shadow: 0 4px 15px rgba(239, 68, 68, 0.3);
+        }
+
+        .ai-stat-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .ai-stat-label {
+            font-size: 0.9rem;
+            opacity: 0.95;
+            font-weight: 500;
+        }
+
+        .ai-stat-detail {
+            font-size: 0.75rem;
+            opacity: 0.8;
+            margin-top: 0.25rem;
+        }
+
+        .ai-section {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 2px 10px var(--shadow);
+            margin-bottom: 1.5rem;
+        }
+
+        .ai-section h3 {
+            margin-bottom: 1rem;
+            color: var(--brand-color);
+        }
+
+        /* AI Strategy Tables */
+        .ai-strategy-table,
+        .ai-fragile-table,
+        .ai-timeline-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        .ai-strategy-table th,
+        .ai-strategy-table td,
+        .ai-fragile-table th,
+        .ai-fragile-table td,
+        .ai-timeline-table th,
+        .ai-timeline-table td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .ai-strategy-table th,
+        .ai-fragile-table th,
+        .ai-timeline-table th {
+            background-color: #f9fafb;
+            font-weight: 600;
+            color: #374151;
+            border-bottom: 2px solid #d1d5db;
+        }
+
+        .ai-strategy-table tr:hover,
+        .ai-fragile-table tr:hover,
+        .ai-timeline-table tr:hover {
+            background-color: #f9fafb;
+        }
+
+        .ai-strategy-table td:nth-child(2),
+        .ai-strategy-table td:nth-child(3),
+        .ai-strategy-table td:nth-child(4),
+        .ai-strategy-table td:nth-child(5),
+        .ai-fragile-table td:nth-child(3),
+        .ai-fragile-table td:nth-child(4) {
+            text-align: center;
+        }
+
+        .ai-strategy-table th:nth-child(2),
+        .ai-strategy-table th:nth-child(3),
+        .ai-strategy-table th:nth-child(4),
+        .ai-strategy-table th:nth-child(5),
+        .ai-fragile-table th:nth-child(3),
+        .ai-fragile-table th:nth-child(4) {
+            text-align: center;
+        }
         `;
     }
 
@@ -1720,24 +1854,6 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                     </div>
                                 </div>
                                 ` : ''}
-
-                                <script>
-                                    function toggleAllColumns(scenarioId) {
-                                        const allColumns = document.getElementById('all-columns-' + scenarioId);
-                                        const usedColumns = document.getElementById('used-columns-' + scenarioId);
-                                        const toggleBtn = document.getElementById('toggle-btn-' + scenarioId);
-
-                                        if (allColumns.style.display === 'none') {
-                                            allColumns.style.display = 'block';
-                                            usedColumns.style.display = 'none';
-                                            toggleBtn.textContent = 'Show Used Only';
-                                        } else {
-                                            allColumns.style.display = 'none';
-                                            usedColumns.style.display = 'block';
-                                            toggleBtn.textContent = 'Show All Columns';
-                                        }
-                                    }
-                                </script>
                             </div>
                             `;
                         })() : ''}
@@ -2379,6 +2495,21 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
      * Generate comprehensive failure analysis view
      */
     private static generateFailureAnalysisView(suite: TestSuite, stats: any): string {
+        // Get test results from CSReporter to access AI data
+        const testResults = CSReporter.getResults();
+
+        // Aggregate AI data and generate AI sections
+        let aiSectionsHTML = '';
+        if (testResults && testResults.length > 0) {
+            const aiAggregator = CSAIReportAggregator.getInstance();
+            const aiSummary = aiAggregator.aggregateAIData(testResults);
+
+            // Generate AI statistics HTML if there are AI operations
+            if (aiSummary.totalOperations > 0) {
+                aiSectionsHTML = aiAggregator.generateAIStatsHTML(aiSummary);
+            }
+        }
+
         const performanceMetrics = `
         <div class="performance-grid">
             <div class="metric-card">
@@ -2398,7 +2529,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             </div>
         </div>`;
 
-        const failureReasons = `
+        const failureReasons = stats.failureReasons && stats.failureReasons.length > 0 ? `
         <div class="failure-grid">
             <div class="failure-chart">
                 <h3>Failure Categories</h3>
@@ -2415,9 +2546,9 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     `).join('')}
                 </ul>
             </div>
-        </div>`;
+        </div>` : '<div class="info-message">No failures to analyze</div>';
 
-        const performanceTables = `
+        const performanceTables = stats.performanceMetrics && stats.performanceMetrics.fastest && stats.performanceMetrics.slowest ? `
         <div class="failure-grid">
             <div class="card">
                 <div class="card-header">
@@ -2465,7 +2596,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     </table>
                 </div>
             </div>
-        </div>`;
+        </div>` : '<div class="info-message">Performance metrics will be available after running tests</div>';
 
         const performanceSummary = `
         <div class="card">
@@ -2475,19 +2606,19 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             <div class="card-content">
                 <div class="stats-grid">
                     <div class="metric-card">
-                        <div class="metric-value">${this.formatDuration(stats.avgScenarioTime)}</div>
+                        <div class="metric-value">${this.formatDuration(stats.avgScenarioTime || 0)}</div>
                         <div class="metric-label">Avg Scenario Time</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-value">${this.formatDuration(stats.avgStepTime)}</div>
+                        <div class="metric-value">${this.formatDuration(stats.avgStepTime || 0)}</div>
                         <div class="metric-label">Avg Step Time</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-value">${stats.totalSteps}</div>
+                        <div class="metric-value">${stats.totalSteps || 0}</div>
                         <div class="metric-label">Total Steps</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-value">${stats.stepsPerSecond.toFixed(2)}</div>
+                        <div class="metric-value">${(stats.stepsPerSecond || 0).toFixed(2)}</div>
                         <div class="metric-label">Steps/Second</div>
                     </div>
                 </div>
@@ -2496,6 +2627,14 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         return `
         <h2>Failure Analysis & Performance Metrics</h2>
+
+        ${aiSectionsHTML ? `
+        <div class="ai-operations-section">
+            <h3>🤖 AI Operations & Intelligent Analysis</h3>
+            ${aiSectionsHTML}
+        </div>
+        ` : ''}
+
         ${performanceMetrics}
         ${failureReasons}
         ${performanceTables}
@@ -2525,6 +2664,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     <div class="card-title">🏷️ Tag Analysis</div>
                 </div>
                 <div class="card-content">
+                    ${stats.tagStats && stats.tagStats.length > 0 ? `
                     <table class="data-table">
                         <thead>
                             <tr>
@@ -2543,6 +2683,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                             `).join('')}
                         </tbody>
                     </table>
+                    ` : '<div class="info-message">No tags found in test scenarios</div>'}
                 </div>
             </div>
             
@@ -2674,11 +2815,11 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         const generateArtifactCard = (title: string, icon: string, artifactList: Artifact[], color: string) => `
             <div class="card">
                 <div class="card-header" style="background: ${color}; color: white;">
-                    <div class="card-title">${icon} ${title} (${artifactList.length})</div>
+                    <div class="card-title">${icon} ${title} (${(artifactList || []).length})</div>
                 </div>
                 <div class="card-content">
                     <div class="artifact-list">
-                        ${artifactList.length > 0 ? 
+                        ${artifactList && artifactList.length > 0 ?
                             artifactList.map(artifact => `
                                 <div class="artifact-item">
                                     <a href="${artifact.path}" target="_blank" class="artifact-name">
@@ -2696,13 +2837,13 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         return `
         <h2>Test Artifacts</h2>
-        
+
         <div class="artifacts-grid">
-            ${generateArtifactCard('Screenshots', '📷', artifacts.screenshots, '#10b981')}
-            ${generateArtifactCard('Videos', '🎥', artifacts.videos, '#3b82f6')}
-            ${generateArtifactCard('HAR Files', '🌐', artifacts.har, '#f59e0b')}
-            ${generateArtifactCard('Traces', '🔍', artifacts.traces, '#ef4444')}
-            ${generateArtifactCard('Console Logs', '📝', artifacts.consoleLogs, '#6b7280')}
+            ${generateArtifactCard('Screenshots', '📷', artifacts?.screenshots || [], '#10b981')}
+            ${generateArtifactCard('Videos', '🎥', artifacts?.videos || [], '#3b82f6')}
+            ${generateArtifactCard('HAR Files', '🌐', artifacts?.har || [], '#f59e0b')}
+            ${generateArtifactCard('Traces', '🔍', artifacts?.traces || [], '#ef4444')}
+            ${generateArtifactCard('Console Logs', '📝', artifacts?.consoleLogs || [], '#6b7280')}
         </div>`;
     }
 
@@ -2775,15 +2916,20 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', function() {
                 const viewName = this.dataset.view;
-                
+
                 // Update active nav
                 document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
                 this.classList.add('active');
-                
+
                 // Update active view
                 document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-                document.getElementById(viewName + '-view').classList.add('active');
-                
+                const targetView = document.getElementById(viewName + '-view');
+                if (targetView) {
+                    targetView.classList.add('active');
+                } else {
+                    console.error('View not found:', viewName + '-view');
+                }
+
                 // Initialize charts for the active view
                 setTimeout(() => initializeChartsForView(viewName), 100);
             });
@@ -3068,8 +3214,18 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                 callbacks: {
                                     label: function(context) {
                                         const total = scenarios.length;
-                                        const value = context.parsed.y;
-                                        const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                                        // Robust value extraction for different chart contexts
+                                        let value = context.parsed?.y ?? context.raw ?? context.formattedValue;
+
+                                        // Fallback: Get from dataset directly
+                                        if (value === undefined || value === null) {
+                                            value = context.dataset.data[context.dataIndex];
+                                        }
+
+                                        // Final fallback to 0
+                                        value = value ?? 0;
+
+                                        const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0';
                                         return 'Tests: ' + value + ' (' + percentage + '%)';
                                     }
                                 }
@@ -3176,7 +3332,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             // Feature Performance Chart
             const featureCtx = document.getElementById('feature-chart');
             if (featureCtx && !charts.feature) {
-                const featureData = ${JSON.stringify(stats.featureStats.slice(0, 10))};
+                const featureData = ${JSON.stringify((stats.featureStats || []).slice(0, 10))};
                 charts.feature = new CSChart(featureCtx, {
                     type: 'bar',
                     data: {
@@ -3295,7 +3451,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             // Tag Distribution Chart - Only for dashboard view
             const tagCtx = document.getElementById('tag-chart');
             if (tagCtx && !charts.tag && document.getElementById('dashboard-view').classList.contains('active')) {
-                const tagData = ${JSON.stringify(stats.tagStats.slice(0, 10))};
+                const tagData = ${JSON.stringify((stats.tagStats || []).slice(0, 10))};
                 charts.tag = new CSChart(tagCtx, {
                     type: 'bar',
                     data: {
@@ -3329,8 +3485,9 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         function initializeFailureAnalysisCharts() {
             const failureCategoriesCtx = document.getElementById('failure-categories-chart');
             if (failureCategoriesCtx && !charts.failureCategories) {
-                const failureData = ${JSON.stringify(stats.failureReasons)};
-                charts.failureCategories = new CSChart(failureCategoriesCtx, {
+                const failureData = ${JSON.stringify(stats.failureReasons || [])};
+                if (failureData && failureData.length > 0) {
+                    charts.failureCategories = new CSChart(failureCategoriesCtx, {
                     type: 'pie',
                     data: {
                         labels: failureData.map(f => f.reason),
@@ -3356,6 +3513,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                         }
                     }
                 });
+                }
             }
         }
 
@@ -3363,7 +3521,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         function initializeCategoryCharts() {
             const featureDistCtx = document.getElementById('feature-distribution-chart');
             if (featureDistCtx && !charts.featureDistribution) {
-                const featureData = ${JSON.stringify(stats.featureStats.slice(0, 8))};
+                const featureData = ${JSON.stringify((stats.featureStats || []).slice(0, 8))};
                 charts.featureDistribution = new CSChart(featureDistCtx, {
                     type: 'doughnut',
                     data: {
@@ -3427,7 +3585,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         function toggleStep(element) {
             const details = element.nextElementSibling;
             const icon = element.querySelector('.toggle-icon');
-            
+
             if (details.classList.contains('expanded')) {
                 details.classList.remove('expanded');
                 icon.textContent = '▶';
@@ -3436,6 +3594,24 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 details.classList.add('expanded');
                 icon.textContent = '▼';
                 icon.classList.add('expanded');
+            }
+        }
+
+        function toggleAllColumns(scenarioId) {
+            const allColumns = document.getElementById('all-columns-' + scenarioId);
+            const usedColumns = document.getElementById('used-columns-' + scenarioId);
+            const toggleBtn = document.getElementById('toggle-btn-' + scenarioId);
+
+            if (allColumns && usedColumns && toggleBtn) {
+                if (allColumns.style.display === 'none' || !allColumns.style.display) {
+                    allColumns.style.display = 'block';
+                    usedColumns.style.display = 'none';
+                    toggleBtn.textContent = 'Show Used Only';
+                } else {
+                    allColumns.style.display = 'none';
+                    usedColumns.style.display = 'block';
+                    toggleBtn.textContent = 'Show All Columns';
+                }
             }
         }
 

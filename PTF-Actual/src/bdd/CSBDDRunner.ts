@@ -10,7 +10,7 @@ import { CSScenarioContext } from './CSScenarioContext';
 import { executeStep, getHooks, DataTable } from './CSBDDDecorators';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
-import { CSModuleDetector } from '../core/CSModuleDetector';
+import { CSModuleDetector, ModuleRequirements } from '../core/CSModuleDetector';
 import { CSStepLoader } from '../core/CSStepLoader';
 // Lazy load CSBrowserManager to improve startup performance (saves 36s)
 // Will be loaded when actually needed
@@ -24,9 +24,15 @@ type TestFeature = any;
 type TestScenario = any;
 type TestStep = any;
 import { CSStepValidator } from './CSStepValidator';
+import { CSPageDiagnostics } from '../diagnostics/CSPageDiagnostics';
 // Lazy load ADO integration to improve startup performance
 // import { CSADOIntegration } from '../ado/CSADOIntegration';
 let CSADOIntegration: any = null;
+// Lazy load AI Integration to improve startup performance
+// import { CSAIIntegrationLayer } from '../ai/integration/CSAIIntegrationLayer';
+let CSAIIntegrationLayer: any = null;
+// Lazy load locator extractor
+let CSLocatorExtractor: any = null;
 // Parallel execution imports are loaded dynamically when needed
 import * as path from 'path';
 import * as fs from 'fs';
@@ -75,6 +81,7 @@ export class CSBDDRunner {
     private parallelExecutionDone: boolean = false;
     private scenarioCountForReuse: number = 0;
     private adoIntegration: any; // CSADOIntegration - lazy loaded
+    private aiIntegration: any; // CSAIIntegrationLayer - lazy loaded
     private lastScenarioError: any = null; // Track last scenario error for ADO reporting
 
     private constructor() {
@@ -89,6 +96,8 @@ export class CSBDDRunner {
         this.testSuite = this.initializeTestSuite();
         // Lazy load ADO integration - will be loaded when first test runs
         this.adoIntegration = null;
+        // Lazy load AI integration - will be loaded when needed
+        this.aiIntegration = null;
     }
     
     private initializeTestSuite(): ProfessionalTestSuite {
@@ -150,6 +159,22 @@ export class CSBDDRunner {
             this.adoIntegration = CSADOIntegration.getInstance();
         }
         return this.adoIntegration;
+    }
+
+    /**
+     * Ensure AI integration is loaded (lazy loading)
+     */
+    private ensureAIIntegration(): any {
+        if (!this.aiIntegration) {
+            // Lazy load CSAIIntegrationLayer only when needed
+            if (!CSAIIntegrationLayer) {
+                CSAIIntegrationLayer = require('../ai/integration/CSAIIntegrationLayer').CSAIIntegrationLayer;
+            }
+            // Get worker ID from environment or use 'main' for sequential execution
+            const workerId = process.env.WORKER_ID || 'main';
+            this.aiIntegration = CSAIIntegrationLayer.getInstance(workerId);
+        }
+        return this.aiIntegration;
     }
 
     /**
@@ -229,6 +254,29 @@ export class CSBDDRunner {
 
                 // Load required step definitions using selective loading
                 await this.bddEngine.loadRequiredStepDefinitions(features);
+
+                // Load framework steps with file-level filtering
+                // Aggregate module requirements from all features
+                const moduleDetector = CSModuleDetector.getInstance();
+                const aggregatedRequirements: ModuleRequirements = {
+                    browser: false,
+                    api: false,
+                    database: false,
+                    soap: false
+                };
+
+                for (const feature of features) {
+                    for (const scenario of feature.scenarios) {
+                        const req = moduleDetector.detectRequirements(scenario, feature);
+                        aggregatedRequirements.browser = aggregatedRequirements.browser || req.browser;
+                        aggregatedRequirements.api = aggregatedRequirements.api || req.api;
+                        aggregatedRequirements.database = aggregatedRequirements.database || req.database;
+                        aggregatedRequirements.soap = aggregatedRequirements.soap || req.soap;
+                    }
+                }
+
+                const stepLoader = CSStepLoader.getInstance();
+                await stepLoader.loadRequiredSteps(aggregatedRequirements, features);
             } else {
                 CSReporter.debug('Skipping step loading in main process for parallel execution');
             }
@@ -730,6 +778,10 @@ export class CSBDDRunner {
                 logs: []
             };
 
+            // Group results by scenario name to handle retries
+            // Key: scenarioName+featureName, Value: array of attempts
+            const scenarioAttempts = new Map<string, any[]>();
+
             for (const [workId, result] of results.entries()) {
                 // Create scenario result object
                 const scenarioResult = {
@@ -747,26 +799,12 @@ export class CSBDDRunner {
                     testData: result.testData  // Add test data for data-driven scenarios
                 };
 
-                allScenarios.push(scenarioResult);
-
-                if (result.status === 'passed') {
-                    passed++;
-                    this.passedCount++;
-                } else if (result.status === 'failed') {
-                    failed++;
-                    this.failedCount++;
-                    this.anyTestFailed = true;  // Track that at least one test failed
-
-                    // Add to failed scenarios
-                    this.failedScenarios.push({
-                        scenario: result.scenarioName || workId,
-                        feature: result.featureName || 'Unknown',
-                        error: result.error || 'Test failed'
-                    });
-                } else {
-                    skipped++;
-                    this.skippedCount++;
+                // Group by unique key (feature + scenario name)
+                const scenarioKey = `${scenarioResult.feature}::${scenarioResult.name}`;
+                if (!scenarioAttempts.has(scenarioKey)) {
+                    scenarioAttempts.set(scenarioKey, []);
                 }
+                scenarioAttempts.get(scenarioKey)!.push(scenarioResult);
 
                 // Aggregate artifacts and copy them to main test results folder
                 if (result.artifacts) {
@@ -779,10 +817,44 @@ export class CSBDDRunner {
                     if (copiedArtifacts.traces) allArtifacts.traces.push(...copiedArtifacts.traces);
                     if (copiedArtifacts.logs) allArtifacts.logs.push(...copiedArtifacts.logs);
                 }
+            }
 
-                // Increment step counts
-                if (result.steps) {
-                    result.steps.forEach((step: any) => {
+            // De-duplicate scenarios: keep only the last attempt (final result)
+            for (const [scenarioKey, attempts] of scenarioAttempts.entries()) {
+                // Sort attempts by endTime to get the most recent
+                attempts.sort((a, b) => {
+                    const aTime = a.endTime instanceof Date ? a.endTime.getTime() : new Date(a.endTime).getTime();
+                    const bTime = b.endTime instanceof Date ? b.endTime.getTime() : new Date(b.endTime).getTime();
+                    return bTime - aTime;  // Most recent first
+                });
+
+                // Take the most recent attempt (final result)
+                const finalResult = attempts[0];
+                allScenarios.push(finalResult);
+
+                // Count status for unique scenarios (not retries)
+                if (finalResult.status === 'passed') {
+                    passed++;
+                    this.passedCount++;
+                } else if (finalResult.status === 'failed') {
+                    failed++;
+                    this.failedCount++;
+                    this.anyTestFailed = true;
+
+                    // Add to failed scenarios
+                    this.failedScenarios.push({
+                        scenario: finalResult.name,
+                        feature: finalResult.feature,
+                        error: finalResult.error || 'Test failed'
+                    });
+                } else {
+                    skipped++;
+                    this.skippedCount++;
+                }
+
+                // Increment step counts from final result only
+                if (finalResult.steps) {
+                    finalResult.steps.forEach((step: any) => {
                         if (step.status === 'passed') this.passedSteps++;
                         else if (step.status === 'failed') this.failedSteps++;
                         else if (step.status === 'skipped') this.skippedSteps++;
@@ -1000,12 +1072,19 @@ export class CSBDDRunner {
                 const featureEndTime = new Date();
                 this.currentFeature.endTime = featureEndTime;
                 this.currentFeature.duration = featureEndTime.getTime() - this.currentFeature.startTime.getTime();
-                
+
                 // Calculate feature status (cast to any to avoid TypeScript issues)
                 const hasFailedScenarios = this.currentFeature.scenarios.some((s: any) => s.status === 'failed');
                 (this.currentFeature as any).status = hasFailedScenarios ? 'failed' : 'passed';
+
+                // Debug: Log final scenario count for this feature (commented out - uncomment for debugging)
+                // CSReporter.info(`[SCENARIO-COUNT] Feature "${feature.name}" completed with ${this.currentFeature.scenarios.length} scenarios in report`);
+                // const passed = this.currentFeature.scenarios.filter((s: any) => s.status === 'passed').length;
+                // const failed = this.currentFeature.scenarios.filter((s: any) => s.status === 'failed').length;
+                // const skipped = this.currentFeature.scenarios.filter((s: any) => s.status === 'skipped').length;
+                // CSReporter.info(`[SCENARIO-COUNT] Status: ${passed} passed, ${failed} failed, ${skipped} skipped`);
             }
-            
+
             CSReporter.endFeature();
             await this.context.cleanupFeature();
         }
@@ -1137,8 +1216,12 @@ export class CSBDDRunner {
         iterationNumber?: number,
         totalIterations?: number,
         originalExamples?: any,
-        usedColumns?: Set<string>
+        usedColumns?: Set<string>,
+        isRetryAttempt: boolean = false  // Track if this is a retry attempt
     ): Promise<void> {
+        // Flag to track if we're going to retry (set in catch block, checked in finally block)
+        let willRetryAfterFailure = false;
+
         // Clear any previous scenario error
         this.lastScenarioError = null;
 
@@ -1278,11 +1361,154 @@ export class CSBDDRunner {
             // Record video and HAR if enabled
             await this.captureFailureArtifacts();
 
-            // Retry logic
+            // INTELLIGENT RETRY LOGIC - Analyze failure before retrying
             if (options.retry && options.retry > 0) {
-                CSReporter.info(`Retrying scenario (attempt ${options.retry})...`);
-                await this.executeSingleScenario(scenario, feature, { ...options, retry: options.retry - 1 }, exampleRow, exampleHeaders);
-                return; // Return after retry, don't throw
+                // Analyze failure using diagnostics to determine if retry is worthwhile
+                let shouldRetry = true; // Default to retry
+                let failureAnalysis: any = null;
+
+                try {
+                    // Get failed step diagnostics from scenario context
+                    const stepResults = this.scenarioContext.getStepResults();
+                    const lastFailedStep = stepResults.filter(s => s.status === 'failed').pop();
+                    const diagnostics = lastFailedStep?.diagnostics;
+
+                    // Get current page for analysis
+                    const page = this.browserManager?.getPage();
+                    const currentUrl = page && !page.isClosed() ? await page.url().catch(() => 'unknown') : 'unknown';
+
+                    // Perform failure analysis if we have page and CSIntelligentAI
+                    if (page && !page.isClosed()) {
+                        const { CSIntelligentAI } = await import('../ai/CSIntelligentAI');
+                        const aiInstance = CSIntelligentAI.getInstance();
+
+                        failureAnalysis = await aiInstance.analyzeFailure(error, {
+                            step: lastFailedStep?.step || 'unknown',
+                            page,
+                            url: currentUrl || 'unknown'
+                        });
+
+                        CSReporter.debug(`[Retry] Failure analysis - Type: ${failureAnalysis.failureType}, Healable: ${failureAnalysis.healable}, Confidence: ${failureAnalysis.confidence.toFixed(2)}`);
+
+                        // Record failure analysis in AI data for reports
+                        CSReporter.recordAIFailureAnalysis({
+                            failureType: failureAnalysis.failureType,
+                            healable: failureAnalysis.healable,
+                            confidence: failureAnalysis.confidence,
+                            rootCause: failureAnalysis.rootCause,
+                            suggestedStrategies: failureAnalysis.suggestedStrategies || [],
+                            diagnosticInsights: failureAnalysis.diagnosticInsights || []
+                        });
+
+                        // Decision: Only retry if failure is healable
+                        if (!failureAnalysis.healable) {
+                            shouldRetry = false;
+                            CSReporter.warn(`[Retry] Skipping retry - Failure type '${failureAnalysis.failureType}' is not healable`);
+                            CSReporter.warn(`[Retry] Root cause: ${failureAnalysis.rootCause}`);
+
+                            // Log diagnostic insights
+                            if (failureAnalysis.diagnosticInsights && failureAnalysis.diagnosticInsights.length > 0) {
+                                CSReporter.warn(`[Retry] Diagnostic insights:`);
+                                failureAnalysis.diagnosticInsights.forEach((insight: string) => {
+                                    CSReporter.warn(`  - ${insight}`);
+                                });
+                            }
+                        } else {
+                            CSReporter.info(`[Retry] Failure is healable - Type: ${failureAnalysis.failureType}`);
+                            if (failureAnalysis.suggestedStrategies && failureAnalysis.suggestedStrategies.length > 0) {
+                                CSReporter.info(`[Retry] Suggested strategies: ${failureAnalysis.suggestedStrategies.join(', ')}`);
+                            }
+                        }
+
+                        // Additional intelligence: Check for non-retryable error patterns
+                        const errorMsg = error.message.toLowerCase();
+                        if (errorMsg.includes('network error') || errorMsg.includes('net::err_') ||
+                            errorMsg.includes('500') || errorMsg.includes('503') ||
+                            errorMsg.includes('econnrefused') || errorMsg.includes('enotfound')) {
+                            shouldRetry = false;
+                            CSReporter.warn(`[Retry] Skipping retry - Network/server error detected: ${error.message}`);
+                        }
+
+                        // Check diagnostics for fatal errors
+                        if (diagnostics && diagnostics.stats) {
+                            if (diagnostics.stats.totalErrors > 5) {
+                                CSReporter.warn(`[Retry] Warning: ${diagnostics.stats.totalErrors} JavaScript errors detected on page`);
+                            }
+                            if (diagnostics.stats.failedRequests > 10) {
+                                shouldRetry = false;
+                                CSReporter.warn(`[Retry] Skipping retry - Too many failed requests (${diagnostics.stats.failedRequests}), likely server issue`);
+                            }
+                        }
+                    }
+                } catch (analysisError) {
+                    // If analysis fails, default to retry (safe fallback)
+                    CSReporter.debug(`[Retry] Failure analysis error: ${analysisError}, defaulting to retry`);
+                    shouldRetry = true;
+                }
+
+                // Record retry decision in AI data for reports
+                let retryReason = '';
+                if (!shouldRetry && failureAnalysis) {
+                    retryReason = `${failureAnalysis.failureType} is not healable - ${failureAnalysis.rootCause}`;
+                } else if (!shouldRetry) {
+                    retryReason = 'Non-retryable error pattern detected (network/server error)';
+                } else if (failureAnalysis) {
+                    retryReason = `${failureAnalysis.failureType} is healable - retry recommended`;
+                } else {
+                    retryReason = 'Default retry strategy';
+                }
+
+                CSReporter.recordAIRetryDecision({
+                    shouldRetry,
+                    reason: retryReason,
+                    analysisUsed: failureAnalysis !== null
+                });
+
+                // Proceed with retry only if analysis recommends it
+                if (shouldRetry) {
+                    willRetryAfterFailure = true;  // Set flag so finally block knows not to add scenario
+                    CSReporter.info(`Retrying scenario (attempt ${options.retry})...`);
+
+                    // CRITICAL: Clear browser context before retry to avoid stale state
+                    // This ensures login page loads correctly instead of staying logged in
+                    try {
+                        const browserManager = (await import('../browser/CSBrowserManager')).CSBrowserManager.getInstance();
+                        const context = await browserManager.getContext();
+                        if (context) {
+                            CSReporter.debug('[Retry] Clearing browser context (cookies, storage, cache)...');
+                            await context.clearCookies();
+                            await context.clearPermissions();
+                            // Clear local/session storage via page
+                            const pages = context.pages();
+                            for (const page of pages) {
+                                await page.evaluate(() => {
+                                    localStorage.clear();
+                                    sessionStorage.clear();
+                                }).catch(() => {});
+                            }
+                            CSReporter.debug('[Retry] Browser context cleared successfully');
+                        }
+                    } catch (e) {
+                        CSReporter.debug(`[Retry] Could not clear browser context: ${e}`);
+                    }
+
+                    await this.executeSingleScenario(
+                        scenario,
+                        feature,
+                        { ...options, retry: options.retry - 1 },
+                        exampleRow,
+                        exampleHeaders,
+                        iterationNumber,
+                        totalIterations,
+                        originalExamples,
+                        usedColumns,
+                        true  // Mark as retry attempt
+                    );
+                    return; // Return after retry, don't throw
+                } else {
+                    // Don't retry - log detailed failure and continue to failure handling
+                    CSReporter.error(`[Retry] Retry skipped based on failure analysis - scenario will fail`);
+                }
             }
 
             // Log the error but don't throw it - let the scenario fail but continue with other scenarios
@@ -1408,13 +1634,31 @@ export class CSBDDRunner {
                                 timestamp: new Date(action.timestamp),
                                 details: {}
                             })),
-                            screenshot: screenshotPath  // Keep original for backward compatibility
+                            screenshot: screenshotPath,  // Keep original for backward compatibility
+                            aiData: step.aiData,  // Include AI data from CSReporter
+                            diagnostics: step.diagnostics  // Include diagnostics from CSReporter
                         };
                     })
                 };
-                
-                if (this.currentFeature) {
+
+                // Only add to scenarios array if:
+                // 1. We're NOT going to retry (willRetryAfterFailure=false), AND
+                // 2. Either this is NOT a retry attempt OR this IS a retry and it's the final attempt
+                const isFinalAttempt = !options.retry || options.retry === 0;
+                if (this.currentFeature && !willRetryAfterFailure && (!isRetryAttempt || isFinalAttempt)) {
+                    // Remove previous attempts if this is a final retry
+                    if (isRetryAttempt && isFinalAttempt) {
+                        // Remove previous attempts for this scenario (by matching name)
+                        const scenarioName = scenarioData.name;
+                        // CSReporter.debug(`[SCENARIO-TRACKING] Removing previous attempts of: ${scenarioName}`);
+                        (this.currentFeature as any).scenarios = (this.currentFeature as any).scenarios.filter(
+                            (s: any) => s.name !== scenarioName
+                        );
+                    }
+                    // CSReporter.debug(`[SCENARIO-TRACKING] Adding scenario to report: ${scenarioData.name} (total: ${(this.currentFeature as any).scenarios.length + 1})`);
                     (this.currentFeature as any).scenarios.push(scenarioData);
+                } else {
+                    // CSReporter.debug(`[SCENARIO-TRACKING] NOT adding scenario (will retry or not final): ${scenarioData.name}`);
                 }
             } else {
                 // No CSReporter results, create scenario data from context
@@ -1463,8 +1707,24 @@ export class CSBDDRunner {
                     artifacts: artifacts
                 };
 
-                if (this.currentFeature) {
+                // Only add to scenarios array if:
+                // 1. We're NOT going to retry (willRetryAfterFailure=false), AND
+                // 2. Either this is NOT a retry attempt OR this IS a retry and it's the final attempt
+                const isFinalAttempt = !options.retry || options.retry === 0;
+                if (this.currentFeature && !willRetryAfterFailure && (!isRetryAttempt || isFinalAttempt)) {
+                    // Remove previous attempts if this is a final retry
+                    if (isRetryAttempt && isFinalAttempt) {
+                        // Remove previous attempts for this scenario (by matching name)
+                        const scenarioName = scenarioData.name;
+                        // CSReporter.debug(`[SCENARIO-TRACKING] Removing previous attempts of: ${scenarioName} (fallback path)`);
+                        (this.currentFeature as any).scenarios = (this.currentFeature as any).scenarios.filter(
+                            (s: any) => s.name !== scenarioName
+                        );
+                    }
+                    // CSReporter.debug(`[SCENARIO-TRACKING] Adding scenario to report (fallback path): ${scenarioData.name} (total: ${(this.currentFeature as any).scenarios.length + 1})`);
                     (this.currentFeature as any).scenarios.push(scenarioData);
+                } else {
+                    // CSReporter.debug(`[SCENARIO-TRACKING] NOT adding scenario (fallback path, will retry or not final): ${scenarioData.name}`);
                 }
             }
 
@@ -1547,6 +1807,69 @@ export class CSBDDRunner {
             
         } catch (error: any) {
             const duration = Date.now() - stepStartTime;
+            const stepFullText = `${step.keyword} ${stepText}`;
+
+            // ATTEMPT AI HEALING (ONLY FOR UI STEPS)
+            // AI automatically detects if this is a UI step and only activates healing for UI failures
+            try {
+                const aiIntegration = this.ensureAIIntegration();
+
+                // Check if AI should activate for this step (UI-only by default)
+                if (aiIntegration.shouldActivateAI(stepFullText)) {
+                    CSReporter.debug(`[AI] Attempting intelligent healing for failed step: ${stepFullText}`);
+
+                    // Extract locator from error message if possible
+                    if (!CSLocatorExtractor) {
+                        CSLocatorExtractor = require('../ai/utils/CSLocatorExtractor').CSLocatorExtractor;
+                    }
+                    const extractedLocator = CSLocatorExtractor.extract(error);
+                    if (extractedLocator) {
+                        CSReporter.debug(`[AI] Extracted locator from error: ${extractedLocator}`);
+                    }
+
+                    const healingResult = await aiIntegration.attemptHealing(error, {
+                        page: this.browserManager ? this.browserManager.getPage() : null,
+                        locator: extractedLocator || '', // Extracted from error or empty
+                        step: stepFullText,
+                        url: this.browserManager ? this.browserManager.getPage()?.url() : '',
+                        testName: this.scenarioContext.getCurrentScenario(),
+                        scenarioName: this.scenarioContext.getCurrentScenario()
+                    });
+
+                    if (healingResult.healed && healingResult.newLocator) {
+                        CSReporter.info(`[AI] ✅ Healing successful! Retrying step with healed locator...`);
+
+                        // Retry the step with the healed information
+                        // Reset the timer for the retry
+                        const retryStartTime = Date.now();
+
+                        try {
+                            // Re-execute the step - the healing has already updated internal state
+                            await executeStep(stepText, step.keyword.trim(), this.context, undefined, step.docString);
+
+                            const retryDuration = Date.now() - retryStartTime;
+                            this.scenarioContext.addStepResult(stepFullText, 'passed', retryDuration);
+                            CSReporter.passStep(retryDuration);
+
+                            CSReporter.info(`[AI] Step passed after healing (retry duration: ${retryDuration}ms)`);
+                            return; // SUCCESS - exit early, step passed after healing
+
+                        } catch (retryError: any) {
+                            CSReporter.debug(`[AI] Step still failed after healing, proceeding with normal error handling`);
+                            // Fall through to normal error handling below
+                        }
+                    } else {
+                        CSReporter.debug(`[AI] Healing unsuccessful, proceeding with normal error handling`);
+                    }
+                } else {
+                    CSReporter.debug(`[AI] Skipped for non-UI step (API/Database steps use existing retry behavior)`);
+                }
+            } catch (aiError: any) {
+                // AI healing failed, continue with normal error handling
+                CSReporter.debug(`[AI] Error during healing attempt: ${aiError.message}`);
+            }
+
+            // NORMAL ERROR HANDLING (if AI healing didn't work or wasn't applicable)
             // Don't add step result yet - we need to capture screenshot first
 
             // Capture screenshot on step failure based on capture mode
@@ -1597,6 +1920,23 @@ export class CSBDDRunner {
                     }
                 } catch (screenshotError) {
                     CSReporter.debug(`Failed to capture step failure screenshot: ${screenshotError}`);
+                }
+            }
+
+            // Collect diagnostic data using Playwright 1.56+ APIs (console logs, page errors, network requests)
+            if (this.browserManager) {
+                try {
+                    const page = this.browserManager.getPage();
+                    if (page && !page.isClosed()) {
+                        const diagnostics = await CSPageDiagnostics.collectOnFailure(page);
+                        if (diagnostics) {
+                            CSReporter.debug(`Collected diagnostics: ${diagnostics.stats.totalLogs} logs, ${diagnostics.stats.totalErrors} errors, ${diagnostics.stats.totalRequests} requests`);
+                            this.scenarioContext.setCurrentStepDiagnostics(diagnostics);
+                        }
+                    }
+                } catch (diagnosticError) {
+                    // Diagnostics collection should not break test execution
+                    CSReporter.debug(`Failed to collect page diagnostics: ${diagnosticError}`);
                 }
             }
 
@@ -1787,7 +2127,9 @@ export class CSBDDRunner {
                         duration: action.duration,
                         timestamp: new Date(action.timestamp)
                     })),
-                    screenshot: matchingStep?.screenshot || step.screenshot
+                    screenshot: matchingStep?.screenshot || step.screenshot,
+                    aiData: step.aiData,  // Include AI data from CSReporter
+                    diagnostics: step.diagnostics  // Include diagnostics from CSReporter
                 };
             }) : [],
             // Only extract error and stack trace if the scenario actually failed

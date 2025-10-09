@@ -7,7 +7,7 @@ import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 import { StoredProcedureCall, ProcedureParameter, QueryResult, StoredProcedureMetadata } from '../../database/types/database.types';
 
 export class StoredProcedureSteps {
-    private databaseContext: DatabaseContext = new DatabaseContext();
+    private databaseContext: DatabaseContext = DatabaseContext.getInstance();
     private configManager: CSConfigurationManager;
     private contextVariables: Map<string, any> = new Map();
     private lastOutputParameters: Record<string, any> = {};

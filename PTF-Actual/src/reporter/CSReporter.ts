@@ -19,6 +19,59 @@ export interface StepResult {
     screenshot?: string;
     actions: ActionDetail[];
     timestamp: string;
+    diagnostics?: any;  // Playwright 1.56+ diagnostic data (console logs, page errors, network requests)
+    aiData?: StepAIData;  // AI operations data for this step
+}
+
+export interface StepAIData {
+    healing?: {
+        attempted: boolean;
+        success: boolean;
+        strategy: string;
+        confidence: number;
+        duration: number;
+        originalLocator?: string;
+        healedLocator?: string;
+        attempts: number;
+    };
+    identification?: {
+        method: string;
+        confidence: number;
+        alternatives: number;
+        duration: number;
+    };
+    prediction?: {
+        predicted: boolean;
+        prevented: boolean;
+        confidence: number;
+        fragilityScore: number;
+    };
+    // NEW: Failure analysis from intelligent retry (v3.3.0+)
+    failureAnalysis?: {
+        failureType: string;  // ElementNotFound, Timeout, NetworkError, etc.
+        healable: boolean;  // Whether failure can be healed
+        confidence: number;  // Confidence in the analysis
+        rootCause: string;  // Why it failed
+        suggestedStrategies: string[];  // Healing strategies to try
+        diagnosticInsights: string[];  // Insights from diagnostics
+    };
+    // NEW: Advanced context from zero-code execution (v3.3.0+)
+    advancedContext?: {
+        shadowDOM?: boolean;
+        shadowRootHost?: string;
+        framework?: string;  // react, angular, vue, svelte
+        componentLibrary?: string;  // material-ui, ant-design, bootstrap
+        inTable?: boolean;
+        tableHeaders?: string[];
+        inIframe?: boolean;
+        nearLoadingIndicator?: boolean;
+    };
+    // NEW: Intelligent retry decision (v3.3.0+)
+    retryDecision?: {
+        shouldRetry: boolean;
+        reason: string;  // Why retry was skipped or allowed
+        analysisUsed: boolean;  // Whether failure analysis was used
+    };
 }
 
 export interface ActionDetail {
@@ -173,6 +226,74 @@ export class CSReporter {
                 duration,
                 timestamp: new Date().toISOString()
             });
+        }
+    }
+
+    // AI Data Recording Methods
+    public static recordAIHealing(healingData: StepAIData['healing']): void {
+        if (this.currentStep && healingData) {
+            if (!this.currentStep.aiData) {
+                this.currentStep.aiData = {};
+            }
+            this.currentStep.aiData.healing = healingData;
+            this.debug(`[AI] Healing recorded: ${healingData.success ? 'SUCCESS' : 'FAILED'} using ${healingData.strategy} (${(healingData.confidence * 100).toFixed(1)}% confidence)`);
+        }
+    }
+
+    public static recordAIIdentification(identificationData: StepAIData['identification']): void {
+        if (this.currentStep && identificationData) {
+            if (!this.currentStep.aiData) {
+                this.currentStep.aiData = {};
+            }
+            this.currentStep.aiData.identification = identificationData;
+            this.debug(`[AI] Identification recorded: ${identificationData.method} (${(identificationData.confidence * 100).toFixed(1)}% confidence, ${identificationData.alternatives} alternatives)`);
+        }
+    }
+
+    public static recordAIPrediction(predictionData: StepAIData['prediction']): void {
+        if (this.currentStep && predictionData) {
+            if (!this.currentStep.aiData) {
+                this.currentStep.aiData = {};
+            }
+            this.currentStep.aiData.prediction = predictionData;
+            this.debug(`[AI] Prediction recorded: ${predictionData.predicted ? 'PREDICTED' : 'NOT PREDICTED'} (Fragility: ${(predictionData.fragilityScore * 100).toFixed(1)}%)`);
+        }
+    }
+
+    // NEW: v3.3.0+ AI Data Recording Methods
+    public static recordAIFailureAnalysis(failureAnalysisData: StepAIData['failureAnalysis']): void {
+        if (this.currentStep && failureAnalysisData) {
+            if (!this.currentStep.aiData) {
+                this.currentStep.aiData = {};
+            }
+            this.currentStep.aiData.failureAnalysis = failureAnalysisData;
+            this.debug(`[AI] Failure Analysis recorded: ${failureAnalysisData.failureType} (${failureAnalysisData.healable ? 'HEALABLE' : 'NOT HEALABLE'}, ${(failureAnalysisData.confidence * 100).toFixed(1)}% confidence)`);
+        }
+    }
+
+    public static recordAIAdvancedContext(advancedContextData: StepAIData['advancedContext']): void {
+        if (this.currentStep && advancedContextData) {
+            if (!this.currentStep.aiData) {
+                this.currentStep.aiData = {};
+            }
+            this.currentStep.aiData.advancedContext = advancedContextData;
+            const features: string[] = [];
+            if (advancedContextData.framework) features.push(`framework: ${advancedContextData.framework}`);
+            if (advancedContextData.componentLibrary) features.push(`library: ${advancedContextData.componentLibrary}`);
+            if (advancedContextData.shadowDOM) features.push('shadowDOM');
+            if (advancedContextData.inTable) features.push('table');
+            if (advancedContextData.inIframe) features.push('iframe');
+            this.debug(`[AI] Advanced Context recorded: ${features.join(', ') || 'none'}`);
+        }
+    }
+
+    public static recordAIRetryDecision(retryDecisionData: StepAIData['retryDecision']): void {
+        if (this.currentStep && retryDecisionData) {
+            if (!this.currentStep.aiData) {
+                this.currentStep.aiData = {};
+            }
+            this.currentStep.aiData.retryDecision = retryDecisionData;
+            this.debug(`[AI] Retry Decision recorded: ${retryDecisionData.shouldRetry ? 'RETRY ALLOWED' : 'RETRY SKIPPED'} (${retryDecisionData.reason})`);
         }
     }
 

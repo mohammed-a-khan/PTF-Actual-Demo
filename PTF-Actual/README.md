@@ -1,4 +1,4 @@
-# CS Test Automation Framework
+# CS Playwright Test Framework
 
 ## 🚀 Lightning-Fast, Zero-Hardcoding, Self-Healing Test Automation
 

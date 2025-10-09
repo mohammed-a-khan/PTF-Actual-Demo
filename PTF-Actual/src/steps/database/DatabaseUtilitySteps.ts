@@ -14,7 +14,7 @@ export class DatabaseUtilitySteps {
     private contextVariables: Map<string, any> = new Map();
 
     constructor() {
-        this.databaseContext = new DatabaseContext();
+        this.databaseContext = DatabaseContext.getInstance();
         this.configManager = CSConfigurationManager.getInstance();
     }
 

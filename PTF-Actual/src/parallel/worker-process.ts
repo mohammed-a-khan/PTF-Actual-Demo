@@ -568,6 +568,17 @@ class WorkerProcess {
 
     private async cleanup() {
         try {
+            // Clean up AI integration for this worker
+            try {
+                const { CSAIIntegrationLayer } = this.getModule('../ai/integration/CSAIIntegrationLayer');
+                // Use the same worker ID format that CSBDDRunner uses (from environment)
+                const workerId = process.env.WORKER_ID || 'main';
+                CSAIIntegrationLayer.clearInstance(workerId);
+                console.log(`[Worker ${this.workerId}] AI integration cleaned up (ID: ${workerId})`);
+            } catch (error: any) {
+                // AI integration not loaded, skip
+            }
+
             // Get browser manager singleton - it's created by the BDD runner, not stored in this.browserManager
             const browserLaunchRequired = this.configManager?.getBoolean('BROWSER_LAUNCH_REQUIRED', true);
 

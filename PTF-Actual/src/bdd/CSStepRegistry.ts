@@ -1,5 +1,7 @@
 // Removed Cucumber imports - using our own BDD implementation
-import { CSBrowserManager } from '../browser/CSBrowserManager';
+// Lazy load CSBrowserManager to improve startup performance
+// import { CSBrowserManager } from '../browser/CSBrowserManager';
+let CSBrowserManager: any = null;
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from '../reporter/CSReporter';
 import { registerStepDefinition } from './CSBDDDecorators';
@@ -12,7 +14,7 @@ export interface StepDefinition {
 
 export interface WorldContext {
     config: CSConfigurationManager;
-    browserManager: CSBrowserManager;
+    browserManager: any; // CSBrowserManager type - lazy loaded
     reporter: typeof CSReporter;
     testData: any;
     sharedData: any;
@@ -232,10 +234,13 @@ export class CSStepRegistry {
         // After all tests
         AfterAll({ timeout: 60000 }, async function() {
             CSReporter.info('Completing test suite execution');
-            
+
             // Close all browsers
+            if (!CSBrowserManager) {
+                CSBrowserManager = require('../browser/CSBrowserManager').CSBrowserManager;
+            }
             await CSBrowserManager.getInstance().closeAll();
-            
+
             // Generate final reports
             await CSReporter.generateReports();
         });

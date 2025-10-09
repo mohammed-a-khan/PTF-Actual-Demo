@@ -8,7 +8,7 @@ import { QueryResult } from '../../database/types/database.types';
 import * as fs from 'fs';
 
 export class QueryExecutionSteps {
-    private databaseContext: DatabaseContext = new DatabaseContext();
+    private databaseContext: DatabaseContext = DatabaseContext.getInstance();
     private configManager: CSConfigurationManager;
     private contextVariables: Map<string, any> = new Map();
 

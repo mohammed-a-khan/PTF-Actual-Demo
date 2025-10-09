@@ -6,10 +6,10 @@ export class CSScenarioContext {
     private currentScenario?: string;
     private scenarioTags: string[] = [];
     private scenarioStartTime?: number;
-    private stepResults: Array<{ step: string; status: 'passed' | 'failed' | 'skipped'; duration: number; screenshot?: string }> = [];
+    private stepResults: Array<{ step: string; status: 'passed' | 'failed' | 'skipped'; duration: number; screenshot?: string; diagnostics?: any }> = [];
     private totalScenarios: number = 0;
     private executionStartTime?: number;
-    private currentStep?: { step: string; status: 'passed' | 'failed' | 'skipped'; duration: number; screenshot?: string };
+    private currentStep?: { step: string; status: 'passed' | 'failed' | 'skipped'; duration: number; screenshot?: string; diagnostics?: any };
     
     private constructor() {}
     
@@ -84,13 +84,14 @@ export class CSScenarioContext {
     }
     
     // Step result tracking
-    public addStepResult(step: string, status: 'passed' | 'failed' | 'skipped', duration: number, screenshot?: string, actions?: any[]): void {
+    public addStepResult(step: string, status: 'passed' | 'failed' | 'skipped', duration: number, screenshot?: string, actions?: any[], diagnostics?: any): void {
         const stepResult = {
             step,
             status,
             duration,
             screenshot: screenshot || this.currentStep?.screenshot,
-            actions: actions || []
+            actions: actions || [],
+            diagnostics: diagnostics || this.currentStep?.diagnostics
         };
         this.stepResults.push(stepResult);
         // Don't clear currentStep here - it needs to be available for screenshot attachment in catch block
@@ -120,7 +121,14 @@ export class CSScenarioContext {
         }
     }
 
-    public getStepResults(): Array<{ step: string; status: 'passed' | 'failed' | 'skipped'; duration: number; screenshot?: string; actions?: any[] }> {
+    // Set diagnostics for current step (Playwright 1.56+)
+    public setCurrentStepDiagnostics(diagnostics: any): void {
+        if (this.currentStep) {
+            this.currentStep.diagnostics = diagnostics;
+        }
+    }
+
+    public getStepResults(): Array<{ step: string; status: 'passed' | 'failed' | 'skipped'; duration: number; screenshot?: string; actions?: any[]; diagnostics?: any }> {
         return this.stepResults;
     }
     

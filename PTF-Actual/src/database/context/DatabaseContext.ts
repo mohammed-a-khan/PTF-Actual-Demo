@@ -5,6 +5,7 @@ import { QueryResult, PreparedStatement, DatabaseConnection, QueryOptions } from
 import { CSReporter } from '../../reporter/CSReporter';
 
 export class DatabaseContext {
+    private static instance: DatabaseContext;
     private adapters: Map<string, CSDatabaseAdapter> = new Map();
     private activeAdapter: CSDatabaseAdapter | null = null;
     private activeConnection: DatabaseConnection | null = null;
@@ -17,6 +18,17 @@ export class DatabaseContext {
     private sessionVariables: Map<string, any> = new Map();
     private queryTimeout: number = 60000;
     private maxHistorySize: number = 1000;
+
+    private constructor() {
+        // Private constructor to prevent direct instantiation
+    }
+
+    public static getInstance(): DatabaseContext {
+        if (!DatabaseContext.instance) {
+            DatabaseContext.instance = new DatabaseContext();
+        }
+        return DatabaseContext.instance;
+    }
 
     setActiveConnection(name: string, adapter: CSDatabaseAdapter, connection: DatabaseConnection): void {
         CSReporter.info(`Database connection operation - setActiveConnection, connectionName: ${name}`);

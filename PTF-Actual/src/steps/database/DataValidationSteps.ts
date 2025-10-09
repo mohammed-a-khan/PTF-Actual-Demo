@@ -7,7 +7,7 @@ import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 import { QueryResult } from '../../database/types/database.types';
 
 export class DataValidationSteps {
-    private databaseContext: DatabaseContext = new DatabaseContext();
+    private databaseContext: DatabaseContext = DatabaseContext.getInstance();
     private configManager: CSConfigurationManager;
     private contextVariables: Map<string, any> = new Map();
 

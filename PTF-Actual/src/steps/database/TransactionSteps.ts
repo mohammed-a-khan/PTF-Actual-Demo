@@ -7,7 +7,7 @@ import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 import { Transaction } from '../../database/types/database.types';
 
 export class TransactionSteps {
-    private databaseContext: DatabaseContext = new DatabaseContext();
+    private databaseContext: DatabaseContext = DatabaseContext.getInstance();
     private configManager: CSConfigurationManager;
     private contextVariables: Map<string, any> = new Map();
     private activeTransaction: Transaction | null = null;

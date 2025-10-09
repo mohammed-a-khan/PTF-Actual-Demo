@@ -17,7 +17,7 @@ export class ConnectionSteps {
     private contextVariables: Map<string, any> = new Map();
 
     constructor() {
-        this.databaseContext = new DatabaseContext();
+        this.databaseContext = DatabaseContext.getInstance();
         this.databaseManager = CSDatabaseManager.getInstance();
         this.configManager = CSConfigurationManager.getInstance();
     }
@@ -159,6 +159,25 @@ export class ConnectionSteps {
 
         if (errors.length > 0) {
             throw new Error(`Failed to disconnect from some databases:\n${errors.join('\n')}`);
+        }
+    }
+
+    @CSBDDStepDef('user disconnects from {string} database')
+    async disconnectFromNamedDatabase(databaseAlias: string): Promise<void> {
+        CSReporter.info(`Disconnecting from database: ${databaseAlias}`);
+
+        try {
+            const database = this.databases.get(databaseAlias);
+            if (database) {
+                await database.disconnect();
+                this.databases.delete(databaseAlias);
+                CSReporter.info(`Disconnected from database: ${databaseAlias}`);
+            } else {
+                CSReporter.warn(`Database '${databaseAlias}' not found or already disconnected`);
+            }
+        } catch (error) {
+            CSReporter.error(`Failed to disconnect from database '${databaseAlias}': ${error instanceof Error ? error.message : String(error)}`);
+            throw new Error(`Failed to disconnect from database '${databaseAlias}': ${error instanceof Error ? error.message : String(error)}`);
         }
     }
 

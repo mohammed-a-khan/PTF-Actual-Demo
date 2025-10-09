@@ -30,6 +30,7 @@ export interface StepResult {
     elementInfo?: any;
     apiDetails?: any;
     dbDetails?: any;
+    diagnostics?: any;  // Playwright 1.56+ diagnostic data
 }
 
 export interface ActionDetail {
@@ -1104,6 +1105,7 @@ export class CSHTMLReporter {
                     <span class="step-keyword">${step.keyword}</span>
                     <span class="step-name">${step.name}</span>
                     ${step.error ? `<div class="step-error">${step.error}</div>` : ''}
+                    ${step.diagnostics ? this.generateDiagnostics(step.diagnostics) : ''}
                     ${step.actionDetails ? this.generateActionDetails(step.actionDetails) : ''}
                 </div>
                 <span class="step-duration">${this.formatDuration(step.duration)}</span>
@@ -1121,6 +1123,71 @@ export class CSHTMLReporter {
                         <span style="color: #9ca3af; margin-left: 10px;">${this.formatDuration(action.duration)}</span>
                     </div>
                 `).join('')}
+            </div>
+        `;
+    }
+
+    private generateDiagnostics(diagnostics: any): string {
+        if (!diagnostics || !diagnostics.stats) return '';
+
+        const hasErrors = diagnostics.stats.totalErrors > 0 || diagnostics.stats.errorLogs > 0 || diagnostics.stats.failedRequests > 0;
+        if (!hasErrors && diagnostics.stats.totalLogs === 0 && diagnostics.stats.totalRequests === 0) {
+            return '';
+        }
+
+        const diagnosticId = `diag-${Math.random().toString(36).substr(2, 9)}`;
+
+        return `
+            <div class="diagnostic-panel" style="margin-top: 10px; padding: 12px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 6px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; cursor: pointer;" onclick="document.getElementById('${diagnosticId}').style.display = document.getElementById('${diagnosticId}').style.display === 'none' ? 'block' : 'none'">
+                    <div style="font-size: 13px; font-weight: 600; color: #92400e;">
+                        🔍 Page Diagnostics (Playwright 1.56+)
+                    </div>
+                    <div style="font-size: 11px; color: #78350f;">
+                        ${diagnostics.stats.errorLogs} errors • ${diagnostics.stats.warningLogs} warnings • ${diagnostics.stats.totalRequests} requests
+                    </div>
+                </div>
+                <div id="${diagnosticId}" style="display: none; margin-top: 10px; font-size: 12px; color: #78350f;">
+                    ${diagnostics.pageErrors && diagnostics.pageErrors.length > 0 ? `
+                        <div style="margin-bottom: 10px;">
+                            <strong>❌ Page Errors (${diagnostics.pageErrors.length}):</strong>
+                            ${diagnostics.pageErrors.map((err: any) => `
+                                <div style="margin: 5px 0 5px 15px; padding: 6px; background: rgba(239, 68, 68, 0.1); border-radius: 4px;">
+                                    <div style="font-weight: 600; color: #dc2626;">${err.name}: ${err.message}</div>
+                                    ${err.stack ? `<pre style="margin-top: 4px; font-size: 10px; color: #991b1b; overflow-x: auto; white-space: pre-wrap;">${err.stack}</pre>` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+
+                    ${diagnostics.consoleLogs && diagnostics.consoleLogs.filter((log: any) => log.type === 'error' || log.type === 'warning').length > 0 ? `
+                        <div style="margin-bottom: 10px;">
+                            <strong>🔴 Console Logs (Errors & Warnings):</strong>
+                            ${diagnostics.consoleLogs.filter((log: any) => log.type === 'error' || log.type === 'warning').map((log: any) => `
+                                <div style="margin: 5px 0 5px 15px; padding: 6px; background: ${log.type === 'error' ? 'rgba(239, 68, 68, 0.1)' : 'rgba(245, 158, 11, 0.1)'}; border-radius: 4px;">
+                                    <span style="font-weight: 600; color: ${log.type === 'error' ? '#dc2626' : '#d97706'};">[${log.type.toUpperCase()}]</span> ${log.text}
+                                    ${log.location ? `<div style="font-size: 10px; color: #6b7280; margin-top: 2px;">${log.location.url}:${log.location.line}:${log.location.column}</div>` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+
+                    ${diagnostics.networkRequests && diagnostics.networkRequests.filter((req: any) => req.status && req.status >= 400).length > 0 ? `
+                        <div style="margin-bottom: 10px;">
+                            <strong>🌐 Failed Network Requests:</strong>
+                            ${diagnostics.networkRequests.filter((req: any) => req.status && req.status >= 400).map((req: any) => `
+                                <div style="margin: 5px 0 5px 15px; padding: 6px; background: rgba(239, 68, 68, 0.1); border-radius: 4px;">
+                                    <span style="font-weight: 600; color: #dc2626;">[${req.status}]</span> ${req.method} ${req.url}
+                                    ${req.duration ? `<span style="color: #6b7280; margin-left: 10px;">(${req.duration.toFixed(0)}ms)</span>` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+
+                    <div style="font-size: 10px; color: #9ca3af; margin-top: 8px; padding-top: 8px; border-top: 1px solid #fbbf24;">
+                        Collected at: ${diagnostics.collectionTimestamp || 'N/A'}
+                    </div>
+                </div>
             </div>
         `;
     }

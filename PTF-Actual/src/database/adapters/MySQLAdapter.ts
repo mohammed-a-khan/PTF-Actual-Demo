@@ -35,7 +35,9 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
   private async loadDriver(): Promise<void> {
     if (!this.mysql2) {
       try {
-        this.mysql2 = await import('mysql2/promise');
+        const mysqlModule = await import('mysql2/promise');
+        // Handle both ES modules and CommonJS modules
+        this.mysql2 = (mysqlModule as any).default || mysqlModule;
       } catch (error) {
         throw new Error('MySQL driver (mysql2) not installed. Run: npm install mysql2');
       }
@@ -93,7 +95,7 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
 
   async disconnect(connection: DatabaseConnection): Promise<void> {
     try {
-      const conn = connection as any;
+      const conn = connection.instance as any;
       
       if (conn.end) {
         await conn.end();
@@ -112,7 +114,7 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
     params?: any[], 
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     
     const isPool = conn.getConnection !== undefined;
     const queryConn = isPool ? await conn.getConnection() : conn;
@@ -193,7 +195,7 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
     connection: DatabaseConnection,
     options?: TransactionOptions
   ): Promise<void> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     
     if (options?.isolationLevel) {
       const level = this.getIsolationLevelSQL(options.isolationLevel);
@@ -210,7 +212,7 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
   }
 
   async commitTransaction(connection: DatabaseConnection): Promise<void> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     const txConn = conn._transactionConnection || conn;
     
     await txConn.commit();
@@ -222,7 +224,7 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
   }
 
   async rollbackTransaction(connection: DatabaseConnection): Promise<void> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     const txConn = conn._transactionConnection || conn;
     
     await txConn.rollback();
@@ -246,7 +248,7 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
   }
 
   async prepare(connection: DatabaseConnection, sql: string): Promise<PreparedStatement> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     const isPool = conn.getConnection !== undefined;
     const prepareConn = isPool ? await conn.getConnection() : conn;
     
@@ -278,7 +280,7 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
   }
 
   async ping(connection: DatabaseConnection): Promise<void> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     
     if (conn.ping) {
       await conn.ping();
@@ -515,7 +517,7 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
     params?: any[],
     _options?: QueryOptions
   ): AsyncGenerator<any, void, unknown> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     const isPool = conn.getConnection !== undefined;
     const streamConn = isPool ? await conn.getConnection() : conn;
 

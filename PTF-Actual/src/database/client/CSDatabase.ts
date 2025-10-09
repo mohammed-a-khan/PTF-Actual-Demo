@@ -685,8 +685,14 @@ export class CSDatabase {
   }
 
   private storeResultForChaining(result: ResultSet): void {
-    const BDDContext = require('../../bdd/context/BDDContext').BDDContext;
-    BDDContext.setDatabaseResult(this.connectionAlias, result);
+    // Store result in the database context for access by other steps
+    try {
+      const { DatabaseContext } = require('../context/DatabaseContext');
+      const dbContext = DatabaseContext.getInstance();
+      dbContext.storeResult(this.connectionAlias || 'last', result);
+    } catch (error) {
+      CSReporter.debug(`Could not store result for chaining: ${(error as Error).message}`);
+    }
   }
 
   private enhanceError(error: Error, code: string, context?: any): Error {

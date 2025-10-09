@@ -9,7 +9,7 @@ pool:
 
 variables:
   buildConfiguration: 'Release'
-  artifactName: 'cs-test-automation-framework'
+  artifactName: 'cs-playwright-test-framework'
 
 stages:
   - stage: Build

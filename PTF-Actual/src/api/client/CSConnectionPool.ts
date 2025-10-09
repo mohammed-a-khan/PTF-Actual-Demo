@@ -57,7 +57,9 @@ export class CSConnectionPool {
                 ca: options.ca,
                 pfx: options.pfx,
                 passphrase: options.passphrase,
-                secureProtocol: 'TLSv1_2_method',
+                // Use TLS 1.2 and 1.3 (modern and secure)
+                minVersion: 'TLSv1.2' as const,
+                maxVersion: 'TLSv1.3' as const,
                 maxCachedSessions: this.defaultConfig.maxCachedSessions
             };
 

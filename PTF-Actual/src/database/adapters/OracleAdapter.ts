@@ -27,8 +27,9 @@ export class CSOracleAdapter extends CSDatabaseAdapter {
     if (!this.oracledb) {
       try {
         const oracleModule = await import('oracledb');
-        this.oracledb = oracleModule;
-        
+        // Handle both ES modules and CommonJS modules
+        this.oracledb = (oracleModule as any).default || oracleModule;
+
         this.oracledb.outFormat = this.oracledb.OUT_FORMAT_OBJECT;
         this.oracledb.fetchAsString = [this.oracledb.CLOB];
         this.oracledb.autoCommit = false;
@@ -75,8 +76,8 @@ export class CSOracleAdapter extends CSDatabaseAdapter {
 
   async disconnect(connection: DatabaseConnection): Promise<void> {
     try {
-      const conn = connection as any;
-      
+      const conn = connection.instance as any;
+
       if (conn.close) {
         await conn.close();
       } else if (conn.terminate) {
@@ -89,13 +90,13 @@ export class CSOracleAdapter extends CSDatabaseAdapter {
   }
 
   async query(
-    connection: DatabaseConnection, 
-    sql: string, 
-    params?: any[], 
+    connection: DatabaseConnection,
+    sql: string,
+    params?: any[],
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const conn = connection as any;
-    
+    const conn = connection.instance as any;
+
     const isPool = conn.getConnection !== undefined;
     const queryConn = isPool ? await conn.getConnection() : conn;
 
@@ -174,7 +175,7 @@ export class CSOracleAdapter extends CSDatabaseAdapter {
     procedureName: string,
     params?: any[]
   ): Promise<QueryResult> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     const isPool = conn.getConnection !== undefined;
     const procConn = isPool ? await conn.getConnection() : conn;
 
@@ -271,8 +272,8 @@ export class CSOracleAdapter extends CSDatabaseAdapter {
   }
 
   async commitTransaction(connection: DatabaseConnection): Promise<void> {
-    const conn = connection as any;
-    
+    const conn = connection.instance as any;
+
     if (conn.commit) {
       await conn.commit();
     } else {
@@ -286,8 +287,8 @@ export class CSOracleAdapter extends CSDatabaseAdapter {
   }
 
   async rollbackTransaction(connection: DatabaseConnection): Promise<void> {
-    const conn = connection as any;
-    
+    const conn = connection.instance as any;
+
     if (conn.rollback) {
       await conn.rollback();
     } else {
@@ -454,7 +455,7 @@ export class CSOracleAdapter extends CSDatabaseAdapter {
   ): Promise<number> {
     if (data.length === 0) return 0;
 
-    const conn = connection as any;
+    const conn = connection.instance as any;
     const isPool = conn.getConnection !== undefined;
     const insertConn = isPool ? await conn.getConnection() : conn;
 

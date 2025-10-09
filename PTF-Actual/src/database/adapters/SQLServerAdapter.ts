@@ -25,7 +25,9 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
   private async loadDriver(): Promise<void> {
     if (!this.mssql) {
       try {
-        this.mssql = await import('mssql');
+        const mssqlModule = await import('mssql');
+        // Handle both ES modules and CommonJS modules
+        this.mssql = (mssqlModule as any).default || mssqlModule;
       } catch (error) {
         throw new Error('SQL Server driver (mssql) not installed. Run: npm install mssql');
       }
@@ -141,7 +143,7 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
 
   async disconnect(connection: DatabaseConnection): Promise<void> {
     try {
-      const pool = connection as any;
+      const pool = connection.instance as any;
       await pool.close();
     } catch (error) {
       CSReporter.error('SQL Server disconnect error: ' + (error as Error).message);
@@ -155,7 +157,7 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
     params?: any[], 
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const pool = connection as any;
+    const pool = connection.instance as any;
     const request = pool.request();
 
     if (options?.timeout) {
@@ -214,7 +216,7 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
     params?: any[],
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const pool = connection as any;
+    const pool = connection.instance as any;
     const request = pool.request();
 
     if (options?.timeout) {
@@ -268,7 +270,7 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
     connection: DatabaseConnection,
     options?: TransactionOptions
   ): Promise<void> {
-    const pool = connection as any;
+    const pool = connection.instance as any;
     const transaction = pool.transaction();
 
     if (options?.isolationLevel) {
@@ -276,27 +278,27 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
     }
 
     await transaction.begin();
-    (connection as any)._transaction = transaction;
+    (connection.instance as any)._transaction = transaction;
   }
 
   async commitTransaction(connection: DatabaseConnection): Promise<void> {
-    const transaction = (connection as any)._transaction;
+    const transaction = (connection.instance as any)._transaction;
     if (!transaction) {
       throw new Error('No active transaction');
     }
 
     await transaction.commit();
-    delete (connection as any)._transaction;
+    delete (connection.instance as any)._transaction;
   }
 
   async rollbackTransaction(connection: DatabaseConnection): Promise<void> {
-    const transaction = (connection as any)._transaction;
+    const transaction = (connection.instance as any)._transaction;
     if (!transaction) {
       throw new Error('No active transaction');
     }
 
     await transaction.rollback();
-    delete (connection as any)._transaction;
+    delete (connection.instance as any)._transaction;
   }
 
   async createSavepoint(connection: DatabaseConnection, name: string): Promise<void> {
@@ -311,7 +313,7 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
   }
 
   async prepare(connection: DatabaseConnection, sql: string): Promise<PreparedStatement> {
-    const pool = connection as any;
+    const pool = connection.instance as any;
     const ps = new this.mssql.PreparedStatement(pool);
     
     const paramMatches = sql.match(/@\w+/g);
@@ -469,7 +471,7 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
   ): Promise<number> {
     if (data.length === 0) return 0;
 
-    const pool = connection as any;
+    const pool = connection.instance as any;
     const tableObj = new this.mssql.Table(table);
     
     const columns = Object.keys(data[0]);

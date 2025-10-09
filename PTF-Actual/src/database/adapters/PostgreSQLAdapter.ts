@@ -25,7 +25,9 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
   private async loadDriver(): Promise<void> {
     if (!this.pg) {
       try {
-        this.pg = await import('pg');
+        const pgModule = await import('pg');
+        // Handle both ES modules and CommonJS modules
+        this.pg = (pgModule as any).default || pgModule;
       } catch (error) {
         throw new Error('PostgreSQL driver (pg) not installed. Run: npm install pg');
       }
@@ -85,7 +87,7 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
 
   async disconnect(connection: DatabaseConnection): Promise<void> {
     try {
-      const conn = connection as any;
+      const conn = connection.instance as any;
       
       this.preparedStatements.clear();
       
@@ -106,7 +108,7 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
     params?: any[], 
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     
     
     try {
@@ -213,7 +215,7 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
   }
 
   async prepare(connection: DatabaseConnection, sql: string): Promise<PreparedStatement> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     const statementName = `stmt_${++this.statementCounter}`;
     
     await conn.query(`PREPARE ${statementName} AS ${sql}`);
@@ -397,7 +399,7 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
   ): Promise<number> {
     if (data.length === 0) return 0;
 
-    const conn = connection as any;
+    const conn = connection.instance as any;
     const columns = Object.keys(data[0]);
     const columnNames = columns.map(col => this.escapeIdentifier(col)).join(', ');
     
@@ -437,7 +439,7 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
     sql: string,
     params?: any[]
   ): AsyncGenerator<any, void, unknown> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     const queryStream = new this.pg.QueryStream(sql, params || []);
     const stream = conn.query(queryStream);
     
@@ -531,7 +533,7 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
   }
 
   override async cancelQuery(connection: DatabaseConnection): Promise<void> {
-    const conn = connection as any;
+    const conn = connection.instance as any;
     
     const pidResult = await this.query(conn, 'SELECT pg_backend_pid()');
     const pid = pidResult.rows[0].pg_backend_pid;

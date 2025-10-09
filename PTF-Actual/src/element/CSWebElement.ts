@@ -323,27 +323,52 @@ export class CSWebElement {
         if (this.locator) return this.locator;
 
         CSReporter.debug(`Getting locator for ${this.description}`);
-        
+
         // Build and try locator strategies
         const strategies = this.buildLocatorStrategies();
-        
+        const startTime = Date.now();
+        const primaryStrategy = strategies[0];
+        let strategyIndex = 0;
+
         for (const strategy of strategies) {
             try {
                 const loc = this.createLocatorFromStrategy(strategy);
                 if (await loc.count() > 0) {
                     this.locator = loc;
-                    CSReporter.debug(`Found element with ${strategy.type}: ${strategy.value}`);
+
+                    // Check if this is self-healing (alternative locator used instead of primary)
+                    if (strategyIndex > 0 && this.options.selfHeal && this.options.alternativeLocators &&
+                        this.options.alternativeLocators.length > 0) {
+                        // This is self-healing via alternative locator
+                        const healingDuration = Date.now() - startTime;
+                        CSReporter.pass(`🔧 Self-healed element "${this.description}" using ${strategy.type}: ${strategy.value}`);
+
+                        // Record AI healing data for HTML report
+                        CSReporter.recordAIHealing({
+                            attempted: true,
+                            success: true,
+                            strategy: 'alternative',
+                            confidence: 1.0, // 0.0-1.0 scale (1.0 = 100%)
+                            duration: healingDuration,
+                            originalLocator: primaryStrategy.value,
+                            healedLocator: `${strategy.type}:${strategy.value}`,
+                            attempts: strategyIndex + 1
+                        });
+                    } else {
+                        CSReporter.debug(`Found element with ${strategy.type}: ${strategy.value}`);
+                    }
+
                     return loc;
                 }
             } catch (error) {
                 CSReporter.debug(`Failed with ${strategy.type}: ${error}`);
             }
+            strategyIndex++;
         }
 
         // Try self-healing if enabled
         if (this.options.selfHeal) {
             CSReporter.info(`Attempting self-healing for ${this.description}`);
-            const primaryStrategy = strategies[0];
             const healingResult = await this.selfHealingEngine.heal(
                 this.page,
                 primaryStrategy.value,
@@ -352,7 +377,22 @@ export class CSWebElement {
 
             if (healingResult.success && healingResult.healedLocator) {
                 this.locator = this.page.locator(healingResult.healedLocator);
-                CSReporter.pass(`Self-healed element: ${this.description}`);
+                const healingDuration = Date.now() - startTime;
+
+                CSReporter.pass(`🤖 AI-healed element "${this.description}" using ${healingResult.strategy} strategy: ${healingResult.healedLocator}`);
+
+                // Record AI healing data for HTML report
+                CSReporter.recordAIHealing({
+                    attempted: true,
+                    success: true,
+                    strategy: healingResult.strategy || 'unknown',
+                    confidence: (healingResult.confidence || 70) / 100, // Convert 0-100 to 0.0-1.0
+                    duration: healingDuration,
+                    originalLocator: primaryStrategy.value,
+                    healedLocator: healingResult.healedLocator,
+                    attempts: strategies.length + 1
+                });
+
                 return this.locator;
             }
         }

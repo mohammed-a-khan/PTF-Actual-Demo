@@ -17,7 +17,7 @@ export class DatabaseGenericSteps {
     private contextVariables: Map<string, any> = new Map();
 
     constructor() {
-        this.databaseContext = new DatabaseContext();
+        this.databaseContext = DatabaseContext.getInstance();
         this.configManager = CSConfigurationManager.getInstance();
         this.databaseManager = CSDatabaseManager.getInstance();
     }
@@ -223,14 +223,17 @@ export class DatabaseGenericSteps {
     async validateConnection(): Promise<void> {
         CSReporter.info('Validating database connection');
 
-        const db = this.getCurrentDatabase();
-        const isConnected = db.isConnected();
+        try {
+            // Try to get the active adapter from context - this will throw if no connection
+            const activeAdapter = this.databaseContext.getActiveAdapter();
 
-        if (!isConnected) {
-            throw new Error('Database connection is not active');
+            // Try to execute a simple query to validate the connection
+            await this.databaseContext.executeQuery('SELECT 1 FROM DUAL');
+
+            CSReporter.info('Database connection validation passed');
+        } catch (error) {
+            throw new Error(`Database connection is not active: ${(error as Error).message}`);
         }
-
-        CSReporter.info('Database connection validation passed');
     }
 
     private getCurrentDatabase(): CSDatabase {
@@ -241,11 +244,12 @@ export class DatabaseGenericSteps {
     }
 
     private getLastResult(): ResultSet {
-        const result = this.contextVariables.get('lastDatabaseResult') as ResultSet;
-        if (!result) {
+        try {
+            const result = this.databaseContext.getStoredResult('last');
+            return result as ResultSet;
+        } catch (error) {
             throw new Error('No query result available. Execute a query first');
         }
-        return result;
     }
 
     private sanitizeQueryForLog(query: string): string {

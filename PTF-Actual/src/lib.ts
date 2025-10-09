@@ -1,11 +1,11 @@
 /**
- * CS Test Automation Framework - Library Entry Point
+ * CS Playwright Test Framework - Library Entry Point
  *
  * Main export file for using the framework as a library/dependency
  * Import this in your test projects:
  *
  * @example
- * import { CSBasePage, CSReporter, CSBDDRunner } from 'cs-test-automation-framework';
+ * import { CSBasePage, CSReporter, CSBDDRunner } from 'cs-playwright-test-framework';
  */
 
 // Core Framework
@@ -128,6 +128,10 @@ export { CSTokenManager } from './auth/CSTokenManager';
 
 // Performance & Monitoring
 export { CSPerformanceMonitor } from './monitoring/CSPerformanceMonitor';
+
+// Diagnostics & Debugging (Playwright 1.56+)
+export { CSPageDiagnostics } from './diagnostics/CSPageDiagnostics';
+export type { PageDiagnosticData, DiagnosticConsoleLog, DiagnosticError, DiagnosticRequest, DiagnosticOptions } from './diagnostics/CSPageDiagnostics';
 
 // Media & Evidence
 export { CSVideoRecorder } from './media/CSVideoRecorder';
