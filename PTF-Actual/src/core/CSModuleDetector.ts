@@ -46,77 +46,64 @@ export class CSModuleDetector {
     /**
      * Step pattern regex for implicit detection
      * Patterns detect step text to infer required modules
+     * Flexible patterns support multiple subjects: I, user, we, they, etc.
      */
     private readonly STEP_PATTERNS: Record<keyof ModuleRequirements, RegExp[]> = {
         browser: [
-            /I navigate to/i,
-            /I click/i,
-            /I enter .* into/i,
-            /I type/i,
-            /I should see/i,
-            /I select/i,
-            /I switch .*browser/i,
-            /the page/i,
-            /browser/i,
-            /I should (still be|NOT be) logged in/i,
-            /current browser should be/i,
-            /I am on the .* page/i,
-            /I wait for/i,
-            /I scroll/i,
-            /I hover/i,
-            /I press/i,
-            /I upload/i,
-            /I download/i,
-            /the element/i,
-            /the button/i,
-            /the link/i,
-            /the input/i,
-            /the dropdown/i,
-            /the checkbox/i,
-            /the radio/i
+            // Navigation patterns (flexible subject)
+            /(?:I|user|users|we|they|he|she)\s+navigate/i,
+            /(?:I|user|users|we|they|he|she)\s+(?:go|goes)\s+to/i,
+            /(?:I|user|users|we|they|he|she)\s+(?:am|is|are)\s+on\s+.*page/i,
+            // Interaction patterns
+            /(?:I|user|users|we|they|he|she)\s+click/i,
+            /(?:I|user|users|we|they|he|she)\s+(?:enter|type|input)/i,
+            /(?:I|user|users|we|they|he|she)\s+select/i,
+            /(?:I|user|users|we|they|he|she)\s+(?:wait|scroll|hover|press)/i,
+            /(?:I|user|users|we|they|he|she)\s+(?:upload|download)/i,
+            // Verification patterns
+            /(?:I|user|users|we|they|he|she)\s+should\s+(?:see|not see)/i,
+            /(?:I|user|users|we|they|he|she)\s+should\s+(?:still be|NOT be)\s+logged in/i,
+            // Element/Browser keywords (subject-independent)
+            /(?:switch|close|open).*browser/i,
+            /the\s+(?:page|element|button|link|input|dropdown|checkbox|radio|tab|window)/i,
+            /(?:browser|webpage|current\s+page)/i
         ],
         api: [
-            /I send a (GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) request/i,
-            /I set .*header/i,
-            /the response status/i,
-            /the response body/i,
-            /the response.*should/i,
-            /I validate response/i,
-            /API/i,
-            /request to/i,
-            /HTTP/i,
-            /REST/i,
-            /endpoint/i,
-            /I set (query parameter|body|authentication)/i,
-            /the API/i,
-            /JSON response/i,
-            /XML response/i,
-            /status code/i
+            // HTTP Request patterns (flexible subject)
+            /(?:I|user|users|we|they|he|she)\s+send.*(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+request/i,
+            /(?:I|user|users|we|they|he|she)\s+(?:call|invoke).*(?:API|endpoint)/i,
+            /(?:I|user|users|we|they|he|she)\s+set.*(?:header|query parameter|body|authentication)/i,
+            /(?:I|user|users|we|they|he|she)\s+validate.*response/i,
+            // Response patterns (subject-independent)
+            /(?:the\s+)?response\s+(?:status|code|body)/i,
+            /(?:the\s+)?(?:JSON|XML)\s+response/i,
+            /status\s+code\s+should/i,
+            // Keywords (subject-independent)
+            /\b(?:API|REST|HTTP|endpoint)\b/i,
+            /request\s+to\s+[/"']/i
         ],
         database: [
-            /I execute query/i,
-            /I connect to database/i,
-            /the query result/i,
-            /I execute stored procedure/i,
-            /database/i,
-            /query/i,
-            /I begin transaction/i,
-            /I rollback transaction/i,
-            /I commit transaction/i,
-            /SQL/i,
-            /SELECT.*FROM/i,
-            /INSERT INTO/i,
-            /UPDATE.*SET/i,
-            /DELETE FROM/i,
-            /the database/i,
-            /table/i,
-            /I run.*query/i
+            // Connection patterns (flexible subject)
+            /(?:I|user|users|we|they|he|she)\s+connect.*(?:to\s+)?database/i,
+            /(?:I|user|users|we|they|he|she)\s+(?:disconnect|close).*database/i,
+            // Query patterns (flexible subject)
+            /(?:I|user|users|we|they|he|she)\s+(?:execute|run).*query/i,
+            /(?:I|user|users|we|they|he|she)\s+execute.*stored\s+procedure/i,
+            // Transaction patterns (flexible subject)
+            /(?:I|user|users|we|they|he|she)\s+(?:begin|start).*transaction/i,
+            /(?:I|user|users|we|they|he|she)\s+(?:commit|rollback).*transaction/i,
+            // SQL Keywords (subject-independent)
+            /\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE)\b.*\b(?:FROM|INTO|TABLE|DATABASE)\b/i,
+            // Database keywords (subject-independent)
+            /\b(?:SQL|database|query\s+result|stored\s+procedure)\b/i,
+            /(?:the\s+)?(?:database|table|query)/i
         ],
         soap: [
-            /SOAP/i,
-            /WSDL/i,
-            /I send.*SOAP/i,
-            /web service/i
+            // SOAP patterns (flexible subject)
+            /(?:I|user|users|we|they|he|she)\s+send.*SOAP/i,
+            /(?:I|user|users|we|they|he|she)\s+(?:call|invoke).*(?:web\s+service|SOAP\s+service)/i,
+            // Keywords (subject-independent)
+            /\b(?:SOAP|WSDL|web\s+service)\b/i
         ]
     };
 
@@ -149,6 +136,12 @@ export class CSModuleDetector {
     /**
      * Detect module requirements for a scenario
      *
+     * Priority Order:
+     * 1. Explicit module specification (MODULES config/CLI)
+     * 2. Tag-based detection (explicit tags)
+     * 3. Step pattern detection (implicit)
+     * 4. Default fallback (browser=true)
+     *
      * @param scenario - Parsed scenario object
      * @param feature - Parsed feature object
      * @returns Module requirements object
@@ -157,8 +150,19 @@ export class CSModuleDetector {
         scenario: ParsedScenario,
         feature: ParsedFeature
     ): ModuleRequirements {
-        // Check if module detection is enabled
-        const enabled = this.config.getBoolean('MODULE_DETECTION_ENABLED', false);
+        // PRIORITY 1: Check for explicit module specification via config/CLI
+        const explicitModules = this.config.get('MODULES', '').trim();
+        if (explicitModules) {
+            const requirements = this.parseExplicitModules(explicitModules);
+            if (this.config.getBoolean('MODULE_DETECTION_LOGGING', false)) {
+                const workerId = process.env.WORKER_ID ? `Worker ${process.env.WORKER_ID}` : 'Main';
+                CSReporter.debug(`[${workerId}] Explicit Modules (MODULES config): ${explicitModules} | Scenario: ${scenario.name}`);
+            }
+            return requirements;
+        }
+
+        // Check if module detection is enabled (default: true for intelligent browser launch)
+        const enabled = this.config.getBoolean('MODULE_DETECTION_ENABLED', true);
         if (!enabled) {
             // Feature disabled - return default (browser always enabled for backward compatibility)
             return {
@@ -279,6 +283,58 @@ export class CSModuleDetector {
      */
     private matchesAnyPattern(text: string, patterns: RegExp[]): boolean {
         return patterns.some(pattern => pattern.test(text));
+    }
+
+    /**
+     * Parse explicit module specification from config/CLI
+     *
+     * Supported formats:
+     * - "api"                    → api only
+     * - "api,database"           → api + database
+     * - "ui,api,database"        → ui + api + database
+     * - "browser,api"            → browser + api (browser is alias for ui)
+     *
+     * @param moduleSpec - Comma-separated list of modules
+     * @returns Module requirements object
+     */
+    private parseExplicitModules(moduleSpec: string): ModuleRequirements {
+        const requirements: ModuleRequirements = {
+            browser: false,
+            api: false,
+            database: false,
+            soap: false
+        };
+
+        // Split by comma and normalize
+        const modules = moduleSpec.toLowerCase().split(',').map(m => m.trim());
+
+        for (const module of modules) {
+            switch (module) {
+                case 'ui':
+                case 'browser':
+                case 'web':
+                    requirements.browser = true;
+                    break;
+                case 'api':
+                case 'rest':
+                case 'http':
+                    requirements.api = true;
+                    break;
+                case 'database':
+                case 'db':
+                case 'sql':
+                    requirements.database = true;
+                    break;
+                case 'soap':
+                case 'wsdl':
+                    requirements.soap = true;
+                    break;
+                default:
+                    CSReporter.warn(`Unknown module in MODULES specification: "${module}". Valid: ui, api, database, soap`);
+            }
+        }
+
+        return requirements;
     }
 
     /**

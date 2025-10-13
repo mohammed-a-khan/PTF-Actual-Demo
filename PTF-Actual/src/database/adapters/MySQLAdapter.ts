@@ -73,21 +73,35 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
       }
 
       const poolSize = config.connectionPoolSize || config.additionalOptions?.['poolSize'];
+      let mysqlConnection: any;
+
       if (poolSize && poolSize > 1) {
-        const pool = await this.mysql2.createPool({
+        mysqlConnection = await this.mysql2.createPool({
           ...connectionConfig,
           connectionLimit: poolSize,
           queueLimit: config.additionalOptions?.['poolQueueLimit'] || 0,
           waitForConnections: true
         });
-        
-        const connection = await pool.getConnection();
-        connection.release();
-        
-        return pool;
+
+        // Test the pool connection
+        const testConn = await mysqlConnection.getConnection();
+        testConn.release();
       } else {
-        return await this.mysql2.createConnection(connectionConfig);
+        mysqlConnection = await this.mysql2.createConnection(connectionConfig);
       }
+
+      // Wrap in DatabaseConnection object
+      return {
+        id: `mysql_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        type: 'mysql',
+        instance: mysqlConnection,
+        config: config,
+        connected: true,
+        lastActivity: new Date(),
+        inTransaction: false,
+        transactionLevel: 0,
+        savepoints: []
+      };
     } catch (error) {
       throw this.parseConnectionError(error);
     }
@@ -236,15 +250,48 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
   }
 
   async createSavepoint(connection: DatabaseConnection, name: string): Promise<void> {
-    await this.query(connection, `SAVEPOINT ${this.escapeIdentifier(name)}`);
+    // MySQL doesn't support savepoints in prepared statements, use query() instead of execute()
+    const conn = connection.instance as any;
+    const isPool = conn.getConnection !== undefined;
+    const queryConn = isPool ? await conn.getConnection() : conn;
+
+    try {
+      await queryConn.query(`SAVEPOINT ${this.escapeIdentifier(name)}`);
+    } finally {
+      if (isPool) {
+        queryConn.release();
+      }
+    }
   }
 
   async releaseSavepoint(connection: DatabaseConnection, name: string): Promise<void> {
-    await this.query(connection, `RELEASE SAVEPOINT ${this.escapeIdentifier(name)}`);
+    // MySQL doesn't support savepoints in prepared statements, use query() instead of execute()
+    const conn = connection.instance as any;
+    const isPool = conn.getConnection !== undefined;
+    const queryConn = isPool ? await conn.getConnection() : conn;
+
+    try {
+      await queryConn.query(`RELEASE SAVEPOINT ${this.escapeIdentifier(name)}`);
+    } finally {
+      if (isPool) {
+        queryConn.release();
+      }
+    }
   }
 
   async rollbackToSavepoint(connection: DatabaseConnection, name: string): Promise<void> {
-    await this.query(connection, `ROLLBACK TO SAVEPOINT ${this.escapeIdentifier(name)}`);
+    // MySQL doesn't support savepoints in prepared statements, use query() instead of execute()
+    const conn = connection.instance as any;
+    const isPool = conn.getConnection !== undefined;
+    const queryConn = isPool ? await conn.getConnection() : conn;
+
+    try {
+      await queryConn.query(`ROLLBACK TO SAVEPOINT ${this.escapeIdentifier(name)}`);
+    } finally {
+      if (isPool) {
+        queryConn.release();
+      }
+    }
   }
 
   async prepare(connection: DatabaseConnection, sql: string): Promise<PreparedStatement> {

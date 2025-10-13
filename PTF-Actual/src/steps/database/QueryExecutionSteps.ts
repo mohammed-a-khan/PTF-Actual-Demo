@@ -24,7 +24,7 @@ export class QueryExecutionSteps {
             const resolvedPath = this.resolveFilePath(filePath);
             const content = await fs.promises.readFile(resolvedPath, 'utf-8');
             const query = content;
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             const startTime = Date.now();
             const result = await this.databaseContext.executeQuery(interpolatedQuery);
@@ -48,7 +48,7 @@ export class QueryExecutionSteps {
 
         try {
             const parameters = this.parseParametersTable(dataTable);
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             const startTime = Date.now();
             const result = await this.databaseContext.executeQuery(interpolatedQuery, Array.isArray(parameters) ? parameters : Object.values(parameters));
@@ -76,7 +76,7 @@ export class QueryExecutionSteps {
                 throw new Error(`Predefined query '${queryName}' not found in configuration`);
             }
 
-            const interpolatedQuery = this.interpolateVariables(query as string);
+            const interpolatedQuery = this.configManager.interpolate(query as string, this.contextVariables);
 
             const startTime = Date.now();
             const result = await this.databaseContext.executeQuery(interpolatedQuery);
@@ -109,7 +109,7 @@ export class QueryExecutionSteps {
                 const queryText = queries[i];
                 if (!queryText) continue;
 
-                const interpolatedQuery = this.interpolateVariables(queryText);
+                const interpolatedQuery = this.configManager.interpolate(queryText, this.contextVariables);
                 const result = await this.databaseContext.executeQuery(interpolatedQuery);
                 results.push(result);
 
@@ -150,7 +150,7 @@ export class QueryExecutionSteps {
         CSReporter.info(`Executing query with timeout ${timeout} seconds: ${this.sanitizeQueryForLog(query)}`);
 
         try {
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             const startTime = Date.now();
             const originalTimeout = this.databaseContext['queryTimeout'];
@@ -179,7 +179,7 @@ export class QueryExecutionSteps {
     async executeQueryExpectingError(query: string): Promise<void> {
         CSReporter.info(`Executing query expecting error: ${this.sanitizeQueryForLog(query)}`);
 
-        const interpolatedQuery = this.interpolateVariables(query);
+        const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
         let errorOccurred = false;
         let errorMessage = '';
 
@@ -204,12 +204,15 @@ export class QueryExecutionSteps {
         CSReporter.info(`Executing scalar query: ${this.sanitizeQueryForLog(query)}`);
 
         try {
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             const result = await this.databaseContext.executeQuery(interpolatedQuery);
             const scalarValue = result.rows[0] ? Object.values(result.rows[0])[0] : null;
 
+            // Store both scalar value and full result for flexibility
             this.contextVariables.set('lastScalarResult', scalarValue);
+            this.contextVariables.set('lastQueryResult', result);
+            this.databaseContext.storeResult('last', result);
 
             CSReporter.info(`Scalar query executed successfully. Value: ${scalarValue}`);
 
@@ -224,7 +227,7 @@ export class QueryExecutionSteps {
         CSReporter.info(`Executing count query: ${this.sanitizeQueryForLog(query)}`);
 
         try {
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             if (!interpolatedQuery.toLowerCase().includes('count')) {
                 throw new Error('Query must contain COUNT function');
@@ -238,7 +241,9 @@ export class QueryExecutionSteps {
                 throw new Error(`Expected numeric count, got: ${count}`);
             }
 
+            // Store result in both contextVariables and DatabaseContext
             this.contextVariables.set('lastScalarResult', countValue);
+            this.databaseContext.storeResult('last', result);
 
             CSReporter.info(`Count query executed successfully. Count: ${countValue}`);
 
@@ -253,7 +258,7 @@ export class QueryExecutionSteps {
         CSReporter.info(`Executing query and fetching first row: ${this.sanitizeQueryForLog(query)}`);
 
         try {
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             const result = await this.databaseContext.executeQuery(interpolatedQuery);
 
@@ -286,7 +291,7 @@ export class QueryExecutionSteps {
         CSReporter.info(`Executing query with limit ${limit}: ${this.sanitizeQueryForLog(query)}`);
 
         try {
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             const limitedQuery = this.addLimitToQuery(interpolatedQuery, limit);
 
@@ -307,7 +312,7 @@ export class QueryExecutionSteps {
         CSReporter.info(`Profiling query: ${this.sanitizeQueryForLog(query)}`);
 
         try {
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             const result = await this.databaseContext.executeWithPlan(interpolatedQuery);
             const executionPlan = this.databaseContext.getLastExecutionPlan() || 'No execution plan available';
@@ -371,19 +376,33 @@ export class QueryExecutionSteps {
         throw new Error(`Query file not found: ${filePath}`);
     }
 
-    private parseParametersTable(dataTable: any): Record<string, any> {
-        const parameters: Record<string, any> = {};
+    private parseParametersTable(dataTable: any): any[] | Record<string, any> {
+        // Handle both .rows (Cucumber DataTable) and .rawTable formats
+        const rows = dataTable?.rows || dataTable?.rawTable;
 
-        if (dataTable && dataTable.rawTable) {
-            dataTable.rawTable.forEach((row: string[]) => {
-                if (row.length >= 2) {
-                    const paramName = row[0]?.trim() || '';
-                    const paramValue = this.interpolateVariables(row[1]?.trim() || '');
+        if (!rows || rows.length === 0) {
+            return [];
+        }
 
-                    parameters[paramName] = this.convertParameterValue(paramValue);
-                }
+        const firstRow = rows[0];
+
+        // Single column: return array of values for ? placeholders
+        if (firstRow.length === 1) {
+            return rows.map((row: string[]) => {
+                const value = this.configManager.interpolate(String(row[0] || '').trim(), this.contextVariables);
+                return this.convertParameterValue(value);
             });
         }
+
+        // Two+ columns: return object with key-value pairs for named parameters
+        const parameters: Record<string, any> = {};
+        rows.forEach((row: string[]) => {
+            if (row.length >= 2) {
+                const paramName = row[0]?.trim() || '';
+                const paramValue = this.configManager.interpolate(row[1]?.trim() || '', this.contextVariables);
+                parameters[paramName] = this.convertParameterValue(paramValue);
+            }
+        });
 
         return parameters;
     }
@@ -427,20 +446,4 @@ export class QueryExecutionSteps {
         return query;
     }
 
-    private interpolateVariables(text: string): string {
-        text = text.replace(/\${([^}]+)}/g, (match, varName) => {
-            return process.env[varName] || match;
-        });
-
-        text = text.replace(/{{([^}]+)}}/g, (match, varName) => {
-            const retrieved = this.contextVariables.get(varName);
-            return retrieved !== undefined ? String(retrieved) : match;
-        });
-
-        text = text.replace(/%([^%]+)%/g, (match, varName) => {
-            return this.configManager.get(varName, match) as string;
-        });
-
-        return text;
-    }
 }

@@ -23,7 +23,7 @@ export class DatabaseUtilitySteps {
         CSReporter.info(`Exporting query result to: ${filePath}`);
 
         const result = this.getLastResult();
-        const interpolatedPath = this.interpolateVariables(filePath);
+        const interpolatedPath = this.configManager.interpolate(filePath, this.contextVariables);
 
         const startTime = Date.now();
         try {
@@ -130,7 +130,7 @@ export class DatabaseUtilitySteps {
 
         try {
             const adapter = this.databaseContext.getActiveAdapter();
-            const interpolatedPath = this.interpolateVariables(backupPath);
+            const interpolatedPath = this.configManager.interpolate(backupPath, this.contextVariables);
             const resolvedPath = this.resolveOutputPath(interpolatedPath);
 
             const startTime = Date.now();
@@ -152,8 +152,8 @@ export class DatabaseUtilitySteps {
 
         try {
             const adapter = this.databaseContext.getActiveAdapter();
-            const interpolatedPath = this.interpolateVariables(filePath);
-            const interpolatedTable = this.interpolateVariables(tableName);
+            const interpolatedPath = this.configManager.interpolate(filePath, this.contextVariables);
+            const interpolatedTable = this.configManager.interpolate(tableName, this.contextVariables);
             const resolvedPath = await this.resolveInputPath(interpolatedPath);
 
             const format = this.detectFormat(resolvedPath);
@@ -188,7 +188,7 @@ export class DatabaseUtilitySteps {
 
         try {
             const adapter = this.databaseContext.getActiveAdapter();
-            const interpolatedTable = this.interpolateVariables(tableName);
+            const interpolatedTable = this.configManager.interpolate(tableName, this.contextVariables);
             const connection = this.getActiveConnection();
 
             await adapter.query(connection, `TRUNCATE TABLE ${interpolatedTable}`);
@@ -207,7 +207,7 @@ export class DatabaseUtilitySteps {
 
         try {
             const adapter = this.databaseContext.getActiveAdapter();
-            const interpolatedTable = this.interpolateVariables(tableName);
+            const interpolatedTable = this.configManager.interpolate(tableName, this.contextVariables);
             const connection = this.getActiveConnection();
 
             try {
@@ -229,9 +229,9 @@ export class DatabaseUtilitySteps {
 
         try {
             const adapter = this.databaseContext.getActiveAdapter();
-            const interpolatedIndex = this.interpolateVariables(indexName);
-            const interpolatedTable = this.interpolateVariables(tableName);
-            const interpolatedColumn = this.interpolateVariables(columnName);
+            const interpolatedIndex = this.configManager.interpolate(indexName, this.contextVariables);
+            const interpolatedTable = this.configManager.interpolate(tableName, this.contextVariables);
+            const interpolatedColumn = this.configManager.interpolate(columnName, this.contextVariables);
             const connection = this.getActiveConnection();
 
             await adapter.query(connection, `CREATE INDEX ${interpolatedIndex} ON ${interpolatedTable} (${interpolatedColumn})`);
@@ -250,7 +250,7 @@ export class DatabaseUtilitySteps {
 
         try {
             const adapter = this.databaseContext.getActiveAdapter();
-            const interpolatedTable = this.interpolateVariables(tableName);
+            const interpolatedTable = this.configManager.interpolate(tableName, this.contextVariables);
 
             const stats = await this.analyzeTableStats(adapter, interpolatedTable);
 
@@ -284,7 +284,7 @@ export class DatabaseUtilitySteps {
 
         try {
             const adapter = this.databaseContext.getActiveAdapter();
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
             const connection = this.getActiveConnection();
 
             const startTime = Date.now();
@@ -735,20 +735,4 @@ export class DatabaseUtilitySteps {
         return insertedCount;
     }
 
-    private interpolateVariables(text: string): string {
-        text = text.replace(/\${([^}]+)}/g, (match, varName) => {
-            return process.env[varName] || match;
-        });
-
-        text = text.replace(/{{([^}]+)}}/g, (match, varName) => {
-            const retrieved = this.contextVariables.get(varName);
-            return retrieved !== undefined ? String(retrieved) : match;
-        });
-
-        text = text.replace(/%([^%]+)%/g, (match, varName) => {
-            return this.configManager.get(varName, match) as string;
-        });
-
-        return text;
-    }
 }

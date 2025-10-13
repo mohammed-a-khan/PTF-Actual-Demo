@@ -5,21 +5,29 @@ import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSValueResolver } from '../utils/CSValueResolver';
 
-// Lazy load heavy libraries for performance
-let XLSX: any = null;
-const getXLSX = () => {
-    if (!XLSX) {
-        XLSX = require('xlsx');
+// Lazy load utility classes for performance
+let ExcelUtility: any = null;
+const getExcelUtility = () => {
+    if (!ExcelUtility) {
+        ExcelUtility = require('../utils/CSExcelUtility').CSExcelUtility;
     }
-    return XLSX;
+    return ExcelUtility;
 };
 
-let csvParse: any = null;
-const getCSVParse = () => {
-    if (!csvParse) {
-        csvParse = require('csv-parse/sync').parse;
+let CsvUtility: any = null;
+const getCsvUtility = () => {
+    if (!CsvUtility) {
+        CsvUtility = require('../utils/CSCsvUtility').CSCsvUtility;
     }
-    return csvParse;
+    return CsvUtility;
+};
+
+let JsonUtility: any = null;
+const getJsonUtility = () => {
+    if (!JsonUtility) {
+        JsonUtility = require('../utils/CSJsonUtility').CSJsonUtility;
+    }
+    return JsonUtility;
 };
 
 let xml2js: any = null;
@@ -38,10 +46,18 @@ export interface DataRow {
 export interface DataProviderOptions {
     source: string;
     sheet?: string;
-    filter?: (row: DataRow) => boolean;
+    filter?: (row: DataRow) => boolean | string;  // Function or string filter
     transform?: (row: DataRow) => DataRow;
     randomize?: boolean;
     limit?: number;
+    // Database-specific options
+    type?: 'excel' | 'csv' | 'json' | 'xml' | 'database' | 'api' | 'generate';
+    dbname?: string;           // Database connection name (e.g., "PRACTICE_ORACLE")
+    connection?: string;       // Alias for dbname
+    query?: string;            // SQL query or named query reference
+    delimiter?: string;        // CSV delimiter
+    path?: string;             // JSON path
+    xpath?: string;            // XML xpath
 }
 
 export class CSDataProvider {
@@ -120,7 +136,9 @@ export class CSDataProvider {
         let data: DataRow[] = [];
 
         // Determine source type and load data
-        if (options.source.endsWith('.xlsx') || options.source.endsWith('.xls')) {
+        if (options.type === 'database' || options.source === 'database' || options.source.startsWith('db:')) {
+            data = await this.loadDatabaseData(options);
+        } else if (options.source.endsWith('.xlsx') || options.source.endsWith('.xls')) {
             data = await this.loadExcelData(options);
         } else if (options.source.endsWith('.csv')) {
             data = await this.loadCSVData(options);
@@ -130,8 +148,6 @@ export class CSDataProvider {
             data = await this.loadXMLData(options);
         } else if (options.source.startsWith('api:')) {
             data = await this.loadAPIData(options);
-        } else if (options.source.startsWith('db:')) {
-            data = await this.loadDatabaseData(options);
         } else if (options.source.startsWith('generate:')) {
             data = await this.generateData(options);
         } else {
@@ -140,7 +156,12 @@ export class CSDataProvider {
 
         // Apply filter if provided
         if (options.filter) {
-            data = data.filter(options.filter);
+            if (typeof options.filter === 'function') {
+                data = data.filter(options.filter);
+            } else if (typeof options.filter === 'string') {
+                // Parse and apply string filter format: "columnName=value;columnName<value;columnName>value"
+                data = this.applyStringFilter(data, options.filter);
+            }
         }
 
         // Apply transformation if provided
@@ -170,22 +191,16 @@ export class CSDataProvider {
     
     private async loadExcelData(options: DataProviderOptions): Promise<DataRow[]> {
         const filePath = this.resolveFilePath(options.source);
-        
+
         if (!fs.existsSync(filePath)) {
             throw new Error(`Excel file not found: ${filePath}`);
         }
-        
-        const xlsx = getXLSX();
-        const workbook = xlsx.readFile(filePath);
-        const sheetName = options.sheet || workbook.SheetNames[0];
-        
-        if (!workbook.Sheets[sheetName]) {
-            throw new Error(`Sheet '${sheetName}' not found in ${filePath}`);
-        }
-        
-        const sheet = workbook.Sheets[sheetName];
-        const data = xlsx.utils.sheet_to_json(sheet);
-        
+
+        const ExcelUtil = getExcelUtility();
+
+        // Use CSExcelUtility to read the data
+        const data = ExcelUtil.readSheetAsJSON(filePath, options.sheet);
+
         // Process formulas if any
         data.forEach((row: any) => {
             Object.keys(row).forEach(key => {
@@ -195,38 +210,42 @@ export class CSDataProvider {
                 }
             });
         });
-        
+
         return data as DataRow[];
     }
     
     private async loadCSVData(options: DataProviderOptions): Promise<DataRow[]> {
         const filePath = this.resolveFilePath(options.source);
-        
+
         if (!fs.existsSync(filePath)) {
             throw new Error(`CSV file not found: ${filePath}`);
         }
-        
-        const content = fs.readFileSync(filePath, 'utf8');
-        const parse = getCSVParse();
-        const data = parse(content, {
+
+        const CsvUtil = getCsvUtility();
+
+        // Use CSCsvUtility to read the data
+        const data = CsvUtil.readAsJSON(filePath, {
+            delimiter: options.delimiter,
             columns: true,
-            skip_empty_lines: true,
+            skipEmptyLines: true,
             trim: true
         });
-        
+
         return data as DataRow[];
     }
     
     private async loadJSONData(options: DataProviderOptions): Promise<DataRow[]> {
         const filePath = this.resolveFilePath(options.source);
-        
+
         if (!fs.existsSync(filePath)) {
             throw new Error(`JSON file not found: ${filePath}`);
         }
-        
-        const content = fs.readFileSync(filePath, 'utf8');
-        const data = JSON.parse(content);
-        
+
+        const JsonUtil = getJsonUtility();
+
+        // Use CSJsonUtility to read the data
+        const data = JsonUtil.readFile(filePath);
+
         // Handle both array and object formats
         if (Array.isArray(data)) {
             return data;
@@ -234,7 +253,7 @@ export class CSDataProvider {
             // If object, look for a data property
             return data.data || data.rows || [data];
         }
-        
+
         return [];
     }
 
@@ -326,13 +345,260 @@ export class CSDataProvider {
     }
     
     private async loadDatabaseData(options: DataProviderOptions): Promise<DataRow[]> {
-        const query = options.source.substring(3); // Remove 'db:' prefix
-        
-        CSReporter.info(`Loading data from database: ${query}`);
-        
-        // This would connect to database and execute query
-        // Placeholder implementation
-        return [];
+        CSReporter.info('Loading data from database datasource');
+
+        try {
+            // Import DatabaseContext dynamically to avoid circular dependencies
+            const { DatabaseContext } = await import('../database/context/DatabaseContext');
+            const dbContext = DatabaseContext.getInstance();
+
+            // Determine the database connection name
+            const connectionName = options.dbname || options.connection;
+
+            // Switch to the specified database connection if provided
+            if (connectionName) {
+                try {
+                    const adapter = dbContext.getAdapter(connectionName);
+                    CSReporter.debug(`Switching to database connection: ${connectionName}`);
+                    // Connection is already established, just need to get it
+                } catch (error) {
+                    throw new Error(
+                        `Database connection '${connectionName}' not found. ` +
+                        `Make sure to establish connection using "user connects to ${connectionName} database" step first. ` +
+                        `Error: ${error instanceof Error ? error.message : String(error)}`
+                    );
+                }
+            }
+
+            // Determine the query to execute
+            let sqlQuery = '';
+
+            if (options.query) {
+                // Check if query is a named query reference (no spaces, uppercase pattern)
+                if (!options.query.includes(' ') && !options.query.includes(';')) {
+                    // Looks like a named query reference like "GET_EMPLOYEES"
+                    const namedQuery = this.config.get(options.query);
+                    if (namedQuery) {
+                        sqlQuery = String(namedQuery);
+                        CSReporter.info(`Using named query '${options.query}': ${this.sanitizeQueryForLog(sqlQuery)}`);
+                    } else {
+                        // Try with DB_QUERY_ prefix
+                        const prefixedQuery = this.config.get(`DB_QUERY_${options.query}`);
+                        if (prefixedQuery) {
+                            sqlQuery = String(prefixedQuery);
+                            CSReporter.info(`Using named query 'DB_QUERY_${options.query}': ${this.sanitizeQueryForLog(sqlQuery)}`);
+                        } else {
+                            throw new Error(
+                                `Named query '${options.query}' not found in configuration. ` +
+                                `Make sure to define '${options.query}' or 'DB_QUERY_${options.query}' in your .env file.`
+                            );
+                        }
+                    }
+                } else {
+                    // Direct SQL query
+                    sqlQuery = options.query;
+                    CSReporter.info(`Using direct SQL query: ${this.sanitizeQueryForLog(sqlQuery)}`);
+                }
+            } else if (options.source.startsWith('db:')) {
+                // Extract query from 'db:' prefix format
+                sqlQuery = options.source.substring(3);
+                CSReporter.info(`Using query from source: ${this.sanitizeQueryForLog(sqlQuery)}`);
+            } else {
+                throw new Error(
+                    'No query specified for database datasource. ' +
+                    'Provide either query parameter or use db:SELECT... format'
+                );
+            }
+
+            // Validate that we have an active connection
+            try {
+                dbContext.getActiveAdapter();
+            } catch (error) {
+                throw new Error(
+                    'No active database connection. ' +
+                    'Use "user connects to <database_name> database" step before using database datasource. ' +
+                    `Error: ${error instanceof Error ? error.message : String(error)}`
+                );
+            }
+
+            // Execute the query
+            const startTime = Date.now();
+            CSReporter.info(`Executing database query for DataProvider: ${this.sanitizeQueryForLog(sqlQuery)}`);
+
+            const result = await dbContext.executeQuery(sqlQuery);
+            const executionTime = Date.now() - startTime;
+
+            CSReporter.info(
+                `Database query executed successfully. ` +
+                `Rows: ${result.rowCount}, Columns: ${result.fields.length}, Time: ${executionTime}ms`
+            );
+
+            // Convert QueryResult.rows to DataRow[] format
+            const data: DataRow[] = result.rows.map((row: any, index: number) => {
+                const dataRow: DataRow = {};
+
+                // Convert database row to DataRow format
+                if (typeof row === 'object' && row !== null) {
+                    Object.keys(row).forEach(key => {
+                        dataRow[key] = row[key];
+                    });
+                } else {
+                    // Handle scalar values
+                    dataRow['value'] = row;
+                    dataRow['index'] = index;
+                }
+
+                return dataRow;
+            });
+
+            CSReporter.info(`Loaded ${data.length} rows from database query`);
+
+            // Log column names for debugging
+            if (data.length > 0) {
+                const columns = Object.keys(data[0]);
+                CSReporter.debug(`Available columns: ${columns.join(', ')}`);
+            }
+
+            return data;
+
+        } catch (error: any) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            CSReporter.error(`Failed to load database data: ${errorMessage}`);
+
+            // Provide helpful error messages
+            if (errorMessage.includes('No active database connection')) {
+                CSReporter.error(
+                    'Hint: Make sure to connect to database first using: ' +
+                    'Given user connects to "<DATABASE_NAME>" database'
+                );
+            }
+
+            throw new Error(`Database datasource loading failed: ${errorMessage}`);
+        }
+    }
+
+    private sanitizeQueryForLog(query: string): string {
+        const maxLength = 100;
+        const sanitized = query.replace(/\s+/g, ' ').trim();
+        if (sanitized.length > maxLength) {
+            return sanitized.substring(0, maxLength) + '...';
+        }
+        return sanitized;
+    }
+
+    private applyStringFilter(data: DataRow[], filterString: string): DataRow[] {
+        // Parse filter format: "columnName=value;columnName<value;columnName>value"
+        const filters = filterString.split(';').map(f => f.trim()).filter(f => f.length > 0);
+
+        if (filters.length === 0) {
+            return data;
+        }
+
+        CSReporter.debug(`Applying ${filters.length} filter(s): ${filterString}`);
+
+        return data.filter(row => {
+            // All filters must pass (AND logic)
+            return filters.every(filterExpr => {
+                // Parse filter expression
+                let columnName: string;
+                let operator: string;
+                let expectedValue: string;
+
+                if (filterExpr.includes('>=')) {
+                    const parts = filterExpr.split('>=');
+                    columnName = parts[0].trim();
+                    operator = '>=';
+                    expectedValue = parts[1].trim();
+                } else if (filterExpr.includes('<=')) {
+                    const parts = filterExpr.split('<=');
+                    columnName = parts[0].trim();
+                    operator = '<=';
+                    expectedValue = parts[1].trim();
+                } else if (filterExpr.includes('!=') || filterExpr.includes('<>')) {
+                    const parts = filterExpr.split(/!=|<>/);
+                    columnName = parts[0].trim();
+                    operator = '!=';
+                    expectedValue = parts[1].trim();
+                } else if (filterExpr.includes('=')) {
+                    const parts = filterExpr.split('=');
+                    columnName = parts[0].trim();
+                    operator = '=';
+                    expectedValue = parts[1].trim();
+                } else if (filterExpr.includes('>')) {
+                    const parts = filterExpr.split('>');
+                    columnName = parts[0].trim();
+                    operator = '>';
+                    expectedValue = parts[1].trim();
+                } else if (filterExpr.includes('<')) {
+                    const parts = filterExpr.split('<');
+                    columnName = parts[0].trim();
+                    operator = '<';
+                    expectedValue = parts[1].trim();
+                } else {
+                    CSReporter.warn(`Invalid filter expression: ${filterExpr}`);
+                    return true; // Skip invalid filters
+                }
+
+                // Get actual value from row (case-insensitive column matching)
+                let actualValue: any;
+                const rowKeys = Object.keys(row);
+                const matchingKey = rowKeys.find(key => key.toLowerCase() === columnName.toLowerCase());
+
+                if (matchingKey) {
+                    actualValue = row[matchingKey];
+                } else {
+                    CSReporter.warn(`Column '${columnName}' not found in row. Available columns: ${rowKeys.join(', ')}`);
+                    return false; // Filter fails if column doesn't exist
+                }
+
+                // Convert values for comparison
+                const actualNum = Number(actualValue);
+                const expectedNum = Number(expectedValue);
+                const isNumericComparison = !isNaN(actualNum) && !isNaN(expectedNum);
+
+                // Apply operator
+                switch (operator) {
+                    case '=':
+                        if (isNumericComparison) {
+                            return actualNum === expectedNum;
+                        }
+                        return String(actualValue).toLowerCase() === expectedValue.toLowerCase();
+
+                    case '!=':
+                        if (isNumericComparison) {
+                            return actualNum !== expectedNum;
+                        }
+                        return String(actualValue).toLowerCase() !== expectedValue.toLowerCase();
+
+                    case '>':
+                        if (isNumericComparison) {
+                            return actualNum > expectedNum;
+                        }
+                        return String(actualValue) > expectedValue;
+
+                    case '<':
+                        if (isNumericComparison) {
+                            return actualNum < expectedNum;
+                        }
+                        return String(actualValue) < expectedValue;
+
+                    case '>=':
+                        if (isNumericComparison) {
+                            return actualNum >= expectedNum;
+                        }
+                        return String(actualValue) >= expectedValue;
+
+                    case '<=':
+                        if (isNumericComparison) {
+                            return actualNum <= expectedNum;
+                        }
+                        return String(actualValue) <= expectedValue;
+
+                    default:
+                        return true;
+                }
+            });
+        });
     }
     
     private async generateData(options: DataProviderOptions): Promise<DataRow[]> {

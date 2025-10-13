@@ -256,22 +256,39 @@ export class CSBDDRunner {
                 await this.bddEngine.loadRequiredStepDefinitions(features);
 
                 // Load framework steps with file-level filtering
-                // Aggregate module requirements from all features
-                const moduleDetector = CSModuleDetector.getInstance();
-                const aggregatedRequirements: ModuleRequirements = {
-                    browser: false,
-                    api: false,
-                    database: false,
-                    soap: false
-                };
+                let aggregatedRequirements: ModuleRequirements;
 
-                for (const feature of features) {
-                    for (const scenario of feature.scenarios) {
-                        const req = moduleDetector.detectRequirements(scenario, feature);
-                        aggregatedRequirements.browser = aggregatedRequirements.browser || req.browser;
-                        aggregatedRequirements.api = aggregatedRequirements.api || req.api;
-                        aggregatedRequirements.database = aggregatedRequirements.database || req.database;
-                        aggregatedRequirements.soap = aggregatedRequirements.soap || req.soap;
+                // Check if user explicitly specified modules via --modules flag
+                const explicitModules = this.config.get('MODULES');
+
+                if (explicitModules) {
+                    // User explicitly specified modules - override auto-detection
+                    const moduleList = explicitModules.split(',').map(m => m.trim().toLowerCase());
+                    aggregatedRequirements = {
+                        api: moduleList.includes('api'),
+                        database: moduleList.includes('database') || moduleList.includes('db'),
+                        soap: moduleList.includes('soap'),
+                        browser: moduleList.includes('ui') || moduleList.includes('browser')
+                    };
+                    CSReporter.debug(`Explicit modules specified via --modules: ${explicitModules}`);
+                } else {
+                    // Auto-detect and aggregate module requirements from all features
+                    const moduleDetector = CSModuleDetector.getInstance();
+                    aggregatedRequirements = {
+                        browser: false,
+                        api: false,
+                        database: false,
+                        soap: false
+                    };
+
+                    for (const feature of features) {
+                        for (const scenario of feature.scenarios) {
+                            const req = moduleDetector.detectRequirements(scenario, feature);
+                            aggregatedRequirements.browser = aggregatedRequirements.browser || req.browser;
+                            aggregatedRequirements.api = aggregatedRequirements.api || req.api;
+                            aggregatedRequirements.database = aggregatedRequirements.database || req.database;
+                            aggregatedRequirements.soap = aggregatedRequirements.soap || req.soap;
+                        }
                     }
                 }
 
@@ -1245,9 +1262,25 @@ export class CSBDDRunner {
         adoIntegration.beforeScenario(scenario, feature);
 
         // INTELLIGENT MODULE DETECTION
-        // Detect required modules (browser, api, database, soap)
+        let requirements: ModuleRequirements;
         const moduleDetector = CSModuleDetector.getInstance();
-        const requirements = moduleDetector.detectRequirements(scenario, feature);
+
+        // Check if user explicitly specified modules via --modules flag
+        const explicitModules = this.config.get('MODULES');
+
+        if (explicitModules) {
+            // User explicitly specified modules - override auto-detection
+            const moduleList = explicitModules.split(',').map(m => m.trim().toLowerCase());
+            requirements = {
+                api: moduleList.includes('api'),
+                database: moduleList.includes('database') || moduleList.includes('db'),
+                soap: moduleList.includes('soap'),
+                browser: moduleList.includes('ui') || moduleList.includes('browser')
+            };
+        } else {
+            // Auto-detect required modules from scenario content
+            requirements = moduleDetector.detectRequirements(scenario, feature);
+        }
 
         // SELECTIVE STEP LOADING
         // Load only required step definitions
@@ -1258,8 +1291,8 @@ export class CSBDDRunner {
         // Check if browser launch is required
         let browserLaunchRequired = this.config.getBoolean('BROWSER_LAUNCH_REQUIRED', true);
 
-        // Use intelligent detection if enabled, otherwise fallback to legacy @api tag detection
-        const moduleDetectionEnabled = this.config.getBoolean('MODULE_DETECTION_ENABLED', false);
+        // Use intelligent detection if enabled (default: true), otherwise fallback to legacy @api tag detection
+        const moduleDetectionEnabled = this.config.getBoolean('MODULE_DETECTION_ENABLED', true);
         if (moduleDetectionEnabled) {
             // Use CSModuleDetector result
             browserLaunchRequired = moduleDetector.isBrowserRequired(requirements);
@@ -1775,9 +1808,17 @@ export class CSBDDRunner {
         exampleRow?: string[],
         exampleHeaders?: string[]
     ): Promise<void> {
+        // Store current iteration test data in context for access in step definitions
+        // Available via {currentRow} in step text ({testData} also supported for backward compatibility)
+        if (exampleRow && exampleHeaders) {
+            const rowData = Object.fromEntries(exampleHeaders.map((h, i) => [h, exampleRow[i]]));
+            this.context.setVariable('currentRow', rowData);
+            this.context.setVariable('testData', rowData); // Backward compatibility
+        }
+
         const stepText = this.interpolateStepText(step.text, exampleRow, exampleHeaders);
         const stepStartTime = Date.now();
-        
+
         this.context.setCurrentStep(`${step.keyword} ${stepText}`);
         CSReporter.startStep(`${step.keyword} ${stepText}`);
         

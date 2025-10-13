@@ -152,6 +152,11 @@ class WorkerProcess {
             this.bddRunner = CSBDDRunner.getInstance();
             this.configManager = CSConfigurationManager.getInstance();
 
+            // CRITICAL: Initialize configuration to load config files
+            // This ensures STEP_DEFINITIONS_PATH and other config values are loaded
+            const project = process.env.PROJECT || 'common';
+            await this.configManager.initialize({project});
+
             // Browser manager will be loaded conditionally during test execution
             this.browserManager = null;
 
@@ -241,6 +246,10 @@ class WorkerProcess {
             const newProject = message.config.project || message.config.PROJECT;
             if (process.env.PROJECT !== newProject) {
                 process.env.PROJECT = newProject;
+
+                // CRITICAL: Initialize configuration to load config files for the project
+                // This ensures STEP_DEFINITIONS_PATH and other config values are loaded
+                await this.configManager.initialize({project: newProject});
             }
 
             // Optimize configuration - only update if different
@@ -320,8 +329,8 @@ class WorkerProcess {
             // INTELLIGENT MODULE DETECTION & SELECTIVE STEP LOADING (Worker Mode)
             const projectKey = message.config.project || message.config.PROJECT || 'orangehrm';
 
-            // Check if intelligent module detection is enabled
-            const moduleDetectionEnabled = this.configManager.getBoolean('MODULE_DETECTION_ENABLED', false);
+            // Check if intelligent module detection is enabled (default: true)
+            const moduleDetectionEnabled = this.configManager.getBoolean('MODULE_DETECTION_ENABLED', true);
 
             if (moduleDetectionEnabled) {
                 const stepLoadStart = Date.now();
@@ -330,9 +339,26 @@ class WorkerProcess {
                 const { CSModuleDetector } = this.getModule('../core/CSModuleDetector');
                 const { CSStepLoader } = this.getModule('../core/CSStepLoader');
 
-                // Detect required modules for this scenario
-                const moduleDetector = CSModuleDetector.getInstance();
-                const requirements = moduleDetector.detectRequirements(message.scenario, message.feature);
+                let requirements: any;
+
+                // Check if user explicitly specified modules via --modules flag
+                const explicitModules = this.configManager.get('MODULES') || message.config.MODULES;
+
+                if (explicitModules) {
+                    // User explicitly specified modules - override auto-detection
+                    const moduleList = explicitModules.split(',').map((m: string) => m.trim().toLowerCase());
+                    requirements = {
+                        api: moduleList.includes('api'),
+                        database: moduleList.includes('database') || moduleList.includes('db'),
+                        soap: moduleList.includes('soap'),
+                        ui: moduleList.includes('ui') || moduleList.includes('browser')
+                    };
+                    console.log(`[Worker ${this.workerId}] Explicit modules specified: ${explicitModules}`);
+                } else {
+                    // Auto-detect required modules from scenario content
+                    const moduleDetector = CSModuleDetector.getInstance();
+                    requirements = moduleDetector.detectRequirements(message.scenario, message.feature);
+                }
 
                 // Load only required step definitions
                 const stepLoader = CSStepLoader.getInstance();
@@ -342,6 +368,8 @@ class WorkerProcess {
 
                 // Log if enabled
                 if (this.configManager.getBoolean('MODULE_DETECTION_LOGGING', false)) {
+                    const { CSModuleDetector } = this.getModule('../core/CSModuleDetector');
+                    const moduleDetector = CSModuleDetector.getInstance();
                     const modules = moduleDetector.getRequirementsSummary(requirements);
                     console.log(`[Worker ${this.workerId}] Module Detection: ${modules}`);
                 }

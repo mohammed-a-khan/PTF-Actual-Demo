@@ -13,7 +13,7 @@
 ### ✅ Phase 1: Quick Wins (60-90s savings)
 
 #### **Optimization #1A: Skip HAR on Cleanup** - Saves 45-60s
-**File:** `/node_modules/cs-test-automation-framework/dist/browser/CSBrowserManager.js`
+**File:** `/node_modules/cs-playwright-test-framework/dist/browser/CSBrowserManager.js`
 
 **Changes Made:**
 
@@ -54,7 +54,7 @@ await this.closeContext(undefined, true, true);
 ---
 
 #### **Optimization #4: Immediate Worker Termination** - Saves 15-30s
-**File:** `/node_modules/cs-test-automation-framework/dist/parallel/parallel-orchestrator.js`
+**File:** `/node_modules/cs-playwright-test-framework/dist/parallel/parallel-orchestrator.js`
 
 **Changes Made:**
 
@@ -115,7 +115,7 @@ else {
 ### ✅ Phase 2: Async Operations (131s savings)
 
 #### **Optimization #2A: Async ZIP Creation** - Saves 58s
-**File:** `/node_modules/cs-test-automation-framework/dist/reporter/CSTestResultsManager.js`
+**File:** `/node_modules/cs-playwright-test-framework/dist/reporter/CSTestResultsManager.js`
 
 **Changes Made:**
 
@@ -169,7 +169,7 @@ const zipCommand = `cd "${parentDir}" && zip -r "${path.resolve(outPath)}" "${so
 ---
 
 #### **Optimization #3A: Background ADO Upload** - Saves 95s
-**File:** `/node_modules/cs-test-automation-framework/dist/ado/CSADOIntegration.js`
+**File:** `/node_modules/cs-playwright-test-framework/dist/ado/CSADOIntegration.js`
 
 **Changes Made:**
 
@@ -335,7 +335,7 @@ If any issues occur, you can disable optimizations by reverting the code changes
 Or revert all changes with:
 ```bash
 cd /mnt/e/PTF-Demo-Project
-npm install cs-test-automation-framework --force
+npm install cs-playwright-test-framework --force
 ```
 
 ---
@@ -390,17 +390,17 @@ npm install cs-test-automation-framework --force
 
 ## 📝 Files Modified
 
-1. `/node_modules/cs-test-automation-framework/dist/browser/CSBrowserManager.js`
+1. `/node_modules/cs-playwright-test-framework/dist/browser/CSBrowserManager.js`
    - Modified: `closeContext()` method (added skipHarSave parameter)
    - Modified: `closeAll()` method (pass skipHarSave=true)
 
-2. `/node_modules/cs-test-automation-framework/dist/parallel/parallel-orchestrator.js`
+2. `/node_modules/cs-playwright-test-framework/dist/parallel/parallel-orchestrator.js`
    - Modified: `cleanup()` method (reduced timeout, added idle detection)
 
-3. `/node_modules/cs-test-automation-framework/dist/reporter/CSTestResultsManager.js`
+3. `/node_modules/cs-playwright-test-framework/dist/reporter/CSTestResultsManager.js`
    - Modified: `zipDirectory()` method (async exec instead of execSync)
 
-4. `/node_modules/cs-test-automation-framework/dist/ado/CSADOIntegration.js`
+4. `/node_modules/cs-playwright-test-framework/dist/ado/CSADOIntegration.js`
    - Modified: `afterAllTests()` method (background upload)
 
 ---

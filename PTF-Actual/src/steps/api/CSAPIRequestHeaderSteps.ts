@@ -33,7 +33,7 @@ export class CSAPIRequestHeaderSteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(headerValue, context);
+            const interpolatedValue = this.configManager.interpolate(headerValue, context.variables);
 
             context.setHeader(headerName, interpolatedValue);
             CSReporter.pass(`Header ${headerName} set to: ${interpolatedValue}`);
@@ -61,7 +61,7 @@ export class CSAPIRequestHeaderSteps {
                     continue;
                 }
 
-                const interpolatedValue = this.interpolateValue(String(headerValue || ''), context);
+                const interpolatedValue = this.configManager.interpolate(String(headerValue || ''), context.variables);
                 context.setHeader(headerName, interpolatedValue);
                 headerCount++;
             }
@@ -107,7 +107,7 @@ export class CSAPIRequestHeaderSteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedToken = this.interpolateValue(token, context);
+            const interpolatedToken = this.configManager.interpolate(token, context.variables);
 
             context.setHeader('Authorization', `Bearer ${interpolatedToken}`);
             CSReporter.pass('Authorization header set with Bearer token');
@@ -123,8 +123,8 @@ export class CSAPIRequestHeaderSteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedUsername = this.interpolateValue(username, context);
-            const interpolatedPassword = this.interpolateValue(password, context);
+            const interpolatedUsername = this.configManager.interpolate(username, context.variables);
+            const interpolatedPassword = this.configManager.interpolate(password, context.variables);
 
             const credentials = Buffer.from(`${interpolatedUsername}:${interpolatedPassword}`).toString('base64');
             context.setHeader('Authorization', `Basic ${credentials}`);
@@ -194,7 +194,7 @@ export class CSAPIRequestHeaderSteps {
             const headers = this.parseHeadersFile(fileContent);
 
             for (const [headerName, headerValue] of Object.entries(headers)) {
-                const interpolatedValue = this.interpolateValue(String(headerValue), context);
+                const interpolatedValue = this.configManager.interpolate(String(headerValue), context.variables);
                 context.setHeader(headerName, interpolatedValue);
             }
 
@@ -331,7 +331,7 @@ export class CSAPIRequestHeaderSteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const encodedValue = Buffer.from(interpolatedValue).toString('base64');
 
             context.setHeader(headerName, encodedValue);
@@ -349,7 +349,7 @@ export class CSAPIRequestHeaderSteps {
         try {
             const context = this.getCurrentContext();
             const crypto = require('crypto');
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const md5Hash = crypto.createHash('md5').update(interpolatedValue).digest('hex');
 
             context.setHeader(headerName, md5Hash);
@@ -367,7 +367,7 @@ export class CSAPIRequestHeaderSteps {
         try {
             const context = this.getCurrentContext();
             const crypto = require('crypto');
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const sha256Hash = crypto.createHash('sha256').update(interpolatedValue).digest('hex');
 
             context.setHeader(headerName, sha256Hash);
@@ -405,7 +405,7 @@ export class CSAPIRequestHeaderSteps {
         try {
             const context = this.getCurrentContext();
             const currentValue = context.headers[headerName] || '';
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
 
             context.setHeader(headerName, String(currentValue) + interpolatedValue);
             CSReporter.pass(`Appended to header ${headerName}`);
@@ -424,7 +424,7 @@ export class CSAPIRequestHeaderSteps {
             const actualValue = context.getVariable(varName);
 
             if (String(actualValue) === expectedValue) {
-                const interpolatedValue = this.interpolateValue(headerValue, context);
+                const interpolatedValue = this.configManager.interpolate(headerValue, context.variables);
                 context.setHeader(headerName, interpolatedValue);
                 CSReporter.pass(`Conditional header ${headerName} set`);
             } else {
@@ -452,21 +452,7 @@ export class CSAPIRequestHeaderSteps {
     }
 
     // Helper methods
-    private interpolateValue(value: string, context: CSApiContext): string {
-        if (!value.includes('{{')) {
-            return value;
-        }
-
-        let interpolated = value;
-        interpolated = interpolated.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
-            const varValue = context.getVariable(varName);
-            return varValue !== undefined ? String(varValue) : match;
-        });
-
-        return interpolated;
-    }
-
-    private resolveFilePath(filePath: string): string {
+    private resolveFilePath(filePath: string): string{
         if (path.isAbsolute(filePath)) {
             return filePath;
         }

@@ -6,7 +6,7 @@ import { DatabaseContext } from '../../database/context/DatabaseContext';
 import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 import { CSReporter } from '../../reporter/CSReporter';
 import { CSDatabaseManager } from '../../database/CSDatabaseManager';
-import { DatabaseConfig, ResultSet } from '../../database/types/database.types';
+import { DatabaseConfig, DatabaseType, ResultSet } from '../../database/types/database.types';
 
 export class DatabaseGenericSteps {
     private databaseContext: DatabaseContext;
@@ -62,11 +62,11 @@ export class DatabaseGenericSteps {
         CSReporter.info(`Executing query: ${this.sanitizeQueryForLog(query)}`);
 
         try {
-            const db = this.getCurrentDatabase();
-            const interpolatedQuery = this.interpolateVariables(query);
+            // Use centralized interpolation system from CSConfigurationManager
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             const startTime = Date.now();
-            const result = await db.query(interpolatedQuery);
+            const result = await this.databaseContext.executeQuery(interpolatedQuery);
             const executionTime = Date.now() - startTime;
 
             this.contextVariables.set('lastDatabaseResult', result);
@@ -92,10 +92,10 @@ export class DatabaseGenericSteps {
         CSReporter.info(`Executing query and storing result as '${alias}': ${this.sanitizeQueryForLog(query)}`);
 
         try {
-            const db = this.getCurrentDatabase();
-            const interpolatedQuery = this.interpolateVariables(query);
+            // Use centralized interpolation system from CSConfigurationManager
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
-            const result = await db.query(interpolatedQuery);
+            const result = await this.databaseContext.executeQuery(interpolatedQuery);
 
             const queryResult = {
                 rows: result.rows || [],
@@ -227,8 +227,12 @@ export class DatabaseGenericSteps {
             // Try to get the active adapter from context - this will throw if no connection
             const activeAdapter = this.databaseContext.getActiveAdapter();
 
+            // Get the database type from the active connection
+            const dbType = (this.databaseContext as any).activeConnectionType as DatabaseType;
+            const testQuery = this.getTestQuery(dbType);
+
             // Try to execute a simple query to validate the connection
-            await this.databaseContext.executeQuery('SELECT 1 FROM DUAL');
+            await this.databaseContext.executeQuery(testQuery);
 
             CSReporter.info('Database connection validation passed');
         } catch (error) {
@@ -260,21 +264,17 @@ export class DatabaseGenericSteps {
         return query;
     }
 
-    private interpolateVariables(text: string): string {
-        text = text.replace(/\${([^}]+)}/g, (match, varName) => {
-            return process.env[varName] || match;
-        });
+    private getTestQuery(type: DatabaseType): string {
+        const testQueries: Record<DatabaseType, string> = {
+            'sqlserver': 'SELECT 1 AS test',
+            'mysql': 'SELECT 1 AS test',
+            'postgresql': 'SELECT 1 AS test',
+            'oracle': 'SELECT 1 AS test FROM DUAL',
+            'mongodb': '{ "ping": 1 }',
+            'redis': 'PING'
+        };
 
-        text = text.replace(/{{([^}]+)}}/g, (match, varName) => {
-            const retrieved = this.contextVariables.get(varName);
-            return retrieved !== undefined ? String(retrieved) : match;
-        });
-
-        text = text.replace(/%([^%]+)%/g, (match, varName) => {
-            return this.configManager.get(varName, match) as string;
-        });
-
-        return text;
+        return testQueries[type] || 'SELECT 1';
     }
 
     @CSBDDStepDef('test execution starts for database testing')

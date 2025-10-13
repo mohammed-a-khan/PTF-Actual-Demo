@@ -261,7 +261,7 @@ export class TransactionSteps {
 
         try {
             const transaction = this.getActiveTransaction();
-            const interpolatedQuery = this.interpolateVariables(query);
+            const interpolatedQuery = this.configManager.interpolate(query, this.contextVariables);
 
             const adapter = this.databaseContext.getActiveAdapter();
             const startTime = Date.now();
@@ -327,20 +327,4 @@ export class TransactionSteps {
         return query;
     }
 
-    private interpolateVariables(text: string): string {
-        text = text.replace(/\${([^}]+)}/g, (match, varName) => {
-            return process.env[varName] || match;
-        });
-
-        text = text.replace(/{{([^}]+)}}/g, (match, varName) => {
-            const retrieved = this.contextVariables.get(varName);
-            return retrieved !== undefined ? String(retrieved) : match;
-        });
-
-        text = text.replace(/%([^%]+)%/g, (match, varName) => {
-            return this.configManager.get(varName, match) as string;
-        });
-
-        return text;
-    }
 }

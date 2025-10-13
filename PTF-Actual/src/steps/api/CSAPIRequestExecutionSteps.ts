@@ -531,7 +531,7 @@ export class CSAPIRequestExecutionSteps {
 
     // Helper methods
     private buildUrl(endpoint: string, context: CSApiContext): string {
-        const interpolatedEndpoint = this.interpolateValue(endpoint, context);
+        const interpolatedEndpoint = this.configManager.interpolate(endpoint, context.variables);
 
         if (interpolatedEndpoint.startsWith('http://') || interpolatedEndpoint.startsWith('https://')) {
             return interpolatedEndpoint;
@@ -553,17 +553,6 @@ export class CSAPIRequestExecutionSteps {
             auth: context.auth,
             ...(queryParams && { params: queryParams })
         };
-    }
-
-    private interpolateValue(value: string, context: CSApiContext): string {
-        if (!value.includes('{{')) {
-            return value;
-        }
-
-        return value.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
-            const varValue = context.getVariable(varName);
-            return varValue !== undefined ? String(varValue) : match;
-        });
     }
 
     private resolveFilePath(filePath: string): string {

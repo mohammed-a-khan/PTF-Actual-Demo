@@ -1,12 +1,12 @@
-import { CSBasePage, CSWebElement, CSReporter } from 'cs-test-automation-framework';
-import { CSPage, CSGetElement } from 'cs-test-automation-framework';
+import { CSBasePage, CSWebElement, CSReporter } from 'cs-playwright-test-framework';
+import { CSPage, CSGetElement } from 'cs-playwright-test-framework';
 
 @CSPage('orangehrm-login')
 export class OrangeHRMLoginPage extends CSBasePage {
     
     // Username field with CS Framework @CSGetElement decorator
     @CSGetElement({
-        css: 'input[name="username"]',
+        css: 'input[name="useame"]',
         description: 'Username input field',
         waitForVisible: true,
         selfHeal: true,

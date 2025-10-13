@@ -1,0 +1,43 @@
+{
+  // Official Cucumber extension configuration
+  "cucumber.features": [
+    "**/*.feature"
+  ],
+  "cucumber.glue": [
+    "test/**/*.ts",
+    "test/**/*.js",
+    "dist/test/**/*.js"
+  ],
+
+  // Cucumber (Gherkin) Full Support extension configuration
+  "cucumberautocomplete.steps": [
+    "test/**/*.ts",
+    "dist/test/**/*.js"
+  ],
+  "cucumberautocomplete.syncfeatures": "**/*.feature",
+  "cucumberautocomplete.strictGherkinCompletion": false,
+  "cucumberautocomplete.strictGherkinValidation": false,
+  "cucumberautocomplete.smartSnippets": true,
+  "cucumberautocomplete.stepsInvariants": true,
+  "cucumberautocomplete.customParameters": [
+    {
+      "parameter": "{string}",
+      "value": "\"([^\"]*)\""
+    },
+    {
+      "parameter": "{int}",
+      "value": "(\\d+)"
+    },
+    {
+      "parameter": "{float}",
+      "value": "(\\d*\\.?\\d+)"
+    }
+  ],
+
+  // Enable string suggestions in feature files
+  "editor.quickSuggestions": {
+    "comments": false,
+    "strings": true,
+    "other": true
+  }
+}

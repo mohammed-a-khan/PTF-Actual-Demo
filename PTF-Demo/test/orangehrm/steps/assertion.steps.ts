@@ -1,4 +1,4 @@
-import { CSBDDStepDef, StepDefinitions, Page, CSReporter, CSBrowserManager, CSExpect } from 'cs-test-automation-framework';
+import { CSBDDStepDef, StepDefinitions, Page, CSReporter, CSBrowserManager, CSExpect } from 'cs-playwright-test-framework';
 
 @StepDefinitions
 export class AssertionSteps {

@@ -8,6 +8,7 @@ import { CSRegexValidator } from '../../api/validators/CSRegexValidator';
 import { CSCustomValidator } from '../../api/validators/CSCustomValidator';
 import { CSResponseTimeValidator } from '../../api/validators/CSResponseTimeValidator';
 import { CSReporter } from '../../reporter/CSReporter';
+import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 import { CSResponse, CSValidationResult } from '../../api/types/CSApiTypes';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -19,6 +20,7 @@ import * as crypto from 'crypto';
  */
 export class CSAPIResponseValidationSteps {
     private contextManager: CSApiContextManager;
+    private configManager: CSConfigurationManager;
     private jsonPathValidator: CSJSONPathValidator;
     private schemaValidator: CSSchemaValidator;
     private xmlValidator: CSXMLValidator;
@@ -28,6 +30,7 @@ export class CSAPIResponseValidationSteps {
 
     constructor() {
         this.contextManager = CSApiContextManager.getInstance();
+        this.configManager = CSConfigurationManager.getInstance();
         this.jsonPathValidator = new CSJSONPathValidator();
         this.schemaValidator = new CSSchemaValidator();
         this.xmlValidator = new CSXMLValidator();
@@ -98,7 +101,7 @@ export class CSAPIResponseValidationSteps {
         try {
             const context = this.getCurrentContext();
             const response = this.getResponse();
-            const interpolatedValue = this.interpolateValue(expectedValue, context);
+            const interpolatedValue = this.configManager.interpolate(expectedValue, context.variables);
 
             const actualValue = this.findHeader(response.headers, headerName);
 
@@ -124,7 +127,7 @@ export class CSAPIResponseValidationSteps {
         try {
             const context = this.getCurrentContext();
             const response = this.getResponse();
-            const interpolatedValue = this.interpolateValue(expectedSubstring, context);
+            const interpolatedValue = this.configManager.interpolate(expectedSubstring, context.variables);
 
             const actualValue = this.findHeader(response.headers, headerName);
 
@@ -169,7 +172,7 @@ export class CSAPIResponseValidationSteps {
         try {
             const context = this.getCurrentContext();
             const response = this.getResponse();
-            const interpolatedValue = this.interpolateValue(expectedValue, context);
+            const interpolatedValue = this.configManager.interpolate(expectedValue, context.variables);
 
             const result = await this.jsonPathValidator.validate(response, {
                 path: jsonPath,
@@ -270,7 +273,7 @@ export class CSAPIResponseValidationSteps {
         try {
             const context = this.getCurrentContext();
             const response = this.getResponse();
-            const interpolatedText = this.interpolateValue(expectedText, context);
+            const interpolatedText = this.configManager.interpolate(expectedText, context.variables);
 
             const bodyText = typeof response.body === 'string'
                 ? response.body
@@ -358,7 +361,7 @@ export class CSAPIResponseValidationSteps {
         try {
             const context = this.getCurrentContext();
             const response = this.getResponse();
-            const interpolatedValue = this.interpolateValue(expectedValue, context);
+            const interpolatedValue = this.configManager.interpolate(expectedValue, context.variables);
 
             const result = await this.xmlValidator.validate(response, {
                 xpath: xmlPath,
@@ -594,17 +597,6 @@ export class CSAPIResponseValidationSteps {
         }
 
         return undefined;
-    }
-
-    private interpolateValue(value: string, context: CSApiContext): string {
-        if (!value.includes('{{')) {
-            return value;
-        }
-
-        return value.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
-            const varValue = context.getVariable(varName);
-            return varValue !== undefined ? String(varValue) : match;
-        });
     }
 
     private resolveFilePath(filePath: string): string {

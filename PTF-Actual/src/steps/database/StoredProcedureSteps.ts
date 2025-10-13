@@ -23,7 +23,7 @@ export class StoredProcedureSteps {
         CSReporter.info(`Executing stored procedure: ${procedureName}`);
 
         try {
-            const interpolatedName = this.interpolateVariables(procedureName);
+            const interpolatedName = this.configManager.interpolate(procedureName, this.contextVariables);
 
             const startTime = Date.now();
             const adapter = this.databaseContext.getActiveAdapter();
@@ -52,13 +52,22 @@ export class StoredProcedureSteps {
         CSReporter.info(`Executing stored procedure '${procedureName}' with parameters`);
 
         try {
-            const interpolatedName = this.interpolateVariables(procedureName);
-            const parameters = this.parseProcedureParameters(dataTable);
+            const interpolatedName = this.configManager.interpolate(procedureName, this.contextVariables);
+            let parameters = this.parseProcedureParameters(dataTable);
+
+            // If parameters don't have proper names (using @param0, @param1), query for actual parameter names
+            if (parameters.length > 0 && parameters[0].name.startsWith('@param')) {
+                const paramNames = await this.getProcedureParameterNames(interpolatedName);
+                parameters = parameters.map((p, index) => ({
+                    ...p,
+                    name: paramNames[index] || p.name
+                }));
+            }
 
             const startTime = Date.now();
             const adapter = this.databaseContext.getActiveAdapter();
             const connection = this.getActiveConnection();
-            const paramArray = parameters.map(p => p.value);
+            const paramArray = parameters;
             const queryResult = await adapter.executeStoredProcedure(connection, interpolatedName, paramArray);
             const executionTime = Date.now() - startTime;
 
@@ -83,7 +92,7 @@ export class StoredProcedureSteps {
         CSReporter.info(`Calling function '${functionName}' and storing result as '${alias}'`);
 
         try {
-            const interpolatedName = this.interpolateVariables(functionName);
+            const interpolatedName = this.configManager.interpolate(functionName, this.contextVariables);
 
             const adapter = this.databaseContext.getActiveAdapter();
             const connection = this.getActiveConnection();
@@ -105,7 +114,7 @@ export class StoredProcedureSteps {
         CSReporter.info(`Calling function '${functionName}' with parameters`);
 
         try {
-            const interpolatedName = this.interpolateVariables(functionName);
+            const interpolatedName = this.configManager.interpolate(functionName, this.contextVariables);
             const parameters = this.parseFunctionParameters(dataTable);
 
             const adapter = this.databaseContext.getActiveAdapter();
@@ -131,7 +140,7 @@ export class StoredProcedureSteps {
             throw new Error('No output parameters available. Execute a stored procedure first');
         }
 
-        const interpolatedExpected = this.interpolateVariables(expectedValue);
+        const interpolatedExpected = this.configManager.interpolate(expectedValue, this.contextVariables);
         const actualValue = outputParams[parameterName];
 
         if (actualValue === undefined) {
@@ -233,7 +242,7 @@ export class StoredProcedureSteps {
             throw new Error('No return value available. Execute a procedure/function first');
         }
 
-        const interpolatedExpected = this.interpolateVariables(expectedValue);
+        const interpolatedExpected = this.configManager.interpolate(expectedValue, this.contextVariables);
         const convertedExpected = this.convertParameterValue(interpolatedExpected);
 
         if (!this.valuesEqual(returnValue, convertedExpected)) {
@@ -252,7 +261,7 @@ export class StoredProcedureSteps {
         CSReporter.info(`Executing system stored procedure: ${procedureName}`);
 
         try {
-            const interpolatedName = this.interpolateVariables(procedureName);
+            const interpolatedName = this.configManager.interpolate(procedureName, this.contextVariables);
 
             const adapter = this.databaseContext.getActiveAdapter();
             const connection = this.getActiveConnection();
@@ -309,48 +318,129 @@ export class StoredProcedureSteps {
         return connection;
     }
 
+    private async getProcedureParameterNames(procedureName: string): Promise<string[]> {
+        try {
+            // Query SQL Server system views for parameter names
+            // This works for SQL Server, MySQL, and PostgreSQL have similar system tables
+            const dbType = (this.databaseContext as any).activeConnectionType;
+
+            let query = '';
+            if (dbType === 'sqlserver') {
+                query = `
+                    SELECT PARAMETER_NAME
+                    FROM INFORMATION_SCHEMA.PARAMETERS
+                    WHERE SPECIFIC_NAME = '${procedureName.replace(/'/g, "''")}'
+                    AND PARAMETER_MODE = 'IN'
+                    ORDER BY ORDINAL_POSITION
+                `;
+            } else if (dbType === 'mysql') {
+                query = `
+                    SELECT PARAMETER_NAME
+                    FROM INFORMATION_SCHEMA.PARAMETERS
+                    WHERE SPECIFIC_NAME = '${procedureName.replace(/'/g, "''")}'
+                    AND PARAMETER_MODE = 'IN'
+                    ORDER BY ORDINAL_POSITION
+                `;
+            } else if (dbType === 'postgresql') {
+                query = `
+                    SELECT parameter_name
+                    FROM information_schema.parameters
+                    WHERE specific_name = '${procedureName.replace(/'/g, "''")}'
+                    AND parameter_mode = 'IN'
+                    ORDER BY ordinal_position
+                `;
+            } else {
+                // For other databases, return empty array (will use generic names)
+                return [];
+            }
+
+            const result = await this.databaseContext.executeQuery(query);
+            const paramNames: string[] = [];
+
+            if (result.rows) {
+                result.rows.forEach((row: any) => {
+                    const paramName = row.PARAMETER_NAME || row.parameter_name;
+                    if (paramName) {
+                        paramNames.push(paramName);
+                    }
+                });
+            }
+
+            return paramNames;
+        } catch (error) {
+            CSReporter.debug(`Could not retrieve parameter names for '${procedureName}': ${error instanceof Error ? error.message : String(error)}`);
+            return [];
+        }
+    }
+
     private parseProcedureParameters(dataTable: any): ProcedureParameter[] {
         const parameters: ProcedureParameter[] = [];
 
-        if (dataTable && dataTable.rawTable) {
-            const headers = dataTable.rawTable[0].map((h: string) => h.toLowerCase().trim());
+        // Handle both .rows (Cucumber DataTable) and .rawTable formats
+        const rows = dataTable?.rows || dataTable?.rawTable;
 
-            for (let i = 1; i < dataTable.rawTable.length; i++) {
-                const row = dataTable.rawTable[i];
-                const param: ProcedureParameter = {
-                    name: '',
-                    value: null,
-                    type: 'VARCHAR',
-                    direction: 'IN'
-                };
+        if (rows && rows.length > 0) {
+            const firstRow = rows[0].map((h: string) => String(h).toLowerCase().trim());
 
-                headers.forEach((header: string, index: number) => {
-                    const cellValue = row[index]?.trim() || '';
+            // Check if first row contains headers (name, value, type, direction) or just values
+            const hasHeaders = firstRow.some((cell: string) =>
+                ['name', 'parameter', 'value', 'type', 'datatype', 'direction', 'mode'].includes(cell)
+            );
 
-                    switch (header) {
-                        case 'name':
-                        case 'parameter':
-                            param.name = cellValue;
-                            break;
-                        case 'value':
-                            param.value = this.convertParameterValue(this.interpolateVariables(cellValue));
-                            break;
-                        case 'type':
-                        case 'datatype':
-                            param.type = cellValue.toUpperCase();
-                            break;
-                        case 'direction':
-                        case 'mode':
-                            param.direction = cellValue.toUpperCase() as any;
-                            break;
+            if (hasHeaders) {
+                // Process as structured table with headers
+                const headers = firstRow;
+
+                for (let i = 1; i < rows.length; i++) {
+                    const row = rows[i];
+                    const param: ProcedureParameter = {
+                        name: '',
+                        value: null,
+                        type: 'VARCHAR',
+                        direction: 'IN'
+                    };
+
+                    headers.forEach((header: string, index: number) => {
+                        const cellValue = row[index]?.trim() || '';
+
+                        switch (header) {
+                            case 'name':
+                            case 'parameter':
+                                param.name = cellValue;
+                                break;
+                            case 'value':
+                                param.value = this.convertParameterValue(this.configManager.interpolate(cellValue, this.contextVariables));
+                                break;
+                            case 'type':
+                            case 'datatype':
+                                param.type = cellValue.toUpperCase();
+                                break;
+                            case 'direction':
+                            case 'mode':
+                                param.direction = cellValue.toUpperCase() as any;
+                                break;
+                        }
+                    });
+
+                    if (!param.name) {
+                        throw new Error(`Parameter name is required at row ${i}`);
+                    }
+
+                    parameters.push(param);
+                }
+            } else {
+                // Process as simple value list (no headers)
+                rows.forEach((row: string[], index: number) => {
+                    if (row && row.length > 0 && row[0]) {
+                        const value = this.configManager.interpolate(String(row[0]).trim(), this.contextVariables);
+                        parameters.push({
+                            name: `@param${index}`,
+                            value: this.convertParameterValue(value),
+                            type: 'VARCHAR',
+                            direction: 'IN'
+                        });
                     }
                 });
-
-                if (!param.name) {
-                    throw new Error(`Parameter name is required at row ${i}`);
-                }
-
-                parameters.push(param);
             }
         }
 
@@ -363,7 +453,7 @@ export class StoredProcedureSteps {
         if (dataTable && dataTable.rawTable) {
             dataTable.rawTable.forEach((row: string[]) => {
                 if (row && row.length > 0 && row[0]) {
-                    const value = this.interpolateVariables(row[0].trim());
+                    const value = this.configManager.interpolate(row[0].trim(), this.contextVariables);
                     parameters.push(this.convertParameterValue(value));
                 }
             });
@@ -440,20 +530,4 @@ export class StoredProcedureSteps {
         return outputParams;
     }
 
-    private interpolateVariables(text: string): string {
-        text = text.replace(/\${([^}]+)}/g, (match, varName) => {
-            return process.env[varName] || match;
-        });
-
-        text = text.replace(/{{([^}]+)}}/g, (match, varName) => {
-            const retrieved = this.contextVariables.get(varName);
-            return retrieved !== undefined ? String(retrieved) : match;
-        });
-
-        text = text.replace(/%([^%]+)%/g, (match, varName) => {
-            return this.configManager.get(varName, match) as string;
-        });
-
-        return text;
-    }
 }

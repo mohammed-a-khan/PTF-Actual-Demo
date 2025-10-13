@@ -403,7 +403,22 @@ async function loadAPIData(endpoint: string): Promise<any[]> {
 }
 
 async function loadDatabaseData(query: string): Promise<any[]> {
-    // Placeholder for database data loading
+    // Use CSDataProvider for consistent implementation
     CSReporter.debug(`Loading data from database: ${query}`);
-    return [];
+
+    try {
+        const { CSDataProvider } = await import('../data/CSDataProvider');
+        const dataProvider = CSDataProvider.getInstance();
+
+        // Load data using db: prefix format
+        const data = await dataProvider.loadData({
+            source: `db:${query}`,
+            type: 'database'
+        });
+
+        return data;
+    } catch (error: any) {
+        CSReporter.error(`Failed to load database data: ${error.message}`);
+        return [];
+    }
 }

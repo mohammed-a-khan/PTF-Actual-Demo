@@ -20,7 +20,7 @@ export class DataValidationSteps {
         CSReporter.info(`Validating cell value at row ${row}, column '${column}' should be '${expectedValue}'`);
 
         const result = this.getLastResult();
-        const interpolatedExpected = this.interpolateVariables(expectedValue);
+        const interpolatedExpected = this.configManager.interpolate(expectedValue, this.contextVariables);
 
         try {
             const actualValue = this.getCellValue(result, row - 1, column);
@@ -47,7 +47,7 @@ export class DataValidationSteps {
         CSReporter.info(`Validating cell at row ${row}, column '${column}' contains '${expectedSubstring}'`);
 
         const result = this.getLastResult();
-        const interpolatedExpected = this.interpolateVariables(expectedSubstring);
+        const interpolatedExpected = this.configManager.interpolate(expectedSubstring, this.contextVariables);
 
         try {
             const actualValue = this.getCellValue(result, row - 1, column);
@@ -72,7 +72,7 @@ export class DataValidationSteps {
         CSReporter.info(`Validating cell at row ${row}, column '${column}' matches pattern '${pattern}'`);
 
         const result = this.getLastResult();
-        const interpolatedPattern = this.interpolateVariables(pattern);
+        const interpolatedPattern = this.configManager.interpolate(pattern, this.contextVariables);
 
         try {
             const actualValue = this.getCellValue(result, row - 1, column);
@@ -142,17 +142,31 @@ export class DataValidationSteps {
         const result = this.getLastResult();
 
         try {
-            const values = result.rows.map(row => row[column]);
+            // Filter out NULL, undefined, and empty values (as per database unique constraint behavior)
+            // In databases, NULL values are ignored in unique constraints - multiple NULLs are allowed
+            const values = result.rows
+                .map(row => row[column])
+                .filter(value => value !== null && value !== undefined && value !== '');
+
             const uniqueValues = new Set(values);
 
             if (uniqueValues.size !== values.length) {
                 const duplicates = values.filter((item, index) => values.indexOf(item) !== index);
+                const uniqueDuplicates = [...new Set(duplicates)]; // Remove duplicate duplicates from error message
                 throw new Error(
-                    `Column '${column}' contains duplicate values: ${duplicates.join(', ')}`
+                    `Column '${column}' contains duplicate values: ${uniqueDuplicates.join(', ')}`
                 );
             }
 
-            CSReporter.info(`Column uniqueness validation passed: ${uniqueValues.size} unique values in column '${column}'`);
+            const nullCount = result.rows.filter(row => {
+                const value = row[column];
+                return value === null || value === undefined || value === '';
+            }).length;
+
+            CSReporter.info(
+                `Column uniqueness validation passed: ${uniqueValues.size} unique non-null values in column '${column}'` +
+                (nullCount > 0 ? ` (${nullCount} NULL/empty values ignored)` : '')
+            );
 
         } catch (error) {
             CSReporter.error(`Column uniqueness validation failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -165,7 +179,7 @@ export class DataValidationSteps {
         CSReporter.info(`Validating all values in column '${column}' are '${expectedValue}'`);
 
         const result = this.getLastResult();
-        const interpolatedExpected = this.interpolateVariables(expectedValue);
+        const interpolatedExpected = this.configManager.interpolate(expectedValue, this.contextVariables);
         const expectedConverted = this.convertExpectedValue(interpolatedExpected);
 
         try {
@@ -194,7 +208,7 @@ export class DataValidationSteps {
         CSReporter.info(`Validating column '${column}' contains value '${value}'`);
 
         const result = this.getLastResult();
-        const interpolatedValue = this.interpolateVariables(value);
+        const interpolatedValue = this.configManager.interpolate(value, this.contextVariables);
         const convertedValue = this.convertExpectedValue(interpolatedValue);
 
         try {
@@ -220,7 +234,7 @@ export class DataValidationSteps {
         CSReporter.info(`Validating column '${column}' does not contain value '${value}'`);
 
         const result = this.getLastResult();
-        const interpolatedValue = this.interpolateVariables(value);
+        const interpolatedValue = this.configManager.interpolate(value, this.contextVariables);
         const convertedValue = this.convertExpectedValue(interpolatedValue);
 
         try {
@@ -318,7 +332,7 @@ export class DataValidationSteps {
         CSReporter.info(`Validating minimum value in column '${column}' should be '${expectedMin}'`);
 
         const result = this.getLastResult();
-        const interpolatedExpected = this.interpolateVariables(expectedMin);
+        const interpolatedExpected = this.configManager.interpolate(expectedMin, this.contextVariables);
 
         try {
             if (result.rowCount === 0) {
@@ -359,7 +373,7 @@ export class DataValidationSteps {
         CSReporter.info(`Validating maximum value in column '${column}' should be '${expectedMax}'`);
 
         const result = this.getLastResult();
-        const interpolatedExpected = this.interpolateVariables(expectedMax);
+        const interpolatedExpected = this.configManager.interpolate(expectedMax, this.contextVariables);
 
         try {
             if (result.rowCount === 0) {
@@ -430,8 +444,8 @@ export class DataValidationSteps {
         CSReporter.info(`Validating values in column '${column}' are between '${minValue}' and '${maxValue}'`);
 
         const result = this.getLastResult();
-        const interpolatedMin = this.interpolateVariables(minValue);
-        const interpolatedMax = this.interpolateVariables(maxValue);
+        const interpolatedMin = this.configManager.interpolate(minValue, this.contextVariables);
+        const interpolatedMax = this.configManager.interpolate(maxValue, this.contextVariables);
 
         try {
             const minConverted = this.convertExpectedValue(interpolatedMin);
@@ -478,8 +492,17 @@ export class DataValidationSteps {
 
         try {
             const actualColumns = result.fields?.map((col: any) => col.name) || Object.keys(result.rows[0] || {});
-            const missingColumns = expectedColumns.filter((col: string) => !actualColumns.includes(col));
-            const extraColumns = actualColumns.filter((col: string) => !expectedColumns.includes(col));
+
+            // Case-insensitive comparison
+            const expectedColumnsLower = expectedColumns.map((col: string) => col.toLowerCase());
+            const actualColumnsLower = actualColumns.map((col: string) => col.toLowerCase());
+
+            const missingColumns = expectedColumns.filter((col: string) =>
+                !actualColumnsLower.includes(col.toLowerCase())
+            );
+            const extraColumns = actualColumns.filter((col: string) =>
+                !expectedColumnsLower.includes(col.toLowerCase())
+            );
 
             if (missingColumns.length > 0 || extraColumns.length > 0) {
                 let errorMsg = 'Column mismatch:\n';
@@ -522,7 +545,12 @@ export class DataValidationSteps {
 
                 for (const column of Object.keys(expectedRow || {})) {
                     const expected = expectedRow![column];
-                    const actual = actualRow![column];
+
+                    // Use case-insensitive column lookup
+                    const actualColumnKey = Object.keys(actualRow || {}).find(
+                        key => key.toLowerCase() === column.toLowerCase()
+                    );
+                    const actual = actualColumnKey ? actualRow![actualColumnKey] : undefined;
 
                     if (!this.valuesEqual(actual, expected)) {
                         throw new Error(
@@ -561,7 +589,7 @@ export class DataValidationSteps {
         }
         const scalarResult = result.rows[0][firstColumn];
 
-        const interpolatedExpected = this.interpolateVariables(expectedValue);
+        const interpolatedExpected = this.configManager.interpolate(expectedValue, this.contextVariables);
         const convertedExpected = this.convertExpectedValue(interpolatedExpected);
 
         try {
@@ -595,17 +623,34 @@ export class DataValidationSteps {
         }
 
         const row = result.rows[rowIndex];
-        if (!(column in row)) {
-            const availableColumns = Object.keys(row).join(', ');
-            throw new Error(
-                `Column '${column}' not found. Available columns: ${availableColumns}`
-            );
+
+        // Try exact match first
+        if (column in row) {
+            return row[column];
         }
 
-        return row[column];
+        // Try case-insensitive match
+        const columnLower = column.toLowerCase();
+        const matchingKey = Object.keys(row).find(key => key.toLowerCase() === columnLower);
+
+        if (matchingKey) {
+            return row[matchingKey];
+        }
+
+        // Column not found
+        const availableColumns = Object.keys(row).join(', ');
+        throw new Error(
+            `Column '${column}' not found. Available columns: ${availableColumns}`
+        );
     }
 
-    private convertExpectedValue(value: string): any {
+    private convertExpectedValue(value: any): any {
+        // If value is not a string, return as-is (could be number, boolean, null, etc.)
+        if (typeof value !== 'string') {
+            return value;
+        }
+
+        // String conversions
         if (value.toLowerCase() === 'null') return null;
         if (value.toLowerCase() === 'true') return true;
         if (value.toLowerCase() === 'false') return false;
@@ -629,11 +674,17 @@ export class DataValidationSteps {
             return actual.getTime() === expected.getTime();
         }
 
-        if (typeof actual === 'number' && typeof expected === 'number') {
-            return Math.abs(actual - expected) < 0.001;
+        // Numeric comparison - handle both numbers and numeric strings
+        const actualNum = typeof actual === 'string' ? parseFloat(actual) : actual;
+        const expectedNum = typeof expected === 'string' ? parseFloat(expected) : expected;
+
+        if (typeof actualNum === 'number' && typeof expectedNum === 'number' &&
+            !isNaN(actualNum) && !isNaN(expectedNum)) {
+            return Math.abs(actualNum - expectedNum) < 0.001;
         }
 
-        return actual === expected;
+        // Fall back to string comparison for non-numeric values
+        return actual === expected || String(actual) === String(expected);
     }
 
     private dataTypesMatch(actual: string, expected: string): boolean {
@@ -704,7 +755,7 @@ export class DataValidationSteps {
                 headers.forEach((header: string, index: number) => {
                     if (row && row[index] !== undefined) {
                         const value = row[index].trim();
-                        const interpolated = this.interpolateVariables(value);
+                        const interpolated = this.configManager.interpolate(value, this.contextVariables);
                         rowData[header] = this.convertExpectedValue(interpolated);
                     } else {
                         rowData[header] = null;
@@ -718,20 +769,4 @@ export class DataValidationSteps {
         return data;
     }
 
-    private interpolateVariables(text: string): string {
-        text = text.replace(/\${([^}]+)}/g, (match, varName) => {
-            return process.env[varName] || match;
-        });
-
-        text = text.replace(/{{([^}]+)}}/g, (match, varName) => {
-            const retrieved = this.contextVariables.get(varName);
-            return retrieved !== undefined ? String(retrieved) : match;
-        });
-
-        text = text.replace(/%([^%]+)%/g, (match, varName) => {
-            return this.configManager.get(varName, match) as string;
-        });
-
-        return text;
-    }
 }

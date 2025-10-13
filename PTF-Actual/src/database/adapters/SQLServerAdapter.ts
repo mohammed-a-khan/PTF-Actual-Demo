@@ -152,13 +152,17 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
   }
 
   async query(
-    connection: DatabaseConnection, 
-    sql: string, 
-    params?: any[], 
+    connection: DatabaseConnection,
+    sql: string,
+    params?: any[],
     options?: QueryOptions
   ): Promise<QueryResult> {
     const pool = connection.instance as any;
-    const request = pool.request();
+
+    // Use transaction request if transaction is active, otherwise use pool request
+    const request = pool._transaction
+      ? pool._transaction.request()
+      : pool.request();
 
     if (options?.timeout) {
       request.timeout = options.timeout;
@@ -217,12 +221,17 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
     options?: QueryOptions
   ): Promise<QueryResult> {
     const pool = connection.instance as any;
-    const request = pool.request();
+
+    // Use transaction request if transaction is active, otherwise use pool request
+    const request = pool._transaction
+      ? pool._transaction.request()
+      : pool.request();
 
     if (options?.timeout) {
       request.timeout = options.timeout;
     }
 
+    // Add parameters to request
     if (params && params.length > 0) {
       params.forEach((param, index) => {
         if (param && typeof param === 'object' && param.name) {
@@ -233,19 +242,44 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
       });
     }
 
+    // Build EXEC statement with parameter names
+    const paramNames = Object.keys(request.parameters || {});
+    const execStatement = paramNames.length > 0
+      ? `EXEC ${procedureName} ${paramNames.map(p => '@' + p).join(', ')}`
+      : `EXEC ${procedureName}`;
+
     try {
       const startTime = Date.now();
-      const result = await request.execute(procedureName);
+      const result = await request.query(execStatement);
       const executionTime = Date.now() - startTime;
 
+      // Determine row count and rows to return
+      let rowCount = 0;
+      let rows = result.recordset || [];
+
+      // Check for multiple recordsets (use the last one)
+      if (result.recordsets && Array.isArray(result.recordsets) && result.recordsets.length > 0) {
+        rows = result.recordsets[result.recordsets.length - 1] || [];
+      }
+
+      // Calculate row count from rowsAffected array
+      if (result.rowsAffected && Array.isArray(result.rowsAffected)) {
+        rowCount = result.rowsAffected.reduce((sum: number, count: number) => sum + (count || 0), 0);
+      }
+
+      // If no rows affected but we have a recordset, use recordset length
+      if (rowCount === 0 && rows.length > 0) {
+        rowCount = rows.length;
+      }
+
       return {
-        rows: result.recordset || [],
-        rowCount: result.rowsAffected ? result.rowsAffected[0] : 0,
-        affectedRows: result.rowsAffected ? result.rowsAffected[0] : 0,
+        rows: rows,
+        rowCount: rowCount,
+        affectedRows: rowCount,
         output: result.output || {},
         returnValue: result.returnValue,
         duration: executionTime,
-        fields: this.parseFields(result.recordset),
+        fields: this.parseFields(rows),
         command: 'EXEC'
       };
     } catch (error: any) {
@@ -525,24 +559,26 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
   }
 
   private addParameter(request: any, name: string, value: any, output: boolean = false): void {
+    // Strip @ prefix if present - mssql expects parameter names without @
+    const cleanName = name.startsWith('@') ? name.substring(1) : name;
     const method = output ? 'output' : 'input';
-    
+
     if (value === null || value === undefined) {
-      request[method](name, this.mssql.NVarChar, null);
+      request[method](cleanName, this.mssql.NVarChar, null);
     } else if (typeof value === 'number') {
       if (Number.isInteger(value)) {
-        request[method](name, this.mssql.Int, value);
+        request[method](cleanName, this.mssql.Int, value);
       } else {
-        request[method](name, this.mssql.Float, value);
+        request[method](cleanName, this.mssql.Float, value);
       }
     } else if (typeof value === 'boolean') {
-      request[method](name, this.mssql.Bit, value);
+      request[method](cleanName, this.mssql.Bit, value);
     } else if (value instanceof Date) {
-      request[method](name, this.mssql.DateTime2, value);
+      request[method](cleanName, this.mssql.DateTime2, value);
     } else if (Buffer.isBuffer(value)) {
-      request[method](name, this.mssql.VarBinary, value);
+      request[method](cleanName, this.mssql.VarBinary, value);
     } else {
-      request[method](name, this.mssql.NVarChar, String(value));
+      request[method](cleanName, this.mssql.NVarChar, String(value));
     }
   }
 

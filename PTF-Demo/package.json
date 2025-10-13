@@ -4,7 +4,7 @@
   "description": "Demo project utilizing cs-test-automation-framework",
   "main": "index.js",
   "scripts": {
-    "cs-framework": "node node_modules/cs-test-automation-framework/dist/index.js",
+    "cs-framework": "cross-env NODE_OPTIONS=\"--tls-min-v1.2\" npx cs-framework",
     "test": "npm run cs-framework -- --project=orangehrm",
     "test:orangehrm": "npm run cs-framework -- --project=orangehrm",
     "test:api": "npm run cs-framework -- --project=api --tags=@api",
@@ -25,10 +25,11 @@
   "license": "ISC",
   "dependencies": {
     "@faker-js/faker": "^10.0.0",
-    "cs-test-automation-framework": "^3.0.21"
+    "cs-playwright-test-framework": "^1.5.4"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "cross-env": "^10.1.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.0.0"
   }

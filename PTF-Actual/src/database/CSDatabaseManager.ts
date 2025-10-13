@@ -76,7 +76,7 @@ export class CSDatabaseManager {
 
     private getDefaultConfig(alias: string): DatabaseConfig {
         const upperAlias = alias.toUpperCase();
-        return {
+        const config: DatabaseConfig = {
             type: this.configManager.get(`DB_${upperAlias}_TYPE`, 'sqlserver') as any,
             host: this.configManager.get(`DB_${upperAlias}_HOST`) || (() => { throw new Error(`Required configuration DB_${upperAlias}_HOST is missing`); })(),
             port: this.configManager.getNumber(`DB_${upperAlias}_PORT`),
@@ -89,5 +89,27 @@ export class CSDatabaseManager {
             poolMin: this.configManager.getNumber(`DB_${upperAlias}_POOL_MIN`, 0),
             poolIdleTimeout: this.configManager.getNumber(`DB_${upperAlias}_POOL_IDLE_TIMEOUT`, 30000)
         };
+
+        // Add SQL Server-specific options if present
+        const additionalOptions: Record<string, any> = {};
+        const encrypt = this.configManager.get(`DB_${upperAlias}_ENCRYPT`);
+        const trustServerCert = this.configManager.get(`DB_${upperAlias}_TRUST_SERVER_CERTIFICATE`);
+        const trustedConnection = this.configManager.get(`DB_${upperAlias}_TRUSTED_CONNECTION`);
+
+        if (encrypt !== undefined) {
+            additionalOptions.encrypt = String(encrypt) === 'true';
+        }
+        if (trustServerCert !== undefined) {
+            additionalOptions.trustServerCertificate = String(trustServerCert) === 'true';
+        }
+        if (trustedConnection !== undefined) {
+            additionalOptions.trustedConnection = String(trustedConnection) === 'true';
+        }
+
+        if (Object.keys(additionalOptions).length > 0) {
+            config.additionalOptions = additionalOptions;
+        }
+
+        return config;
     }
 }

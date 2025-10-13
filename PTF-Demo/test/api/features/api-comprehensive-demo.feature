@@ -621,3 +621,359 @@ Feature: Comprehensive API Testing Demonstration
     And the response body JSON path "$.headers.User-Agent" should exist
     And the response body should contain "https://httpbin.org/get"
     And I print the last response
+
+  # ============================================================================
+  # SECTION: STANDARDIZED VARIABLE INTERPOLATION IN API TESTING
+  # ============================================================================
+  # All API steps now use centralized configManager.interpolate() method
+  # Supporting ALL interpolation syntax types universally:
+  #
+  # 1. {VAR}                     - Config variable
+  # 2. ${VAR:-default}           - Config/env variable with default
+  # 3. {env:VAR}                 - Explicit environment variable
+  # 4. {config:KEY}              - Explicit config variable
+  # 5. {{VAR}} or {context:VAR}  - Runtime context variable
+  # 6. {ternary:COND?TRUE:FALSE} - Conditional interpolation
+  # 7. {concat:VAR1+VAR2}        - Concatenation
+  # 8. {upper:VAR}, {lower:VAR}  - Case transformation
+  # 9. <random>, <timestamp>, <uuid>, <date:FORMAT>, <generate:TYPE> - Dynamic values
+  # ============================================================================
+
+  @api @variable-interpolation @config-vars @demo
+  Scenario: API Interpolation Type 1 - Config Variables {VAR} and {config:KEY}
+    # Test {VAR} and {config:KEY} syntax in API requests
+    Given the API base URL is "https://postman-echo.com"
+
+    # Using {VAR} syntax - references config variable
+    And I set request header "X-Project" to "{PROJECT}"
+    And I set request header "X-Environment" to "{ENVIRONMENT}"
+
+    # Using {config:KEY} syntax - explicit config lookup
+    And I set request header "X-Config-Project" to "{config:PROJECT}"
+
+    When I send a GET request to "/headers"
+    Then the response status should be 200
+    And the response body should contain "orangehrm"
+
+  @api @variable-interpolation @env-vars @demo
+  Scenario: API Interpolation Type 2 - Environment Variables ${VAR} and {env:VAR}
+    # Test ${VAR} and {env:VAR} syntax in API requests
+    Given the API base URL is "https://postman-echo.com"
+
+    # Using ${VAR:-default} syntax - env variable with default
+    And I set request header "X-User" to "${USER:-testuser}"
+
+    # Using {env:VAR} syntax - explicit environment variable
+    And I set request header "X-Home" to "{env:HOME}"
+
+    When I send a GET request to "/headers"
+    Then the response status should be 200
+
+  @api @variable-interpolation @context-vars @demo
+  Scenario: API Interpolation Type 3 - Context Variables {{VAR}} and {context:VAR}
+    # Test {{VAR}} and {context:VAR} syntax with runtime values
+    Given the API base URL is "https://jsonplaceholder.typicode.com"
+
+    # First request to get data
+    When I send a GET request to "/posts/1"
+    Then the response status should be 200
+
+    # Extract and save to context
+    Given I extract "$.userId" from response and save as "userId"
+    Given I extract "$.id" from response and save as "postId"
+
+    # Use context variables with {{VAR}} syntax
+    Given the API base URL is "https://postman-echo.com"
+    And I set request header "X-User-Id" to "{{userId}}"
+    And I set request header "X-Post-Id" to "{{postId}}"
+
+    When I send a GET request to "/headers"
+    Then the response status should be 200
+    And the response body should contain "1"
+
+  @api @variable-interpolation @conditional @demo
+  Scenario: API Interpolation Type 4 - Ternary Conditionals {ternary:COND?TRUE:FALSE}
+    # Test {ternary:...} syntax for conditional values
+    Given the API base URL is "https://postman-echo.com"
+
+    # Use ternary to set header value based on config
+    And I set request header "X-Mode" to "{ternary:HEADLESS?automated:manual}"
+    And I set request header "X-Browser-Type" to "{ternary:BROWSER?{BROWSER}:chrome}"
+
+    When I send a GET request to "/headers"
+    Then the response status should be 200
+
+  @api @variable-interpolation @concatenation @demo
+  Scenario: API Interpolation Type 5 - Concatenation {concat:VAR1+VAR2}
+    # Test {concat:...} syntax for combining values
+    Given the API base URL is "https://postman-echo.com"
+
+    # Use concat to build composite header values
+    And I set request header "X-Full-Context" to "{concat:PROJECT+ENVIRONMENT}"
+    And I set query parameter "context" to "{concat:PROJECT+ENVIRONMENT}"
+
+    When I send a GET request to "/get"
+    Then the response status should be 200
+    And the response body should contain "orangehrm"
+
+  @api @variable-interpolation @case-transform @demo
+  Scenario: API Interpolation Type 6 - Case Transformation {upper:VAR} and {lower:VAR}
+    # Test {upper:...} and {lower:...} syntax
+    Given the API base URL is "https://postman-echo.com"
+
+    # Use case transformations
+    And I set request header "X-Project-Upper" to "{upper:PROJECT}"
+    And I set request header "X-Project-Lower" to "{lower:PROJECT}"
+    And I set query parameter "project_upper" to "{upper:PROJECT}"
+
+    When I send a GET request to "/get"
+    Then the response status should be 200
+    And the response body should contain "ORANGEHRM"
+
+  @api @variable-interpolation @dynamic-values @demo
+  Scenario: API Interpolation Type 7 - Dynamic Placeholders <random>, <timestamp>, <uuid>
+    # Test <placeholder> syntax for dynamic value generation
+    Given the API base URL is "https://postman-echo.com"
+
+    # Generate dynamic values
+    And I set request header "X-Request-Id" to "<uuid>"
+    And I set request header "X-Timestamp" to "<timestamp>"
+    And I set query parameter "random_id" to "test_<random>"
+    And I set query parameter "date" to "<date:YYYY-MM-DD>"
+
+    When I send a GET request to "/get"
+    Then the response status should be 200
+
+  @api @variable-interpolation @generate-values @demo
+  Scenario: API Interpolation Type 8 - Generated Test Data <generate:TYPE>
+    # Test <generate:TYPE> syntax for test data generation
+    Given the API base URL is "https://postman-echo.com"
+
+    # Generate test data
+    And I set JSON body:
+      """
+      {
+        "email": "<generate:email>",
+        "username": "<generate:username>",
+        "phone": "<generate:phone>",
+        "password": "<generate:password>"
+      }
+      """
+
+    When I send a POST request to "/post"
+    Then the response status should be 200
+    And the response body JSON path "$.json.email" should exist
+    And the response body JSON path "$.json.username" should exist
+
+  @api @variable-interpolation @combined-all @demo
+  Scenario: API Interpolation Type 9 - All Interpolation Types Combined
+    # Demonstrate using multiple interpolation types in single request
+    Given the API base URL is "https://postman-echo.com"
+
+    # Combine all interpolation types
+    And I set request headers:
+      | X-Project          | {PROJECT}                                  |
+      | X-Environment      | {config:ENVIRONMENT}                       |
+      | X-User             | ${USER:-testuser}                          |
+      | X-Mode             | {ternary:HEADLESS?automated:manual}        |
+      | X-Composite        | {concat:PROJECT+ENVIRONMENT}               |
+      | X-Project-Upper    | {upper:PROJECT}                            |
+      | X-Request-Id       | <uuid>                                     |
+      | X-Timestamp        | <timestamp>                                |
+      | X-Test-Email       | <generate:email>                           |
+
+    When I send a GET request to "/headers"
+    Then the response status should be 200
+    And the response body should contain "orangehrm"
+    And the response body should contain "ORANGEHRM"
+
+  @api @variable-interpolation @request-body @demo
+  Scenario: Interpolation in Request Body - JSON with All Types
+    # Test interpolation in JSON request body
+    Given the API base URL is "https://postman-echo.com"
+
+    And I set JSON body:
+      """
+      {
+        "project": "{PROJECT}",
+        "environment": "{config:ENVIRONMENT}",
+        "user": "${USER:-testuser}",
+        "mode": "{ternary:HEADLESS?automated:manual}",
+        "context": "{concat:PROJECT+ENVIRONMENT}",
+        "project_upper": "{upper:PROJECT}",
+        "request_id": "<uuid>",
+        "timestamp": "<timestamp>",
+        "random_id": "test_<random>",
+        "test_email": "<generate:email>",
+        "test_username": "<generate:username>",
+        "test_phone": "<generate:phone>",
+        "current_date": "<date:YYYY-MM-DD>",
+        "current_datetime": "<date:YYYY-MM-DD HH:mm:ss>"
+      }
+      """
+
+    When I send a POST request to "/post"
+    Then the response status should be 200
+    And the response body JSON path "$.json.project" should be "orangehrm"
+    And the response body JSON path "$.json.project_upper" should be "ORANGEHRM"
+    And the response body JSON path "$.json.test_email" should exist
+    And the response body JSON path "$.json.request_id" should exist
+
+  @api @variable-interpolation @query-params @demo
+  Scenario: Interpolation in Query Parameters with All Syntax Types
+    # Test interpolation in query parameters
+    Given the API base URL is "https://postman-echo.com"
+
+    And user sets query parameters:
+      | project         | {PROJECT}                             |
+      | env             | {config:ENVIRONMENT}                  |
+      | user            | ${USER:-testuser}                     |
+      | mode            | {ternary:HEADLESS?auto:manual}        |
+      | context         | {concat:PROJECT+ENVIRONMENT}          |
+      | project_upper   | {upper:PROJECT}                       |
+      | random_id       | <random>                              |
+      | timestamp       | <timestamp>                           |
+      | uuid            | <uuid>                                |
+      | date            | <date:YYYY-MM-DD>                     |
+
+    When I send a GET request to "/get"
+    Then the response status should be 200
+    And the response body JSON path "$.args.project" should be "orangehrm"
+    And the response body JSON path "$.args.project_upper" should be "ORANGEHRM"
+
+  @api @variable-interpolation @url-interpolation @demo
+  Scenario: Interpolation in URL Path and Endpoint
+    # Test interpolation in URL paths
+    Given the API base URL is "https://jsonplaceholder.typicode.com"
+
+    # Set a post ID in context
+    And I set variable "postId" to "1"
+
+    # Use interpolation in URL path
+    When I send a GET request to "/posts/{{postId}}"
+    Then the response status should be 200
+    And the response body JSON path "$.id" should be 1
+
+  @api @variable-interpolation @chaining-with-interpolation @demo
+  Scenario: API Chaining with Standardized Interpolation
+    # Demonstrate chaining with all interpolation types
+    Given the API base URL is "https://jsonplaceholder.typicode.com"
+
+    # First request - get a post
+    When I send a GET request to "/posts/1"
+    Then the response status should be 200
+    And I extract "$.userId" from response and save as "userId"
+    And I extract "$.id" from response and save as "postId"
+    And I extract "$.title" from response and save as "postTitle"
+
+    # Second request - use extracted values with interpolation
+    Given the API base URL is "https://postman-echo.com"
+    And I set JSON body:
+      """
+      {
+        "extracted_user_id": "{{userId}}",
+        "extracted_post_id": "{{postId}}",
+        "extracted_title": "{{postTitle}}",
+        "project": "{PROJECT}",
+        "environment": "{config:ENVIRONMENT}",
+        "test_mode": "{ternary:HEADLESS?automated:manual}",
+        "composite": "{concat:PROJECT+ENVIRONMENT}",
+        "request_id": "<uuid>",
+        "timestamp": "<timestamp>",
+        "test_email": "<generate:email>"
+      }
+      """
+
+    When I send a POST request to "/post"
+    Then the response status should be 200
+    And the response body JSON path "$.json.extracted_user_id" should be "1"
+    And the response body JSON path "$.json.project" should be "orangehrm"
+
+  @api @variable-interpolation @form-data-interpolation @demo
+  Scenario: Interpolation in Form Data
+    # Test interpolation in form fields
+    Given the API base URL is "https://postman-echo.com"
+
+    And user sets form fields:
+      | project       | {PROJECT}                          |
+      | environment   | {config:ENVIRONMENT}               |
+      | mode          | {ternary:HEADLESS?auto:manual}     |
+      | context       | {concat:PROJECT+ENVIRONMENT}       |
+      | timestamp     | <timestamp>                        |
+      | random_id     | test_<random>                      |
+      | test_email    | <generate:email>                   |
+
+    When I send a POST request to "/post"
+    Then the response status should be 200
+    And the response body should contain "orangehrm"
+
+  @api @variable-interpolation @authentication-interpolation @demo
+  Scenario: Interpolation in Authentication Headers
+    # Test interpolation in auth configuration
+    Given the API base URL is "https://postman-echo.com"
+
+    # Set token using interpolation
+    And I set variable "apiToken" to "test_token_<random>"
+    And I use bearer token "{{apiToken}}"
+
+    When I send a GET request to "/headers"
+    Then the response status should be 200
+    And the response body should contain "test_token"
+
+  @api @variable-interpolation @multipart-interpolation @demo
+  Scenario: Interpolation in Multipart Form Data
+    # Test interpolation in multipart fields
+    Given the API base URL is "https://postman-echo.com"
+
+    And user sets multipart field "project" to "{PROJECT}"
+    And user sets multipart field "env" to "{config:ENVIRONMENT}"
+    And user sets multipart field "request_id" to "<uuid>"
+    And user sets multipart field "email" to "<generate:email>"
+
+    When I send a POST request to "/post"
+    Then the response status should be 200
+
+  @api @variable-interpolation @xml-body-interpolation @demo
+  Scenario: Interpolation in XML Request Body
+    # Test interpolation in XML body
+    Given the API base URL is "https://postman-echo.com"
+
+    And user sets XML body:
+      """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <request>
+        <project>{PROJECT}</project>
+        <environment>{config:ENVIRONMENT}</environment>
+        <mode>{ternary:HEADLESS?automated:manual}</mode>
+        <timestamp><timestamp></timestamp>
+        <uuid><uuid></uuid>
+        <email><generate:email></email>
+      </request>
+      """
+
+    When I send a POST request to "/post"
+    Then the response status should be 200
+    And the response body should contain "orangehrm"
+
+  @api @variable-interpolation @graphql-interpolation @demo
+  Scenario: Interpolation in GraphQL Queries
+    # Test interpolation in GraphQL query
+    Given the API base URL is "https://countries.trevorblades.com"
+
+    # Set country code using interpolation
+    And I set variable "countryCode" to "US"
+
+    And user sets GraphQL query:
+      """
+      query {
+        country(code: "{{countryCode}}") {
+          name
+          capital
+          currency
+        }
+      }
+      """
+
+    When I send a POST request to "/graphql"
+    Then the response status should be 200
+    And the response body JSON path "$.data.country.name" should be "United States"

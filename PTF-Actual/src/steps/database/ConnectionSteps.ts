@@ -27,7 +27,8 @@ export class ConnectionSteps {
         CSReporter.info(`Connecting with connection string: ${this.sanitizeConnectionString(connectionString)}`);
 
         try {
-            const interpolatedString = this.interpolateVariables(connectionString);
+            // Use centralized interpolation system from CSConfigurationManager
+            const interpolatedString = this.configManager.interpolate(connectionString, this.contextVariables);
             const config = this.parseConnectionString(interpolatedString);
 
             const database = await CSDatabase.create(config, this.currentDatabaseAlias);
@@ -186,20 +187,21 @@ export class ConnectionSteps {
         CSReporter.info('Verifying database connection');
 
         try {
-            const database = this.databases.get(this.currentDatabaseAlias);
-            if (!database) {
-                throw new Error('No active database connection');
+            // Get active adapter from DatabaseContext singleton (throws if no connection)
+            const adapter = this.databaseContext.getActiveAdapter();
+
+            // Get the database type from the active connection
+            const dbType = (this.databaseContext as any).activeConnectionType as DatabaseType;
+            const testQuery = this.getTestQuery(dbType);
+
+            CSReporter.debug(`Using test query for ${dbType}: ${testQuery}`);
+            const result = await this.databaseContext.executeQuery(testQuery);
+
+            if (!result || result.rowCount === 0) {
+                throw new Error('Database test query returned no results');
             }
 
-            const isConnected = await database.isConnected();
-            if (!isConnected) {
-                throw new Error('Database is not connected');
-            }
-
-            const testQuery = this.getTestQuery(database.getType());
-            const result = await database.query(testQuery);
-
-            CSReporter.info(`Database connection verified for: ${this.currentDatabaseAlias}`);
+            CSReporter.info('Database connection verified successfully');
 
         } catch (error) {
             CSReporter.error(`Database connection verification failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -472,36 +474,19 @@ export class ConnectionSteps {
             dataTable.raw()?.forEach((row: string[]) => {
                 if (row.length >= 2 && row[0] && row[1]) {
                     const key = row[0].trim();
-                    const value = this.interpolateVariables(row[1].trim());
+                    // Use centralized interpolation system from CSConfigurationManager
+                    const value = this.configManager.interpolate(row[1].trim(), this.contextVariables);
                     result[key] = value;
                 }
             });
         } else if (dataTable && dataTable.rowsHash) {
             const hash = dataTable.rowsHash();
             Object.keys(hash).forEach(key => {
-                result[key] = this.interpolateVariables(hash[key]);
+                // Use centralized interpolation system from CSConfigurationManager
+                result[key] = this.configManager.interpolate(hash[key], this.contextVariables);
             });
         }
 
         return result;
-    }
-
-    private interpolateVariables(value: string): string {
-        const configManager = CSConfigurationManager.getInstance();
-
-        value = value.replace(/\${([^}]+)}/g, (match, varName) => {
-            return process.env[varName] || match;
-        });
-
-        value = value.replace(/{{([^}]+)}}/g, (match, varName) => {
-            const retrieved = this.contextVariables.get(varName);
-            return retrieved !== undefined ? String(retrieved) : match;
-        });
-
-        value = value.replace(/%([^%]+)%/g, (match, varName) => {
-            return this.configManager.get(varName, match) as string;
-        });
-
-        return value;
     }
 }

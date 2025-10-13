@@ -182,75 +182,165 @@ export class CSConfigurationManager {
         }
     }
 
-    private interpolateAdvanced(str: string): string {
+    private interpolateAdvanced(str: string, contextMap?: Map<string, any>): string {
         if (typeof str !== 'string') return str;
-        
+
         // Handle {VARIABLE} syntax for config variables
         str = str.replace(/{([^}]+)}/g, (match, variable) => {
             // Handle nested/computed variables
             if (variable.includes(':')) {
-                return this.handleComplexVariable(variable);
+                return this.handleComplexVariable(variable, contextMap);
             }
-            
+
             // Simple variable lookup
             return this.config.get(variable) || this.config.get(variable.toUpperCase()) || match;
         });
-        
+
         // Handle ${ENV_VAR} syntax for environment variables and config references
         str = str.replace(/\${([^}]+)}/g, (match, envVar) => {
             const [varName, defaultValue] = envVar.split(':-');
-            
+
             // First check if it's a config key
             const configValue = this.config.get(varName) || this.config.get(varName.toUpperCase());
             if (configValue) {
                 return configValue;
             }
-            
+
             // Then check environment variables
             return process.env[varName] || defaultValue || match;
         });
-        
+
         // Handle <placeholder> syntax for dynamic values
         str = str.replace(/<([^>]+)>/g, (match, placeholder) => {
             return this.handleDynamicPlaceholder(placeholder) || match;
         });
-        
+
         return str;
     }
 
-    private handleComplexVariable(variable: string): string {
+    /**
+     * Public interpolation method with context variable support
+     * Supports all CSConfigurationManager syntax PLUS runtime context variables
+     *
+     * Syntax supported:
+     * - {VAR} - Config variable
+     * - ${VAR} or ${VAR:-default} - Config THEN environment variable with optional default
+     * - {env:VAR} - Explicit environment variable
+     * - {config:KEY} - Explicit config variable
+     * - {context:VAR} - Runtime context variable (from contextMap parameter)
+     * - {{VAR}} - Runtime context variable (shorthand, for backward compatibility)
+     * - {currentRow} - Current iteration data row from Examples/DataProvider (auto-serialized as JSON)
+     * - {testData} - Deprecated: Use {currentRow} instead (kept for backward compatibility)
+     * - <field> - Individual field from Examples table (e.g., <email>, <employee_id>)
+     * - {ternary:COND?TRUE:FALSE} - Conditional interpolation
+     * - {concat:VAR1+VAR2} - Concatenation
+     * - {upper:VAR} - Uppercase transformation
+     * - {lower:VAR} - Lowercase transformation
+     * - <random>, <timestamp>, <uuid>, <date>, <generate:TYPE> - Dynamic values
+     *
+     * @param value - String value to interpolate
+     * @param contextMap - Optional Map of runtime context variables (e.g., from step execution)
+     * @returns Interpolated string
+     */
+    public interpolate(value: string, contextMap?: Map<string, any>): string {
+        if (typeof value !== 'string') return value;
+
+        let result = value;
+
+        // 1. Handle {{VAR}} syntax for context variables (shorthand, backward compatible)
+        if (contextMap) {
+            result = result.replace(/\{\{([^}]+)\}\}/g, (match, varName) => {
+                const contextValue = contextMap.get(varName);
+                return contextValue !== undefined ? String(contextValue) : match;
+            });
+        }
+
+        // 2. Handle standard CSConfigurationManager interpolation (now with context support)
+        result = this.interpolateAdvanced(result, contextMap);
+
+        return result;
+    }
+
+    private handleComplexVariable(variable: string, contextMap?: Map<string, any>): string {
         const parts = variable.split(':');
         const type = parts[0];
-        
+
         switch (type) {
             case 'env':
                 // {env:VARIABLE_NAME}
                 return process.env[parts[1]] || '';
-                
+
             case 'config':
                 // {config:KEY}
                 return this.config.get(parts[1]) || '';
-                
+
+            case 'context':
+                // {context:VAR} or {context:VAR:json} - Runtime context variable
+                if (contextMap) {
+                    const varName = parts[1];
+                    const modifier = parts[2]; // Optional modifier like 'json'
+                    const contextValue = contextMap.get(varName);
+
+                    if (contextValue === undefined) return '';
+
+                    // Handle JSON serialization for objects
+                    if (modifier === 'json' && typeof contextValue === 'object') {
+                        return JSON.stringify(contextValue);
+                    }
+
+                    // For objects without json modifier, serialize anyway
+                    if (typeof contextValue === 'object') {
+                        return JSON.stringify(contextValue);
+                    }
+
+                    return String(contextValue);
+                }
+                return '';
+
             case 'ternary':
                 // {ternary:condition?true_value:false_value}
                 const [condition, values] = parts[1].split('?');
                 const [trueValue, falseValue] = values.split(':');
                 return this.config.get(condition) ? trueValue : falseValue;
-                
+
             case 'concat':
                 // {concat:VAR1+VAR2+VAR3}
                 return parts[1].split('+')
                     .map(v => this.config.get(v) || '')
                     .join('');
-                    
+
             case 'upper':
                 // {upper:variable}
                 return (this.config.get(parts[1]) || '').toUpperCase();
-                
+
             case 'lower':
                 // {lower:variable}
                 return (this.config.get(parts[1]) || '').toLowerCase();
-                
+
+            case 'currentRow':
+                // {currentRow} - Current iteration data row from Examples/DataProvider
+                // Returns complete row data as JSON string
+                if (contextMap) {
+                    const currentRow = contextMap.get('currentRow');
+                    if (currentRow && typeof currentRow === 'object') {
+                        return JSON.stringify(currentRow);
+                    }
+                    return currentRow !== undefined ? String(currentRow) : '';
+                }
+                return '';
+
+            case 'testData':
+                // {testData} - Deprecated: Use {currentRow} instead
+                // Kept for backward compatibility
+                if (contextMap) {
+                    const testData = contextMap.get('testData');
+                    if (testData && typeof testData === 'object') {
+                        return JSON.stringify(testData);
+                    }
+                    return testData !== undefined ? String(testData) : '';
+                }
+                return '';
+
             default:
                 return `{${variable}}`;
         }

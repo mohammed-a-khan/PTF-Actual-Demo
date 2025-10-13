@@ -3,6 +3,7 @@ import { CSApiContext } from '../../api/context/CSApiContext';
 import { CSApiContextManager } from '../../api/context/CSApiContextManager';
 import { CSRequestTemplateEngine } from '../../api/templates/CSRequestTemplateEngine';
 import { CSReporter } from '../../reporter/CSReporter';
+import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -13,10 +14,12 @@ import * as path from 'path';
 export class CSAPIRequestBodySteps {
     private contextManager: CSApiContextManager;
     private templateEngine: CSRequestTemplateEngine;
+    private configManager: CSConfigurationManager;
 
     constructor() {
         this.contextManager = CSApiContextManager.getInstance();
         this.templateEngine = new CSRequestTemplateEngine();
+        this.configManager = CSConfigurationManager.getInstance();
     }
 
     private getCurrentContext(): CSApiContext {
@@ -104,7 +107,7 @@ export class CSAPIRequestBodySteps {
                 formData = {};
             }
 
-            const interpolatedValue = this.interpolateValue(fieldValue, context);
+            const interpolatedValue = this.configManager.interpolate(fieldValue, context.variables);
             formData[fieldName] = interpolatedValue;
 
             context.setVariable('requestBody', formData);
@@ -143,7 +146,7 @@ export class CSAPIRequestBodySteps {
                     throw new Error('Form field name cannot be empty');
                 }
 
-                const interpolatedValue = this.interpolateValue(fieldValue || '', context);
+                const interpolatedValue = this.configManager.interpolate(fieldValue || '', context.variables);
                 formData[fieldName] = interpolatedValue;
             }
 
@@ -170,7 +173,7 @@ export class CSAPIRequestBodySteps {
 
             if (typeof jsonContent === 'string') {
                 // Process template and parse JSON
-                const processedJSON = this.interpolateValue(jsonContent, context);
+                const processedJSON = this.configManager.interpolate(jsonContent, context.variables);
 
                 let jsonObject;
                 try {
@@ -193,7 +196,7 @@ export class CSAPIRequestBodySteps {
                         throw new Error('JSON property name cannot be empty');
                     }
 
-                    const interpolatedValue = this.interpolateValue(value || '', context);
+                    const interpolatedValue = this.configManager.interpolate(value || '', context.variables);
                     jsonObject[key] = this.parseJSONValue(interpolatedValue);
                 }
 
@@ -215,7 +218,7 @@ export class CSAPIRequestBodySteps {
         try {
             const context = this.getCurrentContext();
 
-            const processedXML = this.interpolateValue(xmlContent, context);
+            const processedXML = this.configManager.interpolate(xmlContent, context.variables);
             this.validateXML(processedXML);
 
             context.setVariable('requestBody', processedXML);
@@ -235,7 +238,7 @@ export class CSAPIRequestBodySteps {
         try {
             const context = this.getCurrentContext();
 
-            const interpolatedBody = this.interpolateValue(bodyContent, context);
+            const interpolatedBody = this.configManager.interpolate(bodyContent, context.variables);
             context.setVariable('requestBody', interpolatedBody);
 
             // Set content type if not already set
@@ -280,7 +283,7 @@ export class CSAPIRequestBodySteps {
                 };
             }
 
-            const interpolatedValue = this.interpolateValue(fieldValue, context);
+            const interpolatedValue = this.configManager.interpolate(fieldValue, context.variables);
             multipartData.fields[fieldName] = interpolatedValue;
 
             context.setVariable('requestBody', multipartData);
@@ -355,7 +358,7 @@ export class CSAPIRequestBodySteps {
                 graphqlBody = {};
             }
 
-            const processedQuery = this.interpolateValue(query, context);
+            const processedQuery = this.configManager.interpolate(query, context.variables);
             (graphqlBody as any).query = processedQuery;
 
             context.setVariable('requestBody', graphqlBody);
@@ -380,7 +383,7 @@ export class CSAPIRequestBodySteps {
                 graphqlBody = {};
             }
 
-            const processedVariables = this.interpolateValue(variablesJson, context);
+            const processedVariables = this.configManager.interpolate(variablesJson, context.variables);
 
             let variables: any;
             try {
@@ -408,7 +411,7 @@ export class CSAPIRequestBodySteps {
         try {
             const context = this.getCurrentContext();
 
-            const interpolatedJson = this.interpolateValue(jsonContent, context);
+            const interpolatedJson = this.configManager.interpolate(jsonContent, context.variables);
             const jsonBody = JSON.parse(interpolatedJson);
 
             context.setVariable('requestBody', jsonBody);
@@ -510,20 +513,6 @@ export class CSAPIRequestBodySteps {
         if (!xml.includes('<?xml') && !xml.includes('<') && !xml.includes('>')) {
             throw new Error('Invalid XML format');
         }
-    }
-
-    private interpolateValue(value: string, context: CSApiContext): string {
-        if (!value.includes('{{')) {
-            return value;
-        }
-
-        let interpolated = value;
-        interpolated = interpolated.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
-            const varValue = context.getVariable(varName);
-            return varValue !== undefined ? String(varValue) : match;
-        });
-
-        return interpolated;
     }
 
     private parseJSONValue(value: string): any {

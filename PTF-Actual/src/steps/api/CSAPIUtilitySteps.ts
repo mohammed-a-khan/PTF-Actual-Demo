@@ -238,7 +238,7 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const transformed = interpolatedValue.toUpperCase();
 
             context.setVariable(variableName, transformed);
@@ -255,7 +255,7 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const transformed = interpolatedValue.toLowerCase();
 
             context.setVariable(variableName, transformed);
@@ -272,7 +272,7 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const encoded = Buffer.from(interpolatedValue).toString('base64');
 
             context.setVariable(variableName, encoded);
@@ -289,7 +289,7 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const decoded = Buffer.from(interpolatedValue, 'base64').toString('utf-8');
 
             context.setVariable(variableName, decoded);
@@ -306,7 +306,7 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const encoded = encodeURIComponent(interpolatedValue);
 
             context.setVariable(variableName, encoded);
@@ -323,7 +323,7 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const decoded = decodeURIComponent(interpolatedValue);
 
             context.setVariable(variableName, decoded);
@@ -340,7 +340,7 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const hash = crypto.createHash('md5').update(interpolatedValue).digest('hex');
 
             context.setVariable(variableName, hash);
@@ -357,7 +357,7 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
             const hash = crypto.createHash('sha256').update(interpolatedValue).digest('hex');
 
             context.setVariable(variableName, hash);
@@ -461,8 +461,8 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue1 = this.interpolateValue(value1, context);
-            const interpolatedValue2 = this.interpolateValue(value2, context);
+            const interpolatedValue1 = this.configManager.interpolate(value1, context.variables);
+            const interpolatedValue2 = this.configManager.interpolate(value2, context.variables);
             const isEqual = interpolatedValue1 === interpolatedValue2;
 
             context.setVariable(variableName, isEqual);
@@ -479,8 +479,8 @@ export class CSAPIUtilitySteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue1 = this.interpolateValue(value1, context);
-            const interpolatedValue2 = this.interpolateValue(value2, context);
+            const interpolatedValue1 = this.configManager.interpolate(value1, context.variables);
+            const interpolatedValue2 = this.configManager.interpolate(value2, context.variables);
             const concatenated = interpolatedValue1 + interpolatedValue2;
 
             context.setVariable(variableName, concatenated);
@@ -492,17 +492,6 @@ export class CSAPIUtilitySteps {
     }
 
     // Helper methods
-    private interpolateValue(value: string, context: CSApiContext): string {
-        if (!value.includes('{{')) {
-            return value;
-        }
-
-        return value.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
-            const varValue = context.getVariable(varName);
-            return varValue !== undefined ? String(varValue) : match;
-        });
-    }
-
     private extractJSONPath(response: CSResponse, jsonPath: string): any {
         const path = jsonPath.replace('$.', '').replace('$', '');
         const parts = path.split('.');

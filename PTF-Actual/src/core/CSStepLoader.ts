@@ -146,6 +146,7 @@ export class CSStepLoader {
      */
     public async loadRequiredSteps(requirements: ModuleRequirements, features?: ParsedFeature[]): Promise<void> {
         // Check if framework steps should be loaded based on STEP_DEFINITIONS_PATH
+        // Users control which framework steps to load via STEP_DEFINITIONS_PATH config
         const stepPaths = this.config.get('STEP_DEFINITIONS_PATH', '');
         const shouldLoadFrameworkSteps = stepPaths.includes('node_modules/cs-playwright-test-framework') ||
                                          stepPaths.includes('cs-playwright-test-framework/dist/steps');
@@ -155,7 +156,16 @@ export class CSStepLoader {
             return;
         }
 
-        const strategy = this.config.get('STEP_LOADING_STRATEGY', 'all');
+        // Use the same SELECTIVE_STEP_LOADING config as CSBDDEngine for consistency
+        let useSelectiveLoading = this.config.getBoolean('SELECTIVE_STEP_LOADING', true);
+
+        // If explicit modules were specified via --modules flag, force selective loading
+        const explicitModules = this.config.get('MODULES');
+        if (explicitModules) {
+            useSelectiveLoading = true;
+            CSReporter.debug(`[StepLoader] Explicit modules specified (${explicitModules}), forcing selective loading`);
+        }
+
         const startTime = Date.now();
         let groupsLoaded: StepGroup[] = [];
 
@@ -163,7 +173,7 @@ export class CSStepLoader {
         const stepPatterns = features ? this.extractStepPatterns(features) : undefined;
         const filesLoaded: string[] = [];
 
-        if (strategy === 'selective') {
+        if (useSelectiveLoading) {
             // SELECTIVE LOADING: Only load required step groups
             // Always load common steps (contains browser/UI steps)
             if (!this.loadedGroups.has('common')) {
@@ -208,11 +218,12 @@ export class CSStepLoader {
         if (this.config.getBoolean('MODULE_DETECTION_LOGGING', false) && groupsLoaded.length > 0) {
             const duration = Date.now() - startTime;
             const workerId = process.env.WORKER_ID ? `Worker ${process.env.WORKER_ID}` : 'Main';
+            const mode = useSelectiveLoading ? 'selective' : 'all';
 
             if (stepPatterns && filesLoaded.length > 0) {
-                CSReporter.debug(`[${workerId}] Loaded framework step groups (${strategy}, file-level): ${groupsLoaded.join(', ')} - ${filesLoaded.length} files (${duration}ms)`);
+                CSReporter.debug(`[${workerId}] Loaded framework step groups (${mode}, file-level): ${groupsLoaded.join(', ')} - ${filesLoaded.length} files (${duration}ms)`);
             } else {
-                CSReporter.debug(`[${workerId}] Loaded framework step groups (${strategy}): ${groupsLoaded.join(', ')} (${duration}ms)`);
+                CSReporter.debug(`[${workerId}] Loaded framework step groups (${mode}): ${groupsLoaded.join(', ')} (${duration}ms)`);
             }
         }
     }
@@ -324,7 +335,11 @@ export class CSStepLoader {
             const content = fs.readFileSync(filePath, 'utf8');
 
             // Check if file contains step definition decorators
-            if (!content.includes('@CSBDDStepDef') && !content.includes('CSBDDStepDef(')) {
+            // Source (.ts): @CSBDDStepDef('pattern')
+            // Compiled (.js): CSBDDStepDef)('pattern')
+            if (!content.includes('@CSBDDStepDef') &&
+                !content.includes('CSBDDStepDef(') &&
+                !content.includes('CSBDDStepDef)')) {
                 return false;
             }
 
@@ -424,7 +439,7 @@ export class CSStepLoader {
     ): Promise<void> {
         if (!project) return;
 
-        const selectiveEnabled = this.config.get('STEP_LOADING_STRATEGY', 'all') === 'selective';
+        const selectiveEnabled = this.config.getBoolean('SELECTIVE_STEP_LOADING', true);
 
         // If selective loading disabled or no feature files provided, fallback to load all
         if (!selectiveEnabled || featureFiles.length === 0) {

@@ -1,6 +1,6 @@
 {
   "name": "cs-playwright-test-framework",
-  "version": "1.0.6",
+  "version": "1.5.4",
   "description": "CS Playwright Test Framework - Lightning-fast, configurable, AI-powered self-healing test automation with Playwright",
   "main": "dist/lib.js",
   "types": "dist/lib.d.ts",

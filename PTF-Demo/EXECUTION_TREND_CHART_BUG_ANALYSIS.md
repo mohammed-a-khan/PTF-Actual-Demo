@@ -115,7 +115,7 @@ Values: [0,        0,       0,       26.32,    26.32,   0,       45.45  ]
 
 ### 1. Check Framework Fix Applied:
 ```bash
-grep -A 5 "dayEntries = historyData.filter" /mnt/e/PTF-Demo-Project/node_modules/cs-test-automation-framework/dist/reporter/CSHtmlReportGeneration.js
+grep -A 5 "dayEntries = historyData.filter" /mnt/e/PTF-Demo-Project/node_modules/cs-playwright-test-framework/dist/reporter/CSHtmlReportGeneration.js
 ```
 
 Expected: Should see the new `.filter()` code at line 3084
@@ -209,6 +209,6 @@ const last = dayEntries.length > 0 ? dayEntries[dayEntries.length - 1].passRate 
 **Bug:** Chart shows FIRST execution of each day, ignoring all subsequent runs
 **Fix:** Changed to show LAST execution (most recent) of each day
 **Impact:** Chart now shows accurate daily test trends
-**Status:** ✅ Fixed in `/mnt/e/PTF-Demo-Project/node_modules/cs-test-automation-framework/dist/reporter/CSHtmlReportGeneration.js:3084`
+**Status:** ✅ Fixed in `/mnt/e/PTF-Demo-Project/node_modules/cs-playwright-test-framework/dist/reporter/CSHtmlReportGeneration.js:3084`
 
 **Next step:** Run any test to generate a new report and verify the fix works!

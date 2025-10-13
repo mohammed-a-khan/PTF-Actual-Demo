@@ -91,6 +91,10 @@ Options:
   --project <name>      Project name (required)
   --features <path>     Path to feature files
   --tags <tags>         Tags to filter scenarios
+  --modules <list>      Explicit module specification (api, database, ui, soap)
+                        Examples: --modules=api
+                                 --modules=api,database
+                                 --modules=ui,api,database
   --parallel            Run tests in parallel
   --workers <n>         Number of parallel workers
   --headless            Run browser in headless mode
@@ -259,7 +263,14 @@ async function execute(mode: string) {
                 options.browser = args.browser;
                 config.set('BROWSER', args.browser);
             }
-            
+
+            // Handle explicit module specification
+            if (args.modules || args.m) {
+                const modules = args.modules || args.m;
+                options.modules = modules;
+                config.set('MODULES', modules);
+            }
+
             // Handle parallel execution with workers
             if (args.parallel !== undefined || args.workers !== undefined) {
                 const workerCount = args.workers ? parseInt(args.workers) : 3;

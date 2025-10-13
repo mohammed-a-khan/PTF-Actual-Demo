@@ -1,5 +1,5 @@
-import { CSBasePage, CSWebElement, CSReporter } from 'cs-test-automation-framework';
-import { CSPage, CSGetElement, CSGetElements } from 'cs-test-automation-framework';
+import { CSBasePage, CSWebElement, CSReporter } from 'cs-playwright-test-framework';
+import { CSPage, CSGetElement, CSGetElements } from 'cs-playwright-test-framework';
 
 @CSPage('orangehrm-dashboard')
 export class OrangeHRMDashboardPage extends CSBasePage {

@@ -1,4 +1,4 @@
-import { CSAPIClient, CSAPIExecutor, CSRequestBuilder } from 'cs-test-automation-framework';
+import { CSAPIClient, CSAPIExecutor, CSRequestBuilder } from 'cs-playwright-test-framework';
 
 async function testAPIFunctionality() {
     console.log('Testing API functionality...');

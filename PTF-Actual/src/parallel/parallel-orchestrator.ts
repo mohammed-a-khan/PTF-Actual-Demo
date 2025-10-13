@@ -729,7 +729,8 @@ export class ParallelOrchestrator {
             'ADO_TEST_PLAN_ID', 'ADO_TEST_SUITE_ID',
             'ADO_INTEGRATION_ENABLED',
             'CAPTURE_SCREENSHOTS', 'CAPTURE_VIDEOS',
-            'HAR_ENABLED', 'TRACE_ENABLED'
+            'HAR_ENABLED', 'TRACE_ENABLED',
+            'MODULES'  // Pass explicit module specification to workers for selective loading
         ];
 
         const config: Record<string, any> = {};

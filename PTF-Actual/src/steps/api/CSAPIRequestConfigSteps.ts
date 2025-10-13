@@ -84,7 +84,7 @@ export class CSAPIRequestConfigSteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedPath = this.interpolateValue(path, context);
+            const interpolatedPath = this.configManager.interpolate(path, context.variables);
 
             context.setVariable('requestPath', interpolatedPath);
             CSReporter.pass(`Request path set to: ${interpolatedPath}`);
@@ -162,7 +162,7 @@ export class CSAPIRequestConfigSteps {
                     throw new Error('Query parameter key cannot be empty');
                 }
 
-                const interpolatedValue = this.interpolateValue(String(value || ''), context);
+                const interpolatedValue = this.configManager.interpolate(String(value || ''), context.variables);
                 params[key] = interpolatedValue;
             }
 
@@ -182,7 +182,7 @@ export class CSAPIRequestConfigSteps {
 
         try {
             const context = this.getCurrentContext();
-            const interpolatedValue = this.interpolateValue(value, context);
+            const interpolatedValue = this.configManager.interpolate(value, context.variables);
 
             const existingParams = context.getVariable('queryParams') || {};
             existingParams[key] = interpolatedValue;
@@ -505,19 +505,5 @@ export class CSAPIRequestConfigSteps {
         if (config.auth) {
             context.auth = config.auth;
         }
-    }
-
-    private interpolateValue(value: string, context: CSApiContext): string {
-        if (!value.includes('{{')) {
-            return value;
-        }
-
-        let interpolated = value;
-        interpolated = interpolated.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
-            const varValue = context.getVariable(varName);
-            return varValue !== undefined ? String(varValue) : match;
-        });
-
-        return interpolated;
     }
 }

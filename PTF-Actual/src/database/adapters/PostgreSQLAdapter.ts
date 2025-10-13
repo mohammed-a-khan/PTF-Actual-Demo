@@ -103,22 +103,31 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
   }
 
   async query(
-    connection: DatabaseConnection, 
-    sql: string, 
-    params?: any[], 
+    connection: DatabaseConnection,
+    sql: string,
+    params?: any[],
     options?: QueryOptions
   ): Promise<QueryResult> {
     const conn = connection.instance as any;
-    
-    
+
+    // Convert universal ? placeholders to PostgreSQL $1, $2, $3 format
+    let postgresSql = sql;
+    if (params && params.length > 0 && sql.includes('?')) {
+      let paramIndex = 0;
+      postgresSql = sql.replace(/\?/g, () => {
+        paramIndex++;
+        return `$${paramIndex}`;
+      });
+    }
+
     try {
       const startTime = Date.now();
-      
+
       if (options?.timeout) {
         await this.setStatementTimeout(conn, options.timeout);
       }
 
-      const result = await conn.query(sql, params || []);
+      const result = await conn.query(postgresSql, params || []);
       const executionTime = Date.now() - startTime;
 
       if (options?.timeout) {
@@ -152,10 +161,11 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
     params?: any[],
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const paramPlaceholders = params ? 
-      params.map((_, i) => `$${i + 1}`).join(', ') : '';
+    // Use universal ? placeholders - they will be converted by query() method
+    const paramPlaceholders = params ?
+      params.map(() => '?').join(', ') : '';
     const sql = `SELECT * FROM ${this.escapeIdentifier(procedureName)}(${paramPlaceholders})`;
-    
+
     return this.query(connection, sql, params, options);
   }
 
@@ -165,10 +175,11 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
     params?: any[],
     options?: QueryOptions
   ): Promise<any> {
-    const paramPlaceholders = params ? 
-      params.map((_, i) => `$${i + 1}`).join(', ') : '';
+    // Use universal ? placeholders - they will be converted by query() method
+    const paramPlaceholders = params ?
+      params.map(() => '?').join(', ') : '';
     const sql = `SELECT ${this.escapeIdentifier(functionName)}(${paramPlaceholders}) AS result`;
-    
+
     const result = await this.query(connection, sql, params, options);
     return result.rows[0]?.result;
   }

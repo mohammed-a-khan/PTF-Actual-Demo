@@ -1,4 +1,4 @@
-import { StepDefinitions, Page, CSBDDStepDef, CSConfigurationManager, CSReporter } from 'cs-test-automation-framework';
+import { StepDefinitions, Page, CSBDDStepDef, CSConfigurationManager, CSReporter } from 'cs-playwright-test-framework';
 import { OrangeHRMLoginPage } from '../pages/OrangeHRMLoginPage';
 import { OrangeHRMDashboardPage } from '../pages/OrangeHRMDashboardPage';
 import { expect } from '@playwright/test';

@@ -1,4 +1,4 @@
-import { CSBDDStepDef, StepDefinitions, CSReporter, CSBrowserManager, CSExpect } from 'cs-test-automation-framework';
+import { CSBDDStepDef, StepDefinitions, CSReporter, CSBrowserManager, CSExpect } from 'cs-playwright-test-framework';
 
 /**
  * Step definitions for testing browser management enhancements
