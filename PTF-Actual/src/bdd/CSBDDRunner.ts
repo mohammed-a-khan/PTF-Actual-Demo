@@ -2035,13 +2035,29 @@ export class CSBDDRunner {
     }
     
     private interpolateStepText(text: string, row?: string[], headers?: string[]): string {
-        if (!row || !headers) return text;
-        
         let interpolated = text;
-        headers.forEach((header, index) => {
-            interpolated = interpolated.replace(`<${header}>`, row[index]);
-        });
-        
+
+        // First, replace <field> placeholders from Examples table
+        if (row && headers) {
+            headers.forEach((header, index) => {
+                interpolated = interpolated.replace(`<${header}>`, row[index]);
+            });
+        }
+
+        // Second, call config.interpolate() to handle {config:}, {env:}, {currentRow}, etc.
+        // Build context map with currentRow and testData for interpolation
+        const contextMap = new Map<string, any>();
+        const currentRow = this.context.getVariable('currentRow');
+        const testData = this.context.getVariable('testData');
+        if (currentRow !== undefined) {
+            contextMap.set('currentRow', currentRow);
+        }
+        if (testData !== undefined) {
+            contextMap.set('testData', testData);
+        }
+
+        interpolated = this.config.interpolate(interpolated, contextMap);
+
         return interpolated;
     }
     

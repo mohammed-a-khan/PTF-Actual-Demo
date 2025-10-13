@@ -113,12 +113,33 @@ export class CSAIContextManager {
             lowerStep.includes('radio') ||
             lowerStep.includes('dropdown') ||
             lowerStep.includes('scroll') ||
-            lowerStep.includes('hover')) {
+            lowerStep.includes('hover') ||
+            lowerStep.includes('menu') ||
+            lowerStep.includes('option') ||
+            lowerStep.includes('item') ||
+            lowerStep.includes('link') ||
+            lowerStep.includes('tab') ||
+            lowerStep.includes('header') ||
+            lowerStep.includes('footer') ||
+            lowerStep.includes('modal') ||
+            lowerStep.includes('dialog') ||
+            lowerStep.includes('popup') ||
+            lowerStep.includes('form') ||
+            lowerStep.includes('label') ||
+            lowerStep.includes('text') ||
+            lowerStep.includes('image') ||
+            lowerStep.includes('icon') ||
+            lowerStep.includes('dashboard') ||
+            lowerStep.includes('login') ||
+            lowerStep.includes('logout') ||
+            lowerStep.includes('profile') ||
+            lowerStep.includes('sidebar') ||
+            lowerStep.includes('navigation')) {
             return 'ui';
         }
 
-        // Default to unknown
-        return 'unknown';
+        // Default to UI if not clearly API/Database (most steps are UI in BDD tests)
+        return 'ui';
     }
 
     /**

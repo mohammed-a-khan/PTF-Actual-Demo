@@ -5,15 +5,16 @@ import { CSEncryptionUtil } from '../utils/CSEncryptionUtil';
 // Removed CSReporter import for performance - will use console.log instead
 
 /**
- * CS Configuration Manager - 7-Level Hierarchy System
+ * CS Configuration Manager - 8-Level Hierarchy System
  * Priority Order (Highest to Lowest):
  * 1. Command line arguments (override everything)
  * 2. Environment variables (override config files)
- * 3. config/{project}/environments/{environment}.env
- * 4. config/{project}/common/common.env
- * 5. config/common/environments/{environment}.env
- * 6. config/common/common.env
- * 7. config/global.env (base defaults)
+ * 3. config/{project}/environments/{environment}.env (HIGHEST file priority)
+ * 4. config/{project}/*.env files (e.g., orangehrm.env)
+ * 5. config/{project}/common/common.env
+ * 6. config/common/environments/{environment}.env
+ * 7. config/common/common.env
+ * 8. config/global.env (base defaults)
  */
 export class CSConfigurationManager {
     private static instance: CSConfigurationManager;
@@ -55,11 +56,11 @@ export class CSConfigurationManager {
         await this.loadConfig(`config/${project}/common/common.env`, 'Project common');
         await this.loadAllEnvFilesFromDirectory(`config/${project}/common`, 'Project common configs');
 
-        // Level 3: Project environment specific (Highest file priority)
-        await this.loadConfig(`config/${project}/environments/${environment}.env`, 'Project environment');
-
-        // Also load all .env files from project root directory
+        // Level 3.5: Load all .env files from project root directory (BEFORE environment-specific)
         await this.loadAllEnvFilesFromDirectory(`config/${project}`, 'Project configs', true);
+
+        // Level 3: Project environment specific (Highest file priority - MUST BE LAST)
+        await this.loadConfig(`config/${project}/environments/${environment}.env`, 'Project environment');
 
         // Level 2: Environment variables (override all files)
         this.loadEnvironmentVariables();

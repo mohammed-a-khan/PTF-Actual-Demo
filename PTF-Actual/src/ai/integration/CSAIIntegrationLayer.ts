@@ -103,9 +103,10 @@ export class CSAIIntegrationLayer {
                 return true;
             }
 
-            // Unknown context - be conservative, disable AI
-            CSReporter.debug(`[AIIntegration][${this.workerId}] AI DISABLED for unknown context: "${stepText}" - using existing retry behavior`);
-            return false;
+            // Should never reach here since context now defaults to 'ui'
+            // But keep for safety in case context detection changes
+            CSReporter.debug(`[AIIntegration][${this.workerId}] AI ENABLED for default context (assuming UI): "${stepText}"`);
+            return true;
         }
 
         // UI-only mode disabled, activate for all steps

@@ -327,7 +327,7 @@ class WorkerProcess {
             }
 
             // INTELLIGENT MODULE DETECTION & SELECTIVE STEP LOADING (Worker Mode)
-            const projectKey = message.config.project || message.config.PROJECT || 'orangehrm';
+            const projectKey = message.config.project || message.config.PROJECT || 'default';
 
             // Check if intelligent module detection is enabled (default: true)
             const moduleDetectionEnabled = this.configManager.getBoolean('MODULE_DETECTION_ENABLED', true);

@@ -516,8 +516,8 @@ export class CSHtmlReportGenerator {
             },
             test: {
                 environment: this.config.get('ENVIRONMENT', 'dev'),
-                baseUrl: this.config.get('BASE_URL', 'https://opensource-demo.orangehrmlive.com/web/index.php/auth/login'),
-                apiBaseUrl: this.config.get('API_BASE_URL', 'https://opensource-demo.orangehrmlive.com/web/index.php/api/v2'),
+                baseUrl: this.config.get('BASE_URL', 'Not configured'),
+                apiBaseUrl: this.config.get('API_BASE_URL', 'Not configured'),
                 browser: this.config.get('BROWSER', 'chromium'),
                 browserVersion: process.env.BROWSER_VERSION || 'Chromium 120+',
                 headless: this.config.getBoolean('HEADLESS', true) ? 'Yes' : 'No',

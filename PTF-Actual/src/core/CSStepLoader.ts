@@ -24,45 +24,8 @@ export class CSStepLoader {
     private config: CSConfigurationManager;
     private frameworkRoot: string;
 
-    /**
-     * Step definition file groups
-     * Maps module types to their step definition files
-     */
-    private readonly STEP_GROUPS: Record<StepGroup, string[]> = {
-        common: [
-            'src/steps/common/CSCommonSteps.ts'
-        ],
-        api: [
-            'src/steps/api/CSAPIRequestSteps.ts',
-            'src/steps/api/CSAPIRequestExecutionSteps.ts',
-            'src/steps/api/CSAPIResponseValidationSteps.ts',
-            'src/steps/api/CSAPIValidationSteps.ts',
-            'src/steps/api/CSAPIRequestBodySteps.ts',
-            'src/steps/api/CSAPIRequestHeaderSteps.ts',
-            'src/steps/api/CSAPIRequestConfigSteps.ts',
-            'src/steps/api/CSAPIAuthenticationSteps.ts',
-            'src/steps/api/CSAPIUtilitySteps.ts',
-            'src/steps/api/CSAPIChainingSteps.ts',
-            'src/steps/api/CSAPIGenericSteps.ts'
-        ],
-        database: [
-            'src/steps/database/CSDatabaseAPISteps.ts',
-            'src/steps/database/QueryExecutionSteps.ts',
-            'src/steps/database/StoredProcedureSteps.ts',
-            'src/steps/database/DatabaseGenericSteps.ts',
-            'src/steps/database/ConnectionSteps.ts',
-            'src/steps/database/TransactionSteps.ts',
-            'src/steps/database/DataValidationSteps.ts',
-            'src/steps/database/DatabaseUtilitySteps.ts'
-        ],
-        soap: [
-            'src/steps/soap/CSSoapSteps.ts'
-        ],
-        browser: [
-            // Browser/UI steps are included in common steps
-            // This group exists for future expansion
-        ]
-    };
+    // No hardcoded step groups - framework discovers step files automatically
+    // by scanning dist/steps/{groupName}/ directories
 
     private constructor() {
         this.config = CSConfigurationManager.getInstance();
@@ -82,32 +45,39 @@ export class CSStepLoader {
         try {
             // __dirname in compiled code points to dist/core/
             // Go up to find the framework root
-            const thisFileDir = __dirname; // e.g., /path/to/node_modules/cs-playwright-test-framework/dist/core
+            const thisFileDir = __dirname; // e.g., /path/to/node_modules/@scope/framework/dist/core
 
             // Check if we're in dist/core (compiled framework)
             if (thisFileDir.includes('dist/core') || thisFileDir.includes('dist\\core')) {
                 // Go up two levels: dist/core -> dist -> framework-root
                 const frameworkRoot = path.resolve(thisFileDir, '../..');
 
-                // Verify this is the framework by checking package.json
+                // Verify this is the framework by checking package.json and framework structure
                 const packageJsonPath = path.join(frameworkRoot, 'package.json');
-                if (fs.existsSync(packageJsonPath)) {
+                const stepsDir = path.join(frameworkRoot, 'dist', 'steps');
+                if (fs.existsSync(packageJsonPath) && fs.existsSync(stepsDir)) {
                     const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-                    if (pkg.name === 'cs-playwright-test-framework') {
-                        CSReporter.debug(`Framework root detected: ${frameworkRoot}`);
+                    // Accept any package name containing 'cs-playwright-test-framework'
+                    if (pkg.name && pkg.name.includes('cs-playwright-test-framework')) {
+                        CSReporter.debug(`Framework root detected: ${frameworkRoot} (${pkg.name})`);
                         return frameworkRoot;
                     }
                 }
             }
 
-            // Fallback: Try to resolve from node_modules
-            try {
-                const frameworkPackagePath = require.resolve('cs-playwright-test-framework/package.json');
-                const frameworkRoot = path.dirname(frameworkPackagePath);
-                CSReporter.debug(`Framework root resolved from node_modules: ${frameworkRoot}`);
-                return frameworkRoot;
-            } catch (e) {
-                // Not in node_modules, probably development mode
+            // Fallback: Try to find package.json by walking up from __dirname
+            // This handles cases where the package is installed in node_modules
+            let currentDir = thisFileDir;
+            for (let i = 0; i < 5; i++) { // Max 5 levels up
+                const packageJsonPath = path.join(currentDir, 'package.json');
+                if (fs.existsSync(packageJsonPath)) {
+                    const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+                    if (pkg.name && pkg.name.includes('cs-playwright-test-framework')) {
+                        CSReporter.debug(`Framework root resolved: ${currentDir} (${pkg.name})`);
+                        return currentDir;
+                    }
+                }
+                currentDir = path.dirname(currentDir);
             }
         } catch (error) {
             CSReporter.debug(`Framework root detection fallback to cwd: ${error}`);
@@ -148,8 +118,11 @@ export class CSStepLoader {
         // Check if framework steps should be loaded based on STEP_DEFINITIONS_PATH
         // Users control which framework steps to load via STEP_DEFINITIONS_PATH config
         const stepPaths = this.config.get('STEP_DEFINITIONS_PATH', '');
-        const shouldLoadFrameworkSteps = stepPaths.includes('node_modules/cs-playwright-test-framework') ||
-                                         stepPaths.includes('cs-playwright-test-framework/dist/steps');
+
+        // Check if STEP_DEFINITIONS_PATH contains any framework-related paths
+        // Support both regular and scoped package names (e.g., @scope/package)
+        const shouldLoadFrameworkSteps = stepPaths.includes('node_modules') &&
+                                         stepPaths.includes('cs-playwright-test-framework');
 
         if (!shouldLoadFrameworkSteps) {
             CSReporter.debug('[StepLoader] Framework steps not in STEP_DEFINITIONS_PATH, skipping framework step loading');
@@ -229,72 +202,69 @@ export class CSStepLoader {
     }
 
     /**
-     * Load all step definitions for a specific group
-     * @param groupName - The step group to load
+     * Load all step definitions for a specific group by scanning its directory
+     * @param groupName - The step group to load (api, database, common, soap, browser)
      * @param stepPatterns - Optional step patterns for file-level filtering
      * @returns Array of loaded file names
      */
     private async loadStepGroup(groupName: StepGroup, stepPatterns?: Set<string>): Promise<string[]> {
-        const files = this.STEP_GROUPS[groupName] || [];
         const loadedFiles: string[] = [];
 
-        for (const file of files) {
-            try {
-                const fullPath = this.resolvePath(file);
-                let pathToCheck = fullPath;
+        // Determine the directory to scan
+        // Try dist/steps/{groupName}/ first (compiled), then src/steps/{groupName}/ (dev mode)
+        const distDir = path.join(this.frameworkRoot, 'dist', 'steps', groupName);
+        const srcDir = path.join(this.frameworkRoot, 'src', 'steps', groupName);
 
-                // Check if file exists, try alternate path for dev mode
-                if (!fs.existsSync(fullPath)) {
-                    const srcPath = fullPath.replace('/dist/', '/src/').replace('.js', '.ts');
-                    if (fs.existsSync(srcPath)) {
-                        pathToCheck = srcPath;
-                    } else {
-                        CSReporter.warn(`Framework step file not found: ${fullPath}`);
-                        continue;
-                    }
-                }
+        let stepDir = distDir;
+        let isDevMode = false;
 
-                // If step patterns provided, check if file contains required steps
-                if (stepPatterns && stepPatterns.size > 0) {
-                    const containsSteps = await this.fileContainsSteps(pathToCheck, stepPatterns);
-                    if (!containsSteps) {
-                        CSReporter.debug(`Skipping framework step file (no required steps): ${path.basename(pathToCheck)}`);
-                        continue;
-                    }
-                }
-
-                // Load the file
-                require(pathToCheck);
-                loadedFiles.push(path.basename(pathToCheck));
-                CSReporter.debug(`Loaded framework step file: ${path.basename(pathToCheck)}`);
-
-            } catch (error: any) {
-                CSReporter.error(`Failed to load framework step file ${file}: ${error.message}`);
+        if (!fs.existsSync(distDir)) {
+            if (fs.existsSync(srcDir)) {
+                stepDir = srcDir;
+                isDevMode = true;
+                CSReporter.debug(`[StepLoader] Using dev mode for ${groupName} steps: ${srcDir}`);
+            } else {
+                CSReporter.debug(`[StepLoader] No step directory found for group: ${groupName} (tried ${distDir} and ${srcDir})`);
+                this.loadedGroups.add(groupName);
+                return loadedFiles;
             }
+        }
+
+        // Read all files in the directory
+        try {
+            const entries = fs.readdirSync(stepDir, { withFileTypes: true });
+
+            for (const entry of entries) {
+                if (!entry.isFile()) continue;
+                if (!this.isStepFile(entry.name)) continue;
+
+                const fullPath = path.join(stepDir, entry.name);
+
+                try {
+                    // If step patterns provided, check if file contains required steps
+                    if (stepPatterns && stepPatterns.size > 0) {
+                        const containsSteps = await this.fileContainsSteps(fullPath, stepPatterns);
+                        if (!containsSteps) {
+                            CSReporter.debug(`Skipping framework step file (no required steps): ${entry.name}`);
+                            continue;
+                        }
+                    }
+
+                    // Load the file
+                    require(fullPath);
+                    loadedFiles.push(entry.name);
+                    CSReporter.debug(`Loaded framework step file: ${entry.name}`);
+
+                } catch (error: any) {
+                    CSReporter.error(`Failed to load framework step file ${entry.name}: ${error.message}`);
+                }
+            }
+        } catch (error: any) {
+            CSReporter.error(`Failed to read step directory ${stepDir}: ${error.message}`);
         }
 
         this.loadedGroups.add(groupName);
         return loadedFiles;
-    }
-
-    /**
-     * Resolve step file path relative to framework root
-     * Automatically converts src/ paths to dist/ paths when framework is compiled
-     */
-    private resolvePath(relativePath: string): string {
-        // Convert src/ to dist/ for framework step files
-        let adjustedPath = relativePath;
-        if (relativePath.startsWith('src/')) {
-            adjustedPath = relativePath.replace('src/', 'dist/');
-        }
-
-        // Replace .ts extension with .js for compiled files
-        if (adjustedPath.endsWith('.ts')) {
-            adjustedPath = adjustedPath.replace('.ts', '.js');
-        }
-
-        const resolvedPath = path.resolve(this.frameworkRoot, adjustedPath);
-        return resolvedPath;
     }
 
     /**
@@ -343,60 +313,32 @@ export class CSStepLoader {
                 return false;
             }
 
-            // Check if file contains any of the step patterns
+            // Optimization: Extract significant keywords from step patterns (not full regex matching)
+            // This avoids expensive regex operations for every single step
+            const keywords = new Set<string>();
             for (const pattern of stepPatterns) {
-                try {
-                    // Remove quoted values and parameters to get base text
-                    const baseText = pattern
-                        .replace(/"[^"]*"/g, '')  // Remove quoted strings
-                        .replace(/\d+/g, '')       // Remove numbers
-                        .replace(/^\s*(Given|When|Then|And|But)\s+/i, '') // Remove Gherkin keywords
-                        .trim();
+                // Extract key words (4+ chars) from the pattern
+                const words = pattern
+                    .toLowerCase()
+                    .replace(/[^a-z0-9\s]/g, ' ')
+                    .split(/\s+/)
+                    .filter(w => w.length >= 4 && !['given', 'when', 'then', 'with', 'that', 'should', 'have', 'from', 'into', 'this'].includes(w));
 
-                    // Split into significant words (excluding empty strings)
-                    const stepWords = baseText.split(/\s+/).filter(word => word.length > 2);
+                words.forEach(w => keywords.add(w));
 
-                    if (stepWords.length > 0) {
-                        // Create pattern that matches the decorator format with {string} or {int} parameters
-                        const searchPattern = stepWords.join('.*');
-                        const regex = new RegExp(`@CSBDDStepDef\\(['\"\`].*${searchPattern}.*['\"\`]\\)`, 'i');
-                        if (regex.test(content)) {
-                            return true;
-                        }
+                // Early exit if we find enough keywords
+                if (keywords.size > 20) break;
+            }
 
-                        // Also check for the exact pattern without the Gherkin keyword
-                        const withoutKeyword = pattern.replace(/^\s*(Given|When|Then|And|But)\s+/i, '');
-
-                        // Convert the actual step text to a pattern that matches parameter placeholders
-                        const stepPattern = withoutKeyword
-                            .replace(/"[^"]*"/g, '{string}')           // Replace quoted strings with {string}
-                            .replace(/\b\d+\.\d+\b/g, '{float}')       // Replace floats with {float}
-                            .replace(/\b\d+\b/g, '{int}')              // Replace integers with {int}
-                            .replace(/\b(true|false)\b/gi, '{boolean}') // Replace booleans with {boolean}
-                            .replace(/\{[^}]+\}/g, (match) => match);   // Keep existing placeholders
-
-                        // Check if this pattern exists in the file
-                        if (content.includes(stepPattern)) {
-                            return true;
-                        }
-
-                        // Also try a more generic match for any {word} pattern
-                        const genericPattern = withoutKeyword
-                            .replace(/"[^"]*"/g, '{word}')
-                            .replace(/\b\d+\.\d+\b/g, '{word}')
-                            .replace(/\b\d+\b/g, '{word}')
-                            .replace(/\b(true|false)\b/gi, '{word}');
-
-                        if (content.includes(genericPattern)) {
-                            return true;
-                        }
-                    }
-                } catch (error) {
-                    // Continue if regex fails
-                    continue;
+            // Check if file content contains any of the keywords
+            const contentLower = content.toLowerCase();
+            for (const keyword of keywords) {
+                if (contentLower.includes(keyword)) {
+                    return true;
                 }
             }
 
+            // If no keyword matches, assume file is not relevant
             return false;
         } catch (error: any) {
             CSReporter.warn(`Failed to read framework step file ${filePath}: ${error.message}`);
