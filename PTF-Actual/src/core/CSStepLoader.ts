@@ -141,37 +141,36 @@ export class CSStepLoader {
 
         const startTime = Date.now();
         let groupsLoaded: StepGroup[] = [];
-
-        // Extract step patterns from features for file-level filtering
-        const stepPatterns = features ? this.extractStepPatterns(features) : undefined;
         const filesLoaded: string[] = [];
+
+        CSReporter.info('[StepLoader] Loading framework step definitions...');
 
         if (useSelectiveLoading) {
             // SELECTIVE LOADING: Only load required step groups
             // Always load common steps (contains browser/UI steps)
             if (!this.loadedGroups.has('common')) {
-                const loaded = await this.loadStepGroup('common', stepPatterns);
+                const loaded = await this.loadStepGroup('common');
                 filesLoaded.push(...loaded);
                 groupsLoaded.push('common');
             }
 
             // Load API steps if required
             if (requirements.api && !this.loadedGroups.has('api')) {
-                const loaded = await this.loadStepGroup('api', stepPatterns);
+                const loaded = await this.loadStepGroup('api');
                 filesLoaded.push(...loaded);
                 groupsLoaded.push('api');
             }
 
             // Load Database steps if required
             if (requirements.database && !this.loadedGroups.has('database')) {
-                const loaded = await this.loadStepGroup('database', stepPatterns);
+                const loaded = await this.loadStepGroup('database');
                 filesLoaded.push(...loaded);
                 groupsLoaded.push('database');
             }
 
             // Load SOAP steps if required
             if (requirements.soap && !this.loadedGroups.has('soap')) {
-                const loaded = await this.loadStepGroup('soap', stepPatterns);
+                const loaded = await this.loadStepGroup('soap');
                 filesLoaded.push(...loaded);
                 groupsLoaded.push('soap');
             }
@@ -180,34 +179,30 @@ export class CSStepLoader {
             const allGroups: StepGroup[] = ['common', 'api', 'database', 'soap'];
             for (const group of allGroups) {
                 if (!this.loadedGroups.has(group)) {
-                    const loaded = await this.loadStepGroup(group, stepPatterns);
+                    const loaded = await this.loadStepGroup(group);
                     filesLoaded.push(...loaded);
                     groupsLoaded.push(group);
                 }
             }
         }
 
-        // Log loading results if enabled
-        if (this.config.getBoolean('MODULE_DETECTION_LOGGING', false) && groupsLoaded.length > 0) {
+        // Always log results
+        if (groupsLoaded.length > 0) {
             const duration = Date.now() - startTime;
             const workerId = process.env.WORKER_ID ? `Worker ${process.env.WORKER_ID}` : 'Main';
-            const mode = useSelectiveLoading ? 'selective' : 'all';
-
-            if (stepPatterns && filesLoaded.length > 0) {
-                CSReporter.debug(`[${workerId}] Loaded framework step groups (${mode}, file-level): ${groupsLoaded.join(', ')} - ${filesLoaded.length} files (${duration}ms)`);
-            } else {
-                CSReporter.debug(`[${workerId}] Loaded framework step groups (${mode}): ${groupsLoaded.join(', ')} (${duration}ms)`);
-            }
+            CSReporter.info(`[${workerId}] ✅ Loaded ${filesLoaded.length} framework step files in ${duration}ms`);
         }
     }
 
     /**
      * Load all step definitions for a specific group by scanning its directory
+     * OPTIMIZED: Fast loading without expensive file content analysis
      * @param groupName - The step group to load (api, database, common, soap, browser)
-     * @param stepPatterns - Optional step patterns for file-level filtering
+     * @param stepPatterns - Optional step patterns (IGNORED for performance - loads all files)
      * @returns Array of loaded file names
      */
     private async loadStepGroup(groupName: StepGroup, stepPatterns?: Set<string>): Promise<string[]> {
+        const startTime = Date.now();
         const loadedFiles: string[] = [];
 
         // Determine the directory to scan
@@ -216,134 +211,52 @@ export class CSStepLoader {
         const srcDir = path.join(this.frameworkRoot, 'src', 'steps', groupName);
 
         let stepDir = distDir;
-        let isDevMode = false;
 
         if (!fs.existsSync(distDir)) {
             if (fs.existsSync(srcDir)) {
                 stepDir = srcDir;
-                isDevMode = true;
-                CSReporter.debug(`[StepLoader] Using dev mode for ${groupName} steps: ${srcDir}`);
             } else {
-                CSReporter.debug(`[StepLoader] No step directory found for group: ${groupName} (tried ${distDir} and ${srcDir})`);
                 this.loadedGroups.add(groupName);
                 return loadedFiles;
             }
         }
 
-        // Read all files in the directory
+        // Read all files in the directory (single I/O operation)
         try {
             const entries = fs.readdirSync(stepDir, { withFileTypes: true });
 
-            for (const entry of entries) {
-                if (!entry.isFile()) continue;
-                if (!this.isStepFile(entry.name)) continue;
+            // Filter to step files only
+            const stepFiles = entries.filter(entry =>
+                entry.isFile() && this.isStepFile(entry.name)
+            );
 
+            if (stepFiles.length === 0) {
+                this.loadedGroups.add(groupName);
+                return loadedFiles;
+            }
+
+            CSReporter.debug(`[StepLoader] Loading ${stepFiles.length} ${groupName} step files...`);
+
+            // Load all step files (no expensive content analysis)
+            for (const entry of stepFiles) {
                 const fullPath = path.join(stepDir, entry.name);
-
                 try {
-                    // If step patterns provided, check if file contains required steps
-                    if (stepPatterns && stepPatterns.size > 0) {
-                        const containsSteps = await this.fileContainsSteps(fullPath, stepPatterns);
-                        if (!containsSteps) {
-                            CSReporter.debug(`Skipping framework step file (no required steps): ${entry.name}`);
-                            continue;
-                        }
-                    }
-
-                    // Load the file
                     require(fullPath);
                     loadedFiles.push(entry.name);
-                    CSReporter.debug(`Loaded framework step file: ${entry.name}`);
-
                 } catch (error: any) {
-                    CSReporter.error(`Failed to load framework step file ${entry.name}: ${error.message}`);
+                    CSReporter.error(`Failed to load ${entry.name}: ${error.message}`);
                 }
             }
+
+            const duration = Date.now() - startTime;
+            CSReporter.debug(`[StepLoader] Loaded ${loadedFiles.length} ${groupName} step files (${duration}ms)`);
+
         } catch (error: any) {
             CSReporter.error(`Failed to read step directory ${stepDir}: ${error.message}`);
         }
 
         this.loadedGroups.add(groupName);
         return loadedFiles;
-    }
-
-    /**
-     * Extract all unique step patterns from parsed features
-     * @param features - Parsed features
-     * @returns Set of step text patterns
-     */
-    private extractStepPatterns(features: ParsedFeature[]): Set<string> {
-        const stepPatterns = new Set<string>();
-
-        for (const feature of features) {
-            // Add background steps
-            if ((feature as any).background) {
-                (feature as any).background.steps.forEach((step: any) => {
-                    stepPatterns.add(step.text);
-                });
-            }
-
-            // Add scenario steps
-            for (const scenario of feature.scenarios) {
-                scenario.steps.forEach(step => {
-                    stepPatterns.add(step.text);
-                });
-            }
-        }
-
-        return stepPatterns;
-    }
-
-    /**
-     * Check if a file contains any of the required step patterns
-     * @param filePath - Path to the step definition file
-     * @param stepPatterns - Set of step text patterns to match
-     * @returns True if file contains any required steps
-     */
-    private async fileContainsSteps(filePath: string, stepPatterns: Set<string>): Promise<boolean> {
-        try {
-            const content = fs.readFileSync(filePath, 'utf8');
-
-            // Check if file contains step definition decorators
-            // Source (.ts): @CSBDDStepDef('pattern')
-            // Compiled (.js): CSBDDStepDef)('pattern')
-            if (!content.includes('@CSBDDStepDef') &&
-                !content.includes('CSBDDStepDef(') &&
-                !content.includes('CSBDDStepDef)')) {
-                return false;
-            }
-
-            // Optimization: Extract significant keywords from step patterns (not full regex matching)
-            // This avoids expensive regex operations for every single step
-            const keywords = new Set<string>();
-            for (const pattern of stepPatterns) {
-                // Extract key words (4+ chars) from the pattern
-                const words = pattern
-                    .toLowerCase()
-                    .replace(/[^a-z0-9\s]/g, ' ')
-                    .split(/\s+/)
-                    .filter(w => w.length >= 4 && !['given', 'when', 'then', 'with', 'that', 'should', 'have', 'from', 'into', 'this'].includes(w));
-
-                words.forEach(w => keywords.add(w));
-
-                // Early exit if we find enough keywords
-                if (keywords.size > 20) break;
-            }
-
-            // Check if file content contains any of the keywords
-            const contentLower = content.toLowerCase();
-            for (const keyword of keywords) {
-                if (contentLower.includes(keyword)) {
-                    return true;
-                }
-            }
-
-            // If no keyword matches, assume file is not relevant
-            return false;
-        } catch (error: any) {
-            CSReporter.warn(`Failed to read framework step file ${filePath}: ${error.message}`);
-            return false;
-        }
     }
 
     /**
