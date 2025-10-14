@@ -12,6 +12,28 @@ const getGherkin = () => {
 import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 
+//Import types from CSBDDTypes
+import type {
+    ParsedFeature,
+    ParsedScenario,
+    ParsedStep,
+    ParsedBackground,
+    ParsedRule,
+    ParsedExamples,
+    ExternalDataSource
+} from './CSBDDTypes';
+
+//Re-export types fro backward compatibility
+export type {
+    ParsedFeature,
+    ParsedScenario,
+    ParsedStep,
+    ParsedBackground,
+    ParsedRule,
+    ParsedExamples,
+    ExternalDataSource
+} from './CSBDDTypes';
+
 // Simple UUID function for AstBuilder
 function uuidFn(): string {
     return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -19,60 +41,6 @@ function uuidFn(): string {
         const v = c === 'x' ? r : (r & 0x3 | 0x8);
         return v.toString(16);
     });
-}
-
-export interface ParsedFeature {
-    name: string;
-    description?: string;
-    tags: string[];
-    scenarios: ParsedScenario[];
-    background?: ParsedBackground;
-    rules?: ParsedRule[];
-    uri?: string;  // Path to the feature file
-}
-
-export interface ParsedScenario {
-    name: string;
-    tags: string[];
-    steps: ParsedStep[];
-    examples?: ParsedExamples;
-    type: 'Scenario' | 'ScenarioOutline';
-}
-
-export interface ParsedStep {
-    keyword: string;
-    text: string;
-    dataTable?: any[][];
-    docString?: string;
-}
-
-export interface ParsedBackground {
-    name?: string;
-    steps: ParsedStep[];
-}
-
-export interface ParsedRule {
-    name: string;
-    scenarios: ParsedScenario[];
-}
-
-export interface ParsedExamples {
-    name?: string;
-    headers: string[];
-    rows: string[][];
-    dataSource?: ExternalDataSource;
-}
-
-export interface ExternalDataSource {
-    type: 'excel' | 'csv' | 'json' | 'xml' | 'database' | 'api';
-    source: string;
-    sheet?: string;
-    delimiter?: string;
-    path?: string;
-    xpath?: string;
-    filter?: string;
-    query?: string;
-    connection?: string;
 }
 
 export class CSBDDEngine {

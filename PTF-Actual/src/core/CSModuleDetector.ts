@@ -8,7 +8,9 @@
  * Backward Compatible: Feature-flag controlled, defaults to disabled
  */
 
-import { ParsedScenario, ParsedStep, ParsedFeature } from '../bdd/CSBDDEngine';
+import * as fs from 'fs';
+import * as path from 'path';
+import  type {ParsedScenario, ParsedStep, ParsedFeature } from '../bdd/CSBDDTypes';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from './CSConfigurationManager';
 

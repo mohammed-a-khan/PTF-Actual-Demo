@@ -1,17 +1,13 @@
 /**
  * CS Playwright Test Framework - API Testing Entry Point
  *
- * Lightweight entry point for API testing
+ * Only exports API-specific modules
  *
  * @example
  * import { CSAPIClient, CSAPIExecutor } from '@mdakhan.mak/cs-playwright-test-framework/api';
  */
 
-// Core (minimal)
-export { CSConfigurationManager } from '../core/CSConfigurationManager';
-export { CSReporter } from '../reporter/CSReporter';
-
-// API Testing Core
+// API Core
 export { CSAPIRunner } from '../api/CSAPIRunner';
 export { CSAPIValidator } from '../api/CSAPIValidator';
 export { CSAPIExecutor } from '../api/CSAPIExecutor';
@@ -63,15 +59,3 @@ export { CSSoapEnvelopeBuilder } from '../api/soap/CSSoapEnvelopeBuilder';
 // API Comparison & Matching
 export { CSRecordMatcher } from '../api/comparison/CSRecordMatcher';
 export { CSFieldMapper } from '../api/comparison/CSFieldMapper';
-
-// Assertions
-export { CSAssert } from '../assertions/CSAssert';
-export { CSExpect } from '../assertions/CSExpect';
-
-// Utilities
-export { CSValueResolver } from '../utils/CSValueResolver';
-export { CSEncryptionUtil } from '../utils/CSEncryptionUtil';
-
-// Data Management
-export { CSDataProvider } from '../data/CSDataProvider';
-export { CSDataGenerator } from '../data/CSDataGenerator';

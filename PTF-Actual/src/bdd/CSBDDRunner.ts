@@ -2058,6 +2058,20 @@ export class CSBDDRunner {
 
         interpolated = this.config.interpolate(interpolated, contextMap);
 
+        // DEBUG: Log interpolation for troubleshooting config: values
+        if (text.includes('{config:') && text !== interpolated) {
+            CSReporter.debug(`Step interpolation: "${text}" => "${interpolated}"`);
+        } else if (text.includes('{config:') && text === interpolated) {
+            // Config value wasn't found/replaced
+            const configPattern = /\{config:([^}]+)\}/g;
+            let match;
+            while ((match = configPattern.exec(text)) !== null) {
+                const configKey = match[1];
+                const configValue = this.config.get(configKey);
+                CSReporter.warn(`Config interpolation failed for key "${configKey}" - value: ${configValue === undefined ? 'UNDEFINED' : `"${configValue}"`}`);
+            }
+        }
+
         return interpolated;
     }
     

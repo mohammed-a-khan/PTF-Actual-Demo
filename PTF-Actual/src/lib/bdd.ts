@@ -1,23 +1,14 @@
 /**
  * CS Playwright Test Framework - BDD Entry Point
  *
- * Lightweight entry point for BDD testing
- * Use this instead of the main entry point for faster imports:
+ * Only exports BDD-specific modules
+ * For other dependencies, import them directly from their specific entry points
  *
  * @example
- * // Fast (25ms):
- * import { CSBDDStepDef, Page, StepDefinitions } from '@mdakhan.mak/cs-playwright-test-framework/bdd';
- *
- * // Slow (34s):
- * import { CSBDDStepDef, Page, StepDefinitions } from '@mdakhan.mak/cs-playwright-test-framework';
+ * import { CSBDDStepDef, StepDefinitions } from '@mdakhan.mak/cs-playwright-test-framework/bdd';
  */
 
-// Core Framework (needed for BDD)
-export { CSConfigurationManager } from '../core/CSConfigurationManager';
-export { CSBasePage } from '../core/CSBasePage';
-export { CSPageFactory, CSPage, CSGetElement, CSGetElements, CSElement, CSElements } from '../core/CSPageFactory';
-
-// BDD & Testing
+// BDD Core
 export { CSBDDRunner } from '../bdd/CSBDDRunner';
 export { CSBDDEngine } from '../bdd/CSBDDEngine';
 export { CSStepRegistry, CSBDDStepDef } from '../bdd/CSStepRegistry';
@@ -27,32 +18,19 @@ export { CSFeatureContext } from '../bdd/CSFeatureContext';
 export { CSBDDContext } from '../bdd/CSBDDContext';
 export { CSDataSource } from '../bdd/CSDataSourceDecorator';
 export { CSStepValidator } from '../bdd/CSStepValidator';
+export { CSIntelligentStepExecutor } from '../bdd/CSIntelligentStepExecutor';
 export * from '../bdd/CSBDDDecorators';
+
+//BDD Types (lightweight - can be imported without loading heavy modules)
+export type {
+    ParsedFeature,
+    ParsedScenario,
+    ParsedStep,
+    ParsedBackground,
+    ParsedRule,
+    ParsedExamples,
+    ExternalDataSource
+} from '../bdd/CSBDDTypes';
 
 // Cucumber-Compatible Decorators
 export { Given, When, Then, And, But, Step, defineStep } from '../bdd/CSCucumberDecorators';
-
-// Elements & Browser
-export { CSWebElement } from '../element/CSWebElement';
-export { CSElementResolver } from '../element/CSElementResolver';
-export { CSBrowserPool } from '../browser/CSBrowserPool';
-export { CSBrowserManager } from '../browser/CSBrowserManager';
-
-// Reporting (needed for tests)
-export { CSReporter } from '../reporter/CSReporter';
-
-// Assertions
-export { CSAssert } from '../assertions/CSAssert';
-export { CSExpect } from '../assertions/CSExpect';
-
-// Utilities
-export { CSValueResolver } from '../utils/CSValueResolver';
-export { CSEncryptionUtil } from '../utils/CSEncryptionUtil';
-
-// Data Management
-export { CSDataProvider } from '../data/CSDataProvider';
-export { CSDataGenerator } from '../data/CSDataGenerator';
-
-// Diagnostics
-export { CSPageDiagnostics } from '../diagnostics/CSPageDiagnostics';
-export type { PageDiagnosticData, DiagnosticConsoleLog, DiagnosticError, DiagnosticRequest, DiagnosticOptions } from '../diagnostics/CSPageDiagnostics';

@@ -1,43 +1,24 @@
 {
   "name": "@mdakhan.mak/cs-playwright-test-framework",
-  "version": "1.5.10",
+  "version": "1.5.16",
   "description": "CS Playwright Test Framework - Lightning-fast, configurable, AI-powered self-healing test automation with Playwright",
   "main": "dist/lib/index.js",
   "types": "dist/lib/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/lib/index.d.ts",
-      "default": "./dist/lib/index.js"
-    },
-    "./bdd": {
-      "types": "./dist/lib/bdd.d.ts",
-      "default": "./dist/lib/bdd.js"
-    },
-    "./api": {
-      "types": "./dist/lib/api.d.ts",
-      "default": "./dist/lib/api.js"
-    },
-    "./database": {
-      "types": "./dist/lib/database.d.ts",
-      "default": "./dist/lib/database.js"
-    },
-    "./browser": {
-      "types": "./dist/lib/browser.d.ts",
-      "default": "./dist/lib/browser.js"
-    },
-    "./reporting": {
-      "types": "./dist/lib/reporting.d.ts",
-      "default": "./dist/lib/reporting.js"
-    },
-    "./utilities": {
-      "types": "./dist/lib/utilities.d.ts",
-      "default": "./dist/lib/utilities.js"
-    },
-    "./ai": {
-      "types": "./dist/lib/ai.d.ts",
-      "default": "./dist/lib/ai.js"
-    },
-    "./dist/*": "./dist/*"
+    ".": "./dist/lib/index.js",
+    "./ai": "./dist/lib/ai.js",
+    "./api": "./dist/lib/api.js",
+    "./assertions": "./dist/lib/assertions.js",
+    "./bdd": "./dist/lib/bdd.js",
+    "./browser": "./dist/lib/browser.js",
+    "./core": "./dist/lib/core.js",
+    "./data": "./dist/lib/data.js",
+    "./database": "./dist/lib/database.js",
+    "./element": "./dist/lib/element.js",
+    "./reporter": "./dist/lib/reporter.js",
+    "./utils": "./dist/lib/utils.js",
+    "./package.json": "./package.json",
+    "./*": "./dist/*"
   },
   "bin": {
     "cs-playwright-test": "dist/index.js",

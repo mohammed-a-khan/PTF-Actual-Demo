@@ -360,9 +360,18 @@ class WorkerProcess {
                     requirements = moduleDetector.detectRequirements(message.scenario, message.feature);
                 }
 
-                // Load only required step definitions
+                // Load framework step definitions (selective based on requirements)
                 const stepLoader = CSStepLoader.getInstance();
                 await stepLoader.loadRequiredSteps(requirements);
+
+                // CRITICAL FIX: Also load project-specific step definitions
+                // The intelligent module detection only loads framework steps
+                // We must also load project steps for the scenario to execute
+                if (!this.stepDefinitionsLoaded.get(projectKey)) {
+                    await this.bddRunner.loadProjectSteps(projectKey);
+                    this.stepDefinitionsLoaded.set(projectKey, true);
+                    console.log(`[Worker ${this.workerId}] ✅ Loaded project step definitions for: ${projectKey}`);
+                }
 
                 this.performanceMetrics.set(`selective-steps-${projectKey}`, Date.now() - stepLoadStart);
 

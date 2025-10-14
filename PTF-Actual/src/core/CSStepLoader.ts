@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import { ModuleRequirements } from './CSModuleDetector';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from './CSConfigurationManager';
-import { ParsedFeature } from '../bdd/CSBDDEngine';
+import type {ParsedFeature } from '../bdd/CSBDDTypes';
 
 export type StepGroup = 'common' | 'api' | 'database' | 'soap' | 'browser';
 
