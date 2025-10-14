@@ -717,29 +717,33 @@ export class ParallelOrchestrator {
     }
 
     private getEssentialConfig(): Record<string, any> {
-        // Only send config that workers actually need
-        const essentialKeys = [
-            'PROJECT', 'project',
-            'HEADLESS', 'BROWSER',
-            'BASE_URL', 'TIMEOUT',
-            'BROWSER_REUSE_ENABLED', 'BROWSER_REUSE_CLEAR_STATE',
-            'BROWSER_REUSE_CLOSE_AFTER_SCENARIOS',
-            'ADO_ENABLED', 'ADO_DRY_RUN', 'ADO_ORGANIZATION', 'ADO_PROJECT',
-            'ADO_PAT', 'ADO_BASE_URL', 'ADO_API_VERSION',  // Include ADO PAT and other ADO config
-            'ADO_TEST_PLAN_ID', 'ADO_TEST_SUITE_ID',
-            'ADO_INTEGRATION_ENABLED',
-            'CAPTURE_SCREENSHOTS', 'CAPTURE_VIDEOS',
-            'HAR_ENABLED', 'TRACE_ENABLED',
-            'MODULES'  // Pass explicit module specification to workers for selective loading
-        ];
-
+        // PERFORMANCE: Send only config manager values, not all env vars
+        //Sending all env vars was causing huge IPC overhead
         const config: Record<string, any> = {};
-        for (const key of essentialKeys) {
-            const value = this.config.get(key);
-            if (value !== undefined) {
+
+        //Get all config from config manager (returns Map<string, string>)
+        const allConfigMap = this.config.getAll();
+
+        //Convert Map to plain object for IPC serialization
+        for(const [key, value] of allConfigMap.entries()) {
+            if(value !== undefined && value !== null) {
                 config[key] = value;
             }
         }
+
+        //Only add essential env vars that might not be in config
+        //but are commonly used in test scenarios
+        const essentialEnvVars = [
+            'NODE_ENV', 'CI', 'BUILD_ID', 'BUILD_NUMBER',
+            'TEST_ENV', 'ENVIRONMENT', 'REGION'
+        ];
+
+        for( const envKey of essentialEnvVars) {
+            if(process.env[envKey] && !config[envKey]) {
+                config[envKey] = process.env[envKey];
+            }
+        }
+
         return config;
     }
 

@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import { ModuleRequirements } from './CSModuleDetector';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from './CSConfigurationManager';
-import type {ParsedFeature } from '../bdd/CSBDDTypes';
+import type {ParsedFeature } from '../bdd/CSBDDTypes'
 
 export type StepGroup = 'common' | 'api' | 'database' | 'soap' | 'browser';
 
@@ -148,7 +148,10 @@ export class CSStepLoader {
         if (useSelectiveLoading) {
             // SELECTIVE LOADING: Only load required step groups
             // Always load common steps (contains browser/UI steps)
-            if (!this.loadedGroups.has('common')) {
+
+            const needsCommon = requirements.browser || (!requirements.api && !requirements.database && !requirements.soap);
+
+            if (needsCommon && !this.loadedGroups.has('common')) {
                 const loaded = await this.loadStepGroup('common');
                 filesLoaded.push(...loaded);
                 groupsLoaded.push('common');
@@ -237,10 +240,18 @@ export class CSStepLoader {
 
             CSReporter.debug(`[StepLoader] Loading ${stepFiles.length} ${groupName} step files...`);
 
-            // Load all step files (no expensive content analysis)
+            // PERFORMANCE OPTIMIZATION: Load all step files
+            // Note: require() is synchronous but very fast for compiled JS files
+            // The bottleneck is usually decorator registration, not file loading
             for (const entry of stepFiles) {
                 const fullPath = path.join(stepDir, entry.name);
                 try {
+                    // Check if module is already in cache
+                    if (require.cache[require.resolve(fullPath)]) {
+                        loadedFiles.push(entry.name);
+                        continue;
+                    }
+
                     require(fullPath);
                     loadedFiles.push(entry.name);
                 } catch (error: any) {

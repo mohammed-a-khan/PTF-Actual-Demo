@@ -80,6 +80,7 @@ class WorkerProcess {
     private configManager: any;
     private isInitialized: boolean = false;
     private stepDefinitionsLoaded: Map<string, boolean> = new Map();
+    private frameworkStepsLoaded: boolean = false; // NEW: Track if framework steps are loaded
     private performanceMetrics: Map<string, number> = new Map();
 
     constructor() {
@@ -242,70 +243,23 @@ class WorkerProcess {
             // Lazy initialize if not done
             await this.lazyInitialize();
 
-            // Set project only if changed
+            //PERFORMANCE FIX: Only update config if project changes or first scenario
             const newProject = message.config.project || message.config.PROJECT;
-            if (process.env.PROJECT !== newProject) {
-                process.env.PROJECT = newProject;
+            const isFirstScenario = !this.frameworkStepsLoaded;
+            const projectChanged = process.env.PROJECT !== newProject
 
-                // CRITICAL: Initialize configuration to load config files for the project
-                // This ensures STEP_DEFINITIONS_PATH and other config values are loaded
-                await this.configManager.initialize({project: newProject});
-            }
-
-            // Optimize configuration - only update if different
-            if (!this.configManager) {
-                const { CSConfigurationManager } = this.getModule('../core/CSConfigurationManager');
-                this.configManager = CSConfigurationManager.getInstance();
-            }
-
-            // Batch config updates for performance
-            const configUpdates: Map<string, any> = new Map();
-
-            // ADO configuration from environment
-            const adoKeys = [
-                'ADO_ENABLED', 'ADO_DRY_RUN', 'ADO_ORGANIZATION', 'ADO_PROJECT',
-                'ADO_PAT', 'ADO_BASE_URL', 'ADO_API_VERSION', 'ADO_PLAN_ID',
-                'ADO_SUITE_ID', 'ADO_TEST_PLAN_ID', 'ADO_TEST_SUITE_ID'
-            ];
-
-            for (const key of adoKeys) {
-                const value = process.env[key];
-                if (value !== undefined && this.configManager.get(key) !== value) {
-                    configUpdates.set(key, value);
+            if (projectChanged || isFirstScenario) {
+                if (projectChanged) {
+                    process.env.PROJECT = newProject;
+                    await this.configManager.initialize({project: newProject});
                 }
-            }
 
-            // Artifact configuration from environment
-            const artifactKeys = [
-                'BROWSER_VIDEO', 'BROWSER_VIDEO_WIDTH', 'BROWSER_VIDEO_HEIGHT',
-                'HAR_CAPTURE_MODE', 'BROWSER_HAR_ENABLED', 'BROWSER_HAR_OMIT_CONTENT',
-                'TRACE_CAPTURE_MODE', 'BROWSER_TRACE_ENABLED',
-                'SCREENSHOT_CAPTURE_MODE', 'SCREENSHOT_ON_FAILURE',
-                'HEADLESS', 'BROWSER', 'TIMEOUT'
-            ];
-
-            for (const key of artifactKeys) {
-                const value = process.env[key];
-                if (value !== undefined && this.configManager.get(key) !== value) {
-                    configUpdates.set(key, value);
-                }
-            }
-
-            // Map ADO_ENABLED to ADO_INTEGRATION_ENABLED
-            if (process.env.ADO_ENABLED && this.configManager.get('ADO_INTEGRATION_ENABLED') !== process.env.ADO_ENABLED) {
-                configUpdates.set('ADO_INTEGRATION_ENABLED', process.env.ADO_ENABLED);
-            }
-
-            // Message config
+            //Apply message config (only on first scenario or project change)
             for (const [key, value] of Object.entries(message.config)) {
-                if (this.configManager.get(key) !== value) {
-                    configUpdates.set(key, value);
-                }
+                this.configManager.set(key, value);
             }
 
-            // Apply all config updates at once
-            for (const [key, value] of configUpdates) {
-                this.configManager.set(key, value);
+                console.log(`[Worker ${this.workerId}] Configuration updated (project: ${process.env.PROJECT})`);
             }
 
             // Set test results directory from parent if provided
@@ -329,17 +283,22 @@ class WorkerProcess {
             // INTELLIGENT MODULE DETECTION & SELECTIVE STEP LOADING (Worker Mode)
             const projectKey = message.config.project || message.config.PROJECT || 'default';
 
+            //PERFORMANCE FIX: Only load steps ONCE per worker, not every scenario!
+            const needsStepLoading = !this.frameworkStepsLoaded || !this.stepDefinitionsLoaded.get(projectKey);
+
+            if (needsStepLoading) {
+                const stepLoadStart = Date.now();
+
             // Check if intelligent module detection is enabled (default: true)
             const moduleDetectionEnabled = this.configManager.getBoolean('MODULE_DETECTION_ENABLED', true);
 
-            if (moduleDetectionEnabled) {
-                const stepLoadStart = Date.now();
-
-                // Load module detection components
-                const { CSModuleDetector } = this.getModule('../core/CSModuleDetector');
-                const { CSStepLoader } = this.getModule('../core/CSStepLoader');
-
+                //store requirements outside the block so it can be used for project steps loading
                 let requirements: any;
+
+                if(moduleDetectionEnabled && !this.frameworkStepsLoaded) {
+                    //Load module detection components
+                    const { CSModuleDetector } = this.getModule('../core/CSModuleDetector');
+                    const { CSStepLoader } = this.getModule('../core/CSStepLoader');
 
                 // Check if user explicitly specified modules via --modules flag
                 const explicitModules = this.configManager.get('MODULES') || message.config.MODULES;
@@ -348,10 +307,10 @@ class WorkerProcess {
                     // User explicitly specified modules - override auto-detection
                     const moduleList = explicitModules.split(',').map((m: string) => m.trim().toLowerCase());
                     requirements = {
+                        browser: moduleList.includes('ui') || moduleList.includes('browser'),
                         api: moduleList.includes('api'),
                         database: moduleList.includes('database') || moduleList.includes('db'),
-                        soap: moduleList.includes('soap'),
-                        ui: moduleList.includes('ui') || moduleList.includes('browser')
+                        soap: moduleList.includes('soap')
                     };
                     console.log(`[Worker ${this.workerId}] Explicit modules specified: ${explicitModules}`);
                 } else {
@@ -360,39 +319,34 @@ class WorkerProcess {
                     requirements = moduleDetector.detectRequirements(message.scenario, message.feature);
                 }
 
-                // Load framework step definitions (selective based on requirements)
+                //Load only required framework step definitions (ONCE per worker)
                 const stepLoader = CSStepLoader.getInstance();
                 await stepLoader.loadRequiredSteps(requirements);
 
-                // CRITICAL FIX: Also load project-specific step definitions
-                // The intelligent module detection only loads framework steps
-                // We must also load project steps for the scenario to execute
-                if (!this.stepDefinitionsLoaded.get(projectKey)) {
-                    await this.bddRunner.loadProjectSteps(projectKey);
-                    this.stepDefinitionsLoaded.set(projectKey, true);
-                    console.log(`[Worker ${this.workerId}] ✅ Loaded project step definitions for: ${projectKey}`);
-                }
-
-                this.performanceMetrics.set(`selective-steps-${projectKey}`, Date.now() - stepLoadStart);
+                this.frameworkStepsLoaded = true; //Mark as loaded
+                console.log(`[Worker ${this.workerId}] Framework steps loaded`);
 
                 // Log if enabled
                 if (this.configManager.getBoolean('MODULE_DETECTION_LOGGING', false)) {
-                    const { CSModuleDetector } = this.getModule('../core/CSModuleDetector');
                     const moduleDetector = CSModuleDetector.getInstance();
                     const modules = moduleDetector.getRequirementsSummary(requirements);
                     console.log(`[Worker ${this.workerId}] Module Detection: ${modules}`);
                 }
-            } else {
-                // LEGACY: Load all step definitions for project (backward compatibility)
-                if (!this.stepDefinitionsLoaded.get(projectKey)) {
-                    const stepLoadStart = Date.now();
-
-                    // Now load the steps with the correct path
-                    await this.bddRunner.loadProjectSteps(projectKey);
-                    this.stepDefinitionsLoaded.set(projectKey, true);
-                    this.performanceMetrics.set(`steps-${projectKey}`, Date.now() - stepLoadStart);
-                }
             }
+
+            //Load project-specific step definitions (ONCE per project per worker)
+            if(!this.stepDefinitionsLoaded.get(projectKey)) {
+                await this.bddRunner.loadProjectSteps(projectKey, requirements);
+                this.stepDefinitionsLoaded.set(projectKey, true);
+                console.log(`[Worker ${this.workerId}] Project-specific steps loaded for: ${projectKey}`);
+            }
+
+            this.performanceMetrics.set(`steps-$projectKey}`, Date.now() - stepLoadStart);
+
+        } else {
+            //steps already loaded - skip!
+            console.log(`[Worker ${this.workerId}] Skipping step loading - already loaded`);
+        }
 
             // Execute the scenario using the existing framework method
             // This will handle browser, context, steps, everything

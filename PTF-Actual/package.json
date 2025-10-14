@@ -1,28 +1,130 @@
 {
   "name": "@mdakhan.mak/cs-playwright-test-framework",
-  "version": "1.5.16",
+  "version": "1.5.17",
   "description": "CS Playwright Test Framework - Lightning-fast, configurable, AI-powered self-healing test automation with Playwright",
   "main": "dist/lib/index.js",
   "types": "dist/lib/index.d.ts",
   "exports": {
-    ".": "./dist/lib/index.js",
-    "./ai": "./dist/lib/ai.js",
-    "./api": "./dist/lib/api.js",
-    "./assertions": "./dist/lib/assertions.js",
-    "./bdd": "./dist/lib/bdd.js",
-    "./browser": "./dist/lib/browser.js",
-    "./core": "./dist/lib/core.js",
-    "./data": "./dist/lib/data.js",
-    "./database": "./dist/lib/database.js",
-    "./element": "./dist/lib/element.js",
-    "./reporter": "./dist/lib/reporter.js",
-    "./utils": "./dist/lib/utils.js",
-    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/lib/index.d.ts",
+      "default": "./dist/lib/index.js"
+    },
+    "./ado": {
+      "types": "./dist/lib/ado.d.ts",
+      "default": "./dist/lib/ado.js"
+    },
+    "./ai": {
+      "types": "./dist/lib/ai.d.ts",
+      "default": "./dist/lib/ai.js"
+    },
+    "./api": {
+      "types": "./dist/lib/api.d.ts",
+      "default": "./dist/lib/api.js"
+    },
+    "./assertions": {
+      "types": "./dist/lib/assertions.d.ts",
+      "default": "./dist/lib/assertions.js"
+    },
+    "./auth": {
+      "types": "./dist/lib/auth.d.ts",
+      "default": "./dist/lib/auth.js"
+    },
+    "./bdd": {
+      "types": "./dist/lib/bdd.d.ts",
+      "default": "./dist/lib/bdd.js"
+    },
+    "./browser": {
+      "types": "./dist/lib/browser.d.ts",
+      "default": "./dist/lib/browser.js"
+    },
+    "./core": {
+      "types": "./dist/lib/core.d.ts",
+      "default": "./dist/lib/core.js"
+    },
+    "./dashboard": {
+      "types": "./dist/lib/dashboard.d.ts",
+      "default": "./dist/lib/dashboard.js"
+    },
+    "./data": {
+      "types": "./dist/lib/data.d.ts",
+      "default": "./dist/lib/data.js"
+    },
+    "./database": {
+      "types": "./dist/lib/database.d.ts",
+      "default": "./dist/lib/database.js"
+    },
+    "./diagnostics": {
+      "types": "./dist/lib/diagnostics.d.ts",
+      "default": "./dist/lib/diagnostics.js"
+    },
+    "./element": {
+      "types": "./dist/lib/element.d.ts",
+      "default": "./dist/lib/element.js"
+    },
+    "./evidence": {
+      "types": "./dist/lib/evidence.d.ts",
+      "default": "./dist/lib/evidence.js"
+    },
+    "./media": {
+      "types": "./dist/lib/media.d.ts",
+      "default": "./dist/lib/media.js"
+    },
+    "./mobile": {
+      "types": "./dist/lib/mobile.d.ts",
+      "default": "./dist/lib/mobile.js"
+    },
+    "./monitoring": {
+      "types": "./dist/lib/monitoring.d.ts",
+      "default": "./dist/lib/monitoring.js"
+    },
+    "./navigation": {
+      "types": "./dist/lib/navigation.d.ts",
+      "default": "./dist/lib/navigation.js"
+    },
+    "./network": {
+      "types": "./dist/lib/network.d.ts",
+      "default": "./dist/lib/network.js"
+    },
+    "./parallel": {
+      "types": "./dist/lib/parallel.d.ts",
+      "default": "./dist/lib/parallel.js"
+    },
+    "./pipeline": {
+      "types": "./dist/lib/pipeline.d.ts",
+      "default": "./dist/lib/pipeline.js"
+    },
+    "./reporter": {
+      "types": "./dist/lib/reporter.d.ts",
+      "default": "./dist/lib/reporter.js"
+    },
+    "./self-healing": {
+      "types": "./dist/lib/self-healing.d.ts",
+      "default": "./dist/lib/self-healing.js"
+    },
+    "./steps": {
+      "types": "./dist/lib/steps.d.ts",
+      "default": "./dist/lib/steps.js"
+    },
+    "./types": {
+      "types": "./dist/lib/types.d.ts",
+      "default": "./dist/lib/types.js"
+    },
+    "./utils": {
+      "types": "./dist/lib/utils.d.ts",
+      "default": "./dist/lib/utils.js"
+    },
+    "./utilities": {
+      "types": "./dist/lib/utilities.d.ts",
+      "default": "./dist/lib/utilities.js"
+    },
+    "./visual": {
+      "types": "./dist/lib/visual.d.ts",
+      "default": "./dist/lib/visual.js"
+    },
     "./*": "./dist/*"
   },
   "bin": {
     "cs-playwright-test": "dist/index.js",
-    "cs-playwright-run": "dist/index.js",
     "cs-playwright-framework": "dist/index.js"
   },
   "files": [

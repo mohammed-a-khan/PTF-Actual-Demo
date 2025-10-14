@@ -8,9 +8,41 @@
  */
 
 // AI Core
-export { CSAIEngine } from '../ai/CSAIEngine';
-export { CSAIIntegrationLayer } from '../ai/integration/CSAIIntegrationLayer';
+export {CSAIEngine} from '../ai/CSAIEngine';
+export {CSIntelligentAI} from '../ai/CSIntelligentAI';
 export { CSAIContextManager } from '../ai/CSAIContextManager';
-export { CSPredictiveHealer } from '../ai/prediction/CSPredictiveHealer';
-export { CSIntelligentAI } from '../ai/CSIntelligentAI';
+
+//AI Integration
+export { CSAIIntegrationLayer } from '../ai/integration/CSAIIntegrationLayer';
+
+//AI Prediction
+export {CSPredictiveHealer} from '../ai/prediction/CSPredictiveHealer';
+
+//AI Natural Language Processing
+export {CSNaturalLanguageEngine} from '../ai/nlp/CSNaturalLanguageEngine';
+
+//AI Pattern Matching
+export {CSPatternMatcher} from '../ai/patterns/CSPatternMatcher';
+
+//AI Learning
+export { CSAIHistory } from '../ai/learning/CSAIHistory';
+export {CSStrategyOptimizer} from '../ai/learning/CSStrategyOptimizer';
+export { CSPatternLearner } from '../ai/learning/CSPatternLearner';
+
+//AI Healing
+export { CSIntelligentHealer } from '../ai/healing/CSIntelligentHealer';
+
+//AI Feature Extraction
+export { CSFeatureExtractor } from '../ai/features/CSFeatureExtractor';
+
+//AI DOM Intelligence
+export { CSDOMIntelligence } from '../ai/analysis/CSDOMIntelligence';
+
+//AI Similarity
+export { CSSimilarityEngine } from '../ai/similarity/CSSimilarityEngine';
+
+//AI Utilities
 export { CSLocatorExtractor } from '../ai/utils/CSLocatorExtractor';
+
+//AI Types
+export * from '../ai/types/AITypes';

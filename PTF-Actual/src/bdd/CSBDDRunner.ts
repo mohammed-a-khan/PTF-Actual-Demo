@@ -2241,8 +2241,10 @@ export class CSBDDRunner {
 
     /**
      * Load step definitions for a specific project
+     * @param project - Project name
+     * @param requirements - Optional module requirements for selective loading of framework steps
      */
-    public async loadProjectSteps(project: string): Promise<void> {
+    public async loadProjectSteps(project: string, requirements?: ModuleRequirements): Promise<void> {
         if (!project) return;
 
         // Get step definition paths from configuration
@@ -2258,8 +2260,11 @@ export class CSBDDRunner {
         for (const relativePath of paths) {
             const stepDir = path.join(process.cwd(), relativePath);
             if (fs.existsSync(stepDir)) {
-                // Load step files recursively
-                filesLoaded = this.loadStepFilesRecursively(stepDir) || filesLoaded;
+                //check if this is a framework step path
+                const isFrameworkPath = relativePath.includes('node_modules') && relativePath.includes('cs-playwright-test-framework');
+
+                //Load step files recursively with selective filtering for framework paths
+                filesLoaded = this.loadStepFilesRecursively(stepDir, isFrameworkPath, requirements) || filesLoaded;
             }
         }
 
@@ -2270,8 +2275,11 @@ export class CSBDDRunner {
 
     /**
      * Recursively load step definition files from a directory
+     * @param dir - Directory to scan
+     * @param isFrameworkPath - Whether this is a framework step directory
+     * @param requirements - Module requirements for selective loading (framework paths only)
      */
-    private loadStepFilesRecursively(dir: string): boolean {
+    private loadStepFilesRecursively(dir: string, isFrameworkPath: boolean = false, requirements?: ModuleRequirements): boolean {
         let filesLoaded = false;
 
         if (!fs.existsSync(dir)) {
@@ -2284,8 +2292,36 @@ export class CSBDDRunner {
             const fullPath = path.join(dir, entry.name);
 
             if (entry.isDirectory()) {
+
+                //Selective Loading: skip framework step groups that aren't required
+                if(isFrameworkPath && requirements) {
+                    const dirName = entry.name.toLowerCase();
+
+                    //check if this directory should be skipped based on requirements
+                    if(dirName === 'api' && !requirements.api){
+                        CSReporter.debug(`[StepLoader] Skipping framework API steps (not required)`);
+                        continue;
+                    }
+                    if(dirName === 'database' && !requirements.database){
+                        CSReporter.debug(`[StepLoader] Skipping framework Database steps (not required)`);
+                        continue;
+                    }
+                    if(dirName === 'soap' && !requirements.soap){
+                        CSReporter.debug(`[StepLoader] Skipping framework SOAP steps (not required)`);
+                        continue;
+                    }
+                    if(dirName === 'common'){
+                        //Only load common if browser if required OR no other modules
+                        const needsCommon = requirements.browser || (!requirements.api && !requirements.database && !requirements.soap);
+                        if(!needsCommon){
+                            CSReporter.debug(`[StepLoader] Skipping framework Common steps (not required for API/Database/SOAP-only tests)`);
+                            continue;
+                        }
+                    }
+                }
+
                 // Recursively load from subdirectories
-                filesLoaded = this.loadStepFilesRecursively(fullPath) || filesLoaded;
+                filesLoaded = this.loadStepFilesRecursively(fullPath, isFrameworkPath, requirements) || filesLoaded;
             } else if (entry.isFile() && (entry.name.endsWith('.steps.ts') || entry.name.endsWith('.steps.js') || entry.name.endsWith('Steps.js') || entry.name.endsWith('Steps.ts'))) {
                 try {
                     // If it's a TypeScript file and we're in compiled mode, load the JS version
