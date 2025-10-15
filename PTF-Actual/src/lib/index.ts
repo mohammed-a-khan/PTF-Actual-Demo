@@ -31,7 +31,7 @@ export * from '../bdd/CSBDDDecorators';
 export { Given, When, Then, And, But, Step, defineStep } from '../bdd/CSCucumberDecorators';
 
 // Elements & Browser
-export { CSWebElement } from '../element/CSWebElement';
+export { CSWebElement, CSElementFactory } from '../element/CSWebElement';
 export { CSElementResolver } from '../element/CSElementResolver';
 export { CSBrowserPool } from '../browser/CSBrowserPool';
 export { CSBrowserManager } from '../browser/CSBrowserManager';

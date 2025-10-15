@@ -42,6 +42,8 @@ export interface HoverOptions {
     position?: { x: number; y: number };
     timeout?: number;
     trial?: boolean;
+    delay?: number;
+    noWaitAfter?: boolean;
 }
 
 export interface TapOptions {
@@ -51,6 +53,8 @@ export interface TapOptions {
     position?: { x: number; y: number };
     timeout?: number;
     trial?: boolean;
+    delay?: number;
+    clickCount?: number;
 }
 
 export interface DragToOptions {
@@ -546,15 +550,46 @@ export class CSWebElement {
         });
     }
 
-    // Convenience methods for click
-    async clickWithButton(button: 'left' | 'right' | 'middle'): Promise<void> {
-        CSReporter.info(`Clicking with ${button} button on ${this.description}`);
-        return this.click({ button });
+    // Convenience methods for click - Individual button methods
+    async clickWithLeftButton(): Promise<void> {
+        CSReporter.info(`Clicking with left button on ${this.description}`);
+        return this.click({ button: 'left' });
+    }
+
+    async clickWithRightButton(): Promise<void> {
+        CSReporter.info(`Clicking with right button on ${this.description}`);
+        return this.click({ button: 'right' });
+    }
+
+    async clickWithMiddleButton(): Promise<void> {
+        CSReporter.info(`Clicking with middle button on ${this.description}`);
+        return this.click({ button: 'middle' });
     }
 
     async clickWithPosition(x: number, y: number): Promise<void> {
         CSReporter.info(`Clicking at position (${x}, ${y}) on ${this.description}`);
         return this.click({ position: { x, y } });
+    }
+
+    // Individual modifier methods for click
+    async clickWithAltKey(): Promise<void> {
+        CSReporter.info(`Clicking with Alt key on ${this.description}`);
+        return this.click({ modifiers: ['Alt'] });
+    }
+
+    async clickWithControlKey(): Promise<void> {
+        CSReporter.info(`Clicking with Control key on ${this.description}`);
+        return this.click({ modifiers: ['Control'] });
+    }
+
+    async clickWithMetaKey(): Promise<void> {
+        CSReporter.info(`Clicking with Meta key on ${this.description}`);
+        return this.click({ modifiers: ['Meta'] });
+    }
+
+    async clickWithShiftKey(): Promise<void> {
+        CSReporter.info(`Clicking with Shift key on ${this.description}`);
+        return this.click({ modifiers: ['Shift'] });
     }
 
     async clickWithModifiers(modifiers: Array<'Alt' | 'Control' | 'Meta' | 'Shift'>): Promise<void> {
@@ -565,6 +600,16 @@ export class CSWebElement {
     async clickMultipleTimes(count: number): Promise<void> {
         CSReporter.info(`Clicking ${count} times on ${this.description}`);
         return this.click({ clickCount: count });
+    }
+
+    async clickTwice(): Promise<void> {
+        CSReporter.info(`Double clicking (2 times) on ${this.description}`);
+        return this.click({ clickCount: 2 });
+    }
+
+    async clickThreeTimes(): Promise<void> {
+        CSReporter.info(`Triple clicking (3 times) on ${this.description}`);
+        return this.click({ clickCount: 3 });
     }
 
     async clickWithDelay(delay: number): Promise<void> {
@@ -638,6 +683,58 @@ export class CSWebElement {
         return this.dblclick({ delay });
     }
 
+    // Individual button methods for dblclick
+    async dblclickWithLeftButton(): Promise<void> {
+        CSReporter.info(`Double clicking with left button on ${this.description}`);
+        return this.dblclick({ button: 'left' });
+    }
+
+    async dblclickWithRightButton(): Promise<void> {
+        CSReporter.info(`Double clicking with right button on ${this.description}`);
+        return this.dblclick({ button: 'right' });
+    }
+
+    async dblclickWithMiddleButton(): Promise<void> {
+        CSReporter.info(`Double clicking with middle button on ${this.description}`);
+        return this.dblclick({ button: 'middle' });
+    }
+
+    // Individual modifier methods for dblclick
+    async dblclickWithAltKey(): Promise<void> {
+        CSReporter.info(`Double clicking with Alt key on ${this.description}`);
+        return this.dblclick({ modifiers: ['Alt'] });
+    }
+
+    async dblclickWithControlKey(): Promise<void> {
+        CSReporter.info(`Double clicking with Control key on ${this.description}`);
+        return this.dblclick({ modifiers: ['Control'] });
+    }
+
+    async dblclickWithMetaKey(): Promise<void> {
+        CSReporter.info(`Double clicking with Meta key on ${this.description}`);
+        return this.dblclick({ modifiers: ['Meta'] });
+    }
+
+    async dblclickWithShiftKey(): Promise<void> {
+        CSReporter.info(`Double clicking with Shift key on ${this.description}`);
+        return this.dblclick({ modifiers: ['Shift'] });
+    }
+
+    async dblclickMultipleTimes(count: number): Promise<void> {
+        CSReporter.info(`Double clicking ${count} times on ${this.description}`);
+        return this.dblclick({ clickCount: count });
+    }
+
+    async dblclickWithTrial(): Promise<void> {
+        CSReporter.info(`Trial double clicking on ${this.description}`);
+        return this.dblclick({ trial: true });
+    }
+
+    async dblclickWithoutWaiting(): Promise<void> {
+        CSReporter.info(`Double clicking without waiting on ${this.description}`);
+        return this.dblclick({ noWaitAfter: true });
+    }
+
     // ============================================
     // 3. TAP METHODS (Mobile)
     // ============================================
@@ -667,6 +764,47 @@ export class CSWebElement {
     async tapWithTimeout(timeout: number): Promise<void> {
         CSReporter.info(`Tapping with ${timeout}ms timeout on ${this.description}`);
         return this.tap({ timeout });
+    }
+
+    async tapWithDelay(delay: number): Promise<void> {
+        CSReporter.info(`Tapping with ${delay}ms delay on ${this.description}`);
+        return this.tap({ delay });
+    }
+
+    async tapWithTrial(): Promise<void> {
+        CSReporter.info(`Trial tapping on ${this.description}`);
+        return this.tap({ trial: true });
+    }
+
+    async tapWithoutWaiting(): Promise<void> {
+        CSReporter.info(`Tapping without waiting on ${this.description}`);
+        return this.tap({ noWaitAfter: true });
+    }
+
+    async tapMultipleTimes(count: number): Promise<void> {
+        CSReporter.info(`Tapping ${count} times on ${this.description}`);
+        return this.tap({ clickCount: count });
+    }
+
+    // Individual modifier methods for tap
+    async tapWithAltKey(): Promise<void> {
+        CSReporter.info(`Tapping with Alt key on ${this.description}`);
+        return this.tap({ modifiers: ['Alt'] });
+    }
+
+    async tapWithControlKey(): Promise<void> {
+        CSReporter.info(`Tapping with Control key on ${this.description}`);
+        return this.tap({ modifiers: ['Control'] });
+    }
+
+    async tapWithMetaKey(): Promise<void> {
+        CSReporter.info(`Tapping with Meta key on ${this.description}`);
+        return this.tap({ modifiers: ['Meta'] });
+    }
+
+    async tapWithShiftKey(): Promise<void> {
+        CSReporter.info(`Tapping with Shift key on ${this.description}`);
+        return this.tap({ modifiers: ['Shift'] });
     }
 
     // ============================================
@@ -700,6 +838,42 @@ export class CSWebElement {
         return this.hover({ timeout });
     }
 
+    async hoverWithDelay(delay: number): Promise<void> {
+        CSReporter.info(`Hovering with ${delay}ms delay on ${this.description}`);
+        return this.hover({ delay });
+    }
+
+    async hoverWithTrial(): Promise<void> {
+        CSReporter.info(`Trial hovering on ${this.description}`);
+        return this.hover({ trial: true });
+    }
+
+    async hoverWithoutWaiting(): Promise<void> {
+        CSReporter.info(`Hovering without waiting on ${this.description}`);
+        return this.hover({ noWaitAfter: true });
+    }
+
+    // Individual modifier methods for hover
+    async hoverWithAltKey(): Promise<void> {
+        CSReporter.info(`Hovering with Alt key on ${this.description}`);
+        return this.hover({ modifiers: ['Alt'] });
+    }
+
+    async hoverWithControlKey(): Promise<void> {
+        CSReporter.info(`Hovering with Control key on ${this.description}`);
+        return this.hover({ modifiers: ['Control'] });
+    }
+
+    async hoverWithMetaKey(): Promise<void> {
+        CSReporter.info(`Hovering with Meta key on ${this.description}`);
+        return this.hover({ modifiers: ['Meta'] });
+    }
+
+    async hoverWithShiftKey(): Promise<void> {
+        CSReporter.info(`Hovering with Shift key on ${this.description}`);
+        return this.hover({ modifiers: ['Shift'] });
+    }
+
     // ============================================
     // 5. DRAG METHODS
     // ============================================
@@ -727,6 +901,21 @@ export class CSWebElement {
     async dragToWithForce(target: Locator | CSWebElement): Promise<void> {
         CSReporter.info(`Force dragging ${this.description} to target`);
         return this.dragTo(target, { force: true });
+    }
+
+    async dragToWithTimeout(target: Locator | CSWebElement, timeout: number): Promise<void> {
+        CSReporter.info(`Dragging with ${timeout}ms timeout to target`);
+        return this.dragTo(target, { timeout });
+    }
+
+    async dragToWithTrial(target: Locator | CSWebElement): Promise<void> {
+        CSReporter.info(`Trial dragging to target`);
+        return this.dragTo(target, { trial: true });
+    }
+
+    async dragToWithoutWaiting(target: Locator | CSWebElement): Promise<void> {
+        CSReporter.info(`Dragging without waiting to target`);
+        return this.dragTo(target, { noWaitAfter: true });
     }
 
     // ============================================
@@ -795,6 +984,16 @@ export class CSWebElement {
         return this.pressSequentially(text, { delay });
     }
 
+    async pressSequentiallyWithTimeout(text: string, timeout: number): Promise<void> {
+        CSReporter.info(`Typing "${text}" sequentially with ${timeout}ms timeout on ${this.description}`);
+        return this.pressSequentially(text, { timeout });
+    }
+
+    async pressSequentiallyWithoutWaiting(text: string): Promise<void> {
+        CSReporter.info(`Typing "${text}" sequentially without waiting on ${this.description}`);
+        return this.pressSequentially(text, { noWaitAfter: true });
+    }
+
     async type(text: string, options?: TypeOptions): Promise<void> {
         return this.executeAction(`Type "${text}"`, async () => {
             const locator = await this.getLocator();
@@ -816,6 +1015,16 @@ export class CSWebElement {
     async typeWithDelay(text: string, delay: number): Promise<void> {
         CSReporter.info(`Typing "${text}" with ${delay}ms delay on ${this.description}`);
         return this.type(text, { delay });
+    }
+
+    async typeWithTimeout(text: string, timeout: number): Promise<void> {
+        CSReporter.info(`Typing "${text}" with ${timeout}ms timeout on ${this.description}`);
+        return this.type(text, { timeout });
+    }
+
+    async typeWithoutWaiting(text: string): Promise<void> {
+        CSReporter.info(`Typing "${text}" without waiting on ${this.description}`);
+        return this.type(text, { noWaitAfter: true });
     }
 
     // ============================================
@@ -861,6 +1070,11 @@ export class CSWebElement {
         return this.clear({ timeout });
     }
 
+    async clearWithoutWaiting(): Promise<void> {
+        CSReporter.info(`Clearing without waiting on ${this.description}`);
+        return this.clear({ noWaitAfter: true });
+    }
+
     // ============================================
     // 9. SELECT METHODS
     // ============================================
@@ -894,6 +1108,16 @@ export class CSWebElement {
         return this.selectOption(values, { force: true });
     }
 
+    async selectOptionWithTimeout(values: string | string[], timeout: number): Promise<string[]> {
+        CSReporter.info(`Selecting option(s) with ${timeout}ms timeout in ${this.description}`);
+        return this.selectOption(values, { timeout });
+    }
+
+    async selectOptionWithoutWaiting(values: string | string[]): Promise<string[]> {
+        CSReporter.info(`Selecting option(s) without waiting in ${this.description}`);
+        return this.selectOption(values, { noWaitAfter: true });
+    }
+
     async selectText(options?: SelectTextOptions): Promise<void> {
         return this.executeAction('Select text', async () => {
             const locator = await this.getLocator();
@@ -904,6 +1128,11 @@ export class CSWebElement {
     async selectTextWithForce(): Promise<void> {
         CSReporter.info(`Force selecting text in ${this.description}`);
         return this.selectText({ force: true });
+    }
+
+    async selectTextWithTimeout(timeout: number): Promise<void> {
+        CSReporter.info(`Selecting text with ${timeout}ms timeout in ${this.description}`);
+        return this.selectText({ timeout });
     }
 
     // ============================================
@@ -932,6 +1161,26 @@ export class CSWebElement {
         return this.setInputFiles([]);
     }
 
+    async uploadFileWithTimeout(filePath: string, timeout: number): Promise<void> {
+        CSReporter.info(`Uploading file "${filePath}" with ${timeout}ms timeout to ${this.description}`);
+        return this.setInputFiles(filePath, { timeout });
+    }
+
+    async uploadFileWithoutWaiting(filePath: string): Promise<void> {
+        CSReporter.info(`Uploading file "${filePath}" without waiting to ${this.description}`);
+        return this.setInputFiles(filePath, { noWaitAfter: true });
+    }
+
+    async uploadFilesWithTimeout(filePaths: string[], timeout: number): Promise<void> {
+        CSReporter.info(`Uploading ${filePaths.length} files with ${timeout}ms timeout to ${this.description}`);
+        return this.setInputFiles(filePaths, { timeout });
+    }
+
+    async uploadFilesWithoutWaiting(filePaths: string[]): Promise<void> {
+        CSReporter.info(`Uploading ${filePaths.length} files without waiting to ${this.description}`);
+        return this.setInputFiles(filePaths, { noWaitAfter: true });
+    }
+
     // ============================================
     // 11. CHECKBOX & RADIO METHODS
     // ============================================
@@ -953,6 +1202,21 @@ export class CSWebElement {
         return this.check({ position: { x, y } });
     }
 
+    async checkWithTimeout(timeout: number): Promise<void> {
+        CSReporter.info(`Checking with ${timeout}ms timeout on ${this.description}`);
+        return this.check({ timeout });
+    }
+
+    async checkWithTrial(): Promise<void> {
+        CSReporter.info(`Trial checking on ${this.description}`);
+        return this.check({ trial: true });
+    }
+
+    async checkWithoutWaiting(): Promise<void> {
+        CSReporter.info(`Checking without waiting on ${this.description}`);
+        return this.check({ noWaitAfter: true });
+    }
+
     async uncheck(options?: UncheckOptions): Promise<void> {
         return this.executeAction('Uncheck', async () => {
             const locator = await this.getLocator();
@@ -965,6 +1229,26 @@ export class CSWebElement {
         return this.uncheck({ force: true });
     }
 
+    async uncheckWithPosition(x: number, y: number): Promise<void> {
+        CSReporter.info(`Unchecking at position (${x}, ${y}) on ${this.description}`);
+        return this.uncheck({ position: { x, y } });
+    }
+
+    async uncheckWithTimeout(timeout: number): Promise<void> {
+        CSReporter.info(`Unchecking with ${timeout}ms timeout on ${this.description}`);
+        return this.uncheck({ timeout });
+    }
+
+    async uncheckWithTrial(): Promise<void> {
+        CSReporter.info(`Trial unchecking on ${this.description}`);
+        return this.uncheck({ trial: true });
+    }
+
+    async uncheckWithoutWaiting(): Promise<void> {
+        CSReporter.info(`Unchecking without waiting on ${this.description}`);
+        return this.uncheck({ noWaitAfter: true });
+    }
+
     async setChecked(checked: boolean, options?: SetCheckedOptions): Promise<void> {
         return this.executeAction(`Set checked to ${checked}`, async () => {
             const locator = await this.getLocator();
@@ -975,6 +1259,26 @@ export class CSWebElement {
     async setCheckedWithForce(checked: boolean): Promise<void> {
         CSReporter.info(`Force setting checked to ${checked} on ${this.description}`);
         return this.setChecked(checked, { force: true });
+    }
+
+    async setCheckedWithPosition(checked: boolean, x: number, y: number): Promise<void> {
+        CSReporter.info(`Setting checked to ${checked} at position (${x}, ${y}) on ${this.description}`);
+        return this.setChecked(checked, { position: { x, y } });
+    }
+
+    async setCheckedWithTimeout(checked: boolean, timeout: number): Promise<void> {
+        CSReporter.info(`Setting checked to ${checked} with ${timeout}ms timeout on ${this.description}`);
+        return this.setChecked(checked, { timeout });
+    }
+
+    async setCheckedWithTrial(checked: boolean): Promise<void> {
+        CSReporter.info(`Trial setting checked to ${checked} on ${this.description}`);
+        return this.setChecked(checked, { trial: true });
+    }
+
+    async setCheckedWithoutWaiting(checked: boolean): Promise<void> {
+        CSReporter.info(`Setting checked to ${checked} without waiting on ${this.description}`);
+        return this.setChecked(checked, { noWaitAfter: true });
     }
 
     // ============================================
@@ -1224,6 +1528,71 @@ export class CSWebElement {
     async screenshotFullPage(): Promise<Buffer> {
         CSReporter.info(`Taking full page screenshot of ${this.description}`);
         return this.screenshot({ fullPage: true });
+    }
+
+    // Individual animation methods
+    async screenshotWithAnimationsDisabled(): Promise<Buffer> {
+        CSReporter.info(`Taking screenshot with animations disabled of ${this.description}`);
+        return this.screenshot({ animations: 'disabled' });
+    }
+
+    async screenshotWithAnimationsAllowed(): Promise<Buffer> {
+        CSReporter.info(`Taking screenshot with animations allowed of ${this.description}`);
+        return this.screenshot({ animations: 'allow' });
+    }
+
+    // Individual caret methods
+    async screenshotWithCaretHidden(): Promise<Buffer> {
+        CSReporter.info(`Taking screenshot with caret hidden of ${this.description}`);
+        return this.screenshot({ caret: 'hide' });
+    }
+
+    async screenshotWithCaretInitial(): Promise<Buffer> {
+        CSReporter.info(`Taking screenshot with initial caret of ${this.description}`);
+        return this.screenshot({ caret: 'initial' });
+    }
+
+    // Individual type methods
+    async screenshotAsPng(): Promise<Buffer> {
+        CSReporter.info(`Taking PNG screenshot of ${this.description}`);
+        return this.screenshot({ type: 'png' });
+    }
+
+    async screenshotAsJpeg(quality?: number): Promise<Buffer> {
+        CSReporter.info(`Taking JPEG screenshot of ${this.description}`);
+        return this.screenshot({ type: 'jpeg', quality });
+    }
+
+    // Individual scale methods
+    async screenshotWithCssScale(): Promise<Buffer> {
+        CSReporter.info(`Taking CSS-scaled screenshot of ${this.description}`);
+        return this.screenshot({ scale: 'css' });
+    }
+
+    async screenshotWithDeviceScale(): Promise<Buffer> {
+        CSReporter.info(`Taking device-scaled screenshot of ${this.description}`);
+        return this.screenshot({ scale: 'device' });
+    }
+
+    // Other screenshot methods
+    async screenshotWithTimeout(timeout: number): Promise<Buffer> {
+        CSReporter.info(`Taking screenshot with ${timeout}ms timeout of ${this.description}`);
+        return this.screenshot({ timeout });
+    }
+
+    async screenshotWithMask(masks: Locator[]): Promise<Buffer> {
+        CSReporter.info(`Taking screenshot with ${masks.length} masks of ${this.description}`);
+        return this.screenshot({ mask: masks });
+    }
+
+    async screenshotWithOmitBackground(): Promise<Buffer> {
+        CSReporter.info(`Taking screenshot with transparent background of ${this.description}`);
+        return this.screenshot({ omitBackground: true });
+    }
+
+    async screenshotWithClip(x: number, y: number, width: number, height: number): Promise<Buffer> {
+        CSReporter.info(`Taking clipped screenshot at (${x}, ${y}) ${width}x${height} of ${this.description}`);
+        return this.screenshot({ clip: { x, y, width, height } });
     }
 
     async scrollIntoViewIfNeeded(options?: ScrollIntoViewOptions): Promise<void> {
@@ -1480,9 +1849,10 @@ export class CSWebElement {
 }
 
 /**
- * CSElements - Handle multiple elements
+ * CSElementFactory - Factory class for creating CSWebElement instances dynamically
+ * Provides static helper methods for creating elements without decorators
  */
-export class CSElements {
+export class CSElementFactory {
     private elements: CSWebElement[];
     private options: ElementOptions;
     private page: Page;

@@ -226,8 +226,8 @@ export function CSGetElements(options: CSElementOptions) {
                     this._elements = {};
                 }
                 if (!this._elements[actualPropertyKey]) {
-                    const { CSElements } = require('../element/CSWebElement');
-                    
+                    const { CSElementFactory } = require('../element/CSWebElement');
+
                     // Process the options to build the elements
                     const elementOptions: any = {
                         description: options.description || actualPropertyKey
@@ -242,7 +242,7 @@ export function CSGetElements(options: CSElementOptions) {
                     
                     // Get page from the current instance
                     const currentPage = this.page || (this.browserManager && this.browserManager.getPage());
-                    this._elements[actualPropertyKey] = new CSElements(elementOptions, currentPage);
+                    this._elements[actualPropertyKey] = new CSElementFactory(elementOptions, currentPage);
                 }
                 return this._elements[actualPropertyKey];
             },
@@ -341,10 +341,10 @@ export class CSPageFactory {
         if (prototype.csElements) {
             Object.keys(prototype.csElements).forEach(key => {
                 const options = prototype.csElements[key];
-                
+
                 if (options.multiple) {
-                    const { CSElements } = require('../element/CSWebElement');
-                    instance[key] = new CSElements({
+                    const { CSElementFactory } = require('../element/CSWebElement');
+                    instance[key] = new CSElementFactory({
                         ...options,
                         description: options.description || key
                     });

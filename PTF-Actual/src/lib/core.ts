@@ -13,3 +13,6 @@ export { CSConfigurationManager } from '../core/CSConfigurationManager';
 export { CSPageFactory, CSPage, CSGetElement, CSGetElements, CSElement, CSElements } from '../core/CSPageFactory';
 export { CSStepLoader } from '../core/CSStepLoader';
 export { CSModuleDetector } from '../core/CSModuleDetector';
+
+// Element Factory for dynamic element creation
+export { CSElementFactory } from '../element/CSWebElement';
