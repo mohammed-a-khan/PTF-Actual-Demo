@@ -9,7 +9,7 @@ Feature: Orange HRM Demo Site - Login and Navigation
 
   @TC501 @smoke @high @critical
   Scenario: Standard user login with valid credentials
-    When I enter username "Admin" and password "admin123"
+    When I enter username "Admin" and password "{config:ORANGEHRM_PASSWORD}"
     And I click on the Login button
     Then I should be logged in successfully
     And I should see the Dashboard page

@@ -1,4 +1,5 @@
-import { CSBDDStepDef, Page, StepDefinitions, CSReporter } from 'cs-playwright-test-framework';
+import { CSBDDStepDef, Page, StepDefinitions } from '@mdakhan.mak/cs-playwright-test-framework/bdd';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporting';
 import { OrangeHRMLoginPage } from '../pages/OrangeHRMLoginPage';
 import { OrangeHRMDashboardPage } from '../pages/OrangeHRMDashboardPage';
 

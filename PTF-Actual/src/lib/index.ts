@@ -129,6 +129,14 @@ export { CSTokenManager } from '../auth/CSTokenManager';
 // Performance & Monitoring
 export { CSPerformanceMonitor } from '../monitoring/CSPerformanceMonitor';
 
+// Performance Testing Module
+export { CSLoadGenerator } from '../performance/CSLoadGenerator';
+export { CSPerformanceTestRunner } from '../performance/CSPerformanceTestRunner';
+export { CSPerformanceReporter } from '../performance/CSPerformanceReporter';
+export { CSPerformanceSteps } from '../steps/performance/CSPerformanceSteps';
+export * from '../performance/scenarios/CSPerformanceScenario';
+export * from '../performance/types/CSPerformanceTypes';
+
 // Diagnostics & Debugging (Playwright 1.56+)
 export { CSPageDiagnostics } from '../diagnostics/CSPageDiagnostics';
 export type { PageDiagnosticData, DiagnosticConsoleLog, DiagnosticError, DiagnosticRequest, DiagnosticOptions } from '../diagnostics/CSPageDiagnostics';

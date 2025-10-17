@@ -1,6 +1,6 @@
 {
   "name": "@mdakhan.mak/cs-playwright-test-framework",
-  "version": "1.5.18",
+  "version": "1.5.20",
   "description": "CS Playwright Test Framework - Lightning-fast, configurable, AI-powered self-healing test automation with Playwright",
   "main": "dist/lib/index.js",
   "types": "dist/lib/index.d.ts",
@@ -88,6 +88,10 @@
     "./parallel": {
       "types": "./dist/lib/parallel.d.ts",
       "default": "./dist/lib/parallel.js"
+    },
+    "./performance": {
+      "types": "./dist/lib/performance.d.ts",
+      "default": "./dist/lib/performance.js"
     },
     "./pipeline": {
       "types": "./dist/lib/pipeline.d.ts",

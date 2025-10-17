@@ -12,7 +12,13 @@
     "test:database": "npm run cs-framework -- --project=database --tags=@database",
     "test:parallel": "npm run cs-framework -- --project=orangehrm --parallel --workers=4",
     "test:debug": "npm run cs-framework -- --project=orangehrm --env=dev",
-    "test:headless": "npm run cs-framework -- --project=orangehrm --headless=true"
+    "test:headless": "npm run cs-framework -- --project=orangehrm --headless=true",
+    "test:performance": "npx cs-framework --project=performance --features=test/performance/features/",
+    "test:perf:load": "npx cs-framework --project=performance --features=test/performance/features/ --tags='@load-test'",
+    "test:perf:stress": "npx cs-framework --project=performance --features=test/performance/features/ --tags='@stress-test'",
+    "test:perf:vitals": "npx cs-framework --project=performance --features=test/performance/features/ --tags='@core-web-vitals'",
+    "test:perf:mobile": "npx cs-framework --project=performance --features=test/performance/features/ --tags='@mobile'",
+    "test:perf:single": "npx cs-framework --project=performance --features=test/performance/features/ --tags='@single-user'"
   },
   "keywords": [
     "automation",
@@ -25,12 +31,13 @@
   "license": "ISC",
   "dependencies": {
     "@faker-js/faker": "^10.0.0",
-    "cs-playwright-test-framework": "^1.5.4"
+    "@mdakhan.mak/cs-playwright-test-framework": "^1.5.20"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "cross-env": "^10.1.0",
     "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
     "typescript": "^5.0.0"
   }
 }

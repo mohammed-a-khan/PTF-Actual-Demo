@@ -17,6 +17,27 @@ export interface TestResult {
     consoleLogs: string[];
     networkLogs: any[];
     browserInfo: any;
+    // Performance testing metrics (optional)
+    performanceMetrics?: {
+        testType: 'load' | 'stress' | 'spike' | 'ui-load' | 'core-web-vitals' | 'page-load';
+        virtualUsers: number;
+        totalRequests: number;
+        successfulRequests: number;
+        failedRequests: number;
+        averageResponseTime: number;
+        maxResponseTime: number;
+        minResponseTime: number;
+        throughput: number;
+        errorRate: number;
+        webVitals?: {
+            lcp?: number;
+            fid?: number;
+            cls?: number;
+            fcp?: number;
+            ttfb?: number;
+            score?: 'good' | 'needs-improvement' | 'poor';
+        };
+    };
 }
 
 export interface StepResult {
@@ -847,6 +868,9 @@ export class CSHTMLReporter {
             <button class="tab" data-tab="network">
                 🌐 Network
             </button>
+            <button class="tab" data-tab="performance">
+                ⚡ Performance
+            </button>
         </div>
 
         <!-- Summary Tab -->
@@ -956,6 +980,11 @@ export class CSHTMLReporter {
         <div class="tab-content" id="network-tab">
             <h3>Network Activity</h3>
             ${this.generateNetworkLogs(data.results)}
+        </div>
+
+        <!-- Performance Tab -->
+        <div class="tab-content" id="performance-tab">
+            ${this.generatePerformanceSection(data.results)}
         </div>
     </div>
 
@@ -1343,5 +1372,251 @@ export class CSHTMLReporter {
 
     private formatKey(key: string): string {
         return key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    }
+
+    private generatePerformanceSection(results: TestResult[]): string {
+        // Filter tests that have performance metrics
+        const perfTests = results.filter(r => r.performanceMetrics);
+
+        if (perfTests.length === 0) {
+            return `
+                <div style="text-align: center; padding: 60px 20px; color: #6b7280;">
+                    <div style="font-size: 48px; margin-bottom: 20px;">⚡</div>
+                    <h3 style="margin-bottom: 10px;">No Performance Tests Found</h3>
+                    <p>Performance metrics will appear here when you run load tests or UI performance tests.</p>
+                </div>
+            `;
+        }
+
+        // Calculate aggregate statistics
+        const totalTests = perfTests.length;
+        const loadTests = perfTests.filter(t => ['load', 'stress', 'spike'].includes(t.performanceMetrics!.testType));
+        const uiTests = perfTests.filter(t => ['ui-load', 'core-web-vitals', 'page-load'].includes(t.performanceMetrics!.testType));
+
+        const avgResponseTime = perfTests.reduce((sum, t) => sum + (t.performanceMetrics!.averageResponseTime || 0), 0) / totalTests;
+        const avgThroughput = perfTests.reduce((sum, t) => sum + (t.performanceMetrics!.throughput || 0), 0) / totalTests;
+        const avgErrorRate = perfTests.reduce((sum, t) => sum + (t.performanceMetrics!.errorRate || 0), 0) / totalTests;
+        const totalVirtualUsers = perfTests.reduce((sum, t) => sum + (t.performanceMetrics!.virtualUsers || 0), 0);
+
+        return `
+            <h3>Performance Testing Results</h3>
+
+            <!-- Performance Summary Cards -->
+            <div class="summary-cards" style="margin-bottom: 30px;">
+                <div class="summary-card total">
+                    <div class="number">${totalTests}</div>
+                    <div class="label">Performance Tests</div>
+                </div>
+                <div class="summary-card" style="border-color: #3b82f6; background: rgba(59, 130, 246, 0.1);">
+                    <div class="number">${avgResponseTime.toFixed(0)}ms</div>
+                    <div class="label">Avg Response Time</div>
+                </div>
+                <div class="summary-card" style="border-color: #10b981; background: rgba(16, 185, 129, 0.1);">
+                    <div class="number">${avgThroughput.toFixed(1)}</div>
+                    <div class="label">Avg Throughput (req/s)</div>
+                </div>
+                <div class="summary-card ${avgErrorRate > 5 ? 'failed' : 'passed'}">
+                    <div class="number">${avgErrorRate.toFixed(2)}%</div>
+                    <div class="label">Avg Error Rate</div>
+                </div>
+                <div class="summary-card" style="border-color: #f59e0b; background: rgba(245, 158, 11, 0.1);">
+                    <div class="number">${totalVirtualUsers}</div>
+                    <div class="label">Total Virtual Users</div>
+                </div>
+            </div>
+
+            ${uiTests.length > 0 ? this.generateCoreWebVitalsSection(uiTests) : ''}
+            ${loadTests.length > 0 ? this.generateLoadTestsSection(loadTests) : ''}
+
+            <!-- All Performance Tests Table -->
+            <h3 style="margin-top: 40px;">All Performance Tests</h3>
+            <table class="environment-table">
+                <thead>
+                    <tr>
+                        <th>Test Name</th>
+                        <th>Type</th>
+                        <th>Users</th>
+                        <th>Requests</th>
+                        <th>Success Rate</th>
+                        <th>Avg Response</th>
+                        <th>Throughput</th>
+                        <th>Error Rate</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${perfTests.map(test => {
+                        const pm = test.performanceMetrics!;
+                        const successRate = pm.totalRequests > 0 ? ((pm.successfulRequests / pm.totalRequests) * 100).toFixed(1) : '0';
+                        return `
+                            <tr>
+                                <td style="font-weight: 600;">${test.scenario}</td>
+                                <td><span style="padding: 4px 8px; background: #e5e7eb; border-radius: 4px; font-size: 11px;">${pm.testType}</span></td>
+                                <td>${pm.virtualUsers}</td>
+                                <td>${pm.totalRequests.toLocaleString()}</td>
+                                <td><span class="status-badge ${parseFloat(successRate) >= 95 ? 'passed' : 'failed'}">${successRate}%</span></td>
+                                <td>${pm.averageResponseTime.toFixed(0)}ms</td>
+                                <td>${pm.throughput.toFixed(1)} req/s</td>
+                                <td><span class="status-badge ${pm.errorRate < 5 ? 'passed' : 'failed'}">${pm.errorRate.toFixed(2)}%</span></td>
+                            </tr>
+                        `;
+                    }).join('')}
+                </tbody>
+            </table>
+        `;
+    }
+
+    private generateCoreWebVitalsSection(uiTests: TestResult[]): string {
+        const testsWithVitals = uiTests.filter(t => t.performanceMetrics?.webVitals);
+        if (testsWithVitals.length === 0) return '';
+
+        // Calculate average Core Web Vitals
+        const avgLCP = testsWithVitals.reduce((sum, t) => sum + (t.performanceMetrics!.webVitals!.lcp || 0), 0) / testsWithVitals.length;
+        const avgFID = testsWithVitals.reduce((sum, t) => sum + (t.performanceMetrics!.webVitals!.fid || 0), 0) / testsWithVitals.length;
+        const avgCLS = testsWithVitals.reduce((sum, t) => sum + (t.performanceMetrics!.webVitals!.cls || 0), 0) / testsWithVitals.length;
+        const avgFCP = testsWithVitals.reduce((sum, t) => sum + (t.performanceMetrics!.webVitals!.fcp || 0), 0) / testsWithVitals.length;
+        const avgTTFB = testsWithVitals.reduce((sum, t) => sum + (t.performanceMetrics!.webVitals!.ttfb || 0), 0) / testsWithVitals.length;
+
+        const getVitalColor = (metric: string, value: number): string => {
+            const thresholds: Record<string, { good: number; needsImprovement: number }> = {
+                lcp: { good: 2500, needsImprovement: 4000 },
+                fid: { good: 100, needsImprovement: 300 },
+                cls: { good: 0.1, needsImprovement: 0.25 },
+                fcp: { good: 1800, needsImprovement: 3000 },
+                ttfb: { good: 800, needsImprovement: 1800 }
+            };
+            const t = thresholds[metric];
+            if (!t) return '#6b7280';
+            if (value <= t.good) return '#10b981';
+            if (value <= t.needsImprovement) return '#f59e0b';
+            return '#ef4444';
+        };
+
+        return `
+            <div style="background: var(--cs-light); padding: 20px; border-radius: 10px; margin-bottom: 30px;">
+                <h3 style="margin-bottom: 20px;">📊 Core Web Vitals (Average)</h3>
+                <div class="summary-cards">
+                    <div class="summary-card" style="border-color: ${getVitalColor('lcp', avgLCP)}; background: rgba(16, 185, 129, 0.1);">
+                        <div class="number" style="color: ${getVitalColor('lcp', avgLCP)};">${avgLCP.toFixed(0)}ms</div>
+                        <div class="label">LCP (Largest Contentful Paint)</div>
+                        <div style="font-size: 11px; color: #6b7280; margin-top: 5px;">Target: &lt; 2500ms</div>
+                    </div>
+                    <div class="summary-card" style="border-color: ${getVitalColor('fid', avgFID)}; background: rgba(16, 185, 129, 0.1);">
+                        <div class="number" style="color: ${getVitalColor('fid', avgFID)};">${avgFID.toFixed(0)}ms</div>
+                        <div class="label">FID (First Input Delay)</div>
+                        <div style="font-size: 11px; color: #6b7280; margin-top: 5px;">Target: &lt; 100ms</div>
+                    </div>
+                    <div class="summary-card" style="border-color: ${getVitalColor('cls', avgCLS)}; background: rgba(16, 185, 129, 0.1);">
+                        <div class="number" style="color: ${getVitalColor('cls', avgCLS)};">${avgCLS.toFixed(3)}</div>
+                        <div class="label">CLS (Cumulative Layout Shift)</div>
+                        <div style="font-size: 11px; color: #6b7280; margin-top: 5px;">Target: &lt; 0.1</div>
+                    </div>
+                    <div class="summary-card" style="border-color: ${getVitalColor('fcp', avgFCP)}; background: rgba(16, 185, 129, 0.1);">
+                        <div class="number" style="color: ${getVitalColor('fcp', avgFCP)};">${avgFCP.toFixed(0)}ms</div>
+                        <div class="label">FCP (First Contentful Paint)</div>
+                        <div style="font-size: 11px; color: #6b7280; margin-top: 5px;">Target: &lt; 1800ms</div>
+                    </div>
+                    <div class="summary-card" style="border-color: ${getVitalColor('ttfb', avgTTFB)}; background: rgba(16, 185, 129, 0.1);">
+                        <div class="number" style="color: ${getVitalColor('ttfb', avgTTFB)};">${avgTTFB.toFixed(0)}ms</div>
+                        <div class="label">TTFB (Time to First Byte)</div>
+                        <div style="font-size: 11px; color: #6b7280; margin-top: 5px;">Target: &lt; 800ms</div>
+                    </div>
+                </div>
+
+                <!-- Individual Test Results -->
+                <h4 style="margin-top: 30px; margin-bottom: 15px;">Individual Core Web Vitals Results</h4>
+                <table class="environment-table">
+                    <thead>
+                        <tr>
+                            <th>Test Name</th>
+                            <th>LCP</th>
+                            <th>FID</th>
+                            <th>CLS</th>
+                            <th>FCP</th>
+                            <th>TTFB</th>
+                            <th>Score</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${testsWithVitals.map(test => {
+                            const wv = test.performanceMetrics!.webVitals!;
+                            return `
+                                <tr>
+                                    <td style="font-weight: 600;">${test.scenario}</td>
+                                    <td style="color: ${getVitalColor('lcp', wv.lcp || 0)};">${wv.lcp?.toFixed(0) || 'N/A'}ms</td>
+                                    <td style="color: ${getVitalColor('fid', wv.fid || 0)};">${wv.fid?.toFixed(0) || 'N/A'}ms</td>
+                                    <td style="color: ${getVitalColor('cls', wv.cls || 0)};">${wv.cls?.toFixed(3) || 'N/A'}</td>
+                                    <td style="color: ${getVitalColor('fcp', wv.fcp || 0)};">${wv.fcp?.toFixed(0) || 'N/A'}ms</td>
+                                    <td style="color: ${getVitalColor('ttfb', wv.ttfb || 0)};">${wv.ttfb?.toFixed(0) || 'N/A'}ms</td>
+                                    <td><span class="status-badge ${wv.score === 'good' ? 'passed' : wv.score === 'needs-improvement' ? 'skipped' : 'failed'}">${wv.score || 'N/A'}</span></td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    private generateLoadTestsSection(loadTests: TestResult[]): string {
+        return `
+            <div style="background: var(--cs-light); padding: 20px; border-radius: 10px; margin-bottom: 30px;">
+                <h3 style="margin-bottom: 20px;">🚀 Load Test Results</h3>
+                ${loadTests.map(test => {
+                    const pm = test.performanceMetrics!;
+                    const successRate = pm.totalRequests > 0 ? ((pm.successfulRequests / pm.totalRequests) * 100) : 0;
+
+                    return `
+                        <div style="background: white; border: 2px solid var(--cs-border); border-radius: 10px; padding: 20px; margin-bottom: 20px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                                <h4 style="margin: 0;">${test.scenario}</h4>
+                                <span style="padding: 6px 12px; background: #e5e7eb; border-radius: 4px; font-size: 13px; font-weight: 600;">${pm.testType.toUpperCase()}</span>
+                            </div>
+
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 15px;">
+                                <div style="text-align: center; padding: 15px; background: var(--cs-light); border-radius: 8px;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #667eea;">${pm.virtualUsers}</div>
+                                    <div style="font-size: 12px; color: #6b7280;">Virtual Users</div>
+                                </div>
+                                <div style="text-align: center; padding: 15px; background: var(--cs-light); border-radius: 8px;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #667eea;">${pm.totalRequests.toLocaleString()}</div>
+                                    <div style="font-size: 12px; color: #6b7280;">Total Requests</div>
+                                </div>
+                                <div style="text-align: center; padding: 15px; background: var(--cs-light); border-radius: 8px;">
+                                    <div style="font-size: 24px; font-weight: bold; color: ${successRate >= 95 ? '#10b981' : '#ef4444'};">${successRate.toFixed(1)}%</div>
+                                    <div style="font-size: 12px; color: #6b7280;">Success Rate</div>
+                                </div>
+                                <div style="text-align: center; padding: 15px; background: var(--cs-light); border-radius: 8px;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #667eea;">${pm.averageResponseTime.toFixed(0)}ms</div>
+                                    <div style="font-size: 12px; color: #6b7280;">Avg Response</div>
+                                </div>
+                                <div style="text-align: center; padding: 15px; background: var(--cs-light); border-radius: 8px;">
+                                    <div style="font-size: 24px; font-weight: bold; color: #667eea;">${pm.throughput.toFixed(1)}</div>
+                                    <div style="font-size: 12px; color: #6b7280;">Req/Sec</div>
+                                </div>
+                                <div style="text-align: center; padding: 15px; background: var(--cs-light); border-radius: 8px;">
+                                    <div style="font-size: 24px; font-weight: bold; color: ${pm.errorRate < 5 ? '#10b981' : '#ef4444'};">${pm.errorRate.toFixed(2)}%</div>
+                                    <div style="font-size: 12px; color: #6b7280;">Error Rate</div>
+                                </div>
+                            </div>
+
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; padding-top: 15px; border-top: 1px solid var(--cs-border);">
+                                <div>
+                                    <span style="font-size: 12px; color: #6b7280;">Min Response:</span>
+                                    <span style="font-weight: 600; margin-left: 5px;">${pm.minResponseTime.toFixed(0)}ms</span>
+                                </div>
+                                <div>
+                                    <span style="font-size: 12px; color: #6b7280;">Max Response:</span>
+                                    <span style="font-weight: 600; margin-left: 5px;">${pm.maxResponseTime.toFixed(0)}ms</span>
+                                </div>
+                                <div>
+                                    <span style="font-size: 12px; color: #6b7280;">Duration:</span>
+                                    <span style="font-weight: 600; margin-left: 5px;">${this.formatDuration(test.duration)}</span>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }).join('')}
+            </div>
+        `;
     }
 }

@@ -1,5 +1,6 @@
-import { CSBasePage, CSWebElement, CSReporter } from 'cs-playwright-test-framework';
-import { CSPage, CSGetElement, CSGetElements } from 'cs-playwright-test-framework';
+import { CSBasePage, CSPage, CSGetElement, CSGetElements } from '@mdakhan.mak/cs-playwright-test-framework/core';
+import { CSWebElement, CSElementFactory } from '@mdakhan.mak/cs-playwright-test-framework/element';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporting';
 
 @CSPage('orangehrm-dashboard')
 export class OrangeHRMDashboardPage extends CSBasePage {

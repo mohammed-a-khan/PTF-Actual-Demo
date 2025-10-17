@@ -9,6 +9,30 @@ export interface TestResult {
     steps: StepResult[];
     screenshot?: string;
     timestamp: string;
+    // Performance testing metrics
+    performanceMetrics?: PerformanceTestMetrics;
+}
+
+export interface PerformanceTestMetrics {
+    testType: 'load' | 'stress' | 'spike' | 'ui-load' | 'core-web-vitals' | 'page-load';
+    virtualUsers: number;
+    totalRequests: number;
+    successfulRequests: number;
+    failedRequests: number;
+    averageResponseTime: number;
+    maxResponseTime: number;
+    minResponseTime: number;
+    throughput: number;
+    errorRate: number;
+    // Core Web Vitals (for UI tests)
+    webVitals?: {
+        lcp?: number;  // Largest Contentful Paint
+        fid?: number;  // First Input Delay
+        cls?: number;  // Cumulative Layout Shift
+        fcp?: number;  // First Contentful Paint
+        ttfb?: number; // Time to First Byte
+        score?: 'good' | 'needs-improvement' | 'poor';
+    };
 }
 
 export interface StepResult {
@@ -294,6 +318,51 @@ export class CSReporter {
             }
             this.currentStep.aiData.retryDecision = retryDecisionData;
             this.debug(`[AI] Retry Decision recorded: ${retryDecisionData.shouldRetry ? 'RETRY ALLOWED' : 'RETRY SKIPPED'} (${retryDecisionData.reason})`);
+        }
+    }
+
+    // Performance Testing Methods
+    public static recordPerformanceMetrics(metrics: PerformanceTestMetrics): void {
+        if (this.currentTest) {
+            this.currentTest.performanceMetrics = metrics;
+            this.info(`[Performance] Test type: ${metrics.testType}, Users: ${metrics.virtualUsers}, Avg Response: ${metrics.averageResponseTime}ms, Throughput: ${metrics.throughput} req/s, Error Rate: ${metrics.errorRate}%`);
+
+            // Log Web Vitals if available
+            if (metrics.webVitals) {
+                const vitals = metrics.webVitals;
+                this.info(`[Performance] Core Web Vitals - LCP: ${vitals.lcp}ms, FID: ${vitals.fid}ms, CLS: ${vitals.cls}, FCP: ${vitals.fcp}ms, TTFB: ${vitals.ttfb}ms, Score: ${vitals.score}`);
+            }
+        }
+    }
+
+    public static startPerformanceTest(name: string, testType: PerformanceTestMetrics['testType'], virtualUsers: number): void {
+        this.startTest(name);
+        if (this.currentTest) {
+            this.currentTest.performanceMetrics = {
+                testType,
+                virtualUsers,
+                totalRequests: 0,
+                successfulRequests: 0,
+                failedRequests: 0,
+                averageResponseTime: 0,
+                maxResponseTime: 0,
+                minResponseTime: 0,
+                throughput: 0,
+                errorRate: 0
+            };
+        }
+        this.info(`[Performance] Starting ${testType} test with ${virtualUsers} virtual users`);
+    }
+
+    public static updatePerformanceMetrics(updates: Partial<PerformanceTestMetrics>): void {
+        if (this.currentTest && this.currentTest.performanceMetrics) {
+            Object.assign(this.currentTest.performanceMetrics, updates);
+        }
+    }
+
+    public static recordWebVitals(vitals: PerformanceTestMetrics['webVitals']): void {
+        if (this.currentTest && this.currentTest.performanceMetrics) {
+            this.currentTest.performanceMetrics.webVitals = vitals;
         }
     }
 

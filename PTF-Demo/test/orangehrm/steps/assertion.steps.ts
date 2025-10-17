@@ -1,4 +1,7 @@
-import { CSBDDStepDef, StepDefinitions, Page, CSReporter, CSBrowserManager, CSExpect } from 'cs-playwright-test-framework';
+import { CSBDDStepDef, StepDefinitions, Page } from '@mdakhan.mak/cs-playwright-test-framework/bdd';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
+import { CSBrowserManager } from '@mdakhan.mak/cs-playwright-test-framework/browser';
+import { CSExpect } from '@mdakhan.mak/cs-playwright-test-framework/assertions';
 
 @StepDefinitions
 export class AssertionSteps {

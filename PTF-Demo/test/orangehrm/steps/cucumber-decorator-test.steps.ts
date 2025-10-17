@@ -15,8 +15,12 @@
  * - Mixed decorator usage (new and old)
  */
 
-import { Given, When, Then, And, But, CSBDDStepDef, Page, StepDefinitions, CSReporter } from 'cs-playwright-test-framework';
-import { CSScenarioContext, CSFeatureContext, CSBDDContext } from 'cs-playwright-test-framework';
+import {
+    Given, When, Then, And, But,
+    CSBDDStepDef, Page, StepDefinitions,
+    CSScenarioContext, CSFeatureContext, CSBDDContext
+} from '@mdakhan.mak/cs-playwright-test-framework/bdd';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
 import { OrangeHRMLoginPage } from '../pages/OrangeHRMLoginPage';
 import { OrangeHRMDashboardPage } from '../pages/OrangeHRMDashboardPage';
 

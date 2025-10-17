@@ -31,6 +31,18 @@ export interface PerformanceMetrics {
     cpuUsage?: number;
     memoryUsage?: number;
     
+    //=========Performance Testing Items Starts here==========//
+    // Load Testing Metrics (Enhanced)
+    concurrentUsers?: number;
+    requestsPerSecond?: number;
+    responseTime?: number;
+    errorRate?: number;
+    throughput?: number;
+    activeConnections?: number;
+    queueLength?: number;
+    //==========Perfromance Testing Items ends here===========//
+
+
     // Custom Metrics
     customMetrics?: Record<string, number>;
 }
@@ -620,4 +632,185 @@ export class CSPerformanceMonitor {
     public isActive(): boolean {
         return this.isMonitoring;
     }
+
+//═══════Performance Testing Items Starts here═══════//
+
+// Enhanced methods for Performance Testing Integration
+
+/**
+ * Record load testing metrics during performance testing scenarios
+ */
+public recordLoadTestMetrics(metrics: {
+    concurrentUsers: number,
+    requestsPerSecond: number,
+    responseTime: number,
+    errorRate: number,
+    throughput: number,
+    activeConnections: number,
+    queueLength: number,
+    url: string,
+}): void {
+    if (!this.isMonitoring) return;
+
+    const performanceMetric: PerformanceMetrics = {
+        timestamp: Date.now(),
+        url: metrics.url,
+        concurrentUsers: metrics.concurrentUsers,
+        requestsPerSecond: metrics.requestsPerSecond,
+        responseTime: metrics.responseTime,
+        errorRate: metrics.errorRate,
+        throughput: metrics.throughput,
+        activeConnections: metrics.activeConnections,
+        queueLength: metrics.queueLength
+    };
+
+    this.metrics.push(performanceMetric);
+    this.checkLoadTestThresholds(performanceMetric);
+}
+
+/**
+ * Check load testing specific thresholds
+ */
+private checkLoadTestThresholds(metrics: PerformanceMetrics): void {
+    const loadTestBudgets = this.budgets.filter(b => b.name.includes('Load') || b.name.includes('Performance Test'));
+
+    for (const budget of loadTestBudgets) {
+        for (const threshold of budget.thresholds) {
+            const value = (metrics as any)[threshold.metric];
+            if (value !== undefined) {
+                let severity: 'warning' | 'error' | null = null;
+                let thresholdValue = 0;
+
+                if (value > threshold.error) {
+                    severity = 'error';
+                    thresholdValue = threshold.error;
+                } else if (value > threshold.warning) {
+                    severity = 'warning';
+                    thresholdValue = threshold.warning;
+                }
+
+                if (severity) {
+                    const violation: PerformanceViolation = {
+                        timestamp: metrics.timestamp,
+                        metric: threshold.metric,
+                        actual: value,
+                        threshold: thresholdValue,
+                        severity,
+                        url: metrics.url
+                    };
+
+                    this.violations.push(violation);
+
+                    const message = `Load Test ${severity}: ${threshold.metric} = ${value}${threshold.unit} (threshold: ${thresholdValue}${threshold.unit})`;
+
+                    if (severity === 'error') {
+                        CSReporter.fail(message);
+                    } else {
+                        CSReporter.warn(message);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Add performance budgets for load testing
+ */
+public addLoadTestingBudgets(): void {
+    const loadTestBudget: PerformanceBudget = {
+        name: 'Load Testing Performance',
+        enabled: true,
+        thresholds: [
+            { metric: 'responseTime', warning: 1000, error: 2000, unit: 'ms' },
+            { metric: 'errorRate', warning: 0.05, error: 0.10, unit: '%' },
+            { metric: 'requestsPerSecond', warning: 50, error: 20, unit: 'rps' },
+            { metric: 'throughput', warning: 1000, error: 100, unit: 'KB/s' },
+            { metric: 'activeConnections', warning: 1000, error: 2000, unit: 'count' }
+        ]
+    };
+
+    // Check if already exists
+    const existingIndex = this.budgets.findIndex(b => b.name === loadTestBudget.name);
+    if (existingIndex >= 0) {
+        this.budgets[existingIndex] = loadTestBudget;
+    } else {
+        this.budgets.push(loadTestBudget);
+    }
+
+    CSReporter.info('Load testing performance budgets added');
+}
+
+/**
+ * Start concurrent monitoring for multiple virtual users
+ */
+public async startConcurrentMonitoring(testName: string, virtualUsers: number): Promise<void> {
+    await this.startMonitoring(`${testName}-${virtualUsers}users`);
+    this.addLoadTestingBudgets();
+
+    // Record initial concurrent user count
+    this.recordLoadTestMetrics({
+        concurrentUsers: virtualUsers,
+        timestamp: Date.now()
+    } as any);
+}
+
+/**
+ * Get current load testing summary
+ */
+public getLoadTestSummary(): {
+    avgResponseTime: number;
+    avgErrorRate: number;
+    avgThroughput: number;
+    peakConcurrentUsers: number;
+    totalRequests: number;
+} {
+    const loadMetrics = this.metrics.filter(m => m.responseTime !== undefined || m.errorRate !== undefined);
+
+    if (loadMetrics.length === 0) {
+        return {
+            avgResponseTime: 0,
+            avgErrorRate: 0,
+            avgThroughput: 0,
+            peakConcurrentUsers: 0,
+            totalRequests: 0
+        };
+    }
+
+    const responseTimes = loadMetrics.filter(m => m.responseTime !== undefined).map(m => m.responseTime!);
+    const errorRates = loadMetrics.filter(m => m.errorRate !== undefined).map(m => m.errorRate!);
+    const throughputs = loadMetrics.filter(m => m.throughput !== undefined).map(m => m.throughput!);
+    const concurrentUsers = loadMetrics.filter(m => m.concurrentUsers !== undefined).map(m => m.concurrentUsers!);
+
+    return {
+        avgResponseTime: responseTimes.length > 0 ? responseTimes.reduce((a: number, b: number) => a + b, 0) / responseTimes.length : 0,
+        avgErrorRate: errorRates.length > 0 ? errorRates.reduce((a: number, b: number) => a + b, 0) / errorRates.length : 0,
+        avgThroughput: throughputs.length > 0 ? throughputs.reduce((a: number, b: number) => a + b, 0) / throughputs.length : 0,
+        peakConcurrentUsers: concurrentUsers.length > 0 ? Math.max(...concurrentUsers) : 0,
+        totalRequests: loadMetrics.length
+    };
+}
+
+/**
+ * Export metrics in format compatible with performance testing module
+ */
+public exportForPerformanceTesting(): {
+    metrics: PerformanceMetrics[];
+    violations: PerformanceViolation[];
+    summary: any;
+    testDuration: number;
+} {
+    const summary = this.getLoadTestSummary();
+    const testDuration = this.testStartTime ? Date.now() - this.testStartTime : 0;
+
+    return {
+        metrics: [...this.metrics],
+        violations: [...this.violations],
+        summary,
+        testDuration
+    };
+}
+
+//═══════Performance Testing Items Ends here═══════//
+
 }
