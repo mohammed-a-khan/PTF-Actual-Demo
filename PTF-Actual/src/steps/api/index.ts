@@ -10,3 +10,11 @@ export * from './CSAPIRequestHeaderSteps';
 export * from './CSAPIRequestExecutionSteps';
 export * from './CSAPIResponseValidationSteps';
 export * from './CSAPIUtilitySteps';
+
+// NEW: API Testing Enhancements - Java Framework Migration
+export * from './CSAPIPayloadSteps';
+export * from './CSAPITestDataSteps';
+export * from './CSAPIAdvancedValidationSteps';
+export * from './CSAPIPollingSteps';
+export * from './CSAPIComparisonSteps';
+export * from './CSAPIDataComparisonSteps';

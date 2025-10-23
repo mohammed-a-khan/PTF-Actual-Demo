@@ -223,13 +223,15 @@ export class CSADOConfiguration {
     }
 
     private loadProxyConfiguration(): void {
-        const proxyEnabled = this.config.getBoolean('ADO_PROXY_ENABLED', false);
+        // Default to enabled (true) for organization proxy
+        const proxyEnabled = this.config.getBoolean('ADO_PROXY_ENABLED', true);
 
         if (proxyEnabled) {
             this.proxy = {
                 enabled: true,
                 protocol: this.config.get('ADO_PROXY_PROTOCOL', 'http'),
-                host: this.config.get('ADO_PROXY_HOST'),
+                // Default to organization proxy server when not configured
+                host: this.config.get('ADO_PROXY_HOST', 'proxy.organization.com'),
                 port: this.config.getNumber('ADO_PROXY_PORT', 8080),
                 authRequired: this.config.getBoolean('ADO_PROXY_AUTH_REQUIRED', false),
                 username: this.config.get('ADO_PROXY_USERNAME'),

@@ -89,6 +89,16 @@ export { CSSoapEnvelopeBuilder } from '../api/soap/CSSoapEnvelopeBuilder';
 export { CSRecordMatcher } from '../api/comparison/CSRecordMatcher';
 export { CSFieldMapper } from '../api/comparison/CSFieldMapper';
 
+// NEW: API Testing Enhancements - Java Framework Migration (v1.5.21)
+export { CSPayloadLoader } from '../api/utils/CSPayloadLoader';
+export { CSTemplateProcessor } from '../api/utils/CSTemplateProcessor';
+export { CSPatternValidator, PatternValidationResult } from '../api/validators/CSPatternValidator';
+export { CSPollingEngine, PollingOptions, PollingResult } from '../api/utils/CSPollingEngine';
+export { CSResponseComparator, ComparisonOptions, ComparisonResult, Difference } from '../api/utils/CSResponseComparator';
+
+// NEW: API Data Comparison with Scorecard Matching (v1.5.21)
+export { CSAPIDataComparisonSteps } from '../steps/api/CSAPIDataComparisonSteps';
+
 // Database Testing
 export { CSDatabaseManager } from '../database/CSDatabaseManager';
 export { CSDatabase } from '../database/client/CSDatabase';

@@ -129,9 +129,11 @@ export class CSADOClient {
             pat: this.config.get('ADO_PAT'),
             apiVersion: this.config.get('ADO_API_VERSION', '7.0'),
             proxy: {
-                enabled: this.config.getBoolean('ADO_PROXY_ENABLED', false),
+                // Default to enabled (true) for organization proxy
+                enabled: this.config.getBoolean('ADO_PROXY_ENABLED', true),
                 protocol: this.config.get('ADO_PROXY_PROTOCOL', 'http') as any,
-                host: this.config.get('ADO_PROXY_HOST'),
+                // Default to organization proxy server when not configured
+                host: this.config.get('ADO_PROXY_HOST', 'proxy.organization.com'),
                 port: this.config.getNumber('ADO_PROXY_PORT', 8080),
                 auth: {
                     required: this.config.getBoolean('ADO_PROXY_AUTH_REQUIRED', false),

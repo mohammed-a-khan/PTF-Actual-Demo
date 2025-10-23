@@ -2057,12 +2057,60 @@ export class CSElementFactory {
     }
 
     /**
+     * Detect selector type from a selector string
+     * @param selector Selector string to analyze
+     * @returns Object with selector type and properly formatted value
+     */
+    private static detectSelectorType(selector: string): { type: string; value: string; option: Partial<ElementOptions> } {
+        // Check for explicit type prefix
+        if (selector.startsWith('xpath:')) {
+            return { type: 'xpath', value: selector.substring(6), option: { xpath: selector.substring(6) } };
+        }
+        if (selector.startsWith('css:')) {
+            return { type: 'css', value: selector.substring(4), option: { css: selector.substring(4) } };
+        }
+        if (selector.startsWith('text:')) {
+            return { type: 'text', value: selector.substring(5), option: { text: selector.substring(5) } };
+        }
+        if (selector.startsWith('testId:')) {
+            return { type: 'testId', value: selector.substring(7), option: { testId: selector.substring(7) } };
+        }
+        if (selector.startsWith('role:')) {
+            return { type: 'role', value: selector.substring(5), option: { role: selector.substring(5) } };
+        }
+
+        // Auto-detect based on selector patterns
+
+        // XPath patterns: starts with / or ( or contains [contains( or [text()
+        if (
+            selector.startsWith('//') ||
+            selector.startsWith('/') ||
+            selector.startsWith('(//') ||
+            selector.includes('[contains(') ||
+            selector.includes('[text()') ||
+            selector.match(/\/\/[a-z]/i)
+        ) {
+            return { type: 'xpath', value: selector, option: { xpath: selector } };
+        }
+
+        // ID selector: starts with #
+        if (selector.startsWith('#') && !selector.includes(' ')) {
+            return { type: 'id', value: selector.substring(1), option: { id: selector.substring(1) } };
+        }
+
+        // Default to CSS
+        return { type: 'css', value: selector, option: { css: selector } };
+    }
+
+    /**
      * Create a CSWebElement dynamically with interpolated selector
-     * @param template Selector template with placeholders
+     * Supports both CSS and XPath templates with automatic type detection
+     * @param template Selector template with placeholders (CSS or XPath)
      * @param values Values to interpolate
      * @param description Optional description for logging
      * @param page Optional page instance
-     * @example CSWebElement.createWithTemplate('button[data-id="{id}"][data-action="{action}"]', {id: '123', action: 'submit'})
+     * @example CSWebElement.createWithTemplate('button[data-id="{id}"]', {id: '123'}) // CSS
+     * @example CSWebElement.createWithTemplate('//button[@data-id="{id}"]', {id: '123'}) // XPath
      */
     public static createWithTemplate(template: string, values: Record<string, string>, description?: string, page?: Page): CSWebElement {
         let selector = template;
@@ -2070,31 +2118,60 @@ export class CSElementFactory {
             selector = selector.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
         }
 
+        // Detect selector type and create appropriate element
+        const detected = this.detectSelectorType(selector);
+
+        CSReporter.debug(`createWithTemplate: Detected ${detected.type} selector from template: ${template} => ${selector}`);
+
         return new CSWebElement({
-            css: selector,
-            description: description || `Dynamic templated element: ${selector}`
+            ...detected.option,
+            description: description || `Dynamic templated element (${detected.type}): ${selector}`
         }, page);
     }
 
     /**
      * Create multiple CSWebElements dynamically matching a pattern
-     * @param selector CSS selector that matches multiple elements
+     * Supports both CSS and XPath selectors with automatic type detection
+     * @param selector Selector that matches multiple elements (CSS or XPath)
      * @param description Optional description for logging
      * @param page Optional page instance
      * @returns Array of CSWebElement instances
+     * @example createMultiple('div.item') // CSS
+     * @example createMultiple('//div[@class="item"]') // XPath
      */
     public static async createMultiple(selector: string, description?: string, page?: Page): Promise<CSWebElement[]> {
+        if (!CSBrowserManager) {
+            CSBrowserManager = require('../browser/CSBrowserManager').CSBrowserManager;
+        }
         const pageInstance = page || CSBrowserManager.getInstance().getPage();
-        const count = await pageInstance.locator(selector).count();
-        const elements: CSWebElement[] = [];
 
-        for (let i = 0; i < count; i++) {
-            elements.push(new CSWebElement({
-                css: `${selector}:nth-of-type(${i + 1})`,
-                description: `${description || 'Dynamic element'} [${i + 1}]`
-            }, page));
+        // Detect selector type
+        const detected = this.detectSelectorType(selector);
+        CSReporter.debug(`createMultiple: Detected ${detected.type} selector: ${selector}`);
+
+        // Get count using proper locator syntax
+        let locatorString = selector;
+        if (detected.type === 'xpath') {
+            locatorString = `xpath=${detected.value}`;
         }
 
+        const count = await pageInstance.locator(locatorString).count();
+        const elements: CSWebElement[] = [];
+
+        // Create elements using native Playwright nth() for proper indexing
+        for (let i = 0; i < count; i++) {
+            const element = new CSWebElement({
+                ...detected.option,
+                description: `${description || 'Dynamic element'} [${i + 1}]`
+            }, page);
+
+            // Set the locator to use nth() instead of CSS pseudo-selectors
+            (element as any).locator = pageInstance.locator(locatorString).nth(i);
+
+            elements.push(element);
+        }
+
+        CSReporter.info(`createMultiple: Found ${count} elements matching ${detected.type} selector`);
         return elements;
     }
 
@@ -2179,15 +2256,39 @@ export class CSElementFactory {
 
     /**
      * Create a CSWebElement for nth match of a selector
-     * @param selector CSS selector
+     * Supports both CSS and XPath selectors with automatic type detection
+     * @param selector Selector (CSS or XPath)
      * @param index Index of the element (0-based)
      * @param description Optional description for logging
      * @param page Optional page instance
+     * @example createNth('button.submit', 2) // CSS - 3rd submit button
+     * @example createNth('//button[@type="submit"]', 1) // XPath - 2nd submit button
      */
     public static createNth(selector: string, index: number, description?: string, page?: Page): CSWebElement {
-        return new CSWebElement({
-            css: selector,
+        if (!CSBrowserManager) {
+            CSBrowserManager = require('../browser/CSBrowserManager').CSBrowserManager;
+        }
+        const pageInstance = page || CSBrowserManager.getInstance().getPage();
+
+        // Detect selector type
+        const detected = this.detectSelectorType(selector);
+        CSReporter.debug(`createNth: Detected ${detected.type} selector for index ${index}: ${selector}`);
+
+        // Get proper locator string
+        let locatorString = selector;
+        if (detected.type === 'xpath') {
+            locatorString = `xpath=${detected.value}`;
+        }
+
+        // Create element with nth() locator
+        const element = new CSWebElement({
+            ...detected.option,
             description: description || `${selector} [index: ${index}]`
         }, page);
+
+        // Set the locator to use nth() instead of relying on CSS pseudo-selectors
+        (element as any).locator = pageInstance.locator(locatorString).nth(index);
+
+        return element;
     }
 }

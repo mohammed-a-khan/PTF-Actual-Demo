@@ -245,23 +245,29 @@ export class CSElementResolver {
     }
 
     // Create dynamic element with parameters
+    // Supports both CSS and XPath templates with automatic type detection
     public createDynamicElement(template: string, params: Record<string, any>): CSWebElement {
         CSReporter.debug(`Creating dynamic element with template: ${template}`);
 
-        // Replace parameters in template
+        // Replace parameters in template (supports both {{param}} and {param} syntax)
         let selector = template;
         for (const [key, value] of Object.entries(params)) {
-            selector = selector.replace(`{{${key}}}`, value.toString());
-            selector = selector.replace(`{${key}}`, value.toString());
+            selector = selector.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), value.toString());
+            selector = selector.replace(new RegExp(`\\{${key}\\}`, 'g'), value.toString());
         }
 
         const description = `Dynamic element: ${template} with params: ${JSON.stringify(params)}`;
 
-        return new CSWebElement({
-            css: selector,
-            description: description,
-            timeout: this.config.getNumber('DEFAULT_TIMEOUT', 10000)
-        });
+        // Import CSElementFactory to use its type detection
+        const { CSElementFactory } = require('./CSWebElement');
+
+        // Use CSElementFactory's createWithTemplate which has proper type detection
+        return CSElementFactory.createWithTemplate(template,
+            Object.fromEntries(
+                Object.entries(params).map(([k, v]) => [k, v.toString()])
+            ),
+            description
+        );
     }
 
     // Create element by role
