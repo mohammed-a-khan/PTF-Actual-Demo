@@ -1,6 +1,6 @@
 {
   "name": "@mdakhan.mak/cs-playwright-test-framework",
-  "version": "1.5.21",
+  "version": "1.5.26",
   "description": "CS Playwright Test Framework - Lightning-fast, configurable, AI-powered self-healing test automation with Playwright",
   "main": "dist/lib/index.js",
   "types": "dist/lib/index.d.ts",
@@ -32,6 +32,10 @@
     "./bdd": {
       "types": "./dist/lib/bdd.d.ts",
       "default": "./dist/lib/bdd.js"
+    },
+    "./codegen": {
+      "types": "./dist/codegen/index.d.ts",
+      "default": "./dist/codegen/index.js"
     },
     "./browser": {
       "types": "./dist/lib/browser.d.ts",
@@ -129,7 +133,8 @@
   },
   "bin": {
     "cs-playwright-test": "dist/index.js",
-    "cs-playwright-framework": "dist/index.js"
+    "cs-playwright-framework": "dist/index.js",
+    "cs-playwright-codegen": "dist/codegen/cli/cs-playwright-codegen.js"
   },
   "files": [
     "dist/**/*",
@@ -170,6 +175,9 @@
     "@playwright/test": "^1.56.0",
     "@types/xml2js": "^0.4.14",
     "archiver": "^7.0.0",
+    "chalk": "^5.6.2",
+    "chokidar": "^4.0.3",
+    "commander": "^14.0.1",
     "csv-parse": "^5.5.2",
     "dotenv": "^16.3.1",
     "exceljs": "^4.4.0",
@@ -181,6 +189,7 @@
     "mongodb": "^6.0.0",
     "mssql": "^12.0.0",
     "mysql2": "^3.6.0",
+    "ora": "^9.0.0",
     "oracledb": "^6.0.0",
     "pg": "^8.11.0",
     "redis": "^4.6.0",

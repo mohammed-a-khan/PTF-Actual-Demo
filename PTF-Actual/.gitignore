@@ -60,6 +60,10 @@ Desktop.ini
 .cache/
 tmp/
 temp/
+.temp/
+
+# Codegen artifacts
+.cs-codegen/
 
 # Package lock files (optional - remove this line if you want to track them)
 package-lock.json
