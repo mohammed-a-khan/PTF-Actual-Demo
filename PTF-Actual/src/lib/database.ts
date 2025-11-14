@@ -11,6 +11,9 @@
 export { CSDatabaseManager } from '../database/CSDatabaseManager';
 export { CSDatabaseRunner } from '../database/CSDatabaseRunner';
 
+// Database Utilities
+export { CSDBUtils } from '../database/utils/CSDBUtils';
+
 export { CSDatabase } from '../database/client/CSDatabase';
 export { ConnectionManager } from '../database/client/ConnectionManager';
 export { ConnectionPool } from '../database/client/ConnectionPool';

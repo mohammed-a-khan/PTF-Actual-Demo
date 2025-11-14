@@ -18,7 +18,7 @@ import ora, { Ora } from 'ora';
 import chalk from 'chalk';
 import { AdvancedASTParser } from '../parser/ASTParser';
 import { SymbolicExecutionEngine } from '../analyzer/SymbolicExecutionEngine';
-import { IntelligentCodeGenerator } from '../generator/IntelligentCodeGenerator';
+import { DirectCodeGenerator } from '../generator/DirectCodeGenerator';
 import { GeneratedCSCode } from '../types';
 
 export interface OrchestratorOptions {
@@ -31,12 +31,11 @@ export interface OrchestratorOptions {
 export class CodegenOrchestrator {
     private parser: AdvancedASTParser;
     private symbolicEngine: SymbolicExecutionEngine;
-    private codeGenerator: IntelligentCodeGenerator;
+    private codeGenerator: DirectCodeGenerator;
     private watcher?: chokidar.FSWatcher;
     private playwrightProcess?: ChildProcess;
     private spinner?: Ora;
     private options: OrchestratorOptions;
-    private isShuttingDown: boolean = false;
 
     constructor(options: OrchestratorOptions = {}) {
         // Use framework's .temp directory instead of system temp
@@ -50,10 +49,10 @@ export class CodegenOrchestrator {
             ...options  // User options override defaults
         };
 
-        // Initialize intelligence layers
+        // Initialize code generation system
         this.parser = new AdvancedASTParser();
         this.symbolicEngine = new SymbolicExecutionEngine();
-        this.codeGenerator = new IntelligentCodeGenerator();
+        this.codeGenerator = new DirectCodeGenerator();
     }
 
     /**
@@ -114,24 +113,48 @@ export class CodegenOrchestrator {
 
         this.watcher = chokidar.watch(`${watchDir}/*.spec.ts`, {
             persistent: true,
-            ignoreInitial: true,
+            ignoreInitial: false, // CHANGED: Watch existing files too
             awaitWriteFinish: {
-                stabilityThreshold: 1000, // Wait 1 second after last change
+                stabilityThreshold: 2000, // CHANGED: Wait 2 seconds after last change for better stability
                 pollInterval: 100
-            }
+            },
+            usePolling: true, // ADDED: Use polling for better reliability on Windows/WSL
+            interval: 300 // ADDED: Poll every 300ms
         });
 
+        let isFirstEvent = true; // Track if this is the initial file creation
+
         this.watcher.on('add', async (filePath: string) => {
+            if (this.options.verbose) {
+                console.log(chalk.gray(`   📄 File added: ${path.basename(filePath)}`));
+            }
+            // Skip the initial empty file creation by Playwright
+            if (isFirstEvent) {
+                isFirstEvent = false;
+                if (this.options.verbose) {
+                    console.log(chalk.gray(`   ⏭️  Skipping initial file, waiting for your recording...`));
+                }
+                return;
+            }
             await this.handleNewFile(filePath);
         });
 
         this.watcher.on('change', async (filePath: string) => {
+            if (this.options.verbose) {
+                console.log(chalk.gray(`   📝 File changed: ${path.basename(filePath)}`));
+            }
             await this.handleNewFile(filePath);
         });
 
         this.watcher.on('error', (error: unknown) => {
             console.error(chalk.red('❌ Watcher error:'), error);
         });
+
+        if (this.options.verbose) {
+            this.watcher.on('ready', () => {
+                console.log(chalk.gray('   ✓ File watcher ready'));
+            });
+        }
     }
 
     /**
@@ -165,44 +188,37 @@ export class CodegenOrchestrator {
      */
     private async transformToCSFramework(sourceCode: string, originalFilePath: string): Promise<void> {
         try {
-            // Parse and analyze the recorded test
-            this.spinner = ora(chalk.cyan('Analyzing recorded test...')).start();
+            // Parse and extract actions from recorded test
+            this.spinner = ora(chalk.cyan('🔍 Analyzing recorded test...')).start();
             const analysis = this.parser.parse(sourceCode);
-            this.spinner.succeed(chalk.green(`Found ${analysis.actions.length} test actions`));
+            this.spinner.succeed(chalk.green(`✅ Found ${analysis.actions.length} test actions`));
 
             if (this.options.verbose) {
                 console.log(chalk.gray(`   Actions: ${analysis.actions.map(a => a.type).join(', ')}`));
             }
 
-            // Understand test intent
-            this.spinner = ora(chalk.cyan('Understanding test purpose...')).start();
-            const intentAnalysis = await this.symbolicEngine.executeSymbolically(analysis);
-            this.spinner.succeed(chalk.green(`Detected: ${intentAnalysis.primary.type} test (${Math.round(intentAnalysis.confidence * 100)}% confidence)`));
-
-            if (this.options.verbose) {
-                console.log(chalk.gray(`   Test Type: ${intentAnalysis.testType}`));
-                console.log(chalk.gray(`   Business Goal: ${intentAnalysis.primary.description}`));
-            }
-
-            // Generate CS Framework code
-            this.spinner = ora(chalk.cyan('Generating CS Framework code...')).start();
-            const featureName = this.extractFeatureName(originalFilePath, intentAnalysis.primary.type);
-            const generatedCode = await this.codeGenerator.generate(analysis, intentAnalysis, featureName);
-            this.spinner.succeed(chalk.green('CS Framework code generated'));
+            // Generate CS Framework code using DIRECT conversion
+            // Simple, accurate conversion: Action → Element + Method + Gherkin
+            this.spinner = ora(chalk.cyan('🔨 Converting actions to CS Framework code...')).start();
+            const generatedCode = await this.codeGenerator.generate(analysis.actions);
+            this.spinner.succeed(chalk.green('✅ Code generation complete!'));
 
             // Write generated files
-            this.spinner = ora(chalk.cyan('Writing CS Framework files...')).start();
+            this.spinner = ora(chalk.cyan('📝 Writing CS Framework files...')).start();
             await this.writeGeneratedCode(generatedCode);
-            this.spinner.succeed(chalk.green('✅ Transformation complete!'));
+            this.spinner.succeed(chalk.green('✅ All files written successfully!'));
 
             // Summary
-            this.printSummary(generatedCode, intentAnalysis);
+            this.printIntelligentSummary(generatedCode);
 
         } catch (error) {
             if (this.spinner) {
                 this.spinner.fail(chalk.red('❌ Transformation failed'));
             }
             console.error(chalk.red('Error details:'), error);
+            if (error instanceof Error) {
+                console.error(chalk.gray(error.stack));
+            }
         }
     }
 
@@ -233,42 +249,73 @@ export class CodegenOrchestrator {
         const pageDir = path.join(outputDir, 'pages');
         const stepDir = path.join(outputDir, 'steps');
 
+        // Always create feature, page, and step directories
         [featureDir, pageDir, stepDir].forEach(dir => {
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
         });
 
-        // Write Feature file
-        const featurePath = path.join(featureDir, code.feature.fileName);
-        fs.writeFileSync(featurePath, code.feature.content, 'utf-8');
+        // Only create components directory if we have components to write
+        const componentDir = path.join(outputDir, 'components');
+        if (code.components && code.components.length > 0) {
+            if (!fs.existsSync(componentDir)) {
+                fs.mkdirSync(componentDir, { recursive: true });
+            }
+        }
+
+        // Write Feature files (may have multiple)
+        const features = code.features || [code.feature];
+        for (const feature of features) {
+            const featurePath = path.join(featureDir, feature.fileName);
+            fs.writeFileSync(featurePath, feature.content, 'utf-8');
+            console.log(chalk.gray(`   ✓ ${feature.fileName}`));
+        }
 
         // Write Page Objects
         for (const pageObject of code.pageObjects) {
             const pagePath = path.join(pageDir, pageObject.fileName);
             fs.writeFileSync(pagePath, pageObject.content, 'utf-8');
+            console.log(chalk.gray(`   ✓ ${pageObject.fileName}`));
         }
 
         // Write Step Definitions
         for (const stepDef of code.stepDefinitions) {
             const stepPath = path.join(stepDir, stepDef.fileName);
             fs.writeFileSync(stepPath, stepDef.content, 'utf-8');
+            console.log(chalk.gray(`   ✓ ${stepDef.fileName}`));
+        }
+
+        // Write Components (NavigationComponent, etc.)
+        if (code.components && code.components.length > 0) {
+            for (const component of code.components) {
+                const componentPath = path.join(componentDir, component.fileName);
+                fs.writeFileSync(componentPath, component.content, 'utf-8');
+                console.log(chalk.gray(`   ✓ ${component.fileName}`));
+            }
         }
     }
 
     /**
-     * Print transformation summary
+     * Print code generation summary
      */
-    private printSummary(code: GeneratedCSCode, intentAnalysis: any): void {
-        console.log(chalk.cyan('\n📊 Transformation Summary'));
-        console.log(chalk.gray('━'.repeat(50)));
-        console.log(chalk.white(`  Feature:          ${code.feature.fileName}`));
-        console.log(chalk.white(`  Page Objects:     ${code.pageObjects.length} generated`));
-        console.log(chalk.white(`  Step Definitions: ${code.stepDefinitions.length} generated`));
-        console.log(chalk.white(`  Confidence:       ${Math.round(intentAnalysis.confidence * 100)}%`));
-        console.log(chalk.white(`  Intelligence:     ${code.pageObjects.reduce((sum, po) => sum + po.elements.length, 0)} smart elements`));
-        console.log(chalk.gray('━'.repeat(50)));
-        console.log(chalk.green('✅ Your test is ready to run!\n'));
+    private printIntelligentSummary(code: GeneratedCSCode): void {
+        console.log(chalk.cyan('\n📊 Code Generation Summary'));
+        console.log(chalk.gray('━'.repeat(60)));
+
+        const features = code.features || [code.feature];
+        const totalActions = features[0]?.scenarios?.[0]?.steps?.length || 0;
+        console.log(chalk.white(`  Feature Files:      ${features.length}`));
+        console.log(chalk.white(`  Page Objects:       ${code.pageObjects.length}`));
+        console.log(chalk.white(`  Step Definitions:   ${code.stepDefinitions.length}`));
+        console.log(chalk.white(`  Total Actions:      ${totalActions}`));
+
+        console.log(chalk.gray('\n━'.repeat(60)));
+        console.log(chalk.green('✅ Your test is ready to run!'));
+        console.log(chalk.white(`\n📁 Output directory: ${this.options.outputDir}`));
+        console.log(chalk.gray('   ├── features/     (Gherkin scenarios)'));
+        console.log(chalk.gray('   ├── pages/        (Page Objects)'));
+        console.log(chalk.gray('   └── steps/        (Step Definitions)\n'));
     }
 
     /**
@@ -301,21 +348,23 @@ export class CodegenOrchestrator {
             process.exit(1);
         });
 
+        // Handle when Playwright process exits naturally (user closes browser)
         this.playwrightProcess.on('exit', async (code) => {
-            // If we're already shutting down from SIGINT, don't interfere
-            if (this.isShuttingDown) {
-                return;
+            if (this.options.verbose) {
+                console.log(chalk.gray(`\n   Playwright exited with code: ${code}`));
             }
 
-            // Playwright exited on its own (user closed window or error)
-            if (code !== 0 && code !== null) {
-                console.log(chalk.yellow('\n⚠️  Playwright codegen exited'));
-            }
+            // Don't process if we're already cleaning up
+            if (code === 0 || code === null) {
+                console.log(chalk.cyan('\n🔄 Browser closed, converting your test to CS Framework...\n'));
 
-            // Process final test before exiting
-            await this.processFinalTest();
-            this.cleanup();
-            process.exit(0);  // Always exit with 0 after successful cleanup
+                // Give it a moment to ensure file is saved
+                await new Promise(resolve => setTimeout(resolve, 500));
+                await this.processFinalTest();
+
+                this.cleanup();
+                process.exit(0);
+            }
         });
     }
 
@@ -323,20 +372,23 @@ export class CodegenOrchestrator {
      * Keep process alive
      */
     private keepAlive(): void {
-        // Handle graceful shutdown
+        // Handle graceful shutdown with Ctrl+C
         process.on('SIGINT', async () => {
-            // Prevent duplicate processing if already shutting down
-            if (this.isShuttingDown) {
-                return;
+            console.log(chalk.yellow('\n\n👋 Ctrl+C pressed, closing codegen...'));
+
+            if (this.options.verbose) {
+                console.log(chalk.gray('   Stopping Playwright process...'));
             }
-            this.isShuttingDown = true;
 
-            console.log(chalk.yellow('\n\n👋 Closing codegen and processing your test...'));
-
-            // Kill playwright process first to prevent its exit handler from running
+            // Kill Playwright first
             if (this.playwrightProcess && !this.playwrightProcess.killed) {
-                this.playwrightProcess.kill('SIGKILL');
+                this.playwrightProcess.kill('SIGTERM');
             }
+
+            // Wait a moment for file to be fully written
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            console.log(chalk.cyan('\n🔄 Converting your test to CS Framework...\n'));
 
             // Process the test file if it exists
             await this.processFinalTest();
@@ -346,15 +398,6 @@ export class CodegenOrchestrator {
         });
 
         process.on('SIGTERM', async () => {
-            if (this.isShuttingDown) {
-                return;
-            }
-            this.isShuttingDown = true;
-
-            if (this.playwrightProcess && !this.playwrightProcess.killed) {
-                this.playwrightProcess.kill('SIGKILL');
-            }
-
             await this.processFinalTest();
             this.cleanup();
             process.exit(0);
@@ -374,9 +417,6 @@ export class CodegenOrchestrator {
                 if (sourceCode && sourceCode.trim().length > 0) {
                     console.log(chalk.cyan('\n🔄 Converting your test to CS Framework...\n'));
                     await this.transformToCSFramework(sourceCode, testFile);
-
-                    // Transformation complete - notify user
-                    console.log(chalk.green.bold('\n✨ All done! Your CS Framework code is ready.\n'));
                 }
             }
         } catch (error) {
@@ -388,24 +428,16 @@ export class CodegenOrchestrator {
      * Cleanup resources
      */
     private cleanup(): void {
-        try {
-            if (this.watcher) {
-                this.watcher.close();
-            }
+        if (this.watcher) {
+            this.watcher.close();
+        }
 
-            if (this.playwrightProcess && !this.playwrightProcess.killed) {
-                this.playwrightProcess.kill('SIGTERM');
-            }
+        if (this.playwrightProcess && !this.playwrightProcess.killed) {
+            this.playwrightProcess.kill();
+        }
 
-            if (this.spinner) {
-                this.spinner.stop();
-            }
-
-            // Force cleanup of any lingering event listeners
-            process.removeAllListeners('SIGINT');
-            process.removeAllListeners('SIGTERM');
-        } catch (error) {
-            // Ignore cleanup errors
+        if (this.spinner) {
+            this.spinner.stop();
         }
     }
 

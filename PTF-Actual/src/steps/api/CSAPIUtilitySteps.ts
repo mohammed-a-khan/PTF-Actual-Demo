@@ -144,6 +144,29 @@ export class CSAPIUtilitySteps {
         }
     }
 
+    @CSBDDStepDef("user prints request body")
+    async printRequestBody(): Promise<void> {
+        try {
+            const context = this.getCurrentContext();
+            const lastRequest = context.getLastRequest();
+
+            if (!lastRequest || !lastRequest.body) {
+                CSReporter.warn('No request body available to print');
+                return;
+            }
+
+            CSReporter.info('Request body:');
+            if (typeof lastRequest.body === 'object') {
+                CSReporter.info(JSON.stringify(lastRequest.body, null, 2));
+            } else {
+                CSReporter.info(String(lastRequest.body));
+            }
+        } catch (error) {
+            CSReporter.fail(`Failed to print request body: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
     @CSBDDStepDef("user saves response to file {string}")
     async saveResponseToFile(filePath: string): Promise<void> {
         CSReporter.info(`Saving response to file: ${filePath}`);

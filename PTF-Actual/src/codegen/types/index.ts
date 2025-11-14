@@ -224,8 +224,10 @@ export interface FrameworkMethodSelection {
 
 export interface GeneratedCSCode {
     feature: GeneratedFeature;
+    features?: GeneratedFeature[];
     pageObjects: GeneratedPageObject[];
     stepDefinitions: GeneratedStepDefinition[];
+    components?: any[];
     testData?: GeneratedTestData;
     metadata: GenerationMetadata;
 }
@@ -314,11 +316,18 @@ export interface GeneratedTestData {
 export interface GenerationMetadata {
     timestamp: number;
     version: string;
-    sourceFile: string;
-    analysisConfidence: number;
-    transformationAccuracy: number;
-    warnings: string[];
-    suggestions: string[];
+    sourceFile?: string;
+    generatedBy?: string;
+    analysisConfidence?: number;
+    transformationAccuracy?: number;
+    warnings?: string[];
+    suggestions?: string[];
+    intelligence?: {
+        patterns: number;
+        pages: number;
+        steps: number;
+        features: number;
+    };
 }
 
 // ============================================

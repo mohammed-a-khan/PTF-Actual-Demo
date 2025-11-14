@@ -153,12 +153,15 @@ export class CSPayloadLoader {
             ...variables
         };
 
-        // Step 3: Update resolver context
+        // Step 3: Clear resolver cache to ensure fresh resolution for each iteration
+        this.resolver.clearCache();
+
+        // Step 4: Update resolver context
         for (const [key, value] of Object.entries(mergedVariables)) {
             this.resolver.setVariable(key, value);
         }
 
-        // Step 4: Resolve placeholders
+        // Step 5: Resolve placeholders
         const resolved = this.resolver.resolve(normalized);
 
         // Step 5: Parse JSON
@@ -189,12 +192,15 @@ export class CSPayloadLoader {
             ...variables
         };
 
-        // Step 3: Update resolver context
+        // Step 3: Clear resolver cache to ensure fresh resolution
+        this.resolver.clearCache();
+
+        // Step 4: Update resolver context
         for (const [key, value] of Object.entries(mergedVariables)) {
             this.resolver.setVariable(key, value);
         }
 
-        // Step 4: Resolve placeholders
+        // Step 5: Resolve placeholders
         const resolved = this.resolver.resolve(normalized);
 
         // Step 5: Validate XML structure
@@ -219,13 +225,17 @@ export class CSPayloadLoader {
         // Step 1: Convert Java ${} syntax to PTF {{}} syntax
         const normalized = CSTemplateProcessor.normalizeSyntax(content);
 
-        // Step 2: Resolve placeholders
+        // Step 2: Get variables from BDD context
         const context = CSBDDContext.getInstance();
         const mergedVariables = {
             ...this.buildVariableContext(context),
             ...variables
         };
 
+        // Step 3: Clear resolver cache to ensure fresh resolution
+        this.resolver.clearCache();
+
+        // Step 4: Update resolver context and resolve placeholders
         for (const [key, value] of Object.entries(mergedVariables)) {
             this.resolver.setVariable(key, value);
         }
@@ -250,13 +260,17 @@ export class CSPayloadLoader {
         // Step 1: Convert Java ${} syntax to PTF {{}} syntax
         const normalized = CSTemplateProcessor.normalizeSyntax(content);
 
-        // Step 2: Resolve placeholders
+        // Step 2: Get variables from BDD context
         const context = CSBDDContext.getInstance();
         const mergedVariables = {
             ...this.buildVariableContext(context),
             ...variables
         };
 
+        // Step 3: Clear resolver cache to ensure fresh resolution
+        this.resolver.clearCache();
+
+        // Step 4: Update resolver context and resolve placeholders
         for (const [key, value] of Object.entries(mergedVariables)) {
             this.resolver.setVariable(key, value);
         }

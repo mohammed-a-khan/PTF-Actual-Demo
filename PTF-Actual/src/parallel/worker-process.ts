@@ -540,17 +540,17 @@ class WorkerProcess {
                 return;
             }
 
-            // Try to send the message
-            process.send(message, (error: any) => {
-                if (error) {
-                    // Handle EPIPE and other send errors silently
-                    if (error.code !== 'EPIPE') {
-                        console.error(`[Worker ${this.workerId}] Error sending message:`, error.message);
-                    }
-                }
-            });
+            // Send message without callback to avoid TypeScript version conflicts
+            // Different TS versions (5.3 vs 5.9+) have incompatible process.send() signatures
+            // Using the simplest form that works across all versions
+            const sendResult = process.send(message);
+
+            // Handle buffer full (returns false if message couldn't be queued)
+            if (sendResult === false) {
+                console.debug(`[Worker ${this.workerId}] Message buffer full, message may be delayed`);
+            }
         } catch (error: any) {
-            // Handle synchronous errors
+            // Handle synchronous errors (EPIPE, etc.)
             if (error.code !== 'EPIPE') {
                 console.error(`[Worker ${this.workerId}] Error sending message:`, error.message);
             }

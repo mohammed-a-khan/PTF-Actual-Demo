@@ -192,6 +192,14 @@ export class CSApiContext {
         return this.responses.get('last');
     }
 
+    public getLastRequest(): CSRequestInfo | undefined {
+        // Return the most recent request from history
+        if (this.history.length === 0) {
+            return undefined;
+        }
+        return this.history[this.history.length - 1];
+    }
+
     public clear(): void {
         this.variables.clear();
         this.responses.clear();

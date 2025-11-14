@@ -22,19 +22,43 @@ export class CSAPITestDataSteps {
 
     /**
      * Set single test data key-value pair
+     * Automatically detects and parses JSON arrays/objects from Scenario Outline parameters
      * Example: user set test data "userId" to "12345"
      * Example: user set test data "userName" to "{{faker.name}}"
+     * Example: user set test data "tags" to "["tag1", "tag2"]" (auto-parsed to array)
      */
     @CSBDDStepDef('user set test data {string} to {string}')
     public async setTestData(key: string, value: string): Promise<void> {
         try {
-            // Resolve value (supports templates and functions)
+            let finalValue: any;
+
+            // Step 1: Resolve any templates/placeholders in the value
             const resolvedValue = this.resolver.resolve(value);
 
-            // Store in BDD context (global)
-            this.context.setVariable(key, resolvedValue);
+            // Step 2: Try to parse as JSON if it looks like JSON (array or object)
+            const trimmedValue = resolvedValue.trim();
+            if (trimmedValue.startsWith('[') || trimmedValue.startsWith('{')) {
+                try {
+                    finalValue = JSON.parse(trimmedValue);
+                    CSReporter.debug(`Parsed JSON value for ${key}: ${JSON.stringify(finalValue)}`);
+                } catch (parseError) {
+                    // If JSON parse fails, treat as string
+                    finalValue = resolvedValue;
+                    CSReporter.debug(`Value looks like JSON but failed to parse, treating as string: ${key}`);
+                }
+            } else {
+                // Not JSON, use as-is
+                finalValue = resolvedValue;
+            }
 
-            CSReporter.info(`Test data set: ${key} = ${resolvedValue}`);
+            // Step 3: Store in BDD context (global)
+            this.context.setVariable(key, finalValue);
+
+            // Log with proper formatting
+            const displayValue = typeof finalValue === 'object'
+                ? JSON.stringify(finalValue)
+                : finalValue;
+            CSReporter.info(`Test data set: ${key} = ${displayValue}`);
 
         } catch (error: any) {
             CSReporter.error(`Failed to set test data: ${error.message}`);

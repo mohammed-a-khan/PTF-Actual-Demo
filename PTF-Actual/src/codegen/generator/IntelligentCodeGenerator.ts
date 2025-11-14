@@ -1,533 +1,183 @@
 /**
- * Intelligent Code Generator for CS Codegen
- * This is where ALL intelligence layers come together to generate optimal CS Framework code
+ * INTELLIGENT CODE GENERATOR - v2.0
  *
- * Integrates:
- * - Layer 3: LLM Intent Understanding
- * - Layer 4: Framework Knowledge Graph
- * - Layer 5: ML Pattern Recognition
- * - Layer 7: Runtime Behavior Prediction
- * - Intelligent Locator Optimization
+ * Integrates 5 intelligence layers to generate optimal CS Framework code:
+ * 1. Assertion Intelligence - understands verification intent
+ * 2. Pattern Recognition - detects UI workflows
+ * 3. Context Extraction - semantic understanding
+ * 4. Intelligent Naming - meaningful identifiers
+ * 5. Architecture Organizer - proper structure
  */
 
+import { Action, GeneratedCSCode } from '../types';
+import { CSReporter } from '../../reporter/CSReporter';
+import { AssertionIntelligenceEngine, ExtractedAssertion } from '../intelligence/AssertionIntelligenceEngine';
+import { PatternRecognitionEngine, Pattern } from '../intelligence/PatternRecognitionEngine';
+import { ContextExtractor, ElementContext } from '../intelligence/ContextExtractor';
+import { IntelligentNamingSystem } from '../intelligence/IntelligentNamingSystem';
 import {
-    DeepCodeAnalysis,
-    IntentAnalysis,
-    GeneratedCSCode,
-    GeneratedFeature,
-    GeneratedPageObject,
-    GeneratedStepDefinition,
-    GeneratedElement,
-    GeneratedMethod,
-    GherkinScenario,
-    GherkinStep,
-    Action,
-    CSCapabilityMatch
-} from '../types';
-import { FrameworkKnowledgeGraph } from '../knowledge/FrameworkKnowledgeGraph';
-import { LLMIntentAnalyzer } from '../intelligence/LLMIntentAnalyzer';
-import { MLPatternRecognizer } from '../intelligence/MLPatternRecognizer';
-import { RuntimeBehaviorPredictor } from '../intelligence/RuntimeBehaviorPredictor';
-import { IntelligentLocatorOptimizer } from '../intelligence/IntelligentLocatorOptimizer';
+    ArchitectureOrganizer,
+    ArchitectureOutput,
+    ElementDefinition,
+    MethodDefinition,
+    ParameterDefinition
+} from '../intelligence/ArchitectureOrganizer';
 
 export class IntelligentCodeGenerator {
-    private knowledgeGraph: FrameworkKnowledgeGraph;
-    private llmAnalyzer: LLMIntentAnalyzer;
-    private patternRecognizer: MLPatternRecognizer;
-    private behaviorPredictor: RuntimeBehaviorPredictor;
-    private locatorOptimizer: IntelligentLocatorOptimizer;
+    private assertionEngine: AssertionIntelligenceEngine;
+    private patternEngine: PatternRecognitionEngine;
+    private contextExtractor: ContextExtractor;
+    private namingSystem: IntelligentNamingSystem;
+    private architectureOrganizer: ArchitectureOrganizer;
 
     constructor() {
-        this.knowledgeGraph = new FrameworkKnowledgeGraph();
-        this.llmAnalyzer = new LLMIntentAnalyzer({ useLocal: true });
-        this.patternRecognizer = new MLPatternRecognizer();
-        this.behaviorPredictor = new RuntimeBehaviorPredictor();
-        this.locatorOptimizer = new IntelligentLocatorOptimizer();
+        this.assertionEngine = new AssertionIntelligenceEngine();
+        this.patternEngine = new PatternRecognitionEngine();
+        this.contextExtractor = new ContextExtractor();
+        this.namingSystem = new IntelligentNamingSystem();
+        this.architectureOrganizer = new ArchitectureOrganizer();
     }
 
     /**
-     * Generate optimal CS Framework code using ALL intelligence
+     * Generate intelligent CS Framework code from Playwright recording
      */
-    public async generate(
-        analysis: DeepCodeAnalysis,
-        intentAnalysis: IntentAnalysis,
-        featureName: string
-    ): Promise<GeneratedCSCode> {
-        // Layer 3: Get deeper LLM-powered understanding
-        const llmAnalysis = await this.llmAnalyzer.analyzeIntent(analysis);
+    public async generate(actions: Action[]): Promise<GeneratedCSCode> {
+        CSReporter.info('🧠 Starting intelligent code generation...');
 
-        // Layer 5: Recognize patterns using ML
-        const patterns = await this.patternRecognizer.recognizePatterns(analysis);
+        // LAYER 1: Detect patterns (dropdowns, modals, navigation, etc.)
+        const patterns = this.patternEngine.detectPatterns(actions);
 
-        // Layer 7: Predict runtime behavior
-        const behaviorPrediction = await this.behaviorPredictor.predictBehavior(analysis);
+        // LAYER 2: Extract context for each action
+        const contexts = new Map<Action, ElementContext>();
+        for (const action of actions) {
+            const context = this.contextExtractor.extractElementContext(action, patterns, actions);
+            contexts.set(action, context);
+        }
 
-        // DON'T optimize locators here - we'll use original selectors and build proper CS locators
-        // The buildCSLocator method will handle the conversion properly
-
-        // Generate Feature file (Gherkin) with LLM insights
-        const feature = this.generateFeature(
-            analysis,
-            intentAnalysis,
-            featureName,
-            llmAnalysis
-        );
-
-        // Generate Page Objects using intelligent method selection
-        const pageObjects = this.generatePageObjects(
-            analysis,
-            intentAnalysis,
-            patterns
-        );
-
-        // Generate Step Definitions with pattern suggestions
-        const stepDefinitions = this.generateStepDefinitions(
-            analysis,
-            intentAnalysis,
-            pageObjects,
-            patterns
-        );
-
-        // Compile warnings and suggestions from all intelligence layers
-        const warnings = this.compileWarnings(behaviorPrediction, patterns);
-        const suggestions = this.compileSuggestions(behaviorPrediction, llmAnalysis, patterns);
-
-        return {
-            feature,
-            pageObjects,
-            stepDefinitions,
-            metadata: {
-                timestamp: Date.now(),
-                version: '2.0.0-intelligent',
-                sourceFile: 'codegen.spec.ts',
-                analysisConfidence: intentAnalysis.confidence,
-                transformationAccuracy: this.calculateAccuracy(intentAnalysis),
-                warnings,
-                suggestions
-            }
-        };
-    }
-
-    /**
-     * Optimize all locators in actions
-     */
-    private optimizeAllLocators(actions: Action[]): Action[] {
-        return actions.map(action => {
-            if (!action.target) return action;
-
-            const optimized = this.locatorOptimizer.optimizeLocator(action);
-
-            // Update action with optimized locator
-            return {
-                ...action,
-                target: {
-                    ...action.target,
-                    selector: optimized.optimized
-                },
-                // Store optimization metadata
-                metadata: {
-                    originalLocator: optimized.original,
-                    stabilityScore: optimized.stabilityScore,
-                    fallbacks: optimized.fallbacks,
-                    reasoning: optimized.reasoning
-                }
-            } as any;
-        });
-    }
-
-    /**
-     * Compile warnings from all intelligence layers
-     */
-    private compileWarnings(behaviorPrediction: any, patterns: any[]): string[] {
-        const warnings: string[] = [];
-
-        // Add failure point warnings
-        if (behaviorPrediction.failurePoints) {
-            for (const point of behaviorPrediction.failurePoints) {
-                if (point.risk === 'high') {
-                    warnings.push(`Line ${point.location.line}: ${point.reason}`);
+        // LAYER 3: Analyze assertions
+        const assertions = new Map<Action, ExtractedAssertion>();
+        for (const action of actions) {
+            if (action.type === 'assertion') {
+                const previousActions = actions.slice(0, actions.indexOf(action));
+                const assertion = this.assertionEngine.analyzeAssertion(action, previousActions);
+                if (assertion) {
+                    assertions.set(action, assertion);
                 }
             }
         }
 
-        // Add flakiness warning
-        if (behaviorPrediction.flakinessRisk > 0.5) {
-            warnings.push(`Flakiness risk: ${Math.round(behaviorPrediction.flakinessRisk * 100)}% - Consider adding explicit waits`);
-        }
+        // LAYER 4: Generate intelligent names and create elements
+        const elements = this.generateElements(actions, contexts, patterns);
 
-        // Add maintenance risk warnings
-        if (behaviorPrediction.maintenanceRisks) {
-            for (const risk of behaviorPrediction.maintenanceRisks) {
-                if (risk.severity === 'high') {
-                    warnings.push(`${risk.type}: ${risk.description}`);
-                }
-            }
-        }
+        // LAYER 5: Generate intelligent methods from patterns
+        const methods = this.generateMethods(patterns, contexts, assertions);
 
-        return warnings;
-    }
-
-    /**
-     * Compile suggestions from all intelligence layers
-     */
-    private compileSuggestions(behaviorPrediction: any, llmAnalysis: any, patterns: any[]): string[] {
-        const suggestions: string[] = [];
-
-        // Add LLM suggestions
-        if (llmAnalysis.semanticUnderstanding) {
-            suggestions.push(`Business Goal: ${llmAnalysis.semanticUnderstanding.what}`);
-            suggestions.push(`User Journey: ${llmAnalysis.semanticUnderstanding.how}`);
-        }
-
-        // Add optimization suggestions
-        if (behaviorPrediction.optimizations) {
-            for (const opt of behaviorPrediction.optimizations) {
-                if (opt.impact === 'high') {
-                    suggestions.push(`${opt.type}: ${opt.description}`);
-                }
-            }
-        }
-
-        // Add pattern-based suggestions
-        for (const pattern of patterns) {
-            if (pattern.confidence > 0.8) {
-                suggestions.push(`Consider using existing ${pattern.name} pattern`);
-            }
-        }
-
-        // Add runtime estimates
-        if (behaviorPrediction.estimatedDuration) {
-            suggestions.push(`Estimated execution time: ${Math.round(behaviorPrediction.estimatedDuration / 1000)}s`);
-        }
-
-        return suggestions;
-    }
-
-    /**
-     * Generate Feature file with intelligent Gherkin
-     */
-    private generateFeature(
-        analysis: DeepCodeAnalysis,
-        intentAnalysis: IntentAnalysis,
-        featureName: string,
-        llmAnalysis?: any
-    ): GeneratedFeature {
-        const scenario = this.generateScenario(analysis, intentAnalysis);
-
-        const content = this.buildFeatureContent(featureName, scenario);
-
-        return {
-            fileName: `${this.toKebabCase(featureName)}.feature`,
-            path: `features/${this.toKebabCase(featureName)}.feature`,
-            content,
-            scenarios: [scenario]
-        };
-    }
-
-    /**
-     * Generate Gherkin scenario from intelligence
-     */
-    private generateScenario(
-        analysis: DeepCodeAnalysis,
-        intentAnalysis: IntentAnalysis
-    ): GherkinScenario {
-        const { primary, testType } = intentAnalysis;
-        const { actions } = analysis;
-
-        // Generate scenario name
-        const scenarioName = this.generateScenarioName(primary);
-
-        // Generate tags
-        const tags = this.generateTags(primary, testType);
-
-        // Generate steps
-        const steps = this.generateGherkinSteps(actions, intentAnalysis);
-
-        return {
-            name: scenarioName,
-            tags,
-            steps
-        };
-    }
-
-    /**
-     * Generate scenario name from intent
-     */
-    private generateScenarioName(intent: any): string {
-        if (intent.businessGoal) {
-            return intent.businessGoal;
-        }
-        return `${intent.subtype} ${intent.type}`;
-    }
-
-    /**
-     * Generate tags
-     */
-    private generateTags(intent: any, testType: string): string[] {
-        const tags: string[] = [];
-
-        // Test type tag
-        tags.push(`@${testType}`);
-
-        // Intent-based tags
-        if (intent.type === 'authentication') {
-            tags.push('@smoke');
-            tags.push('@authentication');
-        } else if (intent.type === 'crud') {
-            tags.push('@crud');
-            tags.push(`@${intent.subtype}`);
-        }
-
-        return tags;
-    }
-
-    /**
-     * Generate Gherkin steps with intelligence
-     */
-    private generateGherkinSteps(actions: Action[], intentAnalysis: IntentAnalysis): GherkinStep[] {
-        const steps: GherkinStep[] = [];
-
-        // Group actions intelligently
-        const grouped = this.groupActionsByIntent(actions, intentAnalysis);
-
-        for (const group of grouped) {
-            const step = this.actionGroupToGherkinStep(group);
-            if (step) {
-                steps.push(step);
-            }
-        }
-
-        return steps;
-    }
-
-    /**
-     * Group actions by intent - each action becomes a step
-     */
-    private groupActionsByIntent(actions: Action[], intentAnalysis: IntentAnalysis): Action[][] {
-        // Each action should become its own step, except navigation which goes in Background
-        return actions
-            .filter(action => action.type !== 'navigation')  // Skip navigation, it's in Background
-            .map(action => [action]);  // Each action in its own group
-    }
-
-    /**
-     * Convert action group to Gherkin step
-     */
-    private actionGroupToGherkinStep(actions: Action[]): GherkinStep | null {
-        if (actions.length === 0) return null;
-
-        const firstAction = actions[0];
-
-        if (firstAction.type === 'navigation') {
-            return {
-                keyword: 'Given',
-                text: `I navigate to the application`
-            };
-        }
-
-        if (firstAction.type === 'fill') {
-            // Check if this is a login pattern (username + password)
-            const hasUsername = actions.some(a =>
-                a.target?.selector?.toLowerCase().includes('username') ||
-                a.target?.options?.name?.toLowerCase().includes('username')
-            );
-            const hasPassword = actions.some(a =>
-                a.target?.selector?.toLowerCase().includes('password') ||
-                a.target?.options?.name?.toLowerCase().includes('password')
-            );
-
-            if (hasUsername && hasPassword) {
-                return {
-                    keyword: 'When',
-                    text: `I enter username "Admin" and password "admin123"`
-                };
-            }
-
-            // Get field name from first fill action - must match step definition format
-            const fieldName = this.extractFieldName(firstAction);
-            return {
-                keyword: 'When',
-                text: `I enter "test-value" in the ${fieldName} field`
-            };
-        }
-
-        if (firstAction.type === 'click') {
-            const elementName = this.extractElementDescription(firstAction);
-
-            // Determine if it's a button, link, or other element
-            if (firstAction.target?.type === 'getByRole') {
-                const role = firstAction.target.selector.toLowerCase();
-                const name = firstAction.target.options?.name || 'element';
-
-                if (role === 'button') {
-                    return {
-                        keyword: 'And',
-                        text: `I click on the "${name}" button`
-                    };
-                } else if (role === 'link') {
-                    return {
-                        keyword: 'And',
-                        text: `I click on the "${name}" link`
-                    };
-                } else if (role === 'menuitem') {
-                    return {
-                        keyword: 'And',
-                        text: `I select "${name}" from the menu`
-                    };
-                }
-            }
-
-            return {
-                keyword: 'And',
-                text: `I click on the ${elementName}`
-            };
-        }
-
-        if (firstAction.type === 'assertion') {
-            return {
-                keyword: 'Then',
-                text: `I should see the expected result`
-            };
-        }
-
-        return null;
-    }
-
-    /**
-     * Extract field name from action
-     */
-    private extractFieldName(action: Action): string {
-        if (action.target?.options?.name) {
-            return action.target.options.name;
-        }
-        if (action.target?.selector) {
-            const match = action.target.selector.match(/name[=\s]*["']([^"']+)["']/);
-            if (match) return match[1];
-        }
-        return 'field';
-    }
-
-    /**
-     * Extract element description from action
-     */
-    private extractElementDescription(action: Action): string {
-        if (action.target?.options?.name) {
-            return action.target.options.name;
-        }
-
-        const match = action.expression.match(/name:\s*['"]([^'"]+)['"]/);
-        if (match) return match[1];
-
-        const textMatch = action.expression.match(/getByText\(['"]([^'"]+)['"]\)/);
-        if (textMatch) return textMatch[1];
-
-        return 'element';
-    }
-
-    /**
-     * Extract button name from action
-     */
-    private extractButtonName(action: Action): string {
-        const match = action.expression.match(/name:\s*['"]([^'"]+)['"]/);
-        if (match) return match[1];
-
-        const textMatch = action.expression.match(/getByText\(['"]([^'"]+)['"]\)/);
-        if (textMatch) return textMatch[1];
-
-        return 'button';
-    }
-
-    /**
-     * Generate Page Objects with intelligent element creation
-     */
-    private generatePageObjects(
-        analysis: DeepCodeAnalysis,
-        intentAnalysis: IntentAnalysis,
-        patterns?: any[]
-    ): GeneratedPageObject[] {
-        // For now, generate single page object
-        // TODO: Detect page boundaries and create multiple page objects
-
-        const className = this.generatePageClassName(intentAnalysis);
-        const elements = this.generateElements(analysis);
-        const methods = this.generatePageMethods(analysis, intentAnalysis);
-
-        const content = this.buildPageObjectContent(className, elements, methods);
-
-        return [{
-            className,
-            fileName: `${className}.ts`,
-            path: `pages/${className}.ts`,
-            content,
-            baseClass: 'CSBasePage',
-            decorator: '@CSPage',
+        // LAYER 6: Organize into proper architecture
+        const architecture = this.architectureOrganizer.organize(
+            actions,
+            patterns,
+            contexts,
             elements,
             methods
-        }];
+        );
+
+        // Build final code output
+        const code = this.buildCodeOutput(architecture);
+
+        CSReporter.info('✅ Intelligent code generation complete!');
+
+        return code;
     }
 
     /**
-     * Generate page class name
+     * Generate element definitions with intelligent names
+     * Creates elements for pattern actions AND frequently used elements
      */
-    private generatePageClassName(intentAnalysis: IntentAnalysis): string {
-        const { primary } = intentAnalysis;
-
-        // Use intent-based naming (don't use entities as they may contain URLs)
-        if (primary.type === 'authentication') {
-            return 'LoginPage';
+    private generateElements(
+        actions: Action[],
+        contexts: Map<Action, ElementContext>,
+        patterns: Pattern[]
+    ): Map<string, ElementDefinition> {
+        // Build set of actions that are part of patterns (these should always have elements)
+        const patternActionSet = new Set<Action>();
+        for (const pattern of patterns) {
+            for (const action of pattern.actions) {
+                if (action.type !== 'assertion' && action.type !== 'navigation' && action.target) {
+                    patternActionSet.add(action);
+                }
+            }
         }
 
-        if (primary.type === 'crud') {
-            const subtype = primary.subtype || 'data';
-            return `${this.capitalize(subtype)}Page`;
+        // First pass: count element usage per module
+        const elementUsage = new Map<string, { count: number; actions: Action[]; context: ElementContext; isPatternAction: boolean }>();
+
+        for (const action of actions) {
+            // Skip navigation and actions without targets
+            if (action.type === 'navigation' || !action.target) continue;
+
+            const context = contexts.get(action);
+            if (!context) continue;
+
+            // Create unique key: module + locatorType + selector + name
+            const key = `${context.pageModule}:${action.target.type}:${action.target.selector}:${action.target.options?.name || ''}`;
+
+            if (!elementUsage.has(key)) {
+                elementUsage.set(key, { count: 0, actions: [], context, isPatternAction: false });
+            }
+
+            const usage = elementUsage.get(key)!;
+            usage.count++;
+            usage.actions.push(action);
+
+            // Mark if this is a pattern action OR assertion (assertions should always have elements)
+            if (patternActionSet.has(action) || action.type === 'assertion') {
+                usage.isPatternAction = true;
+            }
         }
 
-        if (primary.type === 'form-interaction') {
-            return 'FormPage';
-        }
+        // Second pass: create elements for pattern actions OR frequently used ones
+        const elements = new Map<string, ElementDefinition>();
+        const usedNames = new Set<string>();
 
-        if (primary.type === 'navigation') {
-            return 'NavigationPage';
-        }
+        for (const [key, usage] of elementUsage.entries()) {
+            // Create element if:
+            // 1. Part of a detected pattern (login, search, dropdown, etc.)
+            // 2. Used 2+ times
+            // 3. Has specific important role (buttons, etc.)
+            const action = usage.actions[0];
+            const isImportantElement = this.isImportantElement(action.target, usage.context);
 
-        if (primary.type === 'verification') {
-            return 'VerificationPage';
-        }
+            if (usage.isPatternAction || usage.count >= 2 || isImportantElement) {
+                // Generate intelligent element name
+                let elementName = this.namingSystem.generateElementName(action, usage.context);
 
-        return 'TestPage';
-    }
+                // Make unique by adding context, not just numbers
+                if (usedNames.has(elementName)) {
+                    const modulePrefix = usage.context.pageModule.toLowerCase();
+                    elementName = `${modulePrefix}${elementName.charAt(0).toUpperCase() + elementName.slice(1)}`;
 
-    /**
-     * Capitalize first letter
-     */
-    private capitalize(str: string): string {
-        return str.charAt(0).toUpperCase() + str.slice(1);
-    }
+                    if (usedNames.has(elementName)) {
+                        const selectorHint = this.generateSelectorHint(action.target);
+                        elementName = `${elementName}${selectorHint}`;
 
-    /**
-     * Generate elements with intelligent decorators
-     */
-    private generateElements(analysis: DeepCodeAnalysis): GeneratedElement[] {
-        const elements: GeneratedElement[] = [];
-        const seen = new Set<string>();
+                        // Last resort: skip this element (use inline instead)
+                        if (usedNames.has(elementName)) {
+                            continue;
+                        }
+                    }
+                }
+                usedNames.add(elementName);
 
-        for (const action of analysis.actions) {
-            if (action.target) {
-                const elementName = this.generateElementName(action.target);
-
-                if (seen.has(elementName)) continue;
-                seen.add(elementName);
-
-                const locator = this.buildCSLocator(action.target);
-
-                elements.push({
+                // Create element definition
+                const element: ElementDefinition = {
                     name: elementName,
-                    type: 'CSWebElement',
-                    decorator: '@CSGetElement',
-                    locator,
-                    description: `${action.target.selector} element`,
-                    comment: `// ${action.type} target`
-                });
+                    selector: action.target?.selector || '',
+                    locatorType: action.target?.type || 'locator',
+                    options: action.target?.options,
+                    module: usage.context.pageModule
+                };
+
+                elements.set(elementName, element);
             }
         }
 
@@ -535,562 +185,797 @@ export class IntelligentCodeGenerator {
     }
 
     /**
-     * Generate intelligent element name
+     * Check if element is important enough to always create (buttons, inputs, etc.)
      */
-    private generateElementName(target: any): string {
-        const selector = target.selector;
-
-        // Username/password fields (check both selector and options.name)
-        const selectorLower = selector.toLowerCase();
-        const optionsName = target.options?.name?.toLowerCase() || '';
-
-        if (selectorLower.includes('username') || optionsName.includes('username')) {
-            return 'usernameField';
-        }
-        if (selectorLower.includes('password') || optionsName.includes('password')) {
-            return 'passwordField';
-        }
-
-        // getByRole elements - determine type by role
-        if (target.type === 'getByRole' && target.options?.name) {
-            const role = selector.toLowerCase();
-            const name = this.sanitizeIdentifier(target.options.name);
-            let baseName = this.toCamelCase(name);
-
-            // Ensure first letter is lowercase
-            baseName = baseName.charAt(0).toLowerCase() + baseName.slice(1);
-
-            // Determine suffix based on role
-            if (role === 'textbox' || role === 'input') {
-                return baseName.endsWith('Field') ? baseName : `${baseName}Field`;
-            } else if (role === 'button') {
-                return baseName.endsWith('Button') ? baseName : `${baseName}Button`;
-            } else if (role === 'link') {
-                return baseName.endsWith('Link') ? baseName : `${baseName}Link`;
-            } else if (role === 'menuitem') {
-                return baseName.endsWith('MenuItem') ? baseName : `${baseName}MenuItem`;
-            }
-
-            // Default for other roles
-            return baseName.endsWith('Element') ? baseName : `${baseName}Element`;
-        }
-
-        // getByText elements - use the text content as name
-        if (target.type === 'getByText') {
-            const text = this.sanitizeIdentifier(selector);
-            let baseName = this.toCamelCase(text);
-
-            // Ensure first letter is lowercase
-            baseName = baseName.charAt(0).toLowerCase() + baseName.slice(1);
-
-            // Re-check if starts with number after toCamelCase (since toCamelCase may strip underscore)
-            if (/^[0-9]/.test(baseName)) {
-                baseName = `_${baseName}`;
-            }
-
-            // Text elements are usually links or buttons based on context
-            if (target.action === 'click') {
-                return baseName.endsWith('Link') ? baseName : `${baseName}Link`;
-            }
-            return baseName.endsWith('Element') ? baseName : `${baseName}Element`;
-        }
-
-        // CSS class selectors - extract main class name
-        if (target.type === 'locator' && selector.startsWith('.')) {
-            // Extract first meaningful class name (skip utility classes)
-            const classes = selector.split('.').filter((c: string) => c && c.length > 2);
-            if (classes.length > 0) {
-                const mainClass = classes[0].split(' ')[0]; // Take first significant class
-                let baseName = this.toCamelCase(this.sanitizeIdentifier(mainClass));
-                // Ensure first letter is lowercase
-                baseName = baseName.charAt(0).toLowerCase() + baseName.slice(1);
-                return baseName.endsWith('Icon') || baseName.endsWith('Element') ? baseName : `${baseName}Icon`;
+    private isImportantElement(target: any, context: ElementContext): boolean {
+        // Always create elements for important buttons
+        if (target.type === 'getByRole' && target.selector === 'button') {
+            const name = target.options?.name?.toLowerCase() || '';
+            if (name.includes('search') || name.includes('submit') ||
+                name.includes('login') || name.includes('save') ||
+                name.includes('cancel') || name.includes('delete') ||
+                name.includes('add') || name.includes('create')) {
+                return true;
             }
         }
 
-        // Extract meaningful name from selector
-        let baseName = this.extractMeaningfulName(selector, target.type);
-        // Ensure first letter is lowercase
-        baseName = baseName.charAt(0).toLowerCase() + baseName.slice(1);
-
-        // Add appropriate suffix based on type
-        if (target.type === 'getByPlaceholder' || target.type === 'fill') {
-            return baseName.endsWith('Field') ? baseName : `${baseName}Field`;
-        }
-        if (target.type === 'click') {
-            return baseName.endsWith('Button') ? baseName : `${baseName}Button`;
+        // Always create elements for textboxes (input fields)
+        if (target.type === 'getByRole' && target.selector === 'textbox') {
+            return true;
         }
 
-        return baseName.endsWith('Element') ? baseName : `${baseName}Element`;
+        // Always create elements for inputs with critical placeholders/names
+        if (target.type === 'getByPlaceholder' || target.type === 'getByLabel') {
+            const name = (target.options?.name || target.selector || '').toLowerCase();
+            if (name.includes('username') || name.includes('password') ||
+                name.includes('email') || name.includes('search') ||
+                name.includes('name') || name.includes('phone')) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
-     * Extract meaningful name from selector
+     * Generate selector hint for unique naming
      */
-    private extractMeaningfulName(selector: string, type: string): string {
-        // Try to extract from data-testid
-        if (selector.includes('data-testid')) {
-            const match = selector.match(/data-testid[=\s]*["']([^"']+)["']/);
-            if (match) {
-                return this.toCamelCase(this.sanitizeIdentifier(match[1]));
-            }
+    private generateSelectorHint(target: any): string {
+        if (!target) return '';
+
+        // For buttons/links with names, use the name
+        if (target.options?.name) {
+            const name = target.options.name
+                .replace(/[^a-zA-Z0-9]/g, '')
+                .substring(0, 15);
+            return name.charAt(0).toUpperCase() + name.slice(1);
         }
 
-        // Try to extract from placeholder
-        if (selector.includes('placeholder')) {
-            const match = selector.match(/placeholder[=\s]*["']([^"']+)["']/);
-            if (match) {
-                return this.toCamelCase(this.sanitizeIdentifier(match[1]));
-            }
-        }
-
-        // Try to extract from name attribute
-        if (selector.includes('name')) {
-            const match = selector.match(/name[=\s]*["']([^"']+)["']/);
-            if (match) {
-                return this.toCamelCase(this.sanitizeIdentifier(match[1]));
-            }
-        }
-
-        // Try to extract from class
-        if (selector.includes('class')) {
-            const match = selector.match(/class[=\s]*["']([^"']+)["']/);
-            if (match) {
-                const className = match[1].split(' ')[0]; // Take first class
-                return this.toCamelCase(this.sanitizeIdentifier(className));
-            }
-        }
-
-        // Fallback: sanitize the selector itself
-        return this.toCamelCase(this.sanitizeIdentifier(selector));
-    }
-
-    /**
-     * Sanitize string to be valid JavaScript identifier
-     */
-    private sanitizeIdentifier(str: string): string {
-        const sanitized = str
-            .replace(/[^a-zA-Z0-9_\s-]/g, '') // Remove invalid characters
-            .trim();
-
-        // If empty after sanitization or only digits, make it meaningful
-        if (!sanitized || /^[0-9]+$/.test(sanitized)) {
-            return `text${sanitized || 'Element'}`;
-        }
-
-        // Prepend underscore if starts with number
-        if (/^[0-9]/.test(sanitized)) {
-            return `_${sanitized}`;
-        }
-
-        return sanitized;
-    }
-
-    /**
-     * Build CS Framework locator string
-     */
-    private buildCSLocator(target: any): string {
+        // For role-based, use role
         if (target.type === 'getByRole') {
-            const role = target.selector;
-            if (target.options?.name) {
-                return `role=${role}[name="${target.options.name}"]`;
-            }
-            return `role=${role}`;
+            return target.selector.charAt(0).toUpperCase() + target.selector.slice(1);
         }
 
-        if (target.type === 'getByPlaceholder') {
-            return `[placeholder="${target.selector}"]`;
-        }
-
-        if (target.type === 'getByText') {
-            return `text=${target.selector}`;
-        }
-
-        if (target.type === 'locator') {
-            return target.selector;
-        }
-
-        return target.selector;
+        return '';
     }
 
     /**
-     * Generate page methods with intelligent method selection
+     * Generate intelligent methods from patterns AND assertion groups
      */
-    private generatePageMethods(
-        analysis: DeepCodeAnalysis,
-        intentAnalysis: IntentAnalysis
-    ): GeneratedMethod[] {
-        const methods: GeneratedMethod[] = [];
+    private generateMethods(
+        patterns: Pattern[],
+        contexts: Map<Action, ElementContext>,
+        assertions: Map<Action, ExtractedAssertion>
+    ): MethodDefinition[] {
+        const methods: MethodDefinition[] = [];
 
-        // Generate high-level methods based on intent
-        if (intentAnalysis.primary.type === 'authentication') {
-            methods.push(...this.generateLoginMethod(analysis));
+        // Generate methods from detected patterns (login, search, dropdown, etc.)
+        for (const pattern of patterns) {
+            // Get context from first non-navigation action in pattern
+            const firstAction = pattern.actions.find(a => a.type !== 'navigation');
+            if (!firstAction) continue;
+
+            const context = contexts.get(firstAction);
+            if (!context) continue;
+
+            // Filter out cross-module actions (navigation to different pages)
+            const coreActions = this.filterCorePatternActions(pattern.actions, context.pageModule, contexts);
+
+            // Skip if no core actions remain
+            if (coreActions.length === 0) continue;
+
+            // Generate method name
+            const methodName = this.namingSystem.generateMethodName(pattern, context);
+
+            // Generate Gherkin step
+            const gherkinStep = this.namingSystem.generateGherkinStepText(pattern, context);
+
+            // Generate parameters
+            const parameters = this.generateMethodParameters(pattern);
+
+            // Create method definition
+            const method: MethodDefinition = {
+                name: methodName,
+                purpose: this.describePatternPurpose(pattern),
+                parameters,
+                actions: coreActions,
+                patterns: [pattern],
+                returnType: 'Promise<void>',
+                gherkinStep
+            };
+
+            methods.push(method);
+        }
+
+        // Generate verification methods from assertion groups
+        const assertionMethods = this.generateAssertionMethods(assertions, contexts);
+        methods.push(...assertionMethods);
+
+        return methods;
+    }
+
+    /**
+     * Generate verification methods from grouped assertions
+     */
+    private generateAssertionMethods(
+        assertions: Map<Action, ExtractedAssertion>,
+        contexts: Map<Action, ElementContext>
+    ): MethodDefinition[] {
+        const methods: MethodDefinition[] = [];
+
+        // Group assertions by module
+        const assertionsByModule = new Map<string, Action[]>();
+        for (const [action, assertion] of assertions.entries()) {
+            const context = contexts.get(action);
+            if (!context) continue;
+
+            const module = context.pageModule;
+            if (!assertionsByModule.has(module)) {
+                assertionsByModule.set(module, []);
+            }
+            assertionsByModule.get(module)!.push(action);
+        }
+
+        // Create verification method for each module with assertions
+        for (const [module, assertionActions] of assertionsByModule.entries()) {
+            if (assertionActions.length === 0) continue;
+
+            const methodName = `verify${module}Elements`;
+            const purpose = `Verify ${module} page elements are displayed`;
+
+            const method: MethodDefinition = {
+                name: methodName,
+                purpose,
+                parameters: [],
+                actions: assertionActions,
+                patterns: [],
+                returnType: 'Promise<void>',
+                gherkinStep: `Then I should see ${module} page elements`
+            };
+
+            methods.push(method);
         }
 
         return methods;
     }
 
     /**
-     * Generate login method
+     * Filter pattern actions to only include core actions for the target module
+     * Removes navigation to other pages
      */
-    private generateLoginMethod(analysis: DeepCodeAnalysis): GeneratedMethod[] {
-        return [
-            {
-                name: 'enterUsername',
-                returnType: 'Promise<void>',
-                parameters: [
-                    { name: 'username', type: 'string' }
-                ],
-                implementation: `await this.usernameField.click();
-        await this.usernameField.fill(username);`,
-                comment: '// Enter username',
-                isAsync: true
-            },
-            {
-                name: 'enterPassword',
-                returnType: 'Promise<void>',
-                parameters: [
-                    { name: 'password', type: 'string' }
-                ],
-                implementation: `await this.passwordField.click();
-        await this.passwordField.fill(password);`,
-                comment: '// Enter password',
-                isAsync: true
-            },
-            {
-                name: 'clickLoginButton',
-                returnType: 'Promise<void>',
-                parameters: [],
-                implementation: `await this.loginButton.click();`,
-                comment: '// Click login button',
-                isAsync: true
-            },
-            {
-                name: 'login',
-                returnType: 'Promise<void>',
-                parameters: [
+    private filterCorePatternActions(actions: Action[], targetModule: string, contexts: Map<Action, ElementContext>): Action[] {
+        const coreActions: Action[] = [];
+
+        for (const action of actions) {
+            // Skip navigation actions
+            if (action.type === 'navigation') continue;
+
+            const context = contexts.get(action);
+            if (!context) continue;
+
+            // Include action if it belongs to target module
+            if (context.pageModule === targetModule) {
+                coreActions.push(action);
+            }
+
+            // Stop if we encounter action from different module (indicates page transition)
+            if (context.pageModule !== targetModule && action.target?.type === 'getByRole' && action.target.selector === 'link') {
+                break;
+            }
+        }
+
+        return coreActions;
+    }
+
+    /**
+     * Generate method parameters from pattern
+     */
+    private generateMethodParameters(pattern: Pattern): ParameterDefinition[] {
+        const parameters: ParameterDefinition[] = [];
+
+        switch (pattern.type) {
+            case 'dropdown':
+                parameters.push({
+                    name: 'option',
+                    type: 'string',
+                    defaultValue: `'${pattern.data.optionText}'`
+                });
+                break;
+
+            case 'login':
+                parameters.push(
                     { name: 'username', type: 'string' },
                     { name: 'password', type: 'string' }
-                ],
-                implementation: `await this.enterUsername(username);
-        await this.enterPassword(password);
-        await this.clickLoginButton();`,
-                comment: '// Perform complete login',
-                isAsync: true
-            },
-            {
-                name: 'verifyLoginSuccess',
-                returnType: 'Promise<void>',
-                parameters: [],
-                implementation: `// Add verification logic here
-        await this.page.waitForLoadState('networkidle');`,
-                comment: '// Verify login was successful',
-                isAsync: true
-            }
-        ];
+                );
+                break;
+
+            case 'search':
+                if (pattern.data.searchFields && pattern.data.searchFields.length > 0) {
+                    for (const field of pattern.data.searchFields) {
+                        const paramName = this.namingSystem.generateParameterName(field.field);
+                        parameters.push({
+                            name: paramName,
+                            type: 'string'
+                        });
+                    }
+                }
+                break;
+
+            case 'navigation':
+                // No parameters - module is in method name
+                break;
+
+            case 'modal':
+                // No parameters - action is confirm/cancel
+                break;
+        }
+
+        return parameters;
     }
 
     /**
-     * Generate Step Definitions
+     * Describe pattern purpose
      */
-    private generateStepDefinitions(
-        analysis: DeepCodeAnalysis,
-        intentAnalysis: IntentAnalysis,
-        pageObjects: GeneratedPageObject[],
-        patterns?: any[]
-    ): GeneratedStepDefinition[] {
-        // Generate step definition class
-        const className = `${pageObjects[0].className.replace('Page', '')}Steps`;
+    private describePatternPurpose(pattern: Pattern): string {
+        switch (pattern.type) {
+            case 'dropdown':
+                return `Filter by ${pattern.data.fieldContext.toLowerCase()}`;
+            case 'modal':
+                return `${pattern.data.action === 'confirm' ? 'Confirm' : 'Cancel'} the operation`;
+            case 'login':
+                return 'Authenticate user with credentials';
+            case 'search':
+                return 'Search for records with criteria';
+            case 'navigation':
+                return `Navigate to ${pattern.data.targetModule} module`;
+            default:
+                return 'Perform action';
+        }
+    }
 
-        const content = this.buildStepDefinitionContent(className, analysis, intentAnalysis, pageObjects[0]);
+    /**
+     * Build final code output from architecture
+     */
+    private buildCodeOutput(architecture: ArchitectureOutput): GeneratedCSCode {
+        // Build Feature files
+        const features = architecture.features.map(feature => ({
+            fileName: `${this.namingSystem.toKebabCase(feature.name)}.feature`,
+            path: `test/features/${this.namingSystem.toKebabCase(feature.name)}.feature`,
+            content: this.buildFeatureContent(feature),
+            scenarios: feature.scenarios.map((s: any) => ({
+                name: s.name,
+                tags: s.tags,
+                steps: s.steps.map((step: string) => ({
+                    keyword: this.extractGherkinKeyword(step),
+                    text: this.extractGherkinText(step)
+                }))
+            }))
+        }));
 
-        return [{
-            className,
-            fileName: `${className}.ts`,
-            path: `steps/${className}.ts`,
-            content,
+        // Build Page Objects
+        const pageObjects = architecture.pageObjects.map((page: any) => ({
+            className: page.className,
+            fileName: `${page.className}.ts`,
+            path: `test/pages/${page.className}.ts`,
+            content: this.buildPageObjectContent(page, architecture),
+            baseClass: page.extends,
+            decorator: '@CSPageObject',
+            elements: [],
+            methods: []
+        }));
+
+        // Build Step Definitions
+        const stepDefinitions = architecture.stepDefinitions.map((steps: any) => ({
+            className: steps.className,
+            fileName: `${steps.className}.ts`,
+            path: `test/steps/${steps.className}.ts`,
+            content: this.buildStepDefinitionContent(steps, architecture),
             steps: []
-        }];
-    }
+        }));
 
-    /**
-     * Build feature file content
-     */
-    private buildFeatureContent(featureName: string, scenario: GherkinScenario): string {
-        const tags = scenario.tags.join(' ');
-
-        const steps = scenario.steps.map(step => {
-            let line = `    ${step.keyword} ${step.text}`;
-            if (step.dataTable) {
-                line += '\n' + step.dataTable.map(row =>
-                    '      | ' + row.join(' | ') + ' |'
-                ).join('\n');
-            }
-            return line;
-        }).join('\n');
-
-        // Add proper feature description
-        const description = this.getFeatureDescription(featureName);
-
-        return `${tags}
-Feature: ${featureName}
-  ${description}
-
-  Background:
-    Given I navigate to the application
-
-  Scenario: ${scenario.name}
-${steps}
-`;
-    }
-
-    /**
-     * Get feature description based on name
-     */
-    private getFeatureDescription(featureName: string): string {
-        if (featureName.toLowerCase().includes('login') || featureName.toLowerCase().includes('auth')) {
-            return 'As a user\n  I want to authenticate to the system\n  So that I can access protected features';
-        }
-        return 'As a user\n  I want to test the application\n  So that I can ensure it works correctly';
-    }
-
-    /**
-     * Build page object content
-     */
-    private buildPageObjectContent(
-        className: string,
-        elements: GeneratedElement[],
-        methods: GeneratedMethod[]
-    ): string {
-        const elementsCode = elements.map(el =>
-            `    // ${el.description}
-    @CSGetElement({
-        css: '${el.locator}',
-        description: '${el.description}',
-        waitForVisible: true,
-        selfHeal: true,
-        alternativeLocators: [
-            'xpath:${this.cssToXPath(el.locator)}'
-        ]
-    })
-    public ${el.name}!: CSWebElement;`
-        ).join('\n\n');
-
-        const methodsCode = methods.map(method => {
-            const params = method.parameters.map(p => `${p.name}: ${p.type}`).join(', ');
-            return `    ${method.comment}
-    public async ${method.name}(${params}): ${method.returnType} {
-        CSReporter.info('${this.generateLogMessage(method.name, method.parameters)}');
-        ${method.implementation}
-        CSReporter.pass('${this.generateSuccessMessage(method.name)}');
-    }`;
-        }).join('\n\n');
-
-        const pageName = this.toKebabCase(className.replace('Page', ''));
-
-        return `import { CSBasePage, CSPage, CSGetElement } from '@mdakhan.mak/cs-playwright-test-framework/core';
-import { CSWebElement } from '@mdakhan.mak/cs-playwright-test-framework/element';
-import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporting';
-
-@CSPage('${pageName}')
-export class ${className} extends CSBasePage {
-${elementsCode}
-
-    protected initializeElements(): void {
-        CSReporter.debug('${className} elements initialized');
-    }
-
-${methodsCode}
-
-    public async navigate(): Promise<void> {
-        const baseUrl = this.config.get('BASE_URL');
-        CSReporter.info(\`Navigating to \${baseUrl}\`);
-        await this.page.goto(baseUrl, { timeout: 30000, waitUntil: 'domcontentloaded' });
-        await this.waitForPageLoad();
-        CSReporter.pass('Successfully navigated to application');
-    }
-}
-`;
-    }
-
-    /**
-     * Generate log message for method
-     */
-    private generateLogMessage(methodName: string, params: any[]): string {
-        if (params.length === 0) return `Executing ${methodName}`;
-        const paramNames = params.map(p => `\${${p.name}}`).join(', ');
-        return `Executing ${methodName} with: ${paramNames}`;
-    }
-
-    /**
-     * Generate success message for method
-     */
-    private generateSuccessMessage(methodName: string): string {
-        return `${methodName} completed successfully`;
-    }
-
-    /**
-     * Convert CSS selector to XPath (basic conversion)
-     */
-    private cssToXPath(css: string): string {
-        // Handle role= selectors
-        if (css.startsWith('role=')) {
-            const roleMatch = css.match(/role=([a-z]+)(?:\[name="([^"]+)"\])?/);
-            if (roleMatch) {
-                const [, role, name] = roleMatch;
-                if (name) {
-                    return `//*[@role="${role}" and @name="${name}"]`;
-                }
-                return `//*[@role="${role}"]`;
-            }
+        // Build Navigation Component if exists
+        const components: any[] = [];
+        if (architecture.navigationComponent) {
+            components.push({
+                fileName: 'NavigationComponent.ts',
+                path: 'test/components/NavigationComponent.ts',
+                content: this.buildNavigationComponentContent(architecture.navigationComponent)
+            });
         }
 
-        // Handle text= selectors
-        if (css.startsWith('text=')) {
-            const text = css.substring(5);
-            return `//*[contains(text(),"${text}")]`;
-        }
-
-        // Handle attribute selectors
-        if (css.startsWith('[') && css.includes('=')) {
-            const match = css.match(/\[([^=]+)="([^"]+)"\]/);
-            if (match) {
-                return `//*[@${match[1]}="${match[2]}"]`;
-            }
-        }
-
-        // Handle class selectors
-        if (css.startsWith('.')) {
-            return `//*[contains(@class,"${css.substring(1)}")]`;
-        }
-
-        // Handle ID selectors
-        if (css.startsWith('#')) {
-            return `//*[@id="${css.substring(1)}"]`;
-        }
-
-        // Generic element selector
-        return `//${css}`;
-    }
-
-    /**
-     * Build step definition content
-     */
-    private buildStepDefinitionContent(
-        className: string,
-        analysis: DeepCodeAnalysis,
-        intentAnalysis: IntentAnalysis,
-        pageObject: GeneratedPageObject
-    ): string {
-        const pageName = this.toKebabCase(pageObject.className.replace('Page', ''));
-        // Make sure variable name starts with lowercase
-        const baseVarName = this.toCamelCase(pageObject.className.replace('Page', '') + 'Page');
-        const pageVarName = baseVarName.charAt(0).toLowerCase() + baseVarName.slice(1);
-
-        // Generate step definitions based on all actions
-        const stepDefsList: string[] = [];
-
-        // Always add navigation step
-        stepDefsList.push(`    @CSBDDStepDef('I navigate to the application')
-    async navigateToApplication() {
-        CSReporter.info('Navigating to application');
-        await this.${pageVarName}.navigate();
-        CSReporter.pass('Successfully navigated to application');
-    }`);
-
-        // Generate steps for each unique action pattern
-        const processedSteps = new Set<string>();
-
-        for (const action of analysis.actions) {
-            if (action.type === 'navigation') continue; // Already handled
-
-            if (action.type === 'fill' && action.target) {
-                const fieldName = action.target.options?.name || 'field';
-                const stepText = `I enter {string} in the ${fieldName} field`;
-
-                if (!processedSteps.has(stepText)) {
-                    processedSteps.add(stepText);
-                    const elementName = this.generateElementName(action.target);
-                    stepDefsList.push(`    @CSBDDStepDef('${stepText}')
-    async enter${this.capitalize(this.toCamelCase(fieldName))}(value: string) {
-        CSReporter.info(\`Entering value in ${fieldName} field: \${value}\`);
-        await this.${pageVarName}.${elementName}.fill(value);
-        CSReporter.pass('${fieldName} field filled successfully');
-    }`);
+        return {
+            feature: features[0], // Primary feature
+            features,
+            pageObjects,
+            stepDefinitions,
+            components,
+            metadata: {
+                timestamp: Date.now(),
+                version: '2.0.0-intelligent',
+                generatedBy: 'IntelligentCodeGenerator',
+                intelligence: {
+                    patterns: architecture.pageObjects.reduce((sum: number, p: any) => sum + p.methods.length, 0),
+                    pages: architecture.pageObjects.length,
+                    steps: architecture.stepDefinitions.length,
+                    features: architecture.features.length
                 }
             }
+        };
+    }
 
-            if (action.type === 'click' && action.target) {
-                const elementDesc = action.target.options?.name || this.extractElementDescription(action);
-                const role = action.target.type === 'getByRole' ? action.target.selector.toLowerCase() : 'element';
+    /**
+     * Extract Gherkin keyword from step text
+     */
+    private extractGherkinKeyword(step: string): 'Given' | 'When' | 'Then' | 'And' | 'But' {
+        const match = step.match(/^(Given|When|Then|And|But)\s/);
+        if (match) {
+            return match[1] as any;
+        }
+        return 'When';
+    }
 
-                let stepText = '';
-                let methodName = '';
+    /**
+     * Extract Gherkin text (without keyword)
+     */
+    private extractGherkinText(step: string): string {
+        return step.replace(/^(Given|When|Then|And|But)\s+/, '');
+    }
 
-                if (role === 'button') {
-                    stepText = `I click on the "${elementDesc}" button`;
-                    methodName = `click${this.capitalize(this.toCamelCase(elementDesc))}Button`;
-                } else if (role === 'link') {
-                    stepText = `I click on the "${elementDesc}" link`;
-                    methodName = `click${this.capitalize(this.toCamelCase(elementDesc))}Link`;
-                } else if (role === 'menuitem') {
-                    stepText = `I select "${elementDesc}" from the menu`;
-                    methodName = `select${this.capitalize(this.toCamelCase(elementDesc))}MenuItem`;
+    /**
+     * Build Feature file content
+     */
+    private buildFeatureContent(feature: any): string {
+        let content = `Feature: ${feature.name}\n`;
+        content += `  ${feature.description}\n\n`;
+
+        for (const scenario of feature.scenarios) {
+            content += `  ${scenario.tags.join(' ')}\n`;
+            content += `  Scenario: ${scenario.name}\n`;
+
+            for (const step of scenario.steps) {
+                content += `    ${step}\n`;
+            }
+            content += `\n`;
+        }
+
+        return content;
+    }
+
+    /**
+     * Build Page Object content - USING REAL DEMO PATTERN WITH DECORATORS!
+     */
+    private buildPageObjectContent(page: any, architecture: ArchitectureOutput): string {
+        const hasAssertions = page.methods.some((m: MethodDefinition) =>
+            m.actions.some((a: Action) => a.type === 'assertion')
+        );
+
+        // Import decorators and required classes
+        let content = `import { CSBasePage, CSPage, CSGetElement } from '@mdakhan.mak/cs-playwright-test-framework/core';\n`;
+        content += `import { CSWebElement } from '@mdakhan.mak/cs-playwright-test-framework/element';\n`;
+        content += `import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporting';\n`;
+
+        if (hasAssertions) {
+            content += `import { CSExpect } from '@mdakhan.mak/cs-playwright-test-framework/assertions';\n`;
+        }
+
+        content += `\n`;
+
+        // Generate @CSPage decorator with page identifier
+        const pageIdentifier = page.module.toLowerCase().replace(/\s+/g, '-');
+        content += `@CSPage('${pageIdentifier}')\n`;
+
+        content += `export class ${page.className} extends ${page.extends} {\n`;
+
+        // Add element declarations with @CSGetElement decorators
+        for (const element of page.elements) {
+            content += this.buildElementDecorator(element);
+        }
+
+        // Add initializeElements method
+        content += `\n    protected initializeElements(): void {\n`;
+        content += `        CSReporter.debug('${page.className} elements initialized');\n`;
+        content += `    }\n\n`;
+
+        // Add methods
+        for (const method of page.methods) {
+            content += this.buildMethodImplementation(method, page.elements);
+            content += `\n`;
+        }
+
+        content += `}\n`;
+
+        return content;
+    }
+
+    /**
+     * Build @CSGetElement decorator for element
+     */
+    private buildElementDecorator(element: ElementDefinition): string {
+        const desc = element.name.replace(/([A-Z])/g, ' $1').trim().toLowerCase();
+        let content = `\n    // ${desc}\n`;
+        content += `    @CSGetElement({\n`;
+
+        // Build primary locator
+        content += this.buildDecoratorLocator(element);
+
+        // Add description
+        content += `,\n        description: '${desc}'`;
+
+        // Add options
+        content += `,\n        waitForVisible: true`;
+        content += `,\n        selfHeal: true`;
+
+        // Generate alternative locators
+        const altLocators = this.generateAlternativeLocators(element);
+        if (altLocators.length > 0) {
+            content += `,\n        alternativeLocators: [\n`;
+            content += altLocators.map(loc => `            '${loc}'`).join(',\n');
+            content += `\n        ]`;
+        }
+
+        content += `\n    })\n`;
+        content += `    public ${element.name}!: CSWebElement;\n`;
+
+        return content;
+    }
+
+    /**
+     * Build primary locator for decorator
+     */
+    private buildDecoratorLocator(element: ElementDefinition): string {
+        switch (element.locatorType) {
+            case 'getByRole':
+                if (element.options?.name) {
+                    return `        css: 'role=${element.selector}[name="${element.options.name}"]'`;
+                }
+                return `        css: 'role=${element.selector}'`;
+
+            case 'getByText':
+                return `        text: '${element.options?.name || element.selector}'`;
+
+            case 'getByTestId':
+                return `        css: '[data-testid="${element.selector}"]'`;
+
+            case 'locator':
+                if (element.selector.startsWith('//')) {
+                    return `        xpath: '${element.selector}'`;
                 } else {
-                    stepText = `I click on the ${elementDesc}`;
-                    methodName = `click${this.capitalize(this.toCamelCase(elementDesc))}`;
+                    return `        css: '${element.selector}'`;
                 }
 
-                if (!processedSteps.has(stepText)) {
-                    processedSteps.add(stepText);
-                    const elementName = this.generateElementName(action.target);
-                    stepDefsList.push(`    @CSBDDStepDef('${stepText}')
-    async ${methodName}() {
-        CSReporter.info('Clicking on ${elementDesc}');
-        await this.${pageVarName}.${elementName}.click();
-        CSReporter.pass('${elementDesc} clicked successfully');
-    }`);
+            default:
+                return `        css: '${element.selector}'`;
+        }
+    }
+
+    /**
+     * Generate alternative locators for element
+     */
+    private generateAlternativeLocators(element: ElementDefinition): string[] {
+        const alternatives: string[] = [];
+
+        switch (element.locatorType) {
+            case 'getByRole':
+                if (element.options?.name) {
+                    alternatives.push(`xpath://*[@role="${element.selector}" and @name="${element.options.name}"]`);
                 }
+                break;
+
+            case 'getByText':
+                const text = element.options?.name || element.selector;
+                alternatives.push(`css:*:has-text("${text}")`);
+                alternatives.push(`xpath://*[contains(text(),"${text}")]`);
+                break;
+
+            case 'locator':
+                if (element.selector.startsWith('//')) {
+                    // XPath - add CSS alternative if possible
+                    alternatives.push(`css:${element.selector}`);
+                } else {
+                    // CSS - add XPath alternative
+                    alternatives.push(`xpath://*[contains(@class,"${element.selector.replace('.', '')}")]`);
+                }
+                break;
+        }
+
+        return alternatives;
+    }
+
+
+    /**
+     * Build CS Framework locator
+     */
+    private buildCSLocator(element: ElementDefinition): string {
+        switch (element.locatorType) {
+            case 'getByRole':
+                const role = element.selector;
+                const name = element.options?.name;
+                if (name) {
+                    return `{ role: '${role}', name: '${name}' }`;
+                }
+                return `{ role: '${role}' }`;
+
+            case 'getByText':
+                const text = element.options?.name || element.selector;
+                return `{ text: '${text}' }`;
+
+            case 'locator':
+                return `{ css: '${element.selector}' }`;
+
+            default:
+                return `{ css: '${element.selector}' }`;
+        }
+    }
+
+    /**
+     * Build method implementation with CSReporter pattern from demo project
+     */
+    private buildMethodImplementation(method: MethodDefinition, elements: ElementDefinition[]): string {
+        const params = method.parameters.map((p: any) => `${p.name}: ${p.type}`).join(', ');
+        const hasParams = method.parameters.length > 0;
+        const paramStr = hasParams ? ` - ${method.parameters.map(p => `\${${p.name}}`).join(', ')}` : '';
+
+        let code = `    /**\n`;
+        code += `     * ${method.purpose}\n`;
+        if (method.gherkinStep) {
+            code += `     * Gherkin: ${method.gherkinStep}\n`;
+        }
+        code += `     */\n`;
+        code += `    public async ${method.name}(${params}): ${method.returnType} {\n`;
+        code += `        CSReporter.info(\`${method.purpose}${paramStr}\`);\n\n`;
+
+        // Generate implementation from actions
+        for (const action of method.actions) {
+            const line = this.buildActionImplementation(action, elements, method.parameters);
+            if (line) {
+                code += `        ${line}\n`;
             }
         }
 
-        const stepDefs = stepDefsList.join('\n\n');
+        // Add success reporter at the end (demo project pattern)
+        code += `\n        CSReporter.pass('${this.generateSuccessMessage(method)}');\n`;
+        code += `    }\n`;
 
-        return `import { CSBDDStepDef, Page, StepDefinitions } from '@mdakhan.mak/cs-playwright-test-framework/bdd';
-import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporting';
-import { ${pageObject.className} } from '../pages/${pageObject.className}';
-
-@StepDefinitions
-export class ${className} {
-
-    @Page('${pageName}')
-    private ${pageVarName}!: ${pageObject.className};
-
-${stepDefs}
-}
-
-export default ${className};
-`;
+        return code;
     }
 
     /**
-     * Calculate transformation accuracy
+     * Generate success message for CSReporter.pass()
      */
-    private calculateAccuracy(intentAnalysis: IntentAnalysis): number {
-        return intentAnalysis.confidence * 0.95; // Slight reduction for transformation uncertainty
+    private generateSuccessMessage(method: MethodDefinition): string {
+        if (method.name.startsWith('verify')) {
+            return `Verification successful`;
+        } else if (method.name.includes('login') || method.name.includes('Login')) {
+            return `Login completed successfully`;
+        } else if (method.name.includes('search') || method.name.includes('Search')) {
+            return `Search completed successfully`;
+        } else {
+            return `${method.purpose} completed successfully`;
+        }
     }
 
     /**
-     * Utility: Convert to kebab-case
+     * Build action implementation line
      */
-    private toKebabCase(str: string): string {
-        return str.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase().replace(/\s+/g, '-');
+    private buildActionImplementation(action: Action, elements: ElementDefinition[], parameters: ParameterDefinition[]): string {
+        // Skip navigation actions
+        if (action.type === 'navigation') return '';
+
+        // Skip navigation link clicks (Admin, PIM, Time, etc.)
+        if (action.type === 'click' && action.target?.type === 'getByRole' && action.target.selector === 'link') {
+            const linkName = action.target.options?.name || '';
+            const navigationModules = ['Admin', 'PIM', 'Leave', 'Time', 'Recruitment',
+                                       'Performance', 'Dashboard', 'Directory', 'Maintenance'];
+            if (navigationModules.some(m => linkName.includes(m))) {
+                return ''; // Skip navigation link - should be handled by NavigationComponent
+            }
+        }
+
+        // Find element for this action by matching selector AND locator type
+        const element = elements.find(e => {
+            if (!action.target) return false;
+
+            // Match by both selector and type for better accuracy
+            const selectorMatch = e.selector === action.target.selector;
+            const typeMatch = e.locatorType === action.target.type;
+
+            // For getByRole, also match the name option
+            if (action.target.type === 'getByRole' && action.target.options?.name) {
+                const nameMatch = e.options?.name === action.target.options.name;
+                return selectorMatch && typeMatch && nameMatch;
+            }
+
+            return selectorMatch && typeMatch;
+        });
+
+        // If no element found, create inline locator
+        let elementRef = '';
+        if (element) {
+            elementRef = `this.${element.name}`;
+        } else if (action.target) {
+            // Generate inline locator for unmatched elements
+            elementRef = this.buildInlineLocator(action.target);
+        } else {
+            return ''; // Skip actions without targets
+        }
+
+        switch (action.type) {
+            case 'click':
+                return `await ${elementRef}.click();`;
+
+            case 'fill':
+                const value = action.args[0];
+                if (typeof value === 'string') {
+                    // Check if this matches a parameter name
+                    const matchingParam = this.findMatchingParameter(action, parameters);
+                    if (matchingParam) {
+                        return `await ${elementRef}.fill(${matchingParam.name});`;
+                    }
+                    // Otherwise hardcode the value
+                    return `await ${elementRef}.fill('${value}');`;
+                }
+                return `await ${elementRef}.fill(String(${value}));`;
+
+            case 'assertion':
+                // Generate proper assertion based on expression
+                if (action.expression.includes('toBeVisible')) {
+                    return `await CSExpect(${elementRef}).toBeVisible();`;
+                } else if (action.expression.includes('toContainText')) {
+                    // Extract text from expression
+                    const match = action.expression.match(/toContainText\(['"]([^'"]+)['"]\)/);
+                    if (match) {
+                        return `await CSExpect(${elementRef}).toContainText('${match[1]}');`;
+                    }
+                }
+                return `await CSExpect(${elementRef}).toBeVisible();`;
+
+            default:
+                return '';
+        }
     }
 
     /**
-     * Utility: Convert to camelCase
+     * Find matching parameter for a fill action
      */
-    private toCamelCase(str: string): string {
-        return str.replace(/[-_\s]+(.)?/g, (_, c) => c ? c.toUpperCase() : '');
+    private findMatchingParameter(action: Action, parameters: ParameterDefinition[]): ParameterDefinition | null {
+        if (action.type !== 'fill' || !action.target) return null;
+
+        // Check if target field matches a parameter name
+        const fieldName = action.target.options?.name?.toLowerCase() || '';
+
+        for (const param of parameters) {
+            // Match parameter name with field name
+            if (fieldName.includes(param.name.toLowerCase())) {
+                return param;
+            }
+            // Also check reverse
+            if (param.name.toLowerCase().includes(fieldName)) {
+                return param;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Build inline locator for elements not in page object (NO await here!)
+     */
+    private buildInlineLocator(target: any): string {
+        switch (target.type) {
+            case 'getByRole':
+                if (target.options?.name) {
+                    return `this.page.getByRole('${target.selector}', { name: '${target.options.name}' })`;
+                }
+                return `this.page.getByRole('${target.selector}')`;
+
+            case 'getByText':
+                return `this.page.getByText('${target.selector}')`;
+
+            case 'locator':
+                return `this.page.locator('${target.selector}')`;
+
+            default:
+                return `this.page.locator('${target.selector}')`;
+        }
+    }
+
+    /**
+     * Build Step Definition content
+     */
+    /**
+     * Build Step Definition content using REAL demo project patterns
+     */
+    private buildStepDefinitionContent(steps: any, architecture: ArchitectureOutput): string {
+        // Import decorators (REAL demo pattern - @CSBDDStepDef only!)
+        let content = `import {\n`;
+        content += `    CSBDDStepDef, Page, StepDefinitions,\n`;
+        content += `    CSScenarioContext, CSFeatureContext, CSBDDContext\n`;
+        content += `} from '@mdakhan.mak/cs-playwright-test-framework/bdd';\n`;
+        content += `import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporting';\n`;
+
+        // Import required page objects (for type references only, actual injection via @Page)
+        const requiredPages = architecture.pageObjects.filter((p: any) =>
+            p.module === steps.module || steps.module === 'Navigation'
+        );
+
+        for (const page of requiredPages) {
+            content += `import { ${page.className} } from '../pages/${page.className}';\n`;
+        }
+
+        content += `\n`;
+        content += `/**\n`;
+        content += ` * Step Definitions: ${steps.className}\n`;
+        content += ` * Module: ${steps.module}\n`;
+        content += ` */\n`;
+        content += `@StepDefinitions\n`;
+        content += `export class ${steps.className} {\n\n`;
+
+        // Add page injections using @Page decorator
+        for (const page of requiredPages) {
+            const pageIdentifier = page.module.toLowerCase().replace(/\s+/g, '-');
+            const varName = page.className.charAt(0).toLowerCase() + page.className.slice(1);
+            content += `    @Page('${pageIdentifier}')\n`;
+            content += `    private ${varName}!: ${page.className};\n\n`;
+        }
+
+        // Add context instances (demo project pattern)
+        content += `    private scenarioContext = CSScenarioContext.getInstance();\n`;
+        content += `    private featureContext = CSFeatureContext.getInstance();\n`;
+        content += `    private bddContext = CSBDDContext.getInstance();\n\n`;
+
+        // Add step methods with @CSBDDStepDef decorator (REAL demo pattern!)
+        for (const method of steps.methods) {
+            const gherkinStep = method.gherkinStep || method.decoratorPattern;
+            const stepText = this.extractGherkinText(gherkinStep);
+
+            // Use @CSBDDStepDef with simple string pattern (NOT regex!)
+            content += `    @CSBDDStepDef('${stepText}')\n`;
+
+            const params = method.parameters.map((p: any) => `${p.name}: ${p.type}`).join(', ');
+            content += `    async ${method.methodName}(${params}) {\n`;
+            content += `        CSReporter.info(\`${stepText}\`);\n`;
+            content += `        ${method.implementation}\n`;
+            content += `        CSReporter.pass(\`Step completed: ${stepText}\`);\n`;
+            content += `    }\n\n`;
+        }
+
+        content += `}\n\n`;
+        content += `export default ${steps.className};\n`;
+
+        return content;
+    }
+
+    /**
+     * Build Navigation Component content
+     */
+    private buildNavigationComponentContent(component: any): string {
+        let content = `import { CSWebElement } from '@mdakhan.mak/cs-playwright-test-framework/element';\n`;
+        content += `import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporting';\n\n`;
+
+        content += `/**\n`;
+        content += ` * Shared Navigation Component\n`;
+        content += ` * Contains all navigation links used across pages\n`;
+        content += ` */\n`;
+        content += `export class NavigationComponent {\n\n`;
+
+        // Add navigation links
+        for (const element of component.elements) {
+            content += `    public ${element.name}!: CSWebElement;\n`;
+        }
+
+        content += `\n`;
+        content += `    /**\n`;
+        content += `     * Navigate to a module in the application\n`;
+        content += `     */\n`;
+        content += `    public async navigateToModule(module: string): Promise<void> {\n`;
+        content += `        CSReporter.info(\`Navigating to \${module}\`);\n`;
+        content += `        const link = this[\`\${module.toLowerCase()}Link\`];\n`;
+        content += `        if (link) {\n`;
+        content += `            await link.click();\n`;
+        content += `        }\n`;
+        content += `    }\n`;
+        content += `}\n`;
+
+        return content;
     }
 }

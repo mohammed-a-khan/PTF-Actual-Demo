@@ -83,6 +83,7 @@ export class AdvancedASTParser {
 
     /**
      * Extract all actions from the AST
+     * FIXED: Now properly extracts all actions including assertions
      */
     private extractActions(): Action[] {
         const actions: Action[] = [];
@@ -143,31 +144,50 @@ export class AdvancedASTParser {
 
     /**
      * Parse locator chain from expression
+     * FIXED: Now handles expect() assertions and complex chains properly
      */
     private parseLocator(expression: ts.CallExpression): LocatorInfo | undefined {
         const chain: LocatorChainStep[] = [];
         let current: ts.Expression = expression;
 
-        // Walk backwards through the chain
-        while (ts.isCallExpression(current)) {
-            const methodName = this.getMethodName(current);
-            const args = current.arguments.map(arg => this.evaluateArgument(arg));
-
-            chain.unshift({
-                method: methodName,
-                args
-            });
-
-            // Move to parent expression
-            if (ts.isPropertyAccessExpression(current.expression)) {
-                if (ts.isCallExpression(current.expression.expression)) {
-                    current = current.expression.expression;
-                } else {
-                    break;
+        // SPECIAL CASE: Handle expect(locator).assertion() pattern
+        // Structure: expect(page.getByRole(...)).toBeVisible()
+        //   expression = toBeVisible() CallExpression
+        //   expression.expression = .toBeVisible PropertyAccessExpression
+        //   expression.expression.expression = expect(...) CallExpression
+        const expressionText = expression.getText(this.sourceFile);
+        if (expressionText.startsWith('expect(')) {
+            // Get the expect() call from: toBeVisible() -> .toBeVisible -> expect(...)
+            let expectCall: ts.CallExpression | undefined;
+            if (ts.isPropertyAccessExpression(expression.expression)) {
+                const propertyAccess = expression.expression;
+                if (ts.isCallExpression(propertyAccess.expression)) {
+                    expectCall = propertyAccess.expression;
                 }
-            } else {
-                break;
             }
+
+            // Parse the locator inside expect()
+            if (expectCall && expectCall.arguments.length > 0) {
+                const expectArg = expectCall.arguments[0];
+                if (ts.isCallExpression(expectArg)) {
+                    // The expectArg is a call expression like page.getByRole(...)
+                    // We need to walk its chain to extract the locator steps
+                    this.walkChain(expectArg, chain);
+                } else if (ts.isPropertyAccessExpression(expectArg)) {
+                    // Handle property access expressions
+                    this.walkChain(expectArg, chain);
+                }
+            }
+
+            // Get the assertion method (toBeVisible, toHaveText, etc.)
+            const assertionMethod = this.getMethodName(expression);
+            chain.push({
+                method: assertionMethod,
+                args: this.extractArguments(expression)
+            });
+        } else {
+            // NORMAL CASE: Regular action chain (page.locator().click())
+            this.walkChain(current, chain);
         }
 
         if (chain.length === 0) {
@@ -184,6 +204,17 @@ export class AdvancedASTParser {
             step.method === 'locator'
         );
 
+        // Even if no explicit locator found, return something for assertions
+        if (!locatorStep && expressionText.startsWith('expect(')) {
+            // Create a synthetic locator for assertions
+            return {
+                type: 'unknown',
+                selector: expressionText.substring(7, expressionText.indexOf(')')),  // Extract from expect(...)
+                options: {},
+                chain: chain.length > 0 ? chain : undefined
+            };
+        }
+
         if (!locatorStep) {
             return undefined;
         }
@@ -194,6 +225,38 @@ export class AdvancedASTParser {
             options: this.extractLocatorOptions(locatorStep),
             chain: chain.length > 1 ? chain : undefined
         };
+    }
+
+    /**
+     * Walk through a chain of method calls to extract locator steps
+     */
+    private walkChain(startExpr: ts.Expression, chain: LocatorChainStep[]): void {
+        let current: ts.Expression = startExpr;
+
+        // Walk backwards through the chain
+        while (ts.isCallExpression(current) || ts.isPropertyAccessExpression(current)) {
+            if (ts.isCallExpression(current)) {
+                const methodName = this.getMethodName(current);
+                const args = current.arguments.map(arg => this.evaluateArgument(arg));
+
+                chain.unshift({
+                    method: methodName,
+                    args
+                });
+
+                // Move to parent expression
+                if (ts.isPropertyAccessExpression(current.expression)) {
+                    current = current.expression.expression;
+                } else {
+                    break;
+                }
+            } else if (ts.isPropertyAccessExpression(current)) {
+                // Just a property access without call
+                current = current.expression;
+            } else {
+                break;
+            }
+        }
     }
 
     /**
