@@ -69,7 +69,7 @@ export class CSPdfReportGenerator {
                 displayHeaderFooter: true,
                 headerTemplate: `
                     <div style="font-size: 10px; width: 100%; text-align: center; color: #666; padding: 5px;">
-                        <span style="font-weight: bold; color: #93186C;">CS Test Automation Report</span>
+                        <span style="font-weight: bold; color: #93186C;">CS Playwright Test Automation Report</span>
                     </div>
                 `,
                 footerTemplate: `

@@ -58,6 +58,7 @@ export class CSADOPublisher {
     private testPlanId?: number; // Track plan ID for test run creation
     private planTestPointsMap: Map<number, Set<number>> = new Map(); // Map plan IDs to their test points
     private allScenarios: Array<{scenario: ParsedScenario, feature: ParsedFeature}> = []; // Store all scenarios for feature name extraction
+    private publishedResultsCount: number = 0; // Track number of results published (for sequential mode)
 
     private constructor() {
         this.client = CSADOClient.getInstance();
@@ -340,6 +341,7 @@ export class CSADOPublisher {
         // For non-data-driven tests or when all iterations are done, publish immediately
         try {
             await this.publishSingleResult(result);
+            this.publishedResultsCount++;  // Track published results for hasTestResults()
         } catch (error) {
             CSReporter.error(`Failed to publish result for scenario: ${result.scenario.name} - ${error}`);
             // Don't throw - continue with other scenarios
@@ -435,11 +437,12 @@ export class CSADOPublisher {
      * Publish a single scenario result (handles iterations for data-driven scenarios)
      */
     private async publishSingleResult(result: ScenarioResult): Promise<void> {
+        CSReporter.info(`[ADO] Publishing test result for scenario: ${result.scenario.name} (status: ${result.status})`);
         const metadata = this.tagExtractor.extractMetadata(result.scenario, result.feature);
 
         // Skip if no ADO mapping
         if (!metadata.testCaseIds.length && !metadata.testPlanId && !metadata.testSuiteId) {
-            CSReporter.debug(`Skipping ADO publish for scenario without mapping: ${result.scenario.name}`);
+            CSReporter.info(`[ADO] Skipping publish - no ADO mapping for scenario: ${result.scenario.name}`);
             return;
         }
 
@@ -449,15 +452,17 @@ export class CSADOPublisher {
             (metadata.testCaseId ? [metadata.testCaseId] : []);
 
         if (testCaseIds.length === 0) {
-            CSReporter.warn(`No test case IDs found for scenario: ${result.scenario.name}`);
+            CSReporter.warn(`[ADO] No test case IDs found for scenario: ${result.scenario.name}`);
             return;
         }
+
+        CSReporter.info(`[ADO] Publishing result for test case(s): ${testCaseIds.join(', ')}`);
 
         // Find the correct test run for this scenario's plan
         const testRun = metadata.testPlanId ? this.testRunsByPlan.get(metadata.testPlanId) : this.currentTestRun;
 
         if (!testRun) {
-            CSReporter.warn(`No test run found for plan ${metadata.testPlanId} - skipping result update`);
+            CSReporter.warn(`[ADO] No test run found for plan ${metadata.testPlanId} - skipping result update`);
             return;
         }
 
@@ -561,8 +566,11 @@ export class CSADOPublisher {
 
                 await this.client.updateTestResult(testResult, testRun.id);
                 resultIds.push(testCaseId);
+                CSReporter.info(`[ADO] ✅ Successfully updated test result for test case ${testCaseId} in test run ${testRun.id}`);
             }
         }
+
+        CSReporter.info(`[ADO] Updated ${resultIds.length} test result(s) with outcome: ${finalOutcome}`);
 
         // Upload attachments if configured
         if (resultIds.length > 0 && result.artifacts) {
@@ -758,15 +766,21 @@ export class CSADOPublisher {
      * Complete all test runs and attach zipped results
      */
     public async completeTestRun(testResultsPath?: string): Promise<void> {
+        CSReporter.info(`[ADO] completeTestRun called with zipPath: ${testResultsPath || 'none'}`);
+
         if (!this.config.isEnabled() || this.testRunsByPlan.size === 0) {
+            CSReporter.warn(`[ADO] Cannot complete test run - enabled=${this.config.isEnabled()}, runs=${this.testRunsByPlan.size}`);
             return;
         }
 
         try {
             // Publish any remaining results
             if (this.scenarioResults.size > 0) {
+                CSReporter.info(`[ADO] Publishing ${this.scenarioResults.size} remaining queued results...`);
                 await this.publishAllResults();
             }
+
+            CSReporter.info(`[ADO] Completing ${this.testRunsByPlan.size} test run(s)...`);
 
             // Complete each test run and attach zipped results
             for (const [planId, testRun] of this.testRunsByPlan.entries()) {
@@ -775,25 +789,30 @@ export class CSADOPublisher {
                     if (testResultsPath) {
                         // Check if it's a zip file
                         if (testResultsPath.endsWith('.zip')) {
-                            // CSReporter.info(`Attaching zipped test results to test run ${testRun.id} (Plan ${planId})`);
+                            CSReporter.info(`[ADO] Uploading zip attachment to test run ${testRun.id} (Plan ${planId}): ${testResultsPath}`);
                             await this.client.uploadTestRunAttachment(testRun.id, testResultsPath);
+                            CSReporter.info(`[ADO] ✅ Successfully uploaded zip attachment to test run ${testRun.id}`);
                         } else {
                             // If not a zip, check if we need to zip it
                             const zipPath = `${testResultsPath}.zip`;
                             if (fs.existsSync(zipPath)) {
-                                // CSReporter.info(`Attaching zipped test results to test run ${testRun.id} (Plan ${planId})`);
+                                CSReporter.info(`[ADO] Uploading zip attachment to test run ${testRun.id} (Plan ${planId}): ${zipPath}`);
                                 await this.client.uploadTestRunAttachment(testRun.id, zipPath);
+                                CSReporter.info(`[ADO] ✅ Successfully uploaded zip attachment to test run ${testRun.id}`);
                             } else {
-                                CSReporter.debug(`No zipped results found at ${zipPath}`);
+                                CSReporter.warn(`[ADO] No zipped results found at ${zipPath}`);
                             }
                         }
+                    } else {
+                        CSReporter.warn(`[ADO] No test results zip path provided - skipping attachment upload`);
                     }
 
                     // Complete the test run
+                    CSReporter.info(`[ADO] Completing test run ${testRun.id}...`);
                     await this.client.completeTestRun(testRun.id);
-                    // CSReporter.info(`ADO Test Run completed: ${testRun.name} (ID: ${testRun.id}`);
+                    CSReporter.info(`[ADO] ✅ Test Run completed successfully: ${testRun.name} (ID: ${testRun.id})`);
                 } catch (error) {
-                    CSReporter.error(`Failed to complete test run ${testRun.id} for plan ${planId}: ${error}`);
+                    CSReporter.error(`[ADO] Failed to complete test run ${testRun.id} for plan ${planId}: ${error}`);
                     // Continue with other test runs
                 }
             }
@@ -844,8 +863,15 @@ export class CSADOPublisher {
     public hasTestResults(): boolean {
         // Only return true if we have both:
         // 1. Active test runs (validation passed and test runs were started)
-        // 2. Scenario results to publish
-        return this.testRunsByPlan.size > 0 && (this.scenarioResults.size > 0 || this.iterationResults.size > 0);
+        // 2. Scenario results to publish (either queued or already published)
+        const hasRuns = this.testRunsByPlan.size > 0;
+        const hasQueued = this.scenarioResults.size > 0;
+        const hasIterations = this.iterationResults.size > 0;
+        const hasPublished = this.publishedResultsCount > 0;
+
+        CSReporter.debug(`[ADO] hasTestResults check: runs=${hasRuns}, queued=${hasQueued}, iterations=${hasIterations}, published=${hasPublished}`);
+
+        return hasRuns && (hasQueued || hasIterations || hasPublished);
     }
 
     /**

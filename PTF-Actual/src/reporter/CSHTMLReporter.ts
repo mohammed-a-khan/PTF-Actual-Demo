@@ -112,9 +112,9 @@ export class CSHTMLReporter {
 
     public async generateReport(outputPath: string): Promise<void> {
         this.executionEndTime = new Date();
-        
+
         const reportData = {
-            title: `CS Test Automation Report - ${this.config.get('PROJECT')}`,
+            title: `CS Playwright Test Automation Report - ${this.config.get('PROJECT')}`,
             environment: this.environment,
             executionSettings: this.executionSettings,
             summary: this.generateSummary(),
