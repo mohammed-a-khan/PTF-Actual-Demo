@@ -1811,7 +1811,20 @@ export class CSBDDRunner {
         // Store current iteration test data in context for access in step definitions
         // Available via {currentRow} in step text ({testData} also supported for backward compatibility)
         if (exampleRow && exampleHeaders) {
-            const rowData = Object.fromEntries(exampleHeaders.map((h, i) => [h, exampleRow[i]]));
+            // Parse JSON strings back to arrays/objects if they look like JSON
+            const rowData = Object.fromEntries(exampleHeaders.map((h, i) => {
+                const value = exampleRow[i];
+                // Try to parse as JSON if it looks like an array or object
+                if (typeof value === 'string' && (value.trim().startsWith('[') || value.trim().startsWith('{'))) {
+                    try {
+                        return [h, JSON.parse(value)];
+                    } catch {
+                        // If parse fails, use as string
+                        return [h, value];
+                    }
+                }
+                return [h, value];
+            }));
             this.context.setVariable('currentRow', rowData);
             this.context.setVariable('testData', rowData); // Backward compatibility
         }
@@ -2815,8 +2828,17 @@ export class CSBDDRunner {
             }
 
             // Extract headers and rows
+            // For arrays and objects, JSON.stringify them to preserve structure
+            // Otherwise convert to string normally
             const headers = Object.keys(data[0]);
-            const rows = data.map(item => headers.map(h => String(item[h] || '')));
+            const rows = data.map(item => headers.map(h => {
+                const value = item[h];
+                if (value === null || value === undefined) return '';
+                if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
+                    return JSON.stringify(value);
+                }
+                return String(value);
+            }));
 
             CSReporter.info(`Loaded ${rows.length} rows with headers: ${headers.join(', ')}`);
 
