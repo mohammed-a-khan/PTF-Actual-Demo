@@ -43,7 +43,7 @@ export class CodegenOrchestrator {
 
         // Set defaults first, then apply user options
         this.options = {
-            outputDir: './test',
+            outputDir: './codegen',
             watchDir: defaultWatchDir,
             verbose: false,
             ...options  // User options override defaults

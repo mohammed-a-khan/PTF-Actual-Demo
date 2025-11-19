@@ -311,8 +311,30 @@ export class CSADOPublisher {
             this.iterationResults.get(key)!.push(result);
             // CSReporter.info(`DEBUG: Added iteration ${result.iteration} for ADO: ${key}`);
         } else {
+            // IMPORTANT: If this is an aggregated result (has comment from orchestrator),
+            // clear any stored iterations to prevent double publishing
+            if (result.comment && result.comment.includes('Data-Driven Test Results')) {
+                const hadIterations = this.iterationResults.has(key);
+                if (hadIterations) {
+                    const iterationCount = this.iterationResults.get(key)!.length;
+                    this.iterationResults.delete(key);
+                    CSReporter.debug(`[ADO] Cleared ${iterationCount} iteration(s) for ${key} - aggregated result already published by orchestrator`);
+                }
+            }
             this.scenarioResults.set(key, result);
             // CSReporter.info(`DEBUG: Added scenario result for ADO: ${key}`);
+        }
+    }
+
+    /**
+     * Clear iteration results for a specific scenario (called after aggregated publish)
+     */
+    public clearIterations(scenario: ParsedScenario, feature: ParsedFeature): void {
+        const key = this.getScenarioKey(scenario, feature);
+        if (this.iterationResults.has(key)) {
+            const count = this.iterationResults.get(key)!.length;
+            this.iterationResults.delete(key);
+            CSReporter.debug(`[ADO] Cleared ${count} iteration(s) for ${key}`);
         }
     }
 
@@ -360,23 +382,25 @@ export class CSADOPublisher {
         const iterations = this.iterationResults.get(key);
 
         if (!iterations || iterations.length === 0) {
-            CSReporter.warn(`No iterations found for data-driven test: ${key}`);
+            CSReporter.warn(`[ADO] No iterations found for data-driven test: ${key}`);
             return;
         }
 
-        // CSReporter.info(`Publishing aggregated results for ${iterations.length} iterations of: ${key}`);
+        CSReporter.info(`[ADO] Publishing aggregated results for ${iterations.length} iterations of: ${scenario.name}`);
+
+        // CRITICAL FIX: Clear iterations BEFORE calling publishSingleResult
+        // Otherwise publishSingleResult will see iterations and try to aggregate again!
+        this.iterationResults.delete(key);
 
         // Create aggregated result from iterations
         const aggregatedResult = this.aggregateIterations(scenario, feature, iterations);
 
         try {
             await this.publishSingleResult(aggregatedResult);
+            this.publishedResultsCount++;  // Track published results for hasTestResults()
         } catch (error) {
-            CSReporter.error(`Failed to publish data-driven results: ${error}`);
+            CSReporter.error(`[ADO] Failed to publish data-driven results: ${error}`);
         }
-
-        // Clear the iterations after publishing
-        this.iterationResults.delete(key);
     }
 
     /**
@@ -386,21 +410,54 @@ export class CSADOPublisher {
         // Determine overall status
         const hasFailure = iterations.some(iter => iter.status === 'failed');
         const status = hasFailure ? 'failed' : 'passed';
+        const overallOutcome = hasFailure ? 'Failed' : 'Passed';
 
         // Aggregate durations
         const totalDuration = iterations.reduce((sum, iter) => sum + iter.duration, 0);
 
-        // Aggregate error messages
-        const errorMessages = iterations
-            .filter(iter => iter.errorMessage)
-            .map((iter, idx) => `Iteration ${iter.iteration || idx + 1}: ${iter.errorMessage}`);
+        // Build detailed iteration summaries for comment
+        const iterationSummaries: string[] = [];
+        const failedIterations: string[] = [];
+
+        for (const [idx, iter] of iterations.entries()) {
+            const iterationNum = iter.iteration || idx + 1;
+
+            // Build iteration summary with parameters
+            let iterSummary = `Iteration ${iterationNum}`;
+            if (iter.iterationData) {
+                const params = Object.entries(iter.iterationData)
+                    .slice(0, 3) // Limit to first 3 params for readability
+                    .map(([key, value]) => `${key}:${value}`)
+                    .join(', ');
+                iterSummary += ` [${params}]`;
+            }
+            iterSummary += `: ${iter.status === 'passed' ? '✅ Passed' : '❌ Failed'}`;
+
+            iterationSummaries.push(iterSummary);
+
+            if (iter.status === 'failed' && iter.errorMessage) {
+                failedIterations.push(`  - ${iterSummary}\n    Error: ${iter.errorMessage}`);
+            }
+        }
+
+        // Build comprehensive comment
+        const comment = `Data-Driven Test Results (${iterations.length} iterations)\n` +
+                       `Overall Status: ${overallOutcome}\n\n` +
+                       `Iteration Results:\n${iterationSummaries.join('\n')}` +
+                       (failedIterations.length > 0 ? `\n\nFailed Iterations Details:\n${failedIterations.join('\n')}` : '');
+
+        // Create aggregated error message if there are failures
+        const errorMessage = failedIterations.length > 0 ?
+            `${failedIterations.length} of ${iterations.length} iterations failed. See comment for details.` :
+            undefined;
 
         return {
             scenario,
             feature,
             status,
             duration: totalDuration,
-            errorMessage: errorMessages.length > 0 ? errorMessages.join('\n') : undefined,
+            errorMessage,
+            comment,  // Include the detailed comment
             // Don't include iteration data in the main result - it will be in subResults
             iteration: undefined,
             iterationData: undefined,
@@ -410,6 +467,8 @@ export class CSADOPublisher {
 
     /**
      * Publish all accumulated results (for parallel execution)
+     * NOTE: In parallel mode, data-driven tests are already aggregated and published
+     * by the orchestrator, so we skip iteration results here to avoid duplicates
      */
     public async publishAllResults(): Promise<void> {
         if (!this.config.isEnabled() || this.testRunsByPlan.size === 0 || this.isPublishing) {
@@ -419,15 +478,31 @@ export class CSADOPublisher {
         this.isPublishing = true;
 
         try {
-            // CSReporter.info(`Publishing ${this.scenarioResults.size} test results to Azure DevOps...`);
+            // Count only non-iteration results
+            const nonIterationCount = this.scenarioResults.size;
 
+            CSReporter.info(`[ADO] Publishing ${nonIterationCount} non-iteration test results to Azure DevOps...`);
+
+            // Publish regular (non-iteration) results
             for (const [key, result] of this.scenarioResults) {
                 await this.publishSingleResult(result);
+                this.publishedResultsCount++;
             }
 
-            // CSReporter.info('All test results published to Azure DevOps');
+            // Clear scenarioResults after publishing to prevent double publishing
+            this.scenarioResults.clear();
+
+            // IMPORTANT: Do NOT publish iteration results here!
+            // In parallel mode, iterations are already aggregated and published by ParallelOrchestrator
+            // We only clear them to prevent memory leaks
+            if (this.iterationResults.size > 0) {
+                CSReporter.debug(`[ADO] Skipping ${this.iterationResults.size} data-driven test(s) - already published by orchestrator`);
+                this.iterationResults.clear();
+            }
+
+            CSReporter.info('[ADO] All test results published to Azure DevOps');
         } catch (error) {
-            CSReporter.error(`Failed to publish results to Azure DevOps: ${error}`);
+            CSReporter.error(`[ADO] Failed to publish results to Azure DevOps: ${error}`);
         } finally {
             this.isPublishing = false;
         }
@@ -773,6 +848,9 @@ export class CSADOPublisher {
             return;
         }
 
+        // Save the test run count before clearing (for tracking completion)
+        const testRunCount = this.testRunsByPlan.size;
+
         try {
             // Publish any remaining results
             if (this.scenarioResults.size > 0) {
@@ -780,7 +858,7 @@ export class CSADOPublisher {
                 await this.publishAllResults();
             }
 
-            CSReporter.info(`[ADO] Completing ${this.testRunsByPlan.size} test run(s)...`);
+            CSReporter.info(`[ADO] Completing ${testRunCount} test run(s)...`);
 
             // Complete each test run and attach zipped results
             for (const [planId, testRun] of this.testRunsByPlan.entries()) {
@@ -817,13 +895,16 @@ export class CSADOPublisher {
                 }
             }
 
-            // Clear state
+            // Clear state AFTER completion so hasTestResults() still works correctly during cleanup
             this.currentTestRun = undefined;
-            this.testRunsByPlan.clear();
             this.scenarioResults.clear();
             this.iterationResults.clear();
             this.collectedTestPoints.clear();
             this.planTestPointsMap.clear();
+            // Clear test runs LAST - this is checked by hasTestResults()
+            this.testRunsByPlan.clear();
+            // Mark that test run is no longer started
+            this.testRunStarted = false;
 
             // Delete the zip file after successful upload to all test runs
             if (testResultsPath && testResultsPath.endsWith('.zip')) {

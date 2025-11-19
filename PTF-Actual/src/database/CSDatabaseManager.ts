@@ -76,12 +76,15 @@ export class CSDatabaseManager {
 
     private getDefaultConfig(alias: string): DatabaseConfig {
         const upperAlias = alias.toUpperCase();
+
+        // Check if Windows Authentication is enabled
+        const trustedConnection = this.configManager.get(`DB_${upperAlias}_TRUSTED_CONNECTION`);
+        const useTrustedConnection = String(trustedConnection) === 'true';
+
         const config: DatabaseConfig = {
             type: this.configManager.get(`DB_${upperAlias}_TYPE`, 'sqlserver') as any,
             host: this.configManager.get(`DB_${upperAlias}_HOST`) || (() => { throw new Error(`Required configuration DB_${upperAlias}_HOST is missing`); })(),
             port: this.configManager.getNumber(`DB_${upperAlias}_PORT`),
-            username: this.configManager.get(`DB_${upperAlias}_USERNAME`) || (() => { throw new Error(`Required configuration DB_${upperAlias}_USERNAME is missing`); })(),
-            password: this.configManager.get(`DB_${upperAlias}_PASSWORD`) || (() => { throw new Error(`Required configuration DB_${upperAlias}_PASSWORD is missing`); })(),
             database: this.configManager.get(`DB_${upperAlias}_DATABASE`) || (() => { throw new Error(`Required configuration DB_${upperAlias}_DATABASE is missing`); })(),
             connectionTimeout: this.configManager.getNumber(`DB_${upperAlias}_CONNECTION_TIMEOUT`, 60000),
             queryTimeout: this.configManager.getNumber(`DB_${upperAlias}_REQUEST_TIMEOUT`, 15000),
@@ -90,11 +93,20 @@ export class CSDatabaseManager {
             poolIdleTimeout: this.configManager.getNumber(`DB_${upperAlias}_POOL_IDLE_TIMEOUT`, 30000)
         };
 
+        // Username and password are only required when NOT using Windows Authentication
+        if (!useTrustedConnection) {
+            config.username = this.configManager.get(`DB_${upperAlias}_USERNAME`) || (() => { throw new Error(`Required configuration DB_${upperAlias}_USERNAME is missing`); })();
+            config.password = this.configManager.get(`DB_${upperAlias}_PASSWORD`) || (() => { throw new Error(`Required configuration DB_${upperAlias}_PASSWORD is missing`); })();
+        } else {
+            // For Windows Authentication, username and password should be undefined or empty
+            config.username = this.configManager.get(`DB_${upperAlias}_USERNAME`) || '';
+            config.password = this.configManager.get(`DB_${upperAlias}_PASSWORD`) || '';
+        }
+
         // Add SQL Server-specific options if present
         const additionalOptions: Record<string, any> = {};
         const encrypt = this.configManager.get(`DB_${upperAlias}_ENCRYPT`);
         const trustServerCert = this.configManager.get(`DB_${upperAlias}_TRUST_SERVER_CERTIFICATE`);
-        const trustedConnection = this.configManager.get(`DB_${upperAlias}_TRUSTED_CONNECTION`);
 
         if (encrypt !== undefined) {
             additionalOptions.encrypt = String(encrypt) === 'true';
@@ -102,8 +114,8 @@ export class CSDatabaseManager {
         if (trustServerCert !== undefined) {
             additionalOptions.trustServerCertificate = String(trustServerCert) === 'true';
         }
-        if (trustedConnection !== undefined) {
-            additionalOptions.trustedConnection = String(trustedConnection) === 'true';
+        if (useTrustedConnection) {
+            additionalOptions.trustedConnection = true;
         }
 
         if (Object.keys(additionalOptions).length > 0) {

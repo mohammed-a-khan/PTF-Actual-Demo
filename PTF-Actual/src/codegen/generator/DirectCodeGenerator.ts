@@ -46,7 +46,7 @@ export class DirectCodeGenerator {
      * Generate CS Framework code directly from actions
      */
     public generate(actions: Action[]): GeneratedCSCode {
-        CSReporter.info('🔨 Direct Code Generation (No BS, just conversion)');
+        CSReporter.info('🔨 Direct Code Generation (just conversion)');
         CSReporter.info(`   Processing ${actions.length} actions sequentially...`);
 
         // Reset state
@@ -527,7 +527,7 @@ export class DirectCodeGenerator {
         // Build single feature file
         const feature = {
             fileName: 'test-scenario.feature',
-            path: 'test/features/test-scenario.feature',
+            path: 'codegen/features/test-scenario.feature',
             content: this.buildFeatureContent(gherkinSteps),
             scenarios: [{
                 name: 'Execute recorded test flow',

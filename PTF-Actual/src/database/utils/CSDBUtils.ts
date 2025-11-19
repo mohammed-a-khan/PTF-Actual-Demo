@@ -530,6 +530,581 @@ export class CSDBUtils {
             throw error;
         }
     }
+
+    // ============================================================================
+    // ADVANCED UTILITY METHODS
+    // ============================================================================
+
+    /**
+     * Execute a stored procedure with parameters
+     *
+     * @param alias - Database connection alias
+     * @param procedureName - Name of the stored procedure
+     * @param params - Optional parameters for the stored procedure
+     * @returns Promise<ResultSet> - Result set from stored procedure
+     *
+     * @example
+     * ```typescript
+     * // SQL Server
+     * const result = await CSDBUtils.executeStoredProcedure('MY_DB', 'sp_GetUsersByRole', ['admin']);
+     *
+     * // Oracle
+     * const result = await CSDBUtils.executeStoredProcedure('MY_DB', 'pkg_users.get_by_role', ['admin']);
+     *
+     * // Named stored procedure from config (DB_QUERY_SP_GET_USERS)
+     * const result = await CSDBUtils.executeStoredProcedure('MY_DB', 'SP_GET_USERS', []);
+     * ```
+     */
+    public static async executeStoredProcedure(
+        alias: string,
+        procedureName: string,
+        params?: any[]
+    ): Promise<ResultSet> {
+        try {
+            CSReporter.debug(`CSDBUtils.executeStoredProcedure - Procedure: ${procedureName}`);
+
+            const db = await this.getConnection(alias);
+            const resolvedProc = this.resolveQuery(alias, procedureName);
+
+            // Build CALL or EXEC statement based on database type
+            const dbType = db.getType();
+            let sql: string;
+
+            if (dbType === 'oracle') {
+                // Oracle: CALL or BEGIN...END
+                const paramPlaceholders = params && params.length > 0
+                    ? params.map(() => '?').join(', ')
+                    : '';
+                sql = `BEGIN ${resolvedProc}(${paramPlaceholders}); END;`;
+            } else if (dbType === 'sqlserver') {
+                // SQL Server: EXEC
+                const paramPlaceholders = params && params.length > 0
+                    ? params.map(() => '?').join(', ')
+                    : '';
+                sql = `EXEC ${resolvedProc} ${paramPlaceholders}`;
+            } else {
+                // MySQL/PostgreSQL: CALL
+                const paramPlaceholders = params && params.length > 0
+                    ? params.map(() => '?').join(', ')
+                    : '';
+                sql = `CALL ${resolvedProc}(${paramPlaceholders})`;
+            }
+
+            CSReporter.debug(`Executing stored procedure: ${sql}`);
+            const result = await db.query(sql, params);
+
+            CSReporter.debug(`Stored procedure executed successfully. Rows returned: ${result.rowCount}`);
+            return result;
+        } catch (error) {
+            CSReporter.error(`CSDBUtils.executeStoredProcedure failed: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Execute a query and return first N rows
+     *
+     * @param alias - Database connection alias
+     * @param sql - SQL query string or named query key
+     * @param limit - Number of rows to return
+     * @param params - Optional query parameters
+     * @returns Promise<Record<string, any>[]> - Array of row objects (limited)
+     *
+     * @example
+     * ```typescript
+     * // Get first 10 users
+     * const users = await CSDBUtils.executeQueryLimit('MY_DB', 'SELECT * FROM users ORDER BY id', 10);
+     *
+     * // Get top 5 active users
+     * const activeUsers = await CSDBUtils.executeQueryLimit('MY_DB',
+     *     'SELECT * FROM users WHERE active = ? ORDER BY created_at DESC',
+     *     5,
+     *     [true]
+     * );
+     * ```
+     */
+    public static async executeQueryLimit(
+        alias: string,
+        sql: string,
+        limit: number,
+        params?: any[]
+    ): Promise<Record<string, any>[]> {
+        try {
+            CSReporter.debug(`CSDBUtils.executeQueryLimit - Limit: ${limit}`);
+
+            const result = await this.executeQuery(alias, sql, params);
+            const limitedRows = result.rows.slice(0, limit);
+
+            CSReporter.debug(`Returned ${limitedRows.length} rows (limit: ${limit})`);
+            return limitedRows;
+        } catch (error) {
+            CSReporter.error(`CSDBUtils.executeQueryLimit failed: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Execute a query and return a single column as an array
+     * (Automatically detects first column if column name not specified)
+     *
+     * @param alias - Database connection alias
+     * @param sql - SQL query string or named query key
+     * @param params - Optional query parameters
+     * @param columnName - Optional column name (uses first column if not specified)
+     * @returns Promise<T[]> - Array of column values
+     *
+     * @example
+     * ```typescript
+     * // Get all user IDs (using first column automatically)
+     * const ids = await CSDBUtils.getColumnList<number>('MY_DB', 'SELECT id FROM users');
+     *
+     * // Get all emails from multi-column query
+     * const emails = await CSDBUtils.getColumnList<string>(
+     *     'MY_DB',
+     *     'SELECT id, email, name FROM users WHERE active = ?',
+     *     [true],
+     *     'email'
+     * );
+     * ```
+     */
+    public static async getColumnList<T = any>(
+        alias: string,
+        sql: string,
+        params?: any[],
+        columnName?: string
+    ): Promise<T[]> {
+        try {
+            const result = await this.executeQuery(alias, sql, params);
+
+            if (result.rowCount === 0) {
+                return [];
+            }
+
+            // Use specified column or first column
+            const firstRow = result.rows[0];
+            const targetColumn = columnName || Object.keys(firstRow)[0];
+
+            if (!(targetColumn in firstRow)) {
+                throw new Error(`Column '${targetColumn}' not found in result set. Available: ${Object.keys(firstRow).join(', ')}`);
+            }
+
+            const values = result.rows.map(row => row[targetColumn] as T);
+            CSReporter.debug(`Extracted ${values.length} values from column '${targetColumn}'`);
+
+            return values;
+        } catch (error) {
+            CSReporter.error(`CSDBUtils.getColumnList failed: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Execute a query and return a Map with specified key and value columns
+     *
+     * @param alias - Database connection alias
+     * @param sql - SQL query string or named query key
+     * @param keyColumn - Column name to use as map key
+     * @param valueColumn - Column name to use as map value
+     * @param params - Optional query parameters
+     * @returns Promise<Map<K, V>> - Map of key-value pairs
+     *
+     * @example
+     * ```typescript
+     * // Create map of user ID to name
+     * const userMap = await CSDBUtils.getMap<number, string>(
+     *     'MY_DB',
+     *     'SELECT id, name FROM users',
+     *     'id',
+     *     'name'
+     * );
+     * console.log(userMap.get(123)); // "John Doe"
+     *
+     * // Create map of email to user object
+     * const emailMap = await CSDBUtils.getMap<string, any>(
+     *     'MY_DB',
+     *     'SELECT email, id, name, role FROM users WHERE active = ?',
+     *     'email',
+     *     '*',  // '*' means entire row object
+     *     [true]
+     * );
+     * ```
+     */
+    public static async getMap<K = any, V = any>(
+        alias: string,
+        sql: string,
+        keyColumn: string,
+        valueColumn: string,
+        params?: any[]
+    ): Promise<Map<K, V>> {
+        try {
+            CSReporter.debug(`CSDBUtils.getMap - Key: ${keyColumn}, Value: ${valueColumn}`);
+
+            const result = await this.executeQuery(alias, sql, params);
+            const map = new Map<K, V>();
+
+            if (result.rowCount === 0) {
+                return map;
+            }
+
+            for (const row of result.rows) {
+                if (!(keyColumn in row)) {
+                    throw new Error(`Key column '${keyColumn}' not found in result set`);
+                }
+
+                const key = row[keyColumn] as K;
+
+                // Special case: '*' means entire row object
+                if (valueColumn === '*') {
+                    map.set(key, row as V);
+                } else {
+                    if (!(valueColumn in row)) {
+                        throw new Error(`Value column '${valueColumn}' not found in result set`);
+                    }
+                    map.set(key, row[valueColumn] as V);
+                }
+            }
+
+            CSReporter.debug(`Created map with ${map.size} entries`);
+            return map;
+        } catch (error) {
+            CSReporter.error(`CSDBUtils.getMap failed: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Execute query and return rows as a Map grouped by a specific column
+     *
+     * @param alias - Database connection alias
+     * @param sql - SQL query string or named query key
+     * @param groupByColumn - Column name to group by
+     * @param params - Optional query parameters
+     * @returns Promise<Map<K, Record<string, any>[]>> - Map with grouped rows
+     *
+     * @example
+     * ```typescript
+     * // Group users by role
+     * const usersByRole = await CSDBUtils.getGroupedMap<string>(
+     *     'MY_DB',
+     *     'SELECT role, id, name, email FROM users',
+     *     'role'
+     * );
+     * console.log(usersByRole.get('admin')); // Array of admin users
+     * console.log(usersByRole.get('user'));  // Array of regular users
+     * ```
+     */
+    public static async getGroupedMap<K = any>(
+        alias: string,
+        sql: string,
+        groupByColumn: string,
+        params?: any[]
+    ): Promise<Map<K, Record<string, any>[]>> {
+        try {
+            CSReporter.debug(`CSDBUtils.getGroupedMap - Group By: ${groupByColumn}`);
+
+            const result = await this.executeQuery(alias, sql, params);
+            const groupedMap = new Map<K, Record<string, any>[]>();
+
+            for (const row of result.rows) {
+                if (!(groupByColumn in row)) {
+                    throw new Error(`Group column '${groupByColumn}' not found in result set`);
+                }
+
+                const key = row[groupByColumn] as K;
+
+                if (!groupedMap.has(key)) {
+                    groupedMap.set(key, []);
+                }
+
+                groupedMap.get(key)!.push(row);
+            }
+
+            CSReporter.debug(`Created grouped map with ${groupedMap.size} groups`);
+            return groupedMap;
+        } catch (error) {
+            CSReporter.error(`CSDBUtils.getGroupedMap failed: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Execute query and get single value, or return default value if no rows
+     *
+     * @param alias - Database connection alias
+     * @param sql - SQL query string or named query key
+     * @param defaultValue - Default value to return if no rows found
+     * @param params - Optional query parameters
+     * @returns Promise<T> - Single value or default
+     *
+     * @example
+     * ```typescript
+     * // Get count with default
+     * const count = await CSDBUtils.getSingleValueOrDefault<number>(
+     *     'MY_DB',
+     *     'SELECT COUNT(*) FROM users WHERE deleted = ?',
+     *     0,  // default value
+     *     [true]
+     * );
+     * ```
+     */
+    public static async getSingleValueOrDefault<T = any>(
+        alias: string,
+        sql: string,
+        defaultValue: T,
+        params?: any[]
+    ): Promise<T> {
+        try {
+            return await this.executeSingleValue<T>(alias, sql, params);
+        } catch (error) {
+            if ((error as Error).message.includes('no rows')) {
+                CSReporter.debug(`No rows returned, using default value: ${defaultValue}`);
+                return defaultValue;
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Batch execute multiple queries (not in transaction - independent queries)
+     *
+     * @param alias - Database connection alias
+     * @param queries - Array of {sql, params} objects
+     * @returns Promise<ResultSet[]> - Array of result sets
+     *
+     * @example
+     * ```typescript
+     * const results = await CSDBUtils.batchExecute('MY_DB', [
+     *     { sql: 'SELECT COUNT(*) FROM users' },
+     *     { sql: 'SELECT COUNT(*) FROM orders' },
+     *     { sql: 'SELECT COUNT(*) FROM products WHERE active = ?', params: [true] }
+     * ]);
+     * ```
+     */
+    public static async batchExecute(
+        alias: string,
+        queries: Array<{ sql: string; params?: any[] }>
+    ): Promise<ResultSet[]> {
+        try {
+            CSReporter.debug(`CSDBUtils.batchExecute - Executing ${queries.length} queries`);
+
+            const results: ResultSet[] = [];
+
+            for (const query of queries) {
+                const result = await this.executeQuery(alias, query.sql, query.params);
+                results.push(result);
+            }
+
+            CSReporter.debug(`Batch execution completed: ${results.length} queries executed`);
+            return results;
+        } catch (error) {
+            CSReporter.error(`CSDBUtils.batchExecute failed: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Execute query with pagination support
+     *
+     * @param alias - Database connection alias
+     * @param sql - SQL query string (should have ORDER BY for consistent pagination)
+     * @param page - Page number (1-based)
+     * @param pageSize - Number of rows per page
+     * @param params - Optional query parameters
+     * @returns Promise<{rows: Record<string, any>[], total: number, page: number, pageSize: number, totalPages: number}>
+     *
+     * @example
+     * ```typescript
+     * // Get page 2 with 20 items per page
+     * const result = await CSDBUtils.executePaginated(
+     *     'MY_DB',
+     *     'SELECT * FROM users ORDER BY created_at DESC',
+     *     2,    // page
+     *     20    // pageSize
+     * );
+     * console.log(result.rows);        // 20 rows for page 2
+     * console.log(result.total);       // Total row count
+     * console.log(result.totalPages);  // Total pages
+     * ```
+     */
+    public static async executePaginated(
+        alias: string,
+        sql: string,
+        page: number = 1,
+        pageSize: number = 10,
+        params?: any[]
+    ): Promise<{
+        rows: Record<string, any>[];
+        total: number;
+        page: number;
+        pageSize: number;
+        totalPages: number;
+    }> {
+        try {
+            CSReporter.debug(`CSDBUtils.executePaginated - Page: ${page}, Size: ${pageSize}`);
+
+            // Get total count first
+            const countSql = `SELECT COUNT(*) as total FROM (${sql}) as temp_count`;
+            const countResult = await this.executeQuery(alias, countSql, params);
+            const total = Number(countResult.rows[0].total || countResult.rows[0].TOTAL);
+
+            // Calculate offset
+            const offset = (page - 1) * pageSize;
+
+            // Get paginated data
+            const db = await this.getConnection(alias);
+            const dbType = db.getType();
+
+            let paginatedSql: string;
+            if (dbType === 'oracle') {
+                // Oracle pagination
+                paginatedSql = `SELECT * FROM (SELECT a.*, ROWNUM rnum FROM (${sql}) a WHERE ROWNUM <= ${offset + pageSize}) WHERE rnum > ${offset}`;
+            } else if (dbType === 'sqlserver') {
+                // SQL Server pagination (requires ORDER BY)
+                paginatedSql = `${sql} OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY`;
+            } else {
+                // MySQL/PostgreSQL pagination
+                paginatedSql = `${sql} LIMIT ${pageSize} OFFSET ${offset}`;
+            }
+
+            const result = await this.executeQuery(alias, paginatedSql, params);
+            const totalPages = Math.ceil(total / pageSize);
+
+            CSReporter.debug(`Retrieved page ${page}/${totalPages} (${result.rowCount} rows)`);
+
+            return {
+                rows: result.rows,
+                total,
+                page,
+                pageSize,
+                totalPages
+            };
+        } catch (error) {
+            CSReporter.error(`CSDBUtils.executePaginated failed: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Execute INSERT and return generated ID (auto-increment/sequence value)
+     *
+     * @param alias - Database connection alias
+     * @param sql - INSERT SQL statement or named query key
+     * @param params - Optional query parameters
+     * @returns Promise<number> - Generated ID
+     *
+     * @example
+     * ```typescript
+     * const newId = await CSDBUtils.executeInsertAndGetId(
+     *     'MY_DB',
+     *     'INSERT INTO users (name, email) VALUES (?, ?)',
+     *     ['John Doe', 'john@example.com']
+     * );
+     * console.log(`New user ID: ${newId}`);
+     * ```
+     */
+    public static async executeInsertAndGetId(
+        alias: string,
+        sql: string,
+        params?: any[]
+    ): Promise<number> {
+        try {
+            CSReporter.debug(`CSDBUtils.executeInsertAndGetId`);
+
+            const db = await this.getConnection(alias);
+            const resolvedSql = this.resolveQuery(alias, sql);
+
+            const result = await db.query(resolvedSql, params);
+
+            // Try to get inserted ID from different result formats
+            const insertId = (result as any).insertId || (result as any).lastInsertId || result.rows?.[0]?.id || result.rows?.[0]?.ID;
+
+            if (insertId === undefined) {
+                throw new Error('Could not retrieve generated ID from INSERT statement');
+            }
+
+            CSReporter.debug(`Insert successful, generated ID: ${insertId}`);
+            return Number(insertId);
+        } catch (error) {
+            CSReporter.error(`CSDBUtils.executeInsertAndGetId failed: ${(error as Error).message}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Execute UPSERT (INSERT or UPDATE if exists)
+     *
+     * @param alias - Database connection alias
+     * @param tableName - Table name
+     * @param data - Data object with column names as keys
+     * @param conflictColumn - Column to check for conflicts (e.g., 'id' or 'email')
+     * @returns Promise<number> - Affected rows
+     *
+     * @example
+     * ```typescript
+     * // Will INSERT if email doesn't exist, UPDATE if it does
+     * const affected = await CSDBUtils.executeUpsert(
+     *     'MY_DB',
+     *     'users',
+     *     { email: 'john@example.com', name: 'John Updated', age: 31 },
+     *     'email'
+     * );
+     * ```
+     */
+    public static async executeUpsert(
+        alias: string,
+        tableName: string,
+        data: Record<string, any>,
+        conflictColumn: string
+    ): Promise<number> {
+        try {
+            CSReporter.debug(`CSDBUtils.executeUpsert - Table: ${tableName}, Conflict: ${conflictColumn}`);
+
+            const db = await this.getConnection(alias);
+            const dbType = db.getType();
+
+            const columns = Object.keys(data);
+            const values = Object.values(data);
+            const placeholders = columns.map(() => '?');
+
+            let sql: string;
+
+            if (dbType === 'mysql') {
+                // MySQL/MariaDB UPSERT
+                const updateSet = columns
+                    .filter(col => col !== conflictColumn)
+                    .map(col => `${col} = VALUES(${col})`)
+                    .join(', ');
+                sql = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) ON DUPLICATE KEY UPDATE ${updateSet}`;
+            } else if (dbType === 'postgresql') {
+                // PostgreSQL UPSERT
+                const updateSet = columns
+                    .filter(col => col !== conflictColumn)
+                    .map((col, idx) => `${col} = $${idx + 1}`)
+                    .join(', ');
+                sql = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders.join(', ')}) ON CONFLICT (${conflictColumn}) DO UPDATE SET ${updateSet}`;
+            } else if (dbType === 'sqlserver') {
+                // SQL Server MERGE
+                const updateSet = columns
+                    .filter(col => col !== conflictColumn)
+                    .map(col => `target.${col} = source.${col}`)
+                    .join(', ');
+                const insertCols = columns.join(', ');
+                const insertVals = columns.map(col => `source.${col}`).join(', ');
+                sql = `MERGE INTO ${tableName} AS target USING (SELECT ${placeholders.map((p, i) => `? AS ${columns[i]}`).join(', ')}) AS source ON target.${conflictColumn} = source.${conflictColumn} WHEN MATCHED THEN UPDATE SET ${updateSet} WHEN NOT MATCHED THEN INSERT (${insertCols}) VALUES (${insertVals});`;
+            } else {
+                throw new Error(`UPSERT not supported for database type: ${dbType}`);
+            }
+
+            const result = await db.query(sql, values);
+            const affected = result.affectedRows || 0;
+
+            CSReporter.debug(`Upsert completed: ${affected} rows affected`);
+            return affected;
+        } catch (error) {
+            CSReporter.error(`CSDBUtils.executeUpsert failed: ${(error as Error).message}`);
+            throw error;
+        }
+    }
 }
 
 export default CSDBUtils;

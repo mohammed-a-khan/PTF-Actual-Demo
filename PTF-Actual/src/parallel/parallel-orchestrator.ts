@@ -480,6 +480,9 @@ export class ParallelOrchestrator {
                 ...result
             });
 
+            // DEBUG: Log work item properties
+            CSReporter.debug(`[Orchestrator] handleResult for: ${work.scenario.name}, iterationNumber=${work.iterationNumber}, totalIterations=${work.totalIterations}`);
+
             // Handle data-driven test aggregation
             if (work.iterationNumber && work.totalIterations) {
                 // This is a data-driven test iteration

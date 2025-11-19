@@ -12,6 +12,8 @@
 export { CSConfigurationManager } from '../core/CSConfigurationManager';
 export { CSBasePage } from '../core/CSBasePage';
 export { CSPageFactory, CSPage, CSGetElement, CSGetElements, CSElement, CSElements } from '../core/CSPageFactory';
+export { CSStepCacheManager } from '../core/CSStepCacheManager';
+export { CSStepLoader } from '../core/CSStepLoader';
 
 // BDD & Testing
 export { CSBDDRunner } from '../bdd/CSBDDRunner';

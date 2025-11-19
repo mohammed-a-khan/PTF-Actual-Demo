@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import { ModuleRequirements } from './CSModuleDetector';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from './CSConfigurationManager';
+import { CSStepCacheManager } from './CSStepCacheManager';
 import type {ParsedFeature } from '../bdd/CSBDDTypes'
 
 export type StepGroup = 'common' | 'api' | 'database' | 'soap' | 'browser';
@@ -115,6 +116,19 @@ export class CSStepLoader {
      * @param features - Optional parsed features for file-level filtering
      */
     public async loadRequiredSteps(requirements: ModuleRequirements, features?: ParsedFeature[]): Promise<void> {
+        // TRY ULTRA-FAST CACHE FIRST (VDI optimization)
+        // Benefit: Skips directory scanning and module resolution - just loads known files
+        const cacheManager = CSStepCacheManager.getInstance();
+        const cacheLoaded = await cacheManager.loadCache();
+
+        if (cacheLoaded) {
+            const filesLoaded = await cacheManager.loadCachedStepFiles();
+            if (filesLoaded > 0) {
+                CSReporter.info(`[StepLoader] ⚡ Cache mode: Skipped directory scanning, loaded ${filesLoaded} files directly`);
+                return;  // Skip normal loading entirely!
+            }
+        }
+
         // Check if framework steps should be loaded based on STEP_DEFINITIONS_PATH
         // Users control which framework steps to load via STEP_DEFINITIONS_PATH config
         const stepPaths = this.config.get('STEP_DEFINITIONS_PATH', '');
@@ -195,6 +209,12 @@ export class CSStepLoader {
             const workerId = process.env.WORKER_ID ? `Worker ${process.env.WORKER_ID}` : 'Main';
             CSReporter.info(`[${workerId}] ✅ Loaded ${filesLoaded.length} framework step files in ${duration}ms`);
         }
+
+        // CACHE GENERATION: Generate/update cache after normal loading for next run
+        // This happens AFTER normal loading, so next time we can use ultra-fast cache
+        if (filesLoaded.length > 0) {
+            await cacheManager.generateCache(filesLoaded);
+        }
     }
 
     /**
@@ -248,12 +268,12 @@ export class CSStepLoader {
                 try {
                     // Check if module is already in cache
                     if (require.cache[require.resolve(fullPath)]) {
-                        loadedFiles.push(entry.name);
+                        loadedFiles.push(fullPath);
                         continue;
                     }
 
                     require(fullPath);
-                    loadedFiles.push(entry.name);
+                    loadedFiles.push(fullPath);
                 } catch (error: any) {
                     CSReporter.error(`Failed to load ${entry.name}: ${error.message}`);
                 }
@@ -356,12 +376,14 @@ export class CSStepLoader {
         // Step 4: Load only required step files
         const startTime = Date.now();
         let filesLoaded = 0;
+        const loadedFilePaths: string[] = [];
 
         for (const file of filesToLoad) {
             try {
                 require(file);
                 CSReporter.debug(`[SelectiveLoading] Loaded: ${path.basename(file)}`);
                 filesLoaded++;
+                loadedFilePaths.push(file);
             } catch (e: any) {
                 CSReporter.warn(`Failed to load step file ${file}: ${e.message}`);
             }
@@ -370,6 +392,12 @@ export class CSStepLoader {
         const duration = Date.now() - startTime;
         const workerId = process.env.WORKER_ID ? `Worker ${process.env.WORKER_ID}` : 'Main';
         CSReporter.info(`[${workerId}] Selective loading: ${filesLoaded}/${availableStepFiles.size} step files (${duration}ms)`);
+
+        // CACHE GENERATION: Generate/update cache after normal loading for next run
+        if (loadedFilePaths.length > 0) {
+            const cacheManager = CSStepCacheManager.getInstance();
+            await cacheManager.generateCache(loadedFilePaths);
+        }
     }
 
     /**
@@ -394,14 +422,23 @@ export class CSStepLoader {
             .map(p => path.resolve(process.cwd(), p));
 
         let filesLoaded = false;
+        const loadedFilePaths: string[] = [];
+
         for (const stepDir of expandedPaths) {
             if (fs.existsSync(stepDir)) {
-                filesLoaded = this.loadStepFilesRecursively(stepDir) || filesLoaded;
+                const loaded = this.loadStepFilesRecursively(stepDir, loadedFilePaths);
+                filesLoaded = loaded || filesLoaded;
             }
         }
 
         if (!filesLoaded) {
             CSReporter.warn(`No step definitions found for project: ${project} in paths: ${expandedPaths.join(', ')}`);
+        }
+
+        // CACHE GENERATION: Generate/update cache after normal loading for next run
+        if (loadedFilePaths.length > 0) {
+            const cacheManager = CSStepCacheManager.getInstance();
+            await cacheManager.generateCache(loadedFilePaths);
         }
     }
 
@@ -536,7 +573,7 @@ export class CSStepLoader {
      * Recursively load step definition files from a directory
      * (Backward compatibility method)
      */
-    private loadStepFilesRecursively(dir: string): boolean {
+    private loadStepFilesRecursively(dir: string, loadedFilePaths?: string[]): boolean {
         let filesLoaded = false;
 
         if (!fs.existsSync(dir)) {
@@ -550,7 +587,7 @@ export class CSStepLoader {
 
             if (entry.isDirectory()) {
                 // Recursively load from subdirectories
-                filesLoaded = this.loadStepFilesRecursively(fullPath) || filesLoaded;
+                filesLoaded = this.loadStepFilesRecursively(fullPath, loadedFilePaths) || filesLoaded;
             } else if (entry.isFile() && this.isStepFile(entry.name)) {
                 try {
                     // Handle TypeScript vs JavaScript
@@ -566,10 +603,16 @@ export class CSStepLoader {
                         require(fileToLoad);
                         CSReporter.debug(`Loaded step file: ${fileToLoad}`);
                         filesLoaded = true;
+                        if (loadedFilePaths) {
+                            loadedFilePaths.push(fileToLoad);
+                        }
                     } else {
                         require(fullPath);
                         CSReporter.debug(`Loaded step file: ${fullPath}`);
                         filesLoaded = true;
+                        if (loadedFilePaths) {
+                            loadedFilePaths.push(fullPath);
+                        }
                     }
                 } catch (e: any) {
                     CSReporter.warn(`Failed to load step file ${fullPath}: ${e.message}`);

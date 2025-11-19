@@ -269,15 +269,10 @@ export class CSBDDEngine {
                         scenario.type = 'ScenarioOutline';
                     }
 
-                    // Check if this is a scenario outline with examples
-                    if (child.scenario.examples && child.scenario.examples.length > 0 &&
-                        child.scenario.examples.some((ex: any) => ex.tableBody && ex.tableBody.length > 0)) {
-                        // Expand scenario outline into multiple scenarios
-                        const expandedScenarios = this.expandScenarioOutline(child.scenario);
-                        parsedFeature.scenarios.push(...expandedScenarios);
-                    } else {
-                        parsedFeature.scenarios.push(scenario);
-                    }
+                    // IMPORTANT: Do NOT expand scenario outlines at parse time!
+                    // The orchestrator/runner will handle expansion into iterations with proper aggregation
+                    // Always push the scenario as-is with its examples data
+                    parsedFeature.scenarios.push(scenario);
                 } else if (child.rule) {
                     parsedFeature.rules?.push(this.parseRule(child.rule));
                 }

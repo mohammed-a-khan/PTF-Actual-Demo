@@ -19,6 +19,7 @@ export class CSADOIntegration {
     private allScenarios: Array<{scenario: ParsedScenario, feature: ParsedFeature}> = [];
     private resultsManager: CSTestResultsManager;
     private config: CSConfigurationManager;
+    private afterAllTestsCompleted: boolean = false;
 
     private constructor() {
         this.publisher = CSADOPublisher.getInstance();
@@ -220,6 +221,12 @@ export class CSADOIntegration {
             return;
         }
 
+        // Prevent multiple executions (can be called from both sequential and parallel paths)
+        if (this.afterAllTestsCompleted) {
+            CSReporter.debug('[ADO] afterAllTests already completed, skipping duplicate call');
+            return;
+        }
+
         try {
             // In parallel mode, publish all accumulated results
             if (this.isParallelMode) {
@@ -237,6 +244,9 @@ export class CSADOIntegration {
                 CSReporter.info(`[ADO] Completing test run with attachment: ${testResultsPath}`);
                 // Complete the test run with results attachment
                 await this.publisher.completeTestRun(testResultsPath);
+
+                // Mark as completed only after successful completion
+                this.afterAllTestsCompleted = true;
             } else {
                 CSReporter.warn('[ADO] No test results to upload - skipping zip creation and test run completion');
             }

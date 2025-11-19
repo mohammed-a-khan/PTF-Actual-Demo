@@ -21,7 +21,7 @@ program
     .description('Intelligent Playwright codegen with automatic CS Framework transformation')
     .version('1.0.0')
     .argument('[url]', 'URL to start recording from (optional)')
-    .option('-o, --output-dir <dir>', 'Output directory for generated tests', './test')
+    .option('-o, --output-dir <dir>', 'Output directory for generated tests', './codegen')
     .option('-w, --watch-dir <dir>', 'Directory to watch for codegen output')
     .option('-v, --verbose', 'Enable verbose logging', false)
     .action(async (url: string | undefined, options: any) => {

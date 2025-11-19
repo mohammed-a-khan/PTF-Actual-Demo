@@ -65,6 +65,8 @@ interface ResultMessage {
     endTime?: Date;
     testData?: any;  // Add test data for data-driven scenarios
     adoMetadata?: any;  // ADO metadata for test case mapping
+    iteration?: number;  // Iteration number for data-driven scenarios
+    iterationData?: any;  // Iteration data (example row as object)
 }
 
 // Module cache for performance
@@ -370,6 +372,19 @@ class WorkerProcess {
             result.startTime = scenarioResult.startTime;
             result.endTime = scenarioResult.endTime;
             result.testData = scenarioResult.testData;  // Pass test data for data-driven scenarios
+
+            // Pass iteration information for data-driven scenarios
+            if (message.iterationNumber !== undefined) {
+                result.iteration = message.iterationNumber;
+            }
+            if (message.exampleRow && message.exampleHeaders) {
+                result.iterationData = {};
+                message.exampleHeaders.forEach((header, index) => {
+                    if (message.exampleRow) {
+                        result.iterationData[header] = message.exampleRow[index];
+                    }
+                });
+            }
 
             // Capture error and stack trace for failed tests
             if (result.status === 'failed') {

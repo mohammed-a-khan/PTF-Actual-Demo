@@ -106,12 +106,13 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
     this.config = config;
 
     try {
+      // Check if Windows Authentication (Trusted Connection) is enabled
+      const useTrustedConnection = config.additionalOptions?.['trustedConnection'] === true;
+
       const connectionConfig: any = {
         server: config.host,
         port: config.port || 1433,
         database: config.database,
-        user: config.username,
-        password: config.password,
         options: {
           encrypt: config.ssl !== false,
           trustServerCertificate: config.additionalOptions?.['trustServerCertificate'] !== false,
@@ -126,6 +127,25 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
         }
       };
 
+      // Configure authentication method
+      if (useTrustedConnection) {
+        // Windows Authentication - use domain authentication
+        connectionConfig.authentication = {
+          type: 'ntlm',
+          options: {
+            domain: config.username ? config.username.split('\\')[0] : '',
+            userName: config.username ? config.username.split('\\')[1] || config.username : '',
+            password: config.password || ''
+          }
+        };
+        // Remove trustedConnection from options as we're using authentication object
+        delete connectionConfig.options.trustedConnection;
+      } else {
+        // SQL Authentication - use username and password
+        connectionConfig.user = config.username;
+        connectionConfig.password = config.password;
+      }
+
       if (config.additionalOptions?.['connectionString']) {
         const pool = new this.mssql.ConnectionPool(config.additionalOptions['connectionString']);
         await pool.connect();
@@ -134,7 +154,7 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
 
       const pool = new this.mssql.ConnectionPool(connectionConfig);
       await pool.connect();
-      
+
       return this.wrapConnection(pool, config);
     } catch (error) {
       throw this.parseConnectionError(error);
