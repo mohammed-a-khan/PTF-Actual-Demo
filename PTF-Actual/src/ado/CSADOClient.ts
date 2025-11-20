@@ -304,9 +304,8 @@ export class CSADOClient {
      * Add a new test result to a test run (for data-driven iterations)
      */
     public async addTestResult(result: TestResult, runId: number): Promise<void> {
-        if (!this.config.getBoolean('ADO_UPDATE_TEST_CASES', true)) {
-            return;
-        }
+        // Note: ADO_INTEGRATION_ENABLED is the master switch checked by publisher.isEnabled()
+        // No need for additional checks here
 
         // CSReporter.info(`Adding new test result for test case: ${result.testCaseId} in run: ${runId}`);
 
@@ -340,9 +339,8 @@ export class CSADOClient {
     }
 
     public async updateTestResult(result: TestResult, runId?: number): Promise<void> {
-        if (!this.config.getBoolean('ADO_UPDATE_TEST_CASES', true)) {
-            return;
-        }
+        // Note: ADO_INTEGRATION_ENABLED is the master switch checked by publisher.isEnabled()
+        // No need for additional checks here
 
         // Require runId to be provided
         if (!runId) {

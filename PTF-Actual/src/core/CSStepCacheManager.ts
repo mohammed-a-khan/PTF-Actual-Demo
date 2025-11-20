@@ -11,15 +11,23 @@
  *
  * This cache manager:
  * - Single file read (ONE I/O operation)
+ * - Zero validation in trust mode (instant loading)
  * - Pre-compiled step patterns (no regex compilation)
  * - Instant registration (no decorator overhead)
- * - 10-100x faster on VDI
+ * - 100-1000x faster on VDI
  *
  * CONFIGURATION:
  * ==============
- * STEP_CACHE_ENABLED=true         # Enable cache (default: true)
- * STEP_CACHE_MODE=auto|force      # auto: use cache if fresh, force: always use cache
+ * STEP_CACHE_ENABLED=true              # Enable cache (default: true)
+ * STEP_CACHE_MODE=trust|auto|force     # trust: no validation (fastest), auto: validate, force: use cache without validation (legacy)
  * STEP_CACHE_PATH=.cs-step-cache.json
+ * STEP_CACHE_INVALIDATE_ON_BUILD=true  # Auto-delete cache on build (default: true)
+ *
+ * MODES:
+ * ======
+ * trust  - FASTEST: Load cache without any validation (recommended for VDI/CI)
+ * auto   - SAFE: Validate cache freshness (slow on VDI, not recommended)
+ * force  - LEGACY: Same as trust mode
  */
 
 import * as fs from 'fs';
@@ -41,6 +49,7 @@ export interface StepCacheEntry {
 export interface StepCacheData {
     version: string;
     generated: string;
+    frameworkVersion?: string;  // Framework package version for cache invalidation
     totalFiles: number;
     totalSteps: number;
     fileHashes: Record<string, string>;  // file path -> MD5 hash
@@ -73,6 +82,21 @@ export class CSStepCacheManager {
     }
 
     /**
+     * Get framework package version
+     * Used to invalidate cache when framework is upgraded in consumer projects
+     */
+    private getFrameworkVersion(): string {
+        try {
+            // Try to find framework's package.json
+            const frameworkPackageJson = require('../../../package.json');
+            return frameworkPackageJson.version || 'unknown';
+        } catch (error) {
+            // Fallback: return unknown if can't find package.json
+            return 'unknown';
+        }
+    }
+
+    /**
      * Load and validate cache
      * Returns true if cache is valid and can be used
      */
@@ -90,25 +114,39 @@ export class CSStepCacheManager {
         }
 
         try {
+            const startTime = Date.now();
             const cacheContent = fs.readFileSync(fullPath, 'utf-8');
             this.cacheData = JSON.parse(cacheContent);
+            const readTime = Date.now() - startTime;
+
+            // CRITICAL: Check framework version match (for consumer projects)
+            const currentFrameworkVersion = this.getFrameworkVersion();
+            if (this.cacheData!.frameworkVersion && this.cacheData!.frameworkVersion !== currentFrameworkVersion) {
+                CSReporter.info(`[StepCache] Framework version changed (${this.cacheData!.frameworkVersion} → ${currentFrameworkVersion}), invalidating cache`);
+                this.cacheData = undefined;
+                return false;
+            }
 
             // Check cache mode
-            const mode = this.config.get('STEP_CACHE_MODE', 'auto');
+            const mode = this.config.get('STEP_CACHE_MODE', 'trust');
 
-            if (mode === 'force') {
-                CSReporter.info('[StepCache] Force mode enabled - using cache without validation');
+            if (mode === 'trust' || mode === 'force') {
+                // ULTRA-FAST MODE: No validation, instant loading (recommended for VDI/CI)
+                CSReporter.info(`[StepCache] ⚡ Trust mode: Using cache without validation (${this.cacheData!.totalSteps} steps, ${readTime}ms)`);
                 return true;
             }
 
-            // Auto mode - validate cache freshness
+            // Auto mode - validate cache freshness (SLOW on VDI, not recommended)
+            CSReporter.debug('[StepCache] Auto mode: Validating cache freshness (may be slow on VDI)...');
+            const validationStart = Date.now();
             const isValid = await this.validateCache();
+            const validationTime = Date.now() - validationStart;
 
             if (isValid) {
-                CSReporter.info(`[StepCache] ✅ Valid cache found (${this.cacheData!.totalSteps} steps from ${this.cacheData!.totalFiles} files)`);
+                CSReporter.info(`[StepCache] ✅ Valid cache (${this.cacheData!.totalSteps} steps, read: ${readTime}ms, validation: ${validationTime}ms)`);
                 return true;
             } else {
-                CSReporter.info('[StepCache] Cache outdated, will regenerate');
+                CSReporter.info(`[StepCache] Cache outdated after ${validationTime}ms validation, will regenerate`);
                 return false;
             }
         } catch (error: any) {
@@ -287,6 +325,7 @@ export class CSStepCacheManager {
         const cache: StepCacheData = {
             version: '2.0.0',
             generated: new Date().toISOString(),
+            frameworkVersion: this.getFrameworkVersion(),
             totalFiles: stepFiles.length,
             totalSteps: 0,
             fileHashes: {},
@@ -398,6 +437,32 @@ export class CSStepCacheManager {
         if (fs.existsSync(fullPath)) {
             fs.unlinkSync(fullPath);
             CSReporter.info('[StepCache] Cache file deleted');
+        }
+    }
+
+    /**
+     * Invalidate cache (to be called during build/compilation)
+     * This ensures cache is regenerated after code changes
+     */
+    public static invalidateCacheOnBuild(): void {
+        try {
+            const config = CSConfigurationManager.getInstance();
+            const shouldInvalidate = config.getBoolean('STEP_CACHE_INVALIDATE_ON_BUILD', true);
+
+            if (!shouldInvalidate) {
+                return;
+            }
+
+            const cachePath = config.get('STEP_CACHE_PATH', '.cs-step-cache.json');
+            const fullPath = path.resolve(process.cwd(), cachePath);
+
+            if (fs.existsSync(fullPath)) {
+                fs.unlinkSync(fullPath);
+                console.log('[StepCache] Cache invalidated for rebuild');
+            }
+        } catch (error: any) {
+            // Silently fail - this is just an optimization
+            console.warn(`[StepCache] Failed to invalidate cache: ${error.message}`);
         }
     }
 }

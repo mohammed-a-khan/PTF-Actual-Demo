@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
+import archiver from 'archiver';
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from './CSReporter';
 
@@ -235,8 +236,26 @@ export class CSTestResultsManager {
             return zipPath;
         }
 
+        // Check if directory has any meaningful content before zipping
+        const hasContent = this.directoryHasContent(this.currentTestRunDir);
+        if (!hasContent) {
+            CSReporter.warn(`[ResultsManager] Test results directory is empty - skipping zip creation`);
+            return ''; // Return empty string to signal no zip
+        }
+
         CSReporter.info(`Creating zip archive: ${zipPath}`);
         await this.zipDirectory(this.currentTestRunDir, zipPath);
+
+        // Verify zip has meaningful size (>1KB, empty zips are ~22 bytes)
+        if (fs.existsSync(zipPath)) {
+            const stats = fs.statSync(zipPath);
+            if (stats.size < 1024) {
+                CSReporter.warn(`[ResultsManager] Zip file is too small (${stats.size} bytes) - likely empty, skipping`);
+                fs.unlinkSync(zipPath); // Delete empty zip
+                return ''; // Return empty string to signal no meaningful content
+            }
+        }
+
         this.finalizedZipPath = zipPath;
         CSReporter.info(`✅ Test results zipped successfully: ${zipPath}`);
 
@@ -272,38 +291,46 @@ export class CSTestResultsManager {
     }
     
     /**
-     * Zip a directory
+     * Zip a directory (cross-platform using archiver library)
      */
     private zipDirectory(sourceDir: string, outPath: string): Promise<void> {
         return new Promise((resolve, reject) => {
             try {
-                // Use native zip command if available (Linux/Mac/WSL)
-                const sourceName = path.basename(sourceDir);
-                const parentDir = path.dirname(sourceDir);
+                // Create write stream for output file
+                const output = fs.createWriteStream(outPath);
+                const archive = archiver('zip', {
+                    zlib: { level: 9 } // Maximum compression
+                });
 
-                // Try using zip command (most Unix-like systems)
-                try {
-                    execSync(`cd "${parentDir}" && zip -r "${path.resolve(outPath)}" "${sourceName}" -q`, {
-                        stdio: 'pipe'
-                    });
+                // Listen for errors
+                output.on('error', (err: any) => {
+                    CSReporter.error(`Output stream error: ${err}`);
+                    reject(err);
+                });
+
+                archive.on('error', (err: any) => {
+                    CSReporter.error(`Archive error: ${err}`);
+                    reject(err);
+                });
+
+                // Listen for completion
+                output.on('close', () => {
                     const stats = fs.statSync(outPath);
-                    CSReporter.debug(`Zip created: ${stats.size} bytes`);
+                    CSReporter.debug(`Zip created: ${stats.size} bytes (${archive.pointer()} total bytes)`);
                     resolve();
-                } catch (zipError) {
-                    // If zip command fails, try tar (should work on most systems)
-                    try {
-                        execSync(`cd "${parentDir}" && tar -czf "${path.resolve(outPath)}" "${sourceName}"`, {
-                            stdio: 'pipe'
-                        });
-                        const stats = fs.statSync(outPath);
-                        CSReporter.debug(`Archive created: ${stats.size} bytes`);
-                        resolve();
-                    } catch (tarError) {
-                        CSReporter.warn('Unable to create zip archive - zip/tar commands not available');
-                        resolve();
-                    }
-                }
+                });
+
+                // Pipe archive data to the file
+                archive.pipe(output);
+
+                // Add directory contents to archive
+                const sourceName = path.basename(sourceDir);
+                archive.directory(sourceDir, sourceName);
+
+                // Finalize the archive
+                archive.finalize();
             } catch (error) {
+                CSReporter.error(`Failed to create zip: ${error}`);
                 reject(error);
             }
         });
@@ -326,6 +353,39 @@ export class CSTestResultsManager {
         }
     }
     
+    /**
+     * Check if directory has meaningful content (files other than just empty subdirectories)
+     */
+    private directoryHasContent(dir: string): boolean {
+        if (!fs.existsSync(dir)) {
+            return false;
+        }
+
+        try {
+            const files = fs.readdirSync(dir);
+
+            for (const file of files) {
+                const filePath = path.join(dir, file);
+                const stat = fs.statSync(filePath);
+
+                if (stat.isFile() && stat.size > 0) {
+                    // Found a non-empty file
+                    return true;
+                } else if (stat.isDirectory()) {
+                    // Recursively check subdirectories
+                    if (this.directoryHasContent(filePath)) {
+                        return true;
+                    }
+                }
+            }
+
+            return false; // No meaningful content found
+        } catch (error) {
+            CSReporter.debug(`Error checking directory content: ${error}`);
+            return false;
+        }
+    }
+
     /**
      * Get current test run directory
      */

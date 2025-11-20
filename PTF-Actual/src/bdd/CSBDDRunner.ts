@@ -1376,8 +1376,8 @@ export class CSBDDRunner {
             }
 
             // Skip ADO afterScenario for data-driven iterations (they're aggregated at the end)
-            // Only call for non-data-driven scenarios or when called directly (not part of multi-iteration)
-            if (!totalIterations || totalIterations <= 1) {
+            // Only call for non-data-driven scenarios (totalIterations === 0 means not data-driven)
+            if (!totalIterations || totalIterations === 0) {
                 await adoIntegration.afterScenario(scenario, feature, 'passed', duration, undefined, artifacts, undefined, iterationNumber, iterationData);
             }
 
@@ -1576,8 +1576,8 @@ export class CSBDDRunner {
             }
 
             // Skip ADO afterScenario for data-driven iterations (they're aggregated at the end)
-            // Only call for non-data-driven scenarios or when called directly (not part of multi-iteration)
-            if (!totalIterations || totalIterations <= 1) {
+            // Only call for non-data-driven scenarios (totalIterations === 0 means not data-driven)
+            if (!totalIterations || totalIterations === 0) {
                 await adoIntegration.afterScenario(scenario, feature, 'failed', duration, errorWithStack.message, artifacts, errorWithStack.stack, iterationNumber, iterationData);
             }
             

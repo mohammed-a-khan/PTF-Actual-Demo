@@ -109,6 +109,164 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
       // Check if Windows Authentication (Trusted Connection) is enabled
       const useTrustedConnection = config.additionalOptions?.['trustedConnection'] === true;
 
+      // For Windows Authentication, use msnodesqlv8 driver DIRECTLY (not via mssql wrapper)
+      if (useTrustedConnection && !config.username && !config.password) {
+        CSReporter.info('[SQLServer] Using Windows Integrated Authentication with msnodesqlv8 driver');
+
+        // Load msnodesqlv8 driver DIRECTLY for Windows Authentication
+        // The mssql wrapper doesn't properly pass connection strings to msnodesqlv8
+        let msnodesqlv8Direct;
+        try {
+          msnodesqlv8Direct = await import('msnodesqlv8');
+          // Handle both ES modules and CommonJS modules
+          const sql = (msnodesqlv8Direct as any).default || msnodesqlv8Direct;
+
+          // Also load regular mssql for type compatibility
+          await this.loadDriver();
+        } catch (error) {
+          throw new Error(
+            'Windows Integrated Authentication requires msnodesqlv8 driver. ' +
+            'Run: npm install msnodesqlv8'
+          );
+        }
+
+        // Determine ODBC driver to use
+        // Priority: ODBC Driver 17 > ODBC Driver 18 > SQL Server
+        // Driver 17 is more commonly available on corporate VDIs
+        const driver = config.additionalOptions?.['odbcDriver'] || 'ODBC Driver 17 for SQL Server';
+
+        // Build connection string for Windows Authentication
+        // CRITICAL: Trusted_Connection must be lowercase 'yes' - this is the ONLY recognized value
+        const connString =
+          `Driver={${driver}};` +
+          `Server=${config.host}${config.port && config.port !== 1433 ? `,${config.port}` : ''};` +
+          `Database=${config.database};` +
+          `Trusted_Connection=yes;` +
+          `Encrypt=${config.ssl !== false ? 'yes' : 'no'};` +
+          `TrustServerCertificate=${config.additionalOptions?.['trustServerCertificate'] !== false ? 'yes' : 'no'};`;
+
+        CSReporter.info(`[SQLServer] Connection String: Driver={${driver}};Server=${config.host};Database=${config.database};Trusted_Connection=yes`);
+
+        // Use direct msnodesqlv8 with callback-based API and promisify it
+        try {
+          const sql = (msnodesqlv8Direct as any).default || msnodesqlv8Direct;
+
+          // Create a connection using direct msnodesqlv8
+          const connection: any = await new Promise((resolve, reject) => {
+            sql.open(connString, (err: any, conn: any) => {
+              if (err) {
+                reject(err);
+              } else {
+                resolve(conn);
+              }
+            });
+          });
+
+          CSReporter.info('[SQLServer] Successfully connected using Windows Authentication (direct msnodesqlv8)');
+
+          // Wrap the direct connection in our standard format
+          return {
+            id: `sqlserver-${++this.connectionCounter}`,
+            type: 'sqlserver',
+            instance: connection,
+            config,
+            connected: true,
+            lastActivity: new Date(),
+            inTransaction: false,
+            transactionLevel: 0,
+            savepoints: [],
+            // Add metadata to identify this as a direct msnodesqlv8 connection
+            _isDirect: true,
+            _sql: sql
+          } as DatabaseConnection;
+        } catch (error: any) {
+          // Log full error details for debugging - msnodesqlv8 errors have special structure
+          CSReporter.error(`[SQLServer] ========== CONNECTION ERROR DEBUG ==========`);
+          CSReporter.error(`[SQLServer] Error type: ${typeof error}`);
+          CSReporter.error(`[SQLServer] Error constructor: ${error?.constructor?.name}`);
+          CSReporter.error(`[SQLServer] Error.message: ${error?.message}`);
+          CSReporter.error(`[SQLServer] Error.code: ${error?.code}`);
+          CSReporter.error(`[SQLServer] Error.name: ${error?.name}`);
+          CSReporter.error(`[SQLServer] Error.sqlstate: ${error?.sqlstate}`);
+          CSReporter.error(`[SQLServer] Error.toString(): ${error?.toString()}`);
+
+          // Try to get all enumerable properties
+          if (error && typeof error === 'object') {
+            const allKeys = Object.keys(error);
+            CSReporter.error(`[SQLServer] Error keys: ${allKeys.join(', ')}`);
+            allKeys.forEach(key => {
+              try {
+                CSReporter.error(`[SQLServer] Error.${key}: ${error[key]}`);
+              } catch (e) {
+                CSReporter.error(`[SQLServer] Error.${key}: <unable to stringify>`);
+              }
+            });
+          }
+
+          // Try JSON.stringify with replacer function
+          try {
+            const errorStr = JSON.stringify(error, Object.getOwnPropertyNames(error), 2);
+            CSReporter.error(`[SQLServer] Full error (JSON): ${errorStr}`);
+          } catch (e) {
+            CSReporter.error(`[SQLServer] Cannot JSON.stringify error`);
+          }
+
+          CSReporter.error(`[SQLServer] ========== END ERROR DEBUG ==========`);
+
+          // Check if this is a driver-related error (try alternatives)
+          // Check both error.message and error.originalError
+          const errorMessage = error.message || '';
+          const originalErrorMessage = error.originalError?.message || '';
+
+          const isDriverError =
+            errorMessage.includes('system error 126') ||
+            errorMessage.includes('Data source name not found') ||
+            errorMessage.includes('IM002') ||  // ODBC error for driver not found
+            originalErrorMessage.includes('system error 126') ||
+            originalErrorMessage.includes('Data source name not found') ||
+            originalErrorMessage.includes('IM002');
+
+          if (isDriverError) {
+            CSReporter.warn(`[SQLServer] Driver '${driver}' not available, trying alternatives...`);
+
+            const alternativeDrivers = [
+              'ODBC Driver 17 for SQL Server',
+              'ODBC Driver 18 for SQL Server',
+              'SQL Server',
+              'ODBC Driver 13 for SQL Server',
+              'SQL Server Native Client 11.0'
+            ];
+
+            for (const altDriver of alternativeDrivers) {
+              if (altDriver === driver) continue; // Skip already tried driver
+
+              try {
+                CSReporter.info(`[SQLServer] Trying driver: ${altDriver}`);
+                const altConnString = connString.replace(`Driver={${driver}}`, `Driver={${altDriver}}`);
+                const pool = new this.mssql.ConnectionPool(altConnString);
+                await pool.connect();
+                CSReporter.info(`[SQLServer] Successfully connected using driver: ${altDriver}`);
+                return this.wrapConnection(pool, config);
+              } catch (altError: any) {
+                CSReporter.debug(`[SQLServer] Driver '${altDriver}' failed: ${altError.message || altError.toString()}`);
+              }
+            }
+
+            // If all drivers failed, throw helpful error
+            throw new Error(
+              'No compatible ODBC driver found for Windows Authentication. ' +
+              'Please install "ODBC Driver 17 for SQL Server" or "ODBC Driver 18 for SQL Server". ' +
+              'Download from: https://learn.microsoft.com/en-us/sql/connect/odbc/download-odbc-driver-for-sql-server'
+            );
+          }
+
+          // Re-throw with better error message
+          const errorMsg = error.message || error.toString() || JSON.stringify(error);
+          throw new Error(`SQL Server connection failed: ${errorMsg}`);
+        }
+      }
+
+      // For SQL Authentication or NTLM with credentials, use standard tedious driver
       const connectionConfig: any = {
         server: config.host,
         port: config.port || 1433,
@@ -128,13 +286,19 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
       };
 
       // Configure authentication method
-      if (useTrustedConnection) {
-        // Windows Authentication - use domain authentication
+      if (useTrustedConnection && (config.username || config.password)) {
+        // NTLM authentication with explicitly provided domain credentials
+        const userParts = config.username ? config.username.split('\\') : ['', ''];
+        const domain = userParts.length > 1 ? userParts[0] : '';
+        const userName = userParts.length > 1 ? userParts[1] : (config.username || '');
+
+        CSReporter.info(`[SQLServer] Using NTLM Auth with credentials: ${domain}\\${userName}`);
+
         connectionConfig.authentication = {
           type: 'ntlm',
           options: {
-            domain: config.username ? config.username.split('\\')[0] : '',
-            userName: config.username ? config.username.split('\\')[1] || config.username : '',
+            domain: domain || '',
+            userName: userName,
             password: config.password || ''
           }
         };
@@ -142,6 +306,7 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
         delete connectionConfig.options.trustedConnection;
       } else {
         // SQL Authentication - use username and password
+        CSReporter.info(`[SQLServer] Using SQL Authentication: ${config.username}`);
         connectionConfig.user = config.username;
         connectionConfig.password = config.password;
       }
@@ -163,8 +328,21 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
 
   async disconnect(connection: DatabaseConnection): Promise<void> {
     try {
-      const pool = connection.instance as any;
-      await pool.close();
+      const conn = connection.instance as any;
+
+      // Check if this is a direct msnodesqlv8 connection
+      if ((connection as any)._isDirect) {
+        // Direct msnodesqlv8 uses close() method
+        await new Promise<void>((resolve, reject) => {
+          conn.close((err: any) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+      } else {
+        // Standard mssql pool
+        await conn.close();
+      }
     } catch (error) {
       CSReporter.error('SQL Server disconnect error: ' + (error as Error).message);
       throw error;
@@ -177,12 +355,18 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
     params?: any[],
     options?: QueryOptions
   ): Promise<QueryResult> {
-    const pool = connection.instance as any;
+    const conn = connection.instance as any;
+
+    // Check if this is a direct msnodesqlv8 connection
+    if ((connection as any)._isDirect) {
+      // Use direct msnodesqlv8 query method
+      return this.queryDirect(connection, sql, params, options);
+    }
 
     // Use transaction request if transaction is active, otherwise use pool request
-    const request = pool._transaction
-      ? pool._transaction.request()
-      : pool.request();
+    const request = conn._transaction
+      ? conn._transaction.request()
+      : conn.request();
 
     if (options?.timeout) {
       request.timeout = options.timeout;
@@ -232,6 +416,63 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
     } catch (error: any) {
       throw this.parseQueryError(error, sql);
     }
+  }
+
+  private async queryDirect(
+    connection: DatabaseConnection,
+    sql: string,
+    params?: any[],
+    options?: QueryOptions
+  ): Promise<QueryResult> {
+    const conn = connection.instance as any;
+    const startTime = Date.now();
+
+    // Replace ? placeholders with actual parameters for msnodesqlv8
+    let finalSql = sql;
+    if (params && params.length > 0) {
+      let paramIndex = 0;
+      finalSql = sql.replace(/\?/g, () => {
+        if (paramIndex >= params.length) {
+          throw new Error(`Not enough parameters: expected at least ${paramIndex + 1}, got ${params.length}`);
+        }
+        const param = params[paramIndex++];
+
+        // Convert parameter to SQL literal
+        if (param === null || param === undefined) {
+          return 'NULL';
+        } else if (typeof param === 'number') {
+          return String(param);
+        } else if (typeof param === 'boolean') {
+          return param ? '1' : '0';
+        } else if (param instanceof Date) {
+          return `'${param.toISOString()}'`;
+        } else {
+          // String: escape single quotes and wrap in quotes
+          return `'${String(param).replace(/'/g, "''")}'`;
+        }
+      });
+
+      CSReporter.debug(`[queryDirect] Original SQL: ${sql}`);
+      CSReporter.debug(`[queryDirect] Final SQL with params: ${finalSql}`);
+    }
+
+    return new Promise((resolve, reject) => {
+      conn.query(finalSql, (err: any, rows: any[]) => {
+        if (err) {
+          reject(this.parseQueryError(err, finalSql));
+        } else {
+          const executionTime = Date.now() - startTime;
+          resolve({
+            rows: rows || [],
+            rowCount: rows?.length || 0,
+            affectedRows: rows?.length || 0,
+            fields: rows && rows.length > 0 ? Object.keys(rows[0]).map(name => ({ name, dataType: 'string' })) : [],
+            duration: executionTime,
+            command: sql ? (sql.trim().split(' ')[0] || 'QUERY').toUpperCase() : 'QUERY'
+          });
+        }
+      });
+    });
   }
 
   async executeStoredProcedure(

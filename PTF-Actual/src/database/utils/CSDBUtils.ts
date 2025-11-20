@@ -85,18 +85,58 @@ export class CSDBUtils {
      * @private
      */
     private static resolveQuery(alias: string, sqlOrQueryKey: string): string {
-        // If it looks like a SQL query (contains spaces or keywords), return as-is
-        if (sqlOrQueryKey.toLowerCase().includes('select') ||
-            sqlOrQueryKey.toLowerCase().includes('insert') ||
-            sqlOrQueryKey.toLowerCase().includes('update') ||
-            sqlOrQueryKey.toLowerCase().includes('delete') ||
-            sqlOrQueryKey.includes(' ')) {
+        CSReporter.debug(`[resolveQuery] CALLED with sqlOrQueryKey: ${sqlOrQueryKey.substring(0, 100)}`);
+
+        // If it looks like a SQL query (starts with SQL keywords or contains spaces), return as-is
+        const trimmed = sqlOrQueryKey.trim().toLowerCase();
+        const startsWithSqlKeyword =
+            trimmed.startsWith('select ') ||
+            trimmed.startsWith('insert ') ||
+            trimmed.startsWith('update ') ||
+            trimmed.startsWith('delete ') ||
+            trimmed.startsWith('with ') ||     // Common Table Expressions
+            trimmed.startsWith('create ') ||
+            trimmed.startsWith('alter ') ||
+            trimmed.startsWith('drop ') ||
+            trimmed.startsWith('truncate ') ||
+            trimmed.startsWith('exec ') ||     // SQL Server stored procedures
+            trimmed.startsWith('execute ') ||
+            trimmed.startsWith('call ') ||     // MySQL/PostgreSQL stored procedures
+            trimmed.startsWith('begin ');      // PL/SQL blocks
+
+        if (startsWithSqlKeyword || sqlOrQueryKey.includes(' ')) {
+            CSReporter.debug(`[resolveQuery] Detected as direct SQL, returning as-is`);
             return sqlOrQueryKey;
         }
 
         // Otherwise, try to fetch from config
-        const queryKey = `DB_QUERY_${sqlOrQueryKey.toUpperCase()}`;
+        // Check if the query key already starts with DB_QUERY_ prefix (case-insensitive check)
+        const hasPrefix = sqlOrQueryKey.toUpperCase().startsWith('DB_QUERY_');
+        const queryKey = hasPrefix ? sqlOrQueryKey : `DB_QUERY_${sqlOrQueryKey}`;
+
+        // Initialize config if not already done
+        if (!this.config) {
+            this.initialize();
+        }
+
         const query = this.config.get(queryKey);
+
+        // Get total config keys count for diagnostics
+        const allKeys = Array.from(this.config.getAll().keys());
+        const totalKeys = allKeys.length;
+        const queryKeys = allKeys.filter(k => k.startsWith('DB_QUERY_'));
+
+        CSReporter.debug(`[resolveQuery] Looking for query key: ${queryKey}`);
+        CSReporter.debug(`[resolveQuery] Config instance exists: ${this.config ? 'YES' : 'NO'}`);
+        CSReporter.debug(`[resolveQuery] Total config keys loaded: ${totalKeys}`);
+        CSReporter.debug(`[resolveQuery] Total DB_QUERY_* keys: ${queryKeys.length}`);
+        CSReporter.debug(`[resolveQuery] Query found: ${query ? 'YES' : 'NO'}`);
+
+        if (query) {
+            CSReporter.debug(`[resolveQuery] Query SQL (first 100 chars): ${query.substring(0, 100)}`);
+        } else if (queryKeys.length > 0) {
+            CSReporter.debug(`[resolveQuery] Available DB_QUERY_* keys: ${queryKeys.slice(0, 5).join(', ')}${queryKeys.length > 5 ? '...' : ''}`);
+        }
 
         if (!query) {
             // If not found in config, assume it's a direct SQL (might be a short command)
@@ -130,10 +170,15 @@ export class CSDBUtils {
     public static async executeQuery(alias: string, sql: string, params?: any[]): Promise<ResultSet> {
         try {
             CSReporter.debug(`CSDBUtils.executeQuery - Alias: ${alias}`);
+            CSReporter.debug(`CSDBUtils.executeQuery - Input SQL/QueryKey: "${sql}"`);
+            CSReporter.debug(`CSDBUtils.executeQuery - SQL length: ${sql.length}, Has spaces: ${sql.includes(' ')}`);
 
             const db = await this.getConnection(alias);
+            CSReporter.debug(`CSDBUtils.executeQuery - Connection obtained, calling resolveQuery...`);
+
             const resolvedSql = this.resolveQuery(alias, sql);
 
+            CSReporter.debug(`CSDBUtils.executeQuery - resolveQuery returned, length: ${resolvedSql.length}`);
             CSReporter.debug(`Executing query: ${resolvedSql.substring(0, 100)}${resolvedSql.length > 100 ? '...' : ''}`);
             if (params && params.length > 0) {
                 CSReporter.debug(`Query parameters: ${JSON.stringify(params)}`);

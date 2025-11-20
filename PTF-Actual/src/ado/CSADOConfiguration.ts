@@ -67,7 +67,7 @@ export class CSADOConfiguration {
     private uploadLogs: boolean = true;
     private uploadHar: boolean = false;
     private uploadTraces: boolean = false;
-    private updateTestCases: boolean = true;
+    // updateTestCases removed - redundant with ADO_INTEGRATION_ENABLED
     private createBugsOnFailure: boolean = false;
 
     // Bug template
@@ -212,7 +212,7 @@ export class CSADOConfiguration {
         this.uploadLogs = this.config.getBoolean('ADO_UPLOAD_LOGS', true);
         this.uploadHar = this.config.getBoolean('ADO_UPLOAD_HAR', false);
         this.uploadTraces = this.config.getBoolean('ADO_UPLOAD_TRACES', false);
-        this.updateTestCases = this.config.getBoolean('ADO_UPDATE_TEST_CASES', true);
+        // Note: ADO_UPDATE_TEST_CASES removed - redundant with ADO_INTEGRATION_ENABLED master switch
         this.createBugsOnFailure = this.config.getBoolean('ADO_CREATE_BUGS_ON_FAILURE', false);
     }
 
@@ -390,7 +390,7 @@ export class CSADOConfiguration {
     public shouldUploadLogs(): boolean { return this.uploadLogs; }
     public shouldUploadHar(): boolean { return this.uploadHar; }
     public shouldUploadTraces(): boolean { return this.uploadTraces; }
-    public shouldUpdateTestCases(): boolean { return this.updateTestCases; }
+    // shouldUpdateTestCases removed - redundant with isEnabled() master switch
     public shouldCreateBugsOnFailure(): boolean { return this.createBugsOnFailure; }
     public getBugTemplate(): ADOBugTemplate { return this.bugTemplate; }
 

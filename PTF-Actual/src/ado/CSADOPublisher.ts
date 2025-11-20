@@ -625,6 +625,7 @@ export class CSADOPublisher {
             // Single execution (non-data-driven)
             finalOutcome = result.status === 'passed' ? 'Passed' :
                           result.status === 'failed' ? 'Failed' :
+                          result.status === 'skipped' ? 'NotApplicable' :
                           'NotExecuted';
             aggregatedErrorMessage = result.errorMessage;
 

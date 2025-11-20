@@ -98,9 +98,19 @@ export class CSDatabaseManager {
             config.username = this.configManager.get(`DB_${upperAlias}_USERNAME`) || (() => { throw new Error(`Required configuration DB_${upperAlias}_USERNAME is missing`); })();
             config.password = this.configManager.get(`DB_${upperAlias}_PASSWORD`) || (() => { throw new Error(`Required configuration DB_${upperAlias}_PASSWORD is missing`); })();
         } else {
-            // For Windows Authentication, username and password should be undefined or empty
-            config.username = this.configManager.get(`DB_${upperAlias}_USERNAME`) || '';
-            config.password = this.configManager.get(`DB_${upperAlias}_PASSWORD`) || '';
+            // For Windows Integrated Authentication:
+            // - If USERNAME/PASSWORD are provided → use NTLM auth with domain credentials
+            // - If USERNAME/PASSWORD are NOT provided → use Trusted_Connection (current Windows user)
+            const username = this.configManager.get(`DB_${upperAlias}_USERNAME`);
+            const password = this.configManager.get(`DB_${upperAlias}_PASSWORD`);
+
+            if (username) {
+                config.username = username;
+            }
+            if (password) {
+                config.password = password;
+            }
+            // Note: Leave username/password undefined if not provided for true Windows auth
         }
 
         // Add SQL Server-specific options if present

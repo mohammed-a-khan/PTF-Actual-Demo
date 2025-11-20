@@ -1,10 +1,29 @@
 // src/utils/CSDateTimeUtility.ts
 
 /**
- * Comprehensive DateTime Utility Class
+ * Comprehensive DateTime Utility class
  * Provides extensive date/time parsing, formatting, manipulation, and comparison methods
+ * Supports locale-aware operations with default Americas locale (en-US)
  */
 export class CSDateTimeUtility {
+
+    // Default locale for all operations
+    private static defaultLocale: string = 'en-US';
+
+    /**
+     * Set the default locale for all date operations
+     * @param locale - Locale string (e.g., 'en-US', 'en-GB', 'fr-FR', 'de-DE', 'ja-JP')
+     */
+    static setDefaultLocale(locale: string): void {
+        this.defaultLocale = locale;
+    }
+
+    /**
+     * Get the current default locale
+     */
+    static getDefaultLocale(): string {
+        return this.defaultLocale;
+    }
 
     // ===============================
     // DATE PARSING & CREATION
@@ -152,19 +171,28 @@ export class CSDateTimeUtility {
 
     /**
      * Format date to human-readable string
-     * Example: "January 1, 2024"
+     * Example: "January 1, 2024" (en-US) or "1 janvier 2024" (fr-FR)
+     * @param date - Date to format
+     * @param locale - Locale string (defaults to Americas locale)
      */
-    static toHumanString(date: Date): string {
-        const months = ['January', 'February', 'March', 'April', 'May', 'June',
-                       'July', 'August', 'September', 'October', 'November', 'December'];
-        return `${months[date.getMonth()]} ${date.getDate()}, ${date.getFullYear()}`;
+    static toHumanString(date: Date, locale?: string): string {
+        const targetLocale = locale || this.defaultLocale;
+        return date.toLocaleDateString(targetLocale, {
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+        });
     }
 
     /**
      * Format date to relative time
-     * Example: "2 hours ago", "in 3 days"
+     * Example: "2 hours ago", "in 3 days" (en-US) or uses Intl.RelativeTimeFormat for locale support
+     * @param date - Date to format
+     * @param baseDate - Reference date (defaults to now)
+     * @param locale - Locale string (defaults to Americas locale)
      */
-    static toRelative(date: Date, baseDate: Date = new Date()): string {
+    static toRelative(date: Date, baseDate: Date = new Date(), locale?: string): string {
+        const targetLocale = locale || this.defaultLocale;
         const diff = baseDate.getTime() - date.getTime();
         const seconds = Math.abs(Math.floor(diff / 1000));
         const minutes = Math.floor(seconds / 60);
@@ -173,15 +201,15 @@ export class CSDateTimeUtility {
         const months = Math.floor(days / 30);
         const years = Math.floor(days / 365);
 
-        const suffix = diff > 0 ? 'ago' : 'from now';
-        const prefix = diff > 0 ? '' : 'in ';
+        const rtf = new Intl.RelativeTimeFormat(targetLocale, { numeric: 'auto' });
+        const isPast = diff > 0;
 
-        if (seconds < 60) return `${prefix}${seconds} ${this.pluralize(seconds, 'second')} ${suffix}`;
-        if (minutes < 60) return `${prefix}${minutes} ${this.pluralize(minutes, 'minute')} ${suffix}`;
-        if (hours < 24) return `${prefix}${hours} ${this.pluralize(hours, 'hour')} ${suffix}`;
-        if (days < 30) return `${prefix}${days} ${this.pluralize(days, 'day')} ${suffix}`;
-        if (months < 12) return `${prefix}${months} ${this.pluralize(months, 'month')} ${suffix}`;
-        return `${prefix}${years} ${this.pluralize(years, 'year')} ${suffix}`;
+        if (seconds < 60) return rtf.format(isPast ? -seconds : seconds, 'second');
+        if (minutes < 60) return rtf.format(isPast ? -minutes : minutes, 'minute');
+        if (hours < 24) return rtf.format(isPast ? -hours : hours, 'hour');
+        if (days < 30) return rtf.format(isPast ? -days : days, 'day');
+        if (months < 12) return rtf.format(isPast ? -months : months, 'month');
+        return rtf.format(isPast ? -years : years, 'year');
     }
 
     private static pluralize(count: number, singular: string): string {
@@ -579,23 +607,24 @@ export class CSDateTimeUtility {
 
     /**
      * Get day of week name
+     * @param date - Date to get day name from
+     * @param short - Return short format (Mon) vs long format (Monday)
+     * @param locale - Locale string (defaults to Americas locale)
      */
-    static getDayOfWeekName(date: Date, short: boolean = false): string {
-        const days = short
-            ? ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-            : ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-        return days[date.getDay()];
+    static getDayOfWeekName(date: Date, short: boolean = false, locale?: string): string {
+        const targetLocale = locale || this.defaultLocale;
+        return date.toLocaleDateString(targetLocale, { weekday: short ? 'short' : 'long' });
     }
 
     /**
      * Get month name
+     * @param date - Date to get month name from
+     * @param short - Return short format (Jan) vs long format (January)
+     * @param locale - Locale string (defaults to Americas locale)
      */
-    static getMonthName(date: Date, short: boolean = false): string {
-        const months = short
-            ? ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            : ['January', 'February', 'March', 'April', 'May', 'June',
-               'July', 'August', 'September', 'October', 'November', 'December'];
-        return months[date.getMonth()];
+    static getMonthName(date: Date, short: boolean = false, locale?: string): string {
+        const targetLocale = locale || this.defaultLocale;
+        return date.toLocaleDateString(targetLocale, { month: short ? 'short' : 'long' });
     }
 
     /**
@@ -732,5 +761,84 @@ export class CSDateTimeUtility {
         }
 
         return count;
+    }
+
+    // ===================================
+    // LOCALE-AWARE FORMATTING
+    // ===================================
+
+    /**
+     * Format date with locale-specific formatting
+     * @param date - Date to format
+     * @param options - Intl.DateTimeFormatOptions
+     * @param locale - Locale string (defaults to Americas locale)
+     */
+    static toLocaleString(date: Date, options?: Intl.DateTimeFormatOptions, locale?: string): string {
+        const targetLocale = locale || this.defaultLocale;
+        return date.toLocaleString(targetLocale, options);
+    }
+
+    /**
+     * Format date (date only) with locale-specific formatting
+     * @param date - Date to format
+     * @param options - Intl.DateTimeFormatOptions
+     * @param locale - Locale string (defaults to Americas locale)
+     */
+    static toLocaleDateString(date: Date, options?: Intl.DateTimeFormatOptions, locale?: string): string {
+        const targetLocale = locale || this.defaultLocale;
+        return date.toLocaleDateString(targetLocale, options);
+    }
+
+    /**
+     * Format time with locale-specific formatting
+     * @param date - Date to format
+     * @param options - Intl.DateTimeFormatOptions
+     * @param locale - Locale string (defaults to Americas locale)
+     */
+    static toLocaleTimeString(date: Date, options?: Intl.DateTimeFormatOptions, locale?: string): string {
+        const targetLocale = locale || this.defaultLocale;
+        return date.toLocaleTimeString(targetLocale, options);
+    }
+
+    /**
+     * Format number with locale-specific formatting (useful for dates with numbers)
+     * @param value - Number to format
+     * @param locale - Locale string (defaults to Americas locale)
+     */
+    static formatNumber(value: number, locale?: string): string {
+        const targetLocale = locale || this.defaultLocale;
+        return new Intl.NumberFormat(targetLocale).format(value);
+    }
+
+    /**
+     * Get locale-specific date format pattern
+     * @param locale - Locale string (defaults to Americas locale)
+     * @returns Example: "MM/DD/YYYY" for en-US, "DD/MM/YYYY" for en-GB
+     */
+    static getLocaleDateFormat(locale?: string): string {
+        const targetLocale = locale || this.defaultLocale;
+        const formatter = new Intl.DateTimeFormat(targetLocale);
+        const parts = formatter.formatToParts(new Date(2024, 0, 15)); // Jan 15, 2024
+
+        return parts
+            .map(part => {
+                if (part.type === 'month') return 'MM';
+                if (part.type === 'day') return 'DD';
+                if (part.type === 'year') return 'YYYY';
+                return part.value;
+            })
+            .join('');
+    }
+
+    /**
+     * Get first day of week for locale (0 = Sunday, 1 = Monday)
+     * @param locale - Locale string (defaults to Americas locale)
+     */
+    static getFirstDayOfWeek(locale?: string): number {
+        const targetLocale = locale || this.defaultLocale;
+        // Most Americas locales start with Sunday (0), Europe with Monday (1)
+        const europeanLocales = ['de', 'fr', 'es', 'it', 'nl', 'pl', 'pt', 'ru', 'sv', 'fi', 'no', 'da'];
+        const lang = targetLocale.split('-')[0];
+        return europeanLocales.includes(lang) ? 1 : 0;
     }
 }
