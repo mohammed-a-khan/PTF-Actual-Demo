@@ -138,8 +138,17 @@ export class ParallelOrchestrator {
             }
 
             // Extract headers and rows
+            // For arrays and objects, JSON.stringify them to preserve structure
+            // Otherwise convert to string normally
             const headers = Object.keys(data[0]);
-            const rows = data.map(item => headers.map(h => String(item[h] || '')));
+            const rows = data.map(item => headers.map(h => {
+                const value = item[h];
+                if (value === null || value === undefined) return '';
+                if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
+                    return JSON.stringify(value);
+                }
+                return String(value);
+            }));
 
             CSReporter.info(`Loaded ${rows.length} rows with headers: ${headers.join(', ')}`);
 

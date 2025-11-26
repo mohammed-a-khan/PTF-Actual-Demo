@@ -246,15 +246,133 @@ export class CSDataProvider {
         // Use CSJsonUtility to read the data
         const data = JsonUtil.readFile(filePath);
 
+        // If path option is provided, extract data using JSONPath
+        if (options.path) {
+            const extracted = this.extractByJsonPath(data, options.path);
+            if (extracted !== undefined) {
+                CSReporter.debug(`Extracted ${Array.isArray(extracted) ? extracted.length : 1} items using path: ${options.path}`);
+                return Array.isArray(extracted) ? extracted : [extracted];
+            }
+            CSReporter.warn(`JSONPath '${options.path}' returned no data, falling back to default extraction`);
+        }
+
         // Handle both array and object formats
         if (Array.isArray(data)) {
             return data;
         } else if (typeof data === 'object') {
-            // If object, look for a data property
-            return data.data || data.rows || [data];
+            // If object, look for common data properties
+            return data.data || data.rows || data.testcases || data.testCases || data.records || data.items || [data];
         }
 
         return [];
+    }
+
+    /**
+     * Extract data from JSON using a simple JSONPath-like syntax
+     * Supports:
+     *   - $.property - root property access
+     *   - $.property.nested - nested property access
+     *   - $.property[*] - all items in array
+     *   - $.property[0] - specific array index
+     *   - $[*] - all items from root array
+     *   - property - simple property name (without $.)
+     *
+     * @param data - The JSON data object
+     * @param jsonPath - The path expression
+     * @returns Extracted data or undefined if not found
+     */
+    private extractByJsonPath(data: any, jsonPath: string): any {
+        if (!data || !jsonPath) return undefined;
+
+        // Normalize path - remove leading $. if present
+        let normalizedPath = jsonPath.trim();
+        if (normalizedPath.startsWith('$.')) {
+            normalizedPath = normalizedPath.substring(2);
+        } else if (normalizedPath.startsWith('$[')) {
+            normalizedPath = normalizedPath.substring(1);
+        } else if (normalizedPath === '$') {
+            return data;
+        }
+
+        // Handle root array access $[*] or [*]
+        if (normalizedPath === '[*]' || normalizedPath === '') {
+            return Array.isArray(data) ? data : [data];
+        }
+
+        // Split path into segments, handling array notation
+        // e.g., "testcases[*]" -> ["testcases", "[*]"]
+        // e.g., "data.users[0].name" -> ["data", "users", "[0]", "name"]
+        const segments: string[] = [];
+        let current = '';
+
+        for (let i = 0; i < normalizedPath.length; i++) {
+            const char = normalizedPath[i];
+
+            if (char === '.') {
+                if (current) {
+                    segments.push(current);
+                    current = '';
+                }
+            } else if (char === '[') {
+                if (current) {
+                    segments.push(current);
+                    current = '';
+                }
+                // Find closing bracket
+                const closeBracket = normalizedPath.indexOf(']', i);
+                if (closeBracket !== -1) {
+                    segments.push(normalizedPath.substring(i, closeBracket + 1));
+                    i = closeBracket;
+                }
+            } else {
+                current += char;
+            }
+        }
+        if (current) {
+            segments.push(current);
+        }
+
+        // Navigate through the path
+        let result: any = data;
+
+        for (const segment of segments) {
+            if (result === undefined || result === null) {
+                return undefined;
+            }
+
+            if (segment === '[*]') {
+                // Return all items in array
+                if (Array.isArray(result)) {
+                    return result;
+                }
+                return undefined;
+            } else if (segment.startsWith('[') && segment.endsWith(']')) {
+                // Array index access
+                const indexStr = segment.substring(1, segment.length - 1);
+                const index = parseInt(indexStr, 10);
+                if (!isNaN(index) && Array.isArray(result)) {
+                    result = result[index];
+                } else {
+                    return undefined;
+                }
+            } else {
+                // Property access (case-insensitive fallback)
+                if (result[segment] !== undefined) {
+                    result = result[segment];
+                } else {
+                    // Try case-insensitive match
+                    const keys = Object.keys(result);
+                    const matchingKey = keys.find(k => k.toLowerCase() === segment.toLowerCase());
+                    if (matchingKey) {
+                        result = result[matchingKey];
+                    } else {
+                        return undefined;
+                    }
+                }
+            }
+        }
+
+        return result;
     }
 
     private async loadXMLData(options: DataProviderOptions): Promise<DataRow[]> {

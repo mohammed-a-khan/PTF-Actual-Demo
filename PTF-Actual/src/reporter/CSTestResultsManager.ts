@@ -298,8 +298,19 @@ export class CSTestResultsManager {
             try {
                 // Create write stream for output file
                 const output = fs.createWriteStream(outPath);
+
+                // Use store mode (no compression) for Windows compatibility
+                // High compression (level 9) can cause issues with Windows zip extraction
                 const archive = archiver('zip', {
-                    zlib: { level: 9 } // Maximum compression
+                    zlib: { level: 6 }, // Moderate compression for better compatibility
+                    store: false // Use DEFLATE compression (standard)
+                });
+
+                // Track if any files were added
+                let filesAdded = 0;
+                archive.on('entry', (entry: any) => {
+                    filesAdded++;
+                    CSReporter.debug(`Added to zip: ${entry.name} (${entry.stats?.size || 0} bytes)`);
                 });
 
                 // Listen for errors
@@ -313,10 +324,20 @@ export class CSTestResultsManager {
                     reject(err);
                 });
 
+                // Listen for warnings (non-blocking errors)
+                archive.on('warning', (err: any) => {
+                    if (err.code === 'ENOENT') {
+                        CSReporter.warn(`Archive warning (file not found): ${err.message}`);
+                    } else {
+                        CSReporter.error(`Archive warning: ${err}`);
+                        reject(err);
+                    }
+                });
+
                 // Listen for completion
                 output.on('close', () => {
                     const stats = fs.statSync(outPath);
-                    CSReporter.debug(`Zip created: ${stats.size} bytes (${archive.pointer()} total bytes)`);
+                    CSReporter.info(`✅ Zip finalized: ${stats.size} bytes, ${filesAdded} files/folders added`);
                     resolve();
                 });
 
@@ -324,10 +345,12 @@ export class CSTestResultsManager {
                 archive.pipe(output);
 
                 // Add directory contents to archive
-                const sourceName = path.basename(sourceDir);
-                archive.directory(sourceDir, sourceName);
+                // Second parameter 'false' means don't create a root folder, add contents directly
+                // This makes the zip structure cleaner and more compatible
+                archive.directory(sourceDir, false);
 
-                // Finalize the archive
+                // Finalize the archive (this triggers the writing)
+                CSReporter.debug(`Finalizing archive for: ${sourceDir}`);
                 archive.finalize();
             } catch (error) {
                 CSReporter.error(`Failed to create zip: ${error}`);

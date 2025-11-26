@@ -115,11 +115,11 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
 
         // Load msnodesqlv8 driver DIRECTLY for Windows Authentication
         // The mssql wrapper doesn't properly pass connection strings to msnodesqlv8
+        // Use require() instead of import() to avoid TypeScript compile-time checking
+        // (msnodesqlv8 is a peerDependency, may not be installed during framework build)
         let msnodesqlv8Direct;
         try {
-          msnodesqlv8Direct = await import('msnodesqlv8');
-          // Handle both ES modules and CommonJS modules
-          const sql = (msnodesqlv8Direct as any).default || msnodesqlv8Direct;
+          msnodesqlv8Direct = require('msnodesqlv8');
 
           // Also load regular mssql for type compatibility
           await this.loadDriver();

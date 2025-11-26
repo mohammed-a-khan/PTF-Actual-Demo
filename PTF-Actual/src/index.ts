@@ -220,7 +220,12 @@ async function execute(mode: string) {
             const { CSBDDRunner } = await import('./bdd/CSBDDRunner');
             console.log(`[PERF] CSBDDRunner imported in ${Date.now() - importStart}ms`);
             const runner = CSBDDRunner.getInstance();
-            
+
+            console.log('[DEBUG] Parsed args:', JSON.stringify(args, null, 2));
+            console.log('[DEBUG] args.features:', args.features);
+            console.log('[DEBUG] args.feature:', args.feature);
+            console.log('[DEBUG] args.f:', args.f);
+
             // Pass CLI options to the runner
             const options: any = {};
             
@@ -232,10 +237,13 @@ async function execute(mode: string) {
             // Handle features/feature path
             if (args.features || args.feature || args.f) {
                 const featurePath = args.features || args.feature || args.f;
+                console.log('[DEBUG] Setting options.features to:', featurePath);
                 options.features = featurePath;
                 // Set both FEATURES and FEATURE_PATH for compatibility
                 config.set('FEATURES', featurePath);
                 config.set('FEATURE_PATH', featurePath);
+            } else {
+                console.log('[WARN] No --features argument found in args!');
             }
             
             // Handle tags
@@ -308,7 +316,9 @@ async function execute(mode: string) {
                 options.environment = env;
                 config.set('ENVIRONMENT', env);
             }
-            
+
+            console.log('[DEBUG] Final options being passed to runner.run():', JSON.stringify(options, null, 2));
+
             await runner.run(options);
             break;
             

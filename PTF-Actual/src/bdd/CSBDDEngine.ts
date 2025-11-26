@@ -77,7 +77,7 @@ export class CSBDDEngine {
             });
 
             if (hasTsFiles) {
-                // Register ts-node to handle TypeScript files
+                // Register ts-node to handle TypeScript files with inline source maps for debugging
                 require('ts-node').register({
                     transpileOnly: true,
                     compilerOptions: {
@@ -86,11 +86,14 @@ export class CSBDDEngine {
                         esModuleInterop: true,
                         skipLibCheck: true,
                         experimentalDecorators: true,
-                        emitDecoratorMetadata: true
+                        emitDecoratorMetadata: true,
+                        sourceMap: true,
+                        inlineSourceMap: true,
+                        inlineSources: true
                     }
                 });
                 this.tsNodeRegistered = true;
-                CSReporter.debug('ts-node registered for TypeScript step definition loading');
+                CSReporter.debug('ts-node registered for TypeScript step definition loading with source map support');
             }
         } catch (error: any) {
             // ts-node may not be available, which is fine if only JS files are used
@@ -679,62 +682,75 @@ export class CSBDDEngine {
     }
 
     // Selective step loading based on features
+    // OPTIMIZED: Removed expensive file content analysis - loads all discovered step files
     public async loadRequiredStepDefinitions(features: ParsedFeature[]): Promise<void> {
         const startTime = Date.now();
 
-        if (!this.config.getBoolean('SELECTIVE_STEP_LOADING', true)) {
-            // Load all step definitions
-            await this.loadAllStepDefinitions();
-            return;
-        }
-
-        // Extract all unique step patterns from features
-        const stepPatterns = new Set<string>();
-
-        for (const feature of features) {
-            // Add background steps
-            if ((feature as any).background) {
-                (feature as any).background.steps.forEach((step: any) => {
-                    stepPatterns.add(step.text);
-                });
-            }
-
-            // Add scenario steps
-            for (const scenario of feature.scenarios) {
-                scenario.steps.forEach(step => {
-                    stepPatterns.add(step.text);
-                });
-            }
-        }
-
-        // Load only step files that contain matching patterns
-        const loadedFiles: string[] = [];
+        // Discover all step files from configured paths (excluding framework dist/steps which is handled by CSStepLoader)
+        const stepFiles: string[] = [];
 
         for (const stepPath of this.stepDefinitionPaths) {
+            // Skip framework paths - they are handled by CSStepLoader
+            if (stepPath.includes('node_modules') && stepPath.includes('cs-playwright-test-framework')) {
+                CSReporter.debug(`[StepLoading] Skipping framework path (handled by CSStepLoader): ${stepPath}`);
+                continue;
+            }
+
             if (fs.existsSync(stepPath)) {
                 const stat = fs.statSync(stepPath);
 
                 if (stat.isDirectory()) {
                     const files = this.findStepFiles(stepPath);
-
-                    for (const file of files) {
-                        if (await this.fileContainsSteps(file, stepPatterns)) {
-                            await this.loadStepFile(file);
-                            loadedFiles.push(file);
-                            CSReporter.debug(`Loaded file: ${file}`);
-                        }
-                    }
-                } else if (stepPath.endsWith('.ts') || stepPath.endsWith('.js')) {
-                    if (await this.fileContainsSteps(stepPath, stepPatterns)) {
-                        await this.loadStepFile(stepPath);
-                        loadedFiles.push(stepPath);
-                    }
+                    stepFiles.push(...files);
+                } else if (this.isStepFile(stepPath)) {
+                    stepFiles.push(stepPath);
                 }
             }
         }
 
+        if (stepFiles.length === 0) {
+            CSReporter.debug('[StepLoading] No consumer step files found in configured paths');
+            return;
+        }
+
+        CSReporter.info(`[StepLoading] Found ${stepFiles.length} consumer step files to load`);
+
+        // Load all step files - no content analysis needed (VDI optimization)
+        // The decorator registration happens during require() and handles step matching
+        const loadedFiles: string[] = [];
+        const errors: string[] = [];
+
+        for (const file of stepFiles) {
+            try {
+                await this.loadStepFile(file);
+                loadedFiles.push(file);
+            } catch (error: any) {
+                errors.push(`${path.basename(file)}: ${error.message}`);
+            }
+        }
+
         const loadTime = Date.now() - startTime;
-        CSReporter.info(`Selective step loading: ${loadedFiles.length} files in ${loadTime}ms`);
+
+        if (errors.length > 0) {
+            CSReporter.warn(`[StepLoading] ${errors.length} files failed to load: ${errors.join('; ')}`);
+        }
+
+        CSReporter.info(`[StepLoading] ✅ Loaded ${loadedFiles.length} consumer step files in ${loadTime}ms`);
+    }
+
+    /**
+     * Check if a file is a step definition file
+     */
+    private isStepFile(filePath: string): boolean {
+        const fileName = path.basename(filePath);
+        return (
+            fileName.endsWith('.steps.ts') ||
+            fileName.endsWith('.steps.js') ||
+            fileName.endsWith('.step.ts') ||
+            fileName.endsWith('.step.js') ||
+            fileName.endsWith('Steps.ts') ||
+            fileName.endsWith('Steps.js')
+        ) && !fileName.includes('.spec.') && !fileName.includes('.test.');
     }
 
     private async loadAllStepDefinitions(): Promise<void> {
@@ -770,72 +786,6 @@ export class CSBDDEngine {
         }
 
         return files;
-    }
-
-    private async fileContainsSteps(filePath: string, stepPatterns: Set<string>): Promise<boolean> {
-        const content = fs.readFileSync(filePath, 'utf8');
-
-        // Check if file contains step definition decorators
-        if (!content.includes('@CSBDDStepDef') && !content.includes('CSBDDStepDef(')) {
-            return false;
-        }
-
-        // Check if file contains any of the step patterns
-        for (const pattern of stepPatterns) {
-            // For more flexible matching, check if the file contains the actual step definition text
-            try {
-                // Remove quoted values and parameters to get base text
-                const baseText = pattern
-                    .replace(/"[^"]*"/g, '')  // Remove quoted strings
-                    .replace(/\d+/g, '')       // Remove numbers
-                    .replace(/^\s*(Given|When|Then|And|But)\s+/i, '') // Remove Gherkin keywords
-                    .trim();
-
-                // Split into significant words (excluding empty strings)
-                const stepWords = baseText.split(/\s+/).filter(word => word.length > 2);
-
-                if (stepWords.length > 0) {
-                    // Create pattern that matches the decorator format with {string} or {int} parameters
-                    const searchPattern = stepWords.join('.*');
-                    const regex = new RegExp(`@CSBDDStepDef\\(['\"\`].*${searchPattern}.*['\"\`]\\)`, 'i');
-                    if (regex.test(content)) {
-                        return true;
-                    }
-
-                    // Also check for the exact pattern without the Gherkin keyword
-                    const withoutKeyword = pattern.replace(/^\s*(Given|When|Then|And|But)\s+/i, '');
-
-                    // Convert the actual step text to a pattern that matches parameter placeholders
-                    // Be careful with order - more specific patterns first
-                    const stepPattern = withoutKeyword
-                        .replace(/"[^"]*"/g, '{string}')           // Replace quoted strings with {string}
-                        .replace(/\b\d+\.\d+\b/g, '{float}')       // Replace floats (e.g., 3.14) with {float}
-                        .replace(/\b\d+\b/g, '{int}')              // Replace integers with {int}
-                        .replace(/\b(true|false)\b/gi, '{boolean}') // Replace booleans with {boolean}
-                        .replace(/\{[^}]+\}/g, (match) => match);   // Keep existing placeholders as-is
-
-                    // Check if this pattern exists in the file
-                    if (content.includes(stepPattern)) {
-                        return true;
-                    }
-
-                    // Also try a more generic match for any {word} pattern
-                    const genericPattern = withoutKeyword
-                        .replace(/"[^"]*"/g, '{word}')
-                        .replace(/\b\d+\.\d+\b/g, '{word}')
-                        .replace(/\b\d+\b/g, '{word}')
-                        .replace(/\b(true|false)\b/gi, '{word}');
-
-                    if (content.includes(genericPattern)) {
-                        return true;
-                    }
-                }
-            } catch (error) {
-                // Continue if regex fails
-            }
-        }
-
-        return false;
     }
 
     private async loadStepFile(filePath: string): Promise<void> {

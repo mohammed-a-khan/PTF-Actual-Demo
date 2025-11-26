@@ -210,6 +210,7 @@ export class CSBDDRunner {
         this.testSuite.startTime = new Date();
 
         try {
+            CSReporter.debug(`[CSBDDRunner.run] Received options: ${JSON.stringify(options)}`);
             // Initialize configuration
             await this.config.initialize(options);
 
@@ -447,7 +448,9 @@ export class CSBDDRunner {
     }
     
     private async loadFeatures(options: RunOptions): Promise<ParsedFeature[]> {
+        CSReporter.debug(`[loadFeatures] options.features = ${JSON.stringify(options.features)}`);
         const featurePaths = this.resolveFeaturePaths(options.features);
+        CSReporter.debug(`[loadFeatures] Resolved ${featurePaths.length} feature file(s): ${JSON.stringify(featurePaths.slice(0, 3))}...`);
         const filters = {
             tags: options.tags,
             excludeTags: options.excludeTags,
@@ -473,9 +476,12 @@ export class CSBDDRunner {
     }
     
     private resolveFeaturePaths(features?: string | string[]): string[] {
+        CSReporter.debug(`[resolveFeaturePaths] Input features param: ${JSON.stringify(features)}`);
+        CSReporter.debug(`[resolveFeaturePaths] Type: ${typeof features}, Is undefined: ${features === undefined}, Is null: ${features === null}, Is empty string: ${features === ''}, Is falsy: ${!features}`);
         let pathsToProcess: string[] = [];
 
         if (!features) {
+            CSReporter.warn(`[resolveFeaturePaths] No features parameter provided (value: ${JSON.stringify(features)}), using fallback logic`);
             // PRIORITY 1: Check for PROJECT first (highest priority)
             const project = this.config.get('PROJECT');
             if (project) {
@@ -505,6 +511,7 @@ export class CSBDDRunner {
                 pathsToProcess = [defaultPath];
             }
         } else {
+            CSReporter.debug(`[resolveFeaturePaths] Features parameter provided: ${JSON.stringify(features)}`);
             // Handle passed features (can be string with ';' or array)
             if (Array.isArray(features)) {
                 pathsToProcess = features;
@@ -514,6 +521,7 @@ export class CSBDDRunner {
                 const delimiter = features.includes(';') ? ';' : ',';
                 pathsToProcess = features.split(delimiter).map(p => p.trim()).filter(p => p.length > 0);
             }
+            CSReporter.debug(`[resolveFeaturePaths] Paths to process after parsing: ${JSON.stringify(pathsToProcess)}`);
         }
 
         // Resolve all paths and expand glob patterns
@@ -551,20 +559,29 @@ export class CSBDDRunner {
                 }
             } else {
                 // Regular path (not a glob pattern)
-                const fullPath = path.isAbsolute(pathStr) ? pathStr : path.join(process.cwd(), pathStr);
+                const cwd = process.cwd();
+                const fullPath = path.isAbsolute(pathStr) ? pathStr : path.join(cwd, pathStr);
+                CSReporter.debug(`[resolveFeaturePaths] Processing path: ${pathStr}`);
+                CSReporter.debug(`[resolveFeaturePaths] CWD: ${cwd}`);
+                CSReporter.debug(`[resolveFeaturePaths] Full path: ${fullPath}`);
+                CSReporter.debug(`[resolveFeaturePaths] Path exists: ${fs.existsSync(fullPath)}`);
 
                 if (!fs.existsSync(fullPath)) {
-                    CSReporter.warn(`Path does not exist: ${fullPath}`);
+                    CSReporter.error(`Path does not exist: ${fullPath}`);
+                    CSReporter.error(`Expected path based on CWD ${cwd} and relative path ${pathStr}`);
                     continue;
                 }
 
                 const stat = fs.statSync(fullPath);
 
                 if (stat.isDirectory()) {
+                    CSReporter.debug(`[resolveFeaturePaths] Path is directory, finding all .feature files: ${fullPath}`);
                     // Recursively find all .feature files in the directory
                     const featureFiles = this.findFeatureFiles(fullPath);
+                    CSReporter.debug(`[resolveFeaturePaths] Found ${featureFiles.length} .feature files in directory`);
                     resolvedFeaturePaths.push(...featureFiles);
                 } else if (stat.isFile() && fullPath.endsWith('.feature')) {
+                    CSReporter.debug(`[resolveFeaturePaths] Path is a .feature file, adding: ${fullPath}`);
                     // Add individual feature file
                     resolvedFeaturePaths.push(fullPath);
                 } else {
@@ -573,12 +590,18 @@ export class CSBDDRunner {
             }
         }
 
+        CSReporter.debug(`[resolveFeaturePaths] Total resolved paths: ${resolvedFeaturePaths.length}`);
+
         if (resolvedFeaturePaths.length === 0) {
+            CSReporter.error(`[resolveFeaturePaths] No feature files found!`);
+            CSReporter.error(`[resolveFeaturePaths] Paths that were attempted: ${JSON.stringify(pathsToProcess)}`);
+            CSReporter.error(`[resolveFeaturePaths] Current working directory: ${process.cwd()}`);
             throw new Error('No feature files found in the specified paths');
         }
 
-        // Remove duplicates and return
-        return [...new Set(resolvedFeaturePaths)];
+        const uniquePaths = [...new Set(resolvedFeaturePaths)];
+        CSReporter.debug(`[resolveFeaturePaths] Returning ${uniquePaths.length} unique feature path(s)`);
+        return uniquePaths;
     }
     
     private findFeatureFiles(directory: string): string[] {
