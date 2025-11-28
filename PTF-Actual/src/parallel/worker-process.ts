@@ -207,6 +207,120 @@ class WorkerProcess {
             console.error(`[Worker ${this.workerId}] Uncaught exception:`, error);
             this.cleanup();
         });
+
+        // Playwright 1.57+ inspired: Capture console events from worker process
+        this.setupConsoleCapture();
+    }
+
+    // ============================================
+    // WORKER CONSOLE CAPTURE (Playwright 1.57+ inspired)
+    // ============================================
+
+    private consoleMessages: Array<{type: string, message: string, timestamp: number}> = [];
+    private consoleCapureEnabled: boolean = false;
+
+    /**
+     * Setup console capture for worker process
+     * Inspired by Playwright 1.57's worker.on('console') feature
+     */
+    private setupConsoleCapture() {
+        // Check if console capture is enabled via config (default: true in debug mode)
+        const enableCapture = process.env.WORKER_CONSOLE_CAPTURE === 'true' ||
+                             process.env.LOG_LEVEL === 'debug' ||
+                             process.env.DEBUG === 'true';
+
+        if (!enableCapture) return;
+
+        this.consoleCapureEnabled = true;
+
+        // Capture console.log
+        const originalLog = console.log;
+        console.log = (...args: any[]) => {
+            this.captureConsole('log', args);
+            originalLog.apply(console, args);
+        };
+
+        // Capture console.error
+        const originalError = console.error;
+        console.error = (...args: any[]) => {
+            this.captureConsole('error', args);
+            originalError.apply(console, args);
+        };
+
+        // Capture console.warn
+        const originalWarn = console.warn;
+        console.warn = (...args: any[]) => {
+            this.captureConsole('warn', args);
+            originalWarn.apply(console, args);
+        };
+
+        // Capture console.info
+        const originalInfo = console.info;
+        console.info = (...args: any[]) => {
+            this.captureConsole('info', args);
+            originalInfo.apply(console, args);
+        };
+
+        // Capture console.debug
+        const originalDebug = console.debug;
+        console.debug = (...args: any[]) => {
+            this.captureConsole('debug', args);
+            originalDebug.apply(console, args);
+        };
+    }
+
+    /**
+     * Capture a console message
+     */
+    private captureConsole(type: string, args: any[]) {
+        if (!this.consoleCapureEnabled) return;
+
+        const message = args.map(arg => {
+            if (typeof arg === 'object') {
+                try {
+                    return JSON.stringify(arg);
+                } catch {
+                    return String(arg);
+                }
+            }
+            return String(arg);
+        }).join(' ');
+
+        // Store message (limit to last 100 messages to avoid memory issues)
+        this.consoleMessages.push({
+            type,
+            message,
+            timestamp: Date.now()
+        });
+
+        if (this.consoleMessages.length > 100) {
+            this.consoleMessages.shift();
+        }
+
+        // Send console message to parent process if it's an error or warning
+        if (type === 'error' || type === 'warn') {
+            this.sendMessage({
+                type: 'console',
+                workerId: this.workerId,
+                consoleType: type,
+                message: message,
+                timestamp: Date.now()
+            });
+        }
+    }
+
+    /**
+     * Get captured console messages for this worker
+     */
+    public getConsoleMessages(): Array<{type: string, message: string, timestamp: number}> {
+        return [...this.consoleMessages];
+    }
+
+    /**
+     * Clear captured console messages
+     */
+    public clearConsoleMessages(): void {
+        this.consoleMessages = [];
     }
 
     private async handleMessage(message: any) {

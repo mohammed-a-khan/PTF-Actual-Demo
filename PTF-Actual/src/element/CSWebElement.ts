@@ -26,6 +26,8 @@ export interface ClickOptions {
     position?: { x: number; y: number };
     timeout?: number;
     trial?: boolean;
+    /** @since Playwright 1.57 - Number of intermediate mousemove events during click */
+    steps?: number;
 }
 
 export interface DblClickOptions extends ClickOptions {}
@@ -64,6 +66,8 @@ export interface DragToOptions {
     targetPosition?: { x: number; y: number };
     timeout?: number;
     trial?: boolean;
+    /** @since Playwright 1.57 - Number of intermediate mousemove events during drag */
+    steps?: number;
 }
 
 export interface PressOptions {
@@ -1845,6 +1849,62 @@ export class CSWebElement {
     clearPerformanceMetrics(): void {
         this.performanceMetrics.clear();
         CSReporter.debug(`Performance metrics cleared for ${this.description}`);
+    }
+
+    // ============================================
+    // LOCATOR INFORMATION METHODS (Playwright 1.57+)
+    // ============================================
+
+    /**
+     * Get the element's description (user-defined description)
+     * @returns The description string for this element
+     */
+    getElementDescription(): string {
+        return this.description;
+    }
+
+    /**
+     * Get the Playwright locator's internal description
+     * Uses Playwright 1.57+ locator.description() API
+     * @returns The Playwright locator description string or null if not available
+     * @since Playwright 1.57
+     */
+    async getLocatorDescription(): Promise<string | null> {
+        try {
+            const locator = await this.getLocator();
+            // Check if description() method exists (Playwright 1.57+)
+            if (typeof (locator as any).description === 'function') {
+                return await (locator as any).description();
+            }
+            // Fallback for older Playwright versions
+            return this.description;
+        } catch (error) {
+            CSReporter.debug(`Failed to get locator description: ${error}`);
+            return this.description;
+        }
+    }
+
+    /**
+     * Get comprehensive locator information for debugging and healing
+     * Combines user description with Playwright's internal locator description
+     * @since Playwright 1.57
+     */
+    async getLocatorInfo(): Promise<{
+        userDescription: string;
+        locatorDescription: string | null;
+        selectorType: string;
+        selectorValue: string;
+    }> {
+        const locatorDesc = await this.getLocatorDescription();
+        const strategies = this.buildLocatorStrategies();
+        const primaryStrategy = strategies[0];
+
+        return {
+            userDescription: this.description,
+            locatorDescription: locatorDesc,
+            selectorType: primaryStrategy?.type || 'unknown',
+            selectorValue: primaryStrategy?.value || 'unknown'
+        };
     }
 }
 

@@ -51,10 +51,101 @@ export class CSBDDEngine {
     private dataProviderConfigs: Map<string, string> = new Map();
     private tsNodeRegistered: boolean = false;
 
+    // Global tags - Playwright 1.57 inspired testConfig.tag feature
+    private globalTags: string[] = [];
+
     private constructor() {
         this.config = CSConfigurationManager.getInstance();
         this.initializeStepDefinitionPaths();
+        this.initializeGlobalTags();
         this.registerTsNode();
+    }
+
+    // ============================================
+    // GLOBAL TAG CONFIGURATION (Playwright 1.57+ inspired)
+    // ============================================
+
+    /**
+     * Initialize global tags from configuration
+     * Inspired by Playwright 1.57's testConfig.tag feature
+     */
+    private initializeGlobalTags(): void {
+        // Load global tags from config (comma-separated)
+        const configTags = this.config.get('GLOBAL_TAGS', '');
+        if (configTags) {
+            this.globalTags = configTags.split(',').map((t: string) => t.trim()).filter((t: string) => t);
+            if (this.globalTags.length > 0) {
+                CSReporter.info(`Global tags configured: ${this.globalTags.join(', ')}`);
+            }
+        }
+    }
+
+    /**
+     * Set global tags that will be added to all scenarios
+     * Similar to Playwright 1.57's testConfig.tag
+     * @param tags Array of tag strings (e.g., ['@smoke', '@regression'])
+     * @since Playwright 1.57 inspired
+     */
+    public setGlobalTags(tags: string[]): void {
+        this.globalTags = tags.map(t => t.startsWith('@') ? t : `@${t}`);
+        CSReporter.info(`Global tags set: ${this.globalTags.join(', ')}`);
+    }
+
+    /**
+     * Add a single global tag
+     * @param tag Tag string (e.g., '@smoke' or 'smoke')
+     */
+    public addGlobalTag(tag: string): void {
+        const normalizedTag = tag.startsWith('@') ? tag : `@${tag}`;
+        if (!this.globalTags.includes(normalizedTag)) {
+            this.globalTags.push(normalizedTag);
+            CSReporter.debug(`Global tag added: ${normalizedTag}`);
+        }
+    }
+
+    /**
+     * Remove a global tag
+     * @param tag Tag string to remove
+     */
+    public removeGlobalTag(tag: string): void {
+        const normalizedTag = tag.startsWith('@') ? tag : `@${tag}`;
+        this.globalTags = this.globalTags.filter(t => t !== normalizedTag);
+        CSReporter.debug(`Global tag removed: ${normalizedTag}`);
+    }
+
+    /**
+     * Get current global tags
+     * @returns Array of global tag strings
+     */
+    public getGlobalTags(): string[] {
+        return [...this.globalTags];
+    }
+
+    /**
+     * Clear all global tags
+     */
+    public clearGlobalTags(): void {
+        this.globalTags = [];
+        CSReporter.debug('Global tags cleared');
+    }
+
+    /**
+     * Apply global tags to a scenario's tag list
+     * @param scenarioTags Original scenario tags
+     * @returns Merged tags array with global tags
+     */
+    private applyGlobalTags(scenarioTags: string[]): string[] {
+        if (this.globalTags.length === 0) {
+            return scenarioTags;
+        }
+        // Merge without duplicates
+        const mergedTags = [...scenarioTags];
+        for (const globalTag of this.globalTags) {
+            if (!mergedTags.includes(globalTag)) {
+                mergedTags.push(globalTag);
+            }
+        }
+        return mergedTags;
     }
 
     /**
@@ -382,7 +473,7 @@ export class CSBDDEngine {
 
         return {
             name: scenario.name || 'Unnamed Scenario',
-            tags,
+            tags: this.applyGlobalTags(tags),  // Apply global tags (Playwright 1.57 inspired)
             steps: this.parseSteps(scenario.steps),
             examples: hasActualExamples ? examples : undefined,
             type: (hasActualExamples || (hasDataProviderTag && dataProviderConfig)) ? 'ScenarioOutline' : 'Scenario'
@@ -432,7 +523,7 @@ export class CSBDDEngine {
 
                 expandedScenarios.push({
                     name: scenarioName,
-                    tags: (scenario.tags || []).map((t: any) => t.name),
+                    tags: this.applyGlobalTags((scenario.tags || []).map((t: any) => t.name)),  // Apply global tags (Playwright 1.57 inspired)
                     steps: this.parseSteps(expandedSteps),
                     type: 'Scenario',  // Expanded scenarios are regular scenarios
                     exampleData: exampleData  // Store the example data for reference

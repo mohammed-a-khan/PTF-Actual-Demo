@@ -4,6 +4,24 @@ import * as dotenv from 'dotenv';
 import { CSEncryptionUtil } from '../utils/CSEncryptionUtil';
 // Removed CSReporter import for performance - will use console.log instead
 
+// Lightweight log level checker for direct console.log calls
+// This avoids importing CSReporter during startup for performance
+const LOG_LEVELS = ['DEBUG', 'INFO', 'WARN', 'ERROR'] as const;
+type LogLevel = typeof LOG_LEVELS[number];
+
+function shouldLog(level: LogLevel): boolean {
+    const configuredLevel = (process.env.LOG_LEVEL || 'DEBUG').toUpperCase() as LogLevel;
+    const currentLevelIndex = LOG_LEVELS.indexOf(level);
+    const configuredLevelIndex = LOG_LEVELS.indexOf(configuredLevel);
+
+    // If level not found in hierarchy, default to showing it
+    if (currentLevelIndex === -1 || configuredLevelIndex === -1) {
+        return true;
+    }
+
+    return currentLevelIndex >= configuredLevelIndex;
+}
+
 /**
  * CS Configuration Manager - 8-Level Hierarchy System
  * Priority Order (Highest to Lowest):
@@ -98,7 +116,7 @@ export class CSConfigurationManager {
                 }
             });
             // Use console.log instead of CSReporter for performance
-            if (process.env.DEBUG) {
+            if (shouldLog('DEBUG')) {
                 console.log(`[DEBUG] ✓ Loaded ENV ${description}: ${filePath}`);
             }
         }
@@ -137,7 +155,7 @@ export class CSConfigurationManager {
             }
         } catch (error) {
             // Use console.log instead of CSReporter for performance
-            if (process.env.DEBUG) {
+            if (shouldLog('DEBUG')) {
                 console.log(`[DEBUG] Could not load additional env files from ${dirPath}: ${error}`);
             }
         }
@@ -435,7 +453,7 @@ export class CSConfigurationManager {
                 if (decrypted) {
                     this.config.set(key, decrypted);
                     // Use console.log instead of CSReporter for performance
-                    if (process.env.DEBUG) {
+                    if (shouldLog('DEBUG')) {
                         console.log(`[DEBUG] Decrypted ${key} successfully`);
                     }
                 }

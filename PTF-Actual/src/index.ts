@@ -75,6 +75,24 @@ import minimist from 'minimist';
 // Lightning-fast startup - minimal core loading
 const startTime = Date.now();
 
+// Lightweight log level checker for direct console.log calls
+// This avoids importing CSReporter during startup for performance
+const LOG_LEVELS = ['DEBUG', 'INFO', 'WARN', 'ERROR'] as const;
+type LogLevel = typeof LOG_LEVELS[number];
+
+function shouldLog(level: LogLevel): boolean {
+    const configuredLevel = (process.env.LOG_LEVEL || 'DEBUG').toUpperCase() as LogLevel;
+    const currentLevelIndex = LOG_LEVELS.indexOf(level);
+    const configuredLevelIndex = LOG_LEVELS.indexOf(configuredLevel);
+
+    // If level not found in hierarchy, default to showing it
+    if (currentLevelIndex === -1 || configuredLevelIndex === -1) {
+        return true;
+    }
+
+    return currentLevelIndex >= configuredLevelIndex;
+}
+
 async function main() {
     try {
         // Parse command line arguments
@@ -184,13 +202,13 @@ function determineExecutionMode(args: any, config: any): string {
 }
 
 async function loadRequiredModules(mode: string, config: any) {
-    console.log(`[PERF] loadRequiredModules called for mode: ${mode}`);
+    if (shouldLog('DEBUG')) console.log(`[PERF] loadRequiredModules called for mode: ${mode}`);
     const lazyLoading = config.getBoolean('LAZY_LOADING', true);
     const parallel = config.getBoolean('PARALLEL_INITIALIZATION', true);
 
     // ALWAYS skip module loading if lazy loading is enabled
     if (lazyLoading) {
-        console.log(`[PERF] Lazy loading enabled - skipping module preload`);
+        if (shouldLog('DEBUG')) console.log(`[PERF] Lazy loading enabled - skipping module preload`);
         return;  // Don't preload ANY modules
     }
 
@@ -216,16 +234,16 @@ async function execute(mode: string) {
     
     switch (mode) {
         case 'bdd':
-            console.log('[PERF] About to import CSBDDRunner...');
+            if (shouldLog('DEBUG')) console.log('[PERF] About to import CSBDDRunner...');
             const importStart = Date.now();
             const { CSBDDRunner } = await import('./bdd/CSBDDRunner');
-            console.log(`[PERF] CSBDDRunner imported in ${Date.now() - importStart}ms`);
+            if (shouldLog('DEBUG')) console.log(`[PERF] CSBDDRunner imported in ${Date.now() - importStart}ms`);
             const runner = CSBDDRunner.getInstance();
 
-            console.log('[DEBUG] Parsed args:', JSON.stringify(args, null, 2));
-            console.log('[DEBUG] args.features:', args.features);
-            console.log('[DEBUG] args.feature:', args.feature);
-            console.log('[DEBUG] args.f:', args.f);
+            if (shouldLog('DEBUG')) console.log('[DEBUG] Parsed args:', JSON.stringify(args, null, 2));
+            if (shouldLog('DEBUG')) console.log('[DEBUG] args.features:', args.features);
+            if (shouldLog('DEBUG')) console.log('[DEBUG] args.feature:', args.feature);
+            if (shouldLog('DEBUG')) console.log('[DEBUG] args.f:', args.f);
 
             // Pass CLI options to the runner
             const options: any = {};
@@ -238,13 +256,13 @@ async function execute(mode: string) {
             // Handle features/feature path
             if (args.features || args.feature || args.f) {
                 const featurePath = args.features || args.feature || args.f;
-                console.log('[DEBUG] Setting options.features to:', featurePath);
+                if (shouldLog('DEBUG')) console.log('[DEBUG] Setting options.features to:', featurePath);
                 options.features = featurePath;
                 // Set both FEATURES and FEATURE_PATH for compatibility
                 config.set('FEATURES', featurePath);
                 config.set('FEATURE_PATH', featurePath);
             } else {
-                console.log('[WARN] No --features argument found in args!');
+                if (shouldLog('WARN')) console.log('[WARN] No --features argument found in args!');
             }
             
             // Handle tags
@@ -324,7 +342,7 @@ async function execute(mode: string) {
                 config.set('LAZY_STEP_LOADING', String(lazySteps));
             }
 
-            console.log('[DEBUG] Final options being passed to runner.run():', JSON.stringify(options, null, 2));
+            if (shouldLog('DEBUG')) console.log('[DEBUG] Final options being passed to runner.run():', JSON.stringify(options, null, 2));
 
             await runner.run(options);
             break;

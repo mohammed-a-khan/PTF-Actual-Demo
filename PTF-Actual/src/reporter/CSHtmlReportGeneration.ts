@@ -358,6 +358,7 @@ export class CSHtmlReportGenerator {
         const performanceMetrics = {
             fastest: [] as any[],
             slowest: [] as any[],
+            allScenarios: [] as any[],  // For Speedboard feature (Playwright 1.57 inspired)
             pageLoadTimes: [] as number[],
             responsesTimes: [] as number[]
         };
@@ -380,6 +381,13 @@ export class CSHtmlReportGenerator {
                 performanceMetrics.slowest.push({
                     name: scenario.name,
                     duration: scenario.duration
+                });
+                // Add to allScenarios for Speedboard (Playwright 1.57 inspired)
+                performanceMetrics.allScenarios.push({
+                    name: scenario.name,
+                    duration: scenario.duration,
+                    status: scenario.status,
+                    feature: scenario.feature || 'Unknown Feature'
                 });
             }
 
@@ -1316,6 +1324,172 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             border-radius: 12px;
             font-size: 0.8rem;
             font-weight: 600;
+        }
+
+        /* Speedboard Styles - Playwright 1.57 inspired */
+        .speedboard-card {
+            margin-top: 2rem;
+        }
+
+        .speedboard-card .card-subtitle {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+
+        .speedboard-stats {
+            display: flex;
+            gap: 2rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .speedboard-stat {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .speedboard-stat .stat-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+
+        .speedboard-stat .stat-value {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--primary-color);
+        }
+
+        .speedboard-legend {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 1rem;
+            font-size: 0.85rem;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .legend-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+
+        .legend-color.speedboard-fast {
+            background: var(--success-color);
+        }
+
+        .legend-color.speedboard-medium {
+            background: var(--warning-color);
+        }
+
+        .legend-color.speedboard-slow {
+            background: var(--danger-color);
+        }
+
+        .speedboard-table {
+            width: 100%;
+        }
+
+        .speedboard-table th {
+            text-align: left;
+            padding: 0.75rem 0.5rem;
+            border-bottom: 2px solid var(--border);
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .speedboard-table td {
+            padding: 0.5rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .speedboard-rank {
+            width: 40px;
+            text-align: center;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+
+        .speedboard-status {
+            width: 40px;
+            text-align: center;
+        }
+
+        .speedboard-name {
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .speedboard-duration {
+            width: 200px;
+        }
+
+        .speedboard-bar-container {
+            position: relative;
+            height: 24px;
+            background: var(--bg-color);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .speedboard-bar {
+            position: absolute;
+            left: 0;
+            top: 0;
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .speedboard-bar.speedboard-fast {
+            background: linear-gradient(90deg, var(--success-color), #5cb85c);
+        }
+
+        .speedboard-bar.speedboard-medium {
+            background: linear-gradient(90deg, var(--warning-color), #f0ad4e);
+        }
+
+        .speedboard-bar.speedboard-slow {
+            background: linear-gradient(90deg, var(--danger-color), #d9534f);
+        }
+
+        .speedboard-time {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        .speedboard-indicator {
+            width: 40px;
+            text-align: center;
+        }
+
+        .speedboard-more {
+            text-align: center;
+            padding: 1rem;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
+        tr.speedboard-slow {
+            background: rgba(217, 83, 79, 0.05);
+        }
+
+        tr.speedboard-medium {
+            background: rgba(240, 173, 78, 0.05);
         }
 
         /* Modal Styles */
@@ -2559,6 +2733,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             </div>
         </div>` : '<div class="info-message">No failures to analyze</div>';
 
+        // Enhanced Speedboard-style performance tables (Playwright 1.57 inspired)
         const performanceTables = stats.performanceMetrics && stats.performanceMetrics.fastest && stats.performanceMetrics.slowest ? `
         <div class="failure-grid">
             <div class="card">
@@ -2607,7 +2782,11 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     </table>
                 </div>
             </div>
-        </div>` : '<div class="info-message">Performance metrics will be available after running tests</div>';
+        </div>
+
+        ${this.generateSpeedboard(stats)}
+
+        ` : '<div class="info-message">Performance metrics will be available after running tests</div>';
 
         const performanceSummary = `
         <div class="card">
@@ -3855,11 +4034,133 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         );
     }
 
+    /**
+     * Generate Speedboard section - Playwright 1.57 inspired feature
+     * Shows all scenarios sorted by duration with visual duration bars and percentile indicators
+     */
+    private static generateSpeedboard(stats: any): string {
+        // Get all scenarios sorted by duration (slowest first)
+        const allScenarios = stats.performanceMetrics?.allScenarios || [];
+        if (allScenarios.length === 0) {
+            return '';
+        }
+
+        // Sort by duration descending (slowest first - Speedboard style)
+        const sortedScenarios = [...allScenarios].sort((a: any, b: any) => b.duration - a.duration);
+
+        // Calculate max duration for progress bar scaling
+        const maxDuration = sortedScenarios.length > 0 ? sortedScenarios[0].duration : 1;
+
+        // Calculate percentiles for color coding
+        const durations = sortedScenarios.map((s: any) => s.duration);
+        const p75 = this.calculatePercentile(durations, 75);
+        const p90 = this.calculatePercentile(durations, 90);
+
+        // Calculate statistics
+        const totalDuration = durations.reduce((sum: number, d: number) => sum + d, 0);
+        const avgDuration = totalDuration / durations.length;
+
+        // Generate rows for speedboard
+        const rows = sortedScenarios.slice(0, 20).map((scenario: any, index: number) => {
+            const duration = scenario.duration || 0;
+            const progressPercent = maxDuration > 0 ? (duration / maxDuration) * 100 : 0;
+
+            // Determine color class based on percentile
+            let colorClass = 'speedboard-fast'; // Green - below p75
+            let indicator = '✓';
+            if (duration >= p90) {
+                colorClass = 'speedboard-slow';
+                indicator = '⚠️';
+            } else if (duration >= p75) {
+                colorClass = 'speedboard-medium';
+                indicator = '◐';
+            }
+
+            // Determine status icon
+            const statusIcon = scenario.status === 'passed' ? '✅' :
+                              scenario.status === 'failed' ? '❌' : '⏭️';
+
+            return `
+                <tr class="${colorClass}">
+                    <td class="speedboard-rank">${index + 1}</td>
+                    <td class="speedboard-status">${statusIcon}</td>
+                    <td class="speedboard-name" title="${scenario.name}">${scenario.name}</td>
+                    <td class="speedboard-duration">
+                        <div class="speedboard-bar-container">
+                            <div class="speedboard-bar ${colorClass}" style="width: ${progressPercent}%"></div>
+                            <span class="speedboard-time">${this.formatDuration(duration)}</span>
+                        </div>
+                    </td>
+                    <td class="speedboard-indicator">${indicator}</td>
+                </tr>
+            `;
+        }).join('');
+
+        return `
+        <div class="card speedboard-card">
+            <div class="card-header">
+                <div class="card-title">⚡ Speedboard - All Tests by Duration</div>
+                <div class="card-subtitle">Inspired by Playwright 1.57 • Sorted by execution time (slowest first)</div>
+            </div>
+            <div class="card-content">
+                <div class="speedboard-stats">
+                    <div class="speedboard-stat">
+                        <span class="stat-label">Total Tests</span>
+                        <span class="stat-value">${sortedScenarios.length}</span>
+                    </div>
+                    <div class="speedboard-stat">
+                        <span class="stat-label">Avg Duration</span>
+                        <span class="stat-value">${this.formatDuration(avgDuration)}</span>
+                    </div>
+                    <div class="speedboard-stat">
+                        <span class="stat-label">P75 Threshold</span>
+                        <span class="stat-value">${this.formatDuration(p75)}</span>
+                    </div>
+                    <div class="speedboard-stat">
+                        <span class="stat-label">P90 Threshold</span>
+                        <span class="stat-value">${this.formatDuration(p90)}</span>
+                    </div>
+                </div>
+                <div class="speedboard-legend">
+                    <span class="legend-item"><span class="legend-color speedboard-fast"></span> Fast (&lt; P75)</span>
+                    <span class="legend-item"><span class="legend-color speedboard-medium"></span> Medium (P75-P90)</span>
+                    <span class="legend-item"><span class="legend-color speedboard-slow"></span> Slow (&gt; P90)</span>
+                </div>
+                <table class="data-table speedboard-table">
+                    <thead>
+                        <tr>
+                            <th class="speedboard-rank-header">#</th>
+                            <th class="speedboard-status-header">Status</th>
+                            <th class="speedboard-name-header">Scenario</th>
+                            <th class="speedboard-duration-header">Duration</th>
+                            <th class="speedboard-indicator-header">Perf</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
+                ${sortedScenarios.length > 20 ? `<div class="speedboard-more">Showing top 20 slowest of ${sortedScenarios.length} total tests</div>` : ''}
+            </div>
+        </div>
+        `;
+    }
+
+    /**
+     * Calculate percentile value from array of numbers
+     */
+    private static calculatePercentile(values: number[], percentile: number): number {
+        if (values.length === 0) return 0;
+        const sorted = [...values].sort((a, b) => a - b);
+        const index = Math.ceil((percentile / 100) * sorted.length) - 1;
+        return sorted[Math.max(0, Math.min(index, sorted.length - 1))];
+    }
+
     private static formatDuration(ms: number): string {
         const seconds = Math.floor(ms / 1000);
         const minutes = Math.floor(seconds / 60);
         const hours = Math.floor(minutes / 60);
-        
+
         if (hours > 0) {
             return `${hours}h ${minutes % 60}m ${seconds % 60}s`;
         } else if (minutes > 0) {

@@ -1,6 +1,6 @@
 {
   "name": "@mdakhan.mak/cs-playwright-test-framework",
-  "version": "1.5.26",
+  "version": "1.5.54",
   "description": "CS Playwright Test Framework - Lightning-fast, configurable, AI-powered self-healing test automation with Playwright",
   "main": "dist/lib/index.js",
   "types": "dist/lib/index.d.ts",
@@ -105,6 +105,10 @@
       "types": "./dist/lib/reporting.d.ts",
       "default": "./dist/lib/reporting.js"
     },
+    "./reporter": {
+      "types": "./dist/lib/reporting.d.ts",
+      "default": "./dist/lib/reporting.js"
+    },
     "./self-healing": {
       "types": "./dist/lib/self-healing.d.ts",
       "default": "./dist/lib/self-healing.js"
@@ -169,10 +173,10 @@
   "author": "CS Team",
   "license": "MIT",
   "dependencies": {
-    "@cucumber/cucumber": "^10.0.0",
+    "@cucumber/cucumber": "^12.2.0",
     "@cucumber/gherkin": "^27.0.0",
     "@cucumber/messages": "^24.0.0",
-    "@playwright/test": "^1.56.0",
+    "@playwright/test": "^1.57.0",
     "@types/xml2js": "^0.4.14",
     "archiver": "^7.0.0",
     "chalk": "^5.6.2",
@@ -186,19 +190,42 @@
     "js-yaml": "^4.1.0",
     "jszip": "^3.10.1",
     "minimist": "^1.2.8",
-    "mongodb": "^6.0.0",
     "mssql": "^12.0.0",
-    "mysql2": "^3.6.0",
     "ora": "^9.0.0",
-    "oracledb": "^6.0.0",
-    "pg": "^8.11.0",
-    "redis": "^4.6.0",
     "reflect-metadata": "^0.2.2",
     "sharp": "^0.33.1",
     "socks-proxy-agent": "^8.0.2",
     "ws": "^8.14.2",
     "xlsx": "^0.18.5",
     "xml2js": "^0.6.2"
+  },
+  "peerDependencies": {
+    "mongodb": "^6.0.0",
+    "msnodesqlv8": "^4.2.1",
+    "mysql2": "^3.6.0",
+    "oracledb": "^6.0.0",
+    "pg": "^8.11.0",
+    "redis": "^4.6.0"
+  },
+  "peerDependenciesMeta": {
+    "mongodb": {
+      "optional": true
+    },
+    "msnodesqlv8": {
+      "optional": true
+    },
+    "mysql2": {
+      "optional": true
+    },
+    "oracledb": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "redis": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@faker-js/faker": "^10.0.0",
@@ -213,8 +240,14 @@
     "ajv": "^8.17.1",
     "cross-env": "^7.0.3",
     "ts-node": "^10.9.1",
-    "typescript": "^5.3.2"
+    "typescript": "^5.9.3"
   },
+  "overrides": {
+    "tmp": "^0.2.3",
+    "glob": "^11.0.0",
+    "reflect-metadata": "^0.2.2"
+  },
+  "bundleDependencies": false,
   "engines": {
     "node": ">=20.0.0"
   },

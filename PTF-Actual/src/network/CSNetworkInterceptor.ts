@@ -499,6 +499,128 @@ export class CSNetworkInterceptor {
         this.blockedUrls.clear();
         this.modifiedResponses.clear();
         this.requestTimings.clear();
+        this.serviceWorkerRoutingEnabled = false;
         CSReporter.debug('Network interceptor reset');
+    }
+
+    // ============================================
+    // SERVICE WORKER ROUTING (Playwright 1.57+)
+    // ============================================
+
+    private serviceWorkerRoutingEnabled: boolean = false;
+    private serviceWorkerConsoleMessages: Array<{type: string, text: string, timestamp: Date}> = [];
+
+    /**
+     * Enable Service Worker network routing
+     * Playwright 1.57+ feature: Intercept network requests from Service Workers
+     * @since Playwright 1.57
+     */
+    public async enableServiceWorkerRouting(): Promise<void> {
+        if (!this.page) {
+            throw new Error('Page not initialized');
+        }
+
+        try {
+            // Check if Service Worker routing is available (Playwright 1.57+)
+            const context = this.page.context();
+
+            // Enable Service Worker routing on context
+            // Note: This uses the new Playwright 1.57 API
+            if (typeof (context as any).route === 'function') {
+                await (context as any).route('**/*', async (route: Route, request: Request) => {
+                    // Check if request is from Service Worker
+                    const serviceWorker = request.serviceWorker();
+                    if (serviceWorker) {
+                        CSReporter.debug(`Service Worker request intercepted: ${request.method()} ${request.url()}`);
+
+                        // Record if recording is enabled
+                        if (this.isRecording) {
+                            this.recordRequest(request);
+                        }
+
+                        // Apply mock rules
+                        for (const rule of this.mockRules) {
+                            if (this.matchesRule(request, rule)) {
+                                await this.applyMockRule(route, request, rule);
+                                return;
+                            }
+                        }
+                    }
+
+                    await route.continue();
+                });
+
+                this.serviceWorkerRoutingEnabled = true;
+                CSReporter.info('Service Worker network routing enabled (Playwright 1.57+)');
+            } else {
+                CSReporter.warn('Service Worker routing not available - requires Playwright 1.57+');
+            }
+        } catch (error: any) {
+            CSReporter.warn(`Failed to enable Service Worker routing: ${error.message}`);
+        }
+    }
+
+    /**
+     * Disable Service Worker network routing
+     */
+    public disableServiceWorkerRouting(): void {
+        this.serviceWorkerRoutingEnabled = false;
+        CSReporter.info('Service Worker network routing disabled');
+    }
+
+    /**
+     * Check if Service Worker routing is enabled
+     */
+    public isServiceWorkerRoutingEnabled(): boolean {
+        return this.serviceWorkerRoutingEnabled;
+    }
+
+    /**
+     * Listen to Service Worker console messages
+     * Playwright 1.57+ feature: Capture console events from Service Workers
+     * @since Playwright 1.57
+     */
+    public async listenToServiceWorkerConsole(): Promise<void> {
+        if (!this.page) {
+            throw new Error('Page not initialized');
+        }
+
+        try {
+            const context = this.page.context();
+
+            // Listen for Service Worker console events (Playwright 1.57+)
+            context.on('serviceworker', async (worker: any) => {
+                CSReporter.info(`Service Worker registered: ${worker.url()}`);
+
+                // Listen to console from Service Worker
+                worker.on('console', (msg: any) => {
+                    const message = {
+                        type: msg.type(),
+                        text: msg.text(),
+                        timestamp: new Date()
+                    };
+                    this.serviceWorkerConsoleMessages.push(message);
+                    CSReporter.debug(`[ServiceWorker Console] ${msg.type()}: ${msg.text()}`);
+                });
+            });
+
+            CSReporter.info('Service Worker console listener enabled (Playwright 1.57+)');
+        } catch (error: any) {
+            CSReporter.warn(`Failed to listen to Service Worker console: ${error.message}`);
+        }
+    }
+
+    /**
+     * Get captured Service Worker console messages
+     */
+    public getServiceWorkerConsoleMessages(): Array<{type: string, text: string, timestamp: Date}> {
+        return [...this.serviceWorkerConsoleMessages];
+    }
+
+    /**
+     * Clear Service Worker console messages
+     */
+    public clearServiceWorkerConsoleMessages(): void {
+        this.serviceWorkerConsoleMessages = [];
     }
 }
