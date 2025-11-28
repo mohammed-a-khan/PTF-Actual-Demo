@@ -15,9 +15,20 @@ import {
     ColumnInfo
 } from '../types/database.types';
 import { CSReporter } from '../../reporter/CSReporter';
-import * as mongodb from 'mongodb';
-import { ReadConcernLevel } from 'mongodb';
 import { DatabaseConnection } from '../types/database.types';
+
+// Lazy load mongodb to avoid requiring type declarations at compile time
+let mongodb: any = null;
+function getMongoDb(): any {
+    if (!mongodb) {
+        try {
+            mongodb = require('mongodb');
+        } catch (error) {
+            throw new Error('MongoDB driver (mongodb) not installed. Run: npm install mongodb');
+        }
+    }
+    return mongodb;
+}
 
 export class CSMongoDBAdapter extends CSDatabaseAdapter {
     declare readonly type: 'mongodb';
@@ -33,13 +44,13 @@ export class CSMongoDBAdapter extends CSDatabaseAdapter {
         arrays: true
     };
 
-    private client: mongodb.MongoClient | null = null;
-    private db: mongodb.Db | null = null;
+    private client: any = null;  // mongodb.MongoClient
+    private db: any = null;  // mongodb.Db
     private connectionUrl: string = '';
     private dbName: string = '';
-    private session: mongodb.ClientSession | null = null;
-    private collections: Map<string, mongodb.Collection> = new Map();
-    private connectionOptions: mongodb.MongoClientOptions = {};
+    private session: any = null;  // mongodb.ClientSession
+    private collections: Map<string, any> = new Map();  // Map<string, mongodb.Collection>
+    private connectionOptions: any = {};  // mongodb.MongoClientOptions
     private healthCheckInterval: NodeJS.Timer | null = null;
     private lastHealthCheck: Date = new Date();
     private isHealthy: boolean = true;
@@ -71,7 +82,8 @@ export class CSMongoDBAdapter extends CSDatabaseAdapter {
                 ...this.buildSSLOptions(config)
             };
 
-            this.client = new mongodb.MongoClient(this.connectionUrl, this.connectionOptions);
+            const mongoLib = getMongoDb();
+            this.client = new mongoLib.MongoClient(this.connectionUrl, this.connectionOptions);
             await this.client.connect();
 
             this.db = this.client.db(this.dbName);
@@ -200,8 +212,8 @@ export class CSMongoDBAdapter extends CSDatabaseAdapter {
 
             this.session = this.client!.startSession();
 
-            const transactionOptions: mongodb.TransactionOptions = {
-                readConcern: { level: 'snapshot' as ReadConcernLevel },
+            const transactionOptions: any = {  // mongodb.TransactionOptions
+                readConcern: { level: 'snapshot' },
                 writeConcern: { w: 'majority', j: true },
                 readPreference: 'primary',
                 maxCommitTimeMS: options?.timeout || 60000
@@ -761,7 +773,7 @@ export class CSMongoDBAdapter extends CSDatabaseAdapter {
         
         const processedFilter = this.applyParameters(filter, params);
 
-        const findOptions: mongodb.FindOptions = {};
+        const findOptions: any = {};  // mongodb.FindOptions
         if (this.session) {
             findOptions.session = this.session;
         }
@@ -966,7 +978,7 @@ export class CSMongoDBAdapter extends CSDatabaseAdapter {
         };
     }
 
-    private getCollection(name: string): mongodb.Collection {
+    private getCollection(name: string): any {  // mongodb.Collection
         if (this.collections.has(name)) {
             return this.collections.get(name)!;
         }
@@ -1105,7 +1117,7 @@ export class CSMongoDBAdapter extends CSDatabaseAdapter {
                     nativeDataType: typeof value,
                     nullable: true,
                     isPrimaryKey: key === '_id',
-                    isUnique: indexes.some(idx => idx.key[key] && idx.unique),
+                    isUnique: indexes.some((idx: any) => idx.key[key] && idx.unique),
                     isAutoIncrement: false,
                     comment: `MongoDB field: ${key}`
                 });
@@ -1120,7 +1132,7 @@ export class CSMongoDBAdapter extends CSDatabaseAdapter {
                 name: '_id',
                 columns: ['_id']
             },
-            indexes: indexes.map(idx => ({
+            indexes: indexes.map((idx: any) => ({
                 name: idx.name || `${tableName}_idx_${Object.keys(idx.key).join('_')}`,
                 table: tableName,
                 columns: Object.keys(idx.key),
@@ -1159,8 +1171,9 @@ export class CSMongoDBAdapter extends CSDatabaseAdapter {
     private getMongoDataType(value: any): string {
         if (value === null) return 'null';
         if (value instanceof Date) return 'Date';
-        if (value instanceof mongodb.ObjectId) return 'ObjectId';
-        if (value instanceof mongodb.Binary) return 'Binary';
+        const mongoLib = getMongoDb();
+        if (value instanceof mongoLib.ObjectId) return 'ObjectId';
+        if (value instanceof mongoLib.Binary) return 'Binary';
         if (Array.isArray(value)) return 'Array';
         if (typeof value === 'object') return 'Object';
         return typeof value;

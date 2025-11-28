@@ -15,7 +15,19 @@ import {
     TableInfo
 } from '../types/database.types';
 import { CSReporter } from '../../reporter/CSReporter';
-import * as redis from 'redis';
+
+// Lazy load redis to avoid requiring type declarations at compile time
+let redis: any = null;
+function getRedis(): any {
+    if (!redis) {
+        try {
+            redis = require('redis');
+        } catch (error) {
+            throw new Error('Redis driver (redis) not installed. Run: npm install redis');
+        }
+    }
+    return redis;
+}
 
 export class CSRedisAdapter extends CSDatabaseAdapter {
     readonly type = 'redis';
@@ -31,10 +43,10 @@ export class CSRedisAdapter extends CSDatabaseAdapter {
         arrays: true
     };
 
-    private client: redis.RedisClientType | null = null;
-    private subscriber: redis.RedisClientType | null = null;
-    private publisher: redis.RedisClientType | null = null;
-    private transactionClient: redis.RedisClientType | null = null;
+    private client: any = null;  // redis.RedisClientType
+    private subscriber: any = null;  // redis.RedisClientType
+    private publisher: any = null;  // redis.RedisClientType
+    private transactionClient: any = null;  // redis.RedisClientType
     private isInTransaction: boolean = false;
     private transactionCommands: Array<() => Promise<any>> = [];
     private healthCheckInterval: NodeJS.Timeout | null = null;
@@ -51,7 +63,7 @@ export class CSRedisAdapter extends CSDatabaseAdapter {
         try {
             CSReporter.info(`Connecting to Redis - Host: ${config.host}, Port: ${config.port}`);
 
-            const clientOptions: redis.RedisClientOptions = {
+            const clientOptions: any = {  // redis.RedisClientOptions
                 socket: {
                     host: config.host,
                     port: config.port || 6379,
@@ -81,7 +93,8 @@ export class CSRedisAdapter extends CSDatabaseAdapter {
                 };
             }
 
-            this.client = redis.createClient(clientOptions) as redis.RedisClientType;
+            const redisLib = getRedis();
+            this.client = redisLib.createClient(clientOptions);
 
             this.setupEventHandlers(this.client, 'main');
 
@@ -579,7 +592,7 @@ export class CSRedisAdapter extends CSDatabaseAdapter {
         }
 
         this.pubsubHandlers.set(channel, handler);
-        await this.subscriber.subscribe(channel, (message, channel) => {
+        await this.subscriber.subscribe(channel, (message: any, channel: any) => {
             const handler = this.pubsubHandlers.get(channel);
             if (handler) {
                 handler(message, channel);
@@ -634,8 +647,8 @@ export class CSRedisAdapter extends CSDatabaseAdapter {
         return nodes;
     }
 
-    private setupEventHandlers(client: redis.RedisClientType, name: string): void {
-        client.on('error', (error) => {
+    private setupEventHandlers(client: any, name: string): void {  // client: redis.RedisClientType
+        client.on('error', (error: any) => {
             CSReporter.error(`Redis ${name} client error: ` + (error as Error).message);
             this.isHealthy = false;
         });
@@ -659,12 +672,13 @@ export class CSRedisAdapter extends CSDatabaseAdapter {
         });
     }
 
-    private async setupPubSubClients(options: redis.RedisClientOptions): Promise<void> {
-        this.subscriber = redis.createClient(options) as redis.RedisClientType;
+    private async setupPubSubClients(options: any): Promise<void> {  // options: redis.RedisClientOptions
+        const redisLib = getRedis();
+        this.subscriber = redisLib.createClient(options);
         this.setupEventHandlers(this.subscriber, 'subscriber');
         await this.subscriber.connect();
 
-        this.publisher = redis.createClient(options) as redis.RedisClientType;
+        this.publisher = redisLib.createClient(options);
         this.setupEventHandlers(this.publisher, 'publisher');
         await this.publisher.connect();
 

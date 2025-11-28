@@ -418,35 +418,54 @@ async function createStepInstanceWithPageInjection(context: any, stepHandler: Fu
             } else {
                 CSReporter.debug(`Reusing existing instance of step class: ${StepClass.name}`);
             }
-            
+
             // Get page injection metadata from the step class prototype
             const pageInjections = Reflect.getMetadata('pageInjections', StepClass.prototype) || [];
-            
+
             const currentPage = context.page;
             if (currentPage && pageInjections.length > 0) {
-                const { CSPageFactory } = await import('../core/CSPageFactory');
-                const allPages = CSPageFactory.getAllPages();
-                
+                // Use CSPageRegistry for lazy loading (preferred) or fall back to CSPageFactory
+                const { CSPageRegistry } = await import('../core/CSPageRegistry');
+                const pageRegistry = CSPageRegistry.getInstance();
+
                 for (const injection of pageInjections) {
                     const { property, pageName } = injection;
-                    
-                    // Find the page class by iterating through all registered pages
-                    for (const [className, pageClass] of allPages) {
-                        // Get the @CSPage decorator value from the class metadata
-                        const pageUrl = Reflect.getMetadata('page:url', pageClass);
-                        if (pageUrl === pageName) {
-                            const pageInstance = new pageClass(currentPage);
-                            (stepInstance as any)[property] = pageInstance;
-                            CSReporter.debug(`Injected page: ${pageName} (class: ${pageClass.name}) into step instance property: ${property}`);
-                            break;
+
+                    // Skip if already injected
+                    if ((stepInstance as any)[property]) {
+                        continue;
+                    }
+
+                    // Try lazy loading from registry first
+                    let pageClass = await pageRegistry.getPageClass(pageName);
+
+                    // Fall back to CSPageFactory if not found in registry
+                    if (!pageClass) {
+                        const { CSPageFactory } = await import('../core/CSPageFactory');
+                        const allPages = CSPageFactory.getAllPages();
+
+                        for (const [className, cls] of allPages) {
+                            const pageUrl = Reflect.getMetadata('page:url', cls);
+                            if (pageUrl === pageName) {
+                                pageClass = cls;
+                                break;
+                            }
                         }
+                    }
+
+                    if (pageClass) {
+                        const pageInstance = new pageClass(currentPage);
+                        (stepInstance as any)[property] = pageInstance;
+                        CSReporter.debug(`Injected page: ${pageName} into ${property}`);
+                    } else {
+                        CSReporter.warn(`Page not found for injection: ${pageName}`);
                     }
                 }
             }
-            
+
             return stepInstance;
         }
-        
+
         // Fallback to context if no step class found
         return context;
     } catch (error) {

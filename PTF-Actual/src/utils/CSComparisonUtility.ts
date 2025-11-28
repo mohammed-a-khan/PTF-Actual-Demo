@@ -1,12 +1,29 @@
 // src/utils/CSComparisonUtility.ts
 
 import { CSTextUtility } from './CSTextUtility';
-import { CSExcelUtility } from './CSExcelUtility';
+// Lazy load heavy utilities to improve startup performance (saves 17+ seconds)
+// CSExcelUtility imports ExcelJS, CSPdfUtility imports PDFKit
+let CSExcelUtility: any = null;
+let CSPdfUtility: any = null;
 import { CSCsvUtility } from './CSCsvUtility';
 import { CSJsonUtility } from './CSJsonUtility';
-import { CSPdfUtility } from './CSPdfUtility';
 import * as fs from 'fs';
 import * as path from 'path';
+
+// Helper functions for lazy loading
+function getExcelUtility(): any {
+    if (!CSExcelUtility) {
+        CSExcelUtility = require('./CSExcelUtility').CSExcelUtility;
+    }
+    return CSExcelUtility;
+}
+
+function getPdfUtility(): any {
+    if (!CSPdfUtility) {
+        CSPdfUtility = require('./CSPdfUtility').CSPdfUtility;
+    }
+    return CSPdfUtility;
+}
 
 /**
  * Comprehensive Comparison Utility Class
@@ -98,20 +115,20 @@ export class CSComparisonUtility {
         sheetCount2: number;
     } {
         if (options?.compareAsJSON) {
-            const comparison = CSExcelUtility.compareExcelDataAsJSON(file1, file2, options.sheetName);
+            const comparison = getExcelUtility().compareExcelDataAsJSON(file1, file2, options.sheetName);
             return {
                 areEqual: comparison.areEqual,
                 differences: [...comparison.added, ...comparison.removed, ...comparison.modified],
-                sheetCount1: CSExcelUtility.getSheetNames(file1).length,
-                sheetCount2: CSExcelUtility.getSheetNames(file2).length
+                sheetCount1: getExcelUtility().getSheetNames(file1).length,
+                sheetCount2: getExcelUtility().getSheetNames(file2).length
             };
         } else {
-            const comparison = CSExcelUtility.compareExcelFiles(file1, file2, options?.sheetName);
+            const comparison = getExcelUtility().compareExcelFiles(file1, file2, options?.sheetName);
             return {
                 areEqual: comparison.areEqual,
                 differences: comparison.differences,
-                sheetCount1: CSExcelUtility.getSheetNames(file1).length,
-                sheetCount2: CSExcelUtility.getSheetNames(file2).length
+                sheetCount1: getExcelUtility().getSheetNames(file1).length,
+                sheetCount2: getExcelUtility().getSheetNames(file2).length
             };
         }
     }
@@ -123,7 +140,7 @@ export class CSComparisonUtility {
         areEqual: boolean;
         differences: any[];
     } {
-        return CSExcelUtility.compareSheets(file, sheet1, sheet2);
+        return getExcelUtility().compareSheets(file, sheet1, sheet2);
     }
 
     /**
@@ -308,7 +325,7 @@ export class CSComparisonUtility {
         size2: number;
         sizeDifference: number;
     } {
-        return CSPdfUtility.comparePDFsBytes(file1, file2);
+        return getPdfUtility().comparePDFsBytes(file1, file2);
     }
 
     /**
@@ -320,7 +337,7 @@ export class CSComparisonUtility {
         text2: string;
         similarity: number;
     }> {
-        return await CSPdfUtility.comparePDFsText(file1, file2);
+        return await getPdfUtility().comparePDFsText(file1, file2);
     }
 
     /**
@@ -330,7 +347,7 @@ export class CSComparisonUtility {
         areEqual: boolean;
         differences: Array<{ page: number; isDifferent: boolean }>;
     }> {
-        return await CSPdfUtility.comparePDFsVisually(file1, file2, outputDir);
+        return await getPdfUtility().comparePDFsVisually(file1, file2, outputDir);
     }
 
     /**
@@ -496,7 +513,7 @@ export class CSComparisonUtility {
         areEqual: boolean;
         differences: any[];
     } {
-        const excelData = CSExcelUtility.readSheetAsJSON(excelFile, options?.sheetName);
+        const excelData = getExcelUtility().readSheetAsJSON(excelFile, options?.sheetName);
         const csvData = CSCsvUtility.readAsJSON(csvFile, { delimiter: options?.delimiter });
 
         const areEqual = JSON.stringify(excelData) === JSON.stringify(csvData);
@@ -536,7 +553,7 @@ export class CSComparisonUtility {
         areEqual: boolean;
         differences: any[];
     } {
-        const excelData = CSExcelUtility.readSheetAsJSON(excelFile, options?.sheetName);
+        const excelData = getExcelUtility().readSheetAsJSON(excelFile, options?.sheetName);
         const jsonData = CSJsonUtility.readFile(jsonFile);
 
         const areEqual = JSON.stringify(excelData) === JSON.stringify(jsonData);

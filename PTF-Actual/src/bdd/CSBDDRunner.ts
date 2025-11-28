@@ -250,6 +250,15 @@ export class CSBDDRunner {
                 // Parse paths and replace {project} placeholder
                 const paths = stepPaths.split(';').map(p => p.trim().replace('{project}', project));
 
+                // PERFORMANCE: Scan page directories for lazy loading BEFORE loading steps
+                // This allows @Page decorator to work without importing page classes directly
+                const { CSPageRegistry } = await import('../core/CSPageRegistry');
+                const pageRegistry = CSPageRegistry.getInstance();
+                const pagePaths = this.config.get('PAGE_DEFINITIONS_PATH', `test/${project}/pages;test/common/pages`);
+                const pageDirectories = pagePaths.split(';').map(p => p.trim().replace('{project}', project));
+                pageRegistry.setPageDirectories(pageDirectories);
+                await pageRegistry.scanPages();
+
                 // Set the paths in BDD engine for selective loading
                 this.bddEngine.setStepDefinitionPaths(paths);
 

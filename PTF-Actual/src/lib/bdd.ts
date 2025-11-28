@@ -19,6 +19,7 @@ export { CSBDDContext } from '../bdd/CSBDDContext';
 export { CSDataSource } from '../bdd/CSDataSourceDecorator';
 export { CSStepValidator } from '../bdd/CSStepValidator';
 export { CSIntelligentStepExecutor } from '../bdd/CSIntelligentStepExecutor';
+export { CSStepPatternScanner } from '../bdd/CSStepPatternScanner';
 export * from '../bdd/CSBDDDecorators';
 
 //BDD Types (lightweight - can be imported without loading heavy modules)

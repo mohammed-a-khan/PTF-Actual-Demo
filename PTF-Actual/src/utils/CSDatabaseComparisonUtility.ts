@@ -2,11 +2,27 @@
 
 import { DatabaseContext } from '../database/context/DatabaseContext';
 import { QueryResult } from '../database/types/database.types';
-import { CSExcelUtility } from './CSExcelUtility';
+// Lazy load heavy utilities to improve startup performance
+let CSExcelUtility: any = null;
+let CSPdfUtility: any = null;
 import { CSCsvUtility } from './CSCsvUtility';
 import { CSJsonUtility } from './CSJsonUtility';
 import { CSTextUtility } from './CSTextUtility';
-import { CSPdfUtility } from './CSPdfUtility';
+
+// Helper functions for lazy loading
+function getExcelUtility(): any {
+    if (!CSExcelUtility) {
+        CSExcelUtility = require('./CSExcelUtility').CSExcelUtility;
+    }
+    return CSExcelUtility;
+}
+
+function getPdfUtility(): any {
+    if (!CSPdfUtility) {
+        CSPdfUtility = require('./CSPdfUtility').CSPdfUtility;
+    }
+    return CSPdfUtility;
+}
 
 /**
  * Comprehensive Database Comparison Utility Class
@@ -41,7 +57,7 @@ export class CSDatabaseComparisonUtility {
         const dbData = queryResult.rows;
 
         // Read Excel data
-        const excelData = CSExcelUtility.readSheetAsJSON(excelFile, options?.sheetName);
+        const excelData = getExcelUtility().readSheetAsJSON(excelFile, options?.sheetName);
 
         // Compare data
         return this.compareDataSets(dbData, excelData, options?.ignoreColumnOrder);
@@ -77,7 +93,7 @@ export class CSDatabaseComparisonUtility {
         connectionName?: string;
     }): Promise<void> {
         const queryResult = await this.dbContext.executeQuery(query, options?.connectionName as any);
-        CSExcelUtility.writeJSONToExcel(queryResult.rows, excelFile, options?.sheetName || 'Sheet1');
+        getExcelUtility().writeJSONToExcel(queryResult.rows, excelFile, options?.sheetName || 'Sheet1');
     }
 
     // ===============================
@@ -335,7 +351,7 @@ export class CSDatabaseComparisonUtility {
             : JSON.stringify(dbData, null, 2);
 
         // Extract text from PDF
-        const pdfText = await CSPdfUtility.extractText(pdfFile);
+        const pdfText = await getPdfUtility().extractText(pdfFile);
 
         // Compare texts
         const areEqual = dbText.trim() === pdfText.trim();
@@ -385,7 +401,7 @@ export class CSDatabaseComparisonUtility {
         const html = this.generateHTMLTable(dbData, options?.title);
 
         // Generate PDF from HTML
-        await CSPdfUtility.generateFromHTML(html, pdfFile, {
+        await getPdfUtility().generateFromHTML(html, pdfFile, {
             format: options?.format || 'A4',
             printBackground: true
         });

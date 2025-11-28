@@ -35,9 +35,8 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
   private async loadDriver(): Promise<void> {
     if (!this.mysql2) {
       try {
-        const mysqlModule = await import('mysql2/promise');
-        // Handle both ES modules and CommonJS modules
-        this.mysql2 = (mysqlModule as any).default || mysqlModule;
+        // Use require() to avoid TypeScript checking the module at compile time
+        this.mysql2 = require('mysql2/promise');
       } catch (error) {
         throw new Error('MySQL driver (mysql2) not installed. Run: npm install mysql2');
       }

@@ -3,8 +3,11 @@ import * as path from 'path';
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from './CSReporter';
 import { htmlEscape, attrEscape, jsEscape } from './utils/HtmlSanitizer';
-import { CSExcelReportGenerator } from './CSExcelReportGenerator';
-import { CSPdfReportGenerator } from './CSPdfReportGenerator';
+// Lazy load heavy report generators to improve startup performance (saves 35+ seconds)
+// CSExcelReportGenerator imports ExcelJS (22+ seconds)
+// CSPdfReportGenerator imports PDFKit (15+ seconds)
+let CSExcelReportGenerator: any = null;
+let CSPdfReportGenerator: any = null;
 import { CSAIReportAggregator } from './CSAIReportAggregator';
 
 // Test result types
@@ -122,6 +125,10 @@ export class CSHtmlReportGenerator {
             // Generate Excel report
             if (generateExcel) {
                 try {
+                    // Lazy load CSExcelReportGenerator (saves 22+ seconds at startup)
+                    if (!CSExcelReportGenerator) {
+                        CSExcelReportGenerator = require('./CSExcelReportGenerator').CSExcelReportGenerator;
+                    }
                     await CSExcelReportGenerator.generateReport(suite, outputDir);
                 } catch (error) {
                     CSReporter.warn(`Excel report generation failed: ${error}`);
@@ -131,6 +138,10 @@ export class CSHtmlReportGenerator {
             // Generate PDF report
             if (generatePdf) {
                 try {
+                    // Lazy load CSPdfReportGenerator (saves 15+ seconds at startup)
+                    if (!CSPdfReportGenerator) {
+                        CSPdfReportGenerator = require('./CSPdfReportGenerator').CSPdfReportGenerator;
+                    }
                     await CSPdfReportGenerator.generateReport(reportPath, outputDir);
                 } catch (error) {
                     CSReporter.warn(`PDF report generation failed: ${error}`);

@@ -113,13 +113,41 @@ export class CSBDDEngine {
         const project = this.config.get('PROJECT', 'common');
 
         // Parse and expand paths
-        const paths = pathsConfig.split(';').map(p => {
+        const paths: string[] = [];
+
+        for (let p of pathsConfig.split(';')) {
             // Replace {project} placeholder
             p = p.replace('{project}', project);
 
             // Resolve relative to CWD
-            return path.resolve(process.cwd(), p);
-        });
+            const resolvedPath = path.resolve(process.cwd(), p);
+
+            // PERFORMANCE: Prefer compiled JS (dist/) over TypeScript source
+            // This avoids slow ts-node transpilation (1-2 seconds per file)
+
+            // Case 1: src/ paths -> check dist/ (e.g., src/steps -> dist/steps)
+            if (p.includes('/src/') || p.includes('\\src\\') || p.startsWith('src/') || p.startsWith('src\\')) {
+                const distPath = resolvedPath.replace(/[/\\]src[/\\]/, '/dist/').replace(/[/\\]src$/, '/dist');
+                if (fs.existsSync(distPath)) {
+                    paths.push(distPath);
+                    CSReporter.debug(`Using compiled: ${distPath}`);
+                    continue;
+                }
+            }
+
+            // Case 2: Consumer project pattern - test/{project}/steps -> dist/test/{project}/steps
+            // When tsconfig has outDir: "./dist" and rootDir: ".", compiled files go to dist/test/...
+            if (p.startsWith('test/') || p.startsWith('test\\')) {
+                const distPath = path.resolve(process.cwd(), 'dist', p);
+                if (fs.existsSync(distPath)) {
+                    paths.push(distPath);
+                    CSReporter.debug(`Using compiled: ${distPath}`);
+                    continue;
+                }
+            }
+
+            paths.push(resolvedPath);
+        }
 
         this.stepDefinitionPaths = paths;
     }
@@ -682,29 +710,59 @@ export class CSBDDEngine {
     }
 
     // Selective step loading based on features
-    // OPTIMIZED: Removed expensive file content analysis - loads all discovered step files
+    // OPTIMIZED: Uses pattern scanning for fast startup when LAZY_STEP_LOADING is enabled
     public async loadRequiredStepDefinitions(features: ParsedFeature[]): Promise<void> {
         const startTime = Date.now();
 
-        // Discover all step files from configured paths (excluding framework dist/steps which is handled by CSStepLoader)
-        const stepFiles: string[] = [];
+        // LAZY_STEP_LOADING is enabled by default for fast startup (30-60x faster)
+        // Set LAZY_STEP_LOADING=false or --lazy-steps=false to disable
+        const lazyStepLoading = this.config.getBoolean('LAZY_STEP_LOADING', true);
 
-        for (const stepPath of this.stepDefinitionPaths) {
+        // Get consumer step paths (excluding framework paths)
+        const consumerStepPaths = this.stepDefinitionPaths.filter(stepPath => {
             // Skip framework paths - they are handled by CSStepLoader
             if (stepPath.includes('node_modules') && stepPath.includes('cs-playwright-test-framework')) {
                 CSReporter.debug(`[StepLoading] Skipping framework path (handled by CSStepLoader): ${stepPath}`);
-                continue;
+                return false;
             }
+            return fs.existsSync(stepPath);
+        });
 
-            if (fs.existsSync(stepPath)) {
-                const stat = fs.statSync(stepPath);
+        if (consumerStepPaths.length === 0) {
+            CSReporter.debug('[StepLoading] No consumer step paths found');
+            return;
+        }
 
-                if (stat.isDirectory()) {
-                    const files = this.findStepFiles(stepPath);
-                    stepFiles.push(...files);
-                } else if (this.isStepFile(stepPath)) {
-                    stepFiles.push(stepPath);
-                }
+        if (lazyStepLoading) {
+            // FAST PATH: Use pattern scanning - no require() calls, just file reading
+            // This is 30-60x faster than loading all files upfront
+            const { CSStepPatternScanner } = await import('./CSStepPatternScanner');
+            const scanner = CSStepPatternScanner.getInstance();
+
+            // Scan step files for patterns (fast - just reads source files)
+            await scanner.scanStepFiles(consumerStepPaths);
+
+            // Load only the step files that match steps in the features
+            await scanner.loadStepsForFeatures(features);
+
+            const stats = scanner.getStats();
+            const loadTime = Date.now() - startTime;
+            CSReporter.info(`[StepLoading] ✅ Lazy loading: scanned ${stats.files} files, loaded ${stats.loaded} needed files in ${loadTime}ms`);
+            return;
+        }
+
+        // LEGACY PATH: Load all step files upfront (slower but compatible with all code)
+        // Discover all step files from configured paths
+        const stepFiles: string[] = [];
+
+        for (const stepPath of consumerStepPaths) {
+            const stat = fs.statSync(stepPath);
+
+            if (stat.isDirectory()) {
+                const files = this.findStepFiles(stepPath);
+                stepFiles.push(...files);
+            } else if (this.isStepFile(stepPath)) {
+                stepFiles.push(stepPath);
             }
         }
 
@@ -773,6 +831,7 @@ export class CSBDDEngine {
     private findStepFiles(dirPath: string): string[] {
         const files: string[] = [];
         const items = fs.readdirSync(dirPath);
+        const seenBasenames = new Set<string>();
 
         for (const item of items) {
             const fullPath = path.join(dirPath, item);
@@ -780,8 +839,23 @@ export class CSBDDEngine {
 
             if (stat.isDirectory()) {
                 files.push(...this.findStepFiles(fullPath));
-            } else if (item.endsWith('.ts') || item.endsWith('.js')) {
-                files.push(fullPath);
+            } else if (item.endsWith('.js') || item.endsWith('.ts')) {
+                // PERFORMANCE: Prefer .js files over .ts files to avoid ts-node transpilation
+                // If both .ts and .js exist, only include .js
+                const basename = item.replace(/\.(ts|js)$/, '');
+
+                if (!seenBasenames.has(basename)) {
+                    // Check if .js version exists (prefer it)
+                    const jsVersion = path.join(dirPath, basename + '.js');
+                    const tsVersion = path.join(dirPath, basename + '.ts');
+
+                    if (fs.existsSync(jsVersion)) {
+                        files.push(jsVersion);
+                    } else if (fs.existsSync(tsVersion)) {
+                        files.push(tsVersion);
+                    }
+                    seenBasenames.add(basename);
+                }
             }
         }
 
@@ -792,26 +866,48 @@ export class CSBDDEngine {
         try {
             let fileToLoad = filePath;
 
-            // When using ts-node, always prefer TypeScript files to avoid module instance issues
-            // The issue is that requiring compiled JS files creates different module contexts
+            // PERFORMANCE OPTIMIZATION: Prefer compiled JS files over TypeScript transpilation
+            // ts-node transpilation is slow (can take 1-2 seconds per file)
+            // Compiled JS files load in milliseconds
             if (filePath.endsWith('.ts')) {
-                // For ts-node execution, always use the TypeScript file directly
-                // This ensures the same module instance is used across all requires
-                fileToLoad = filePath;
-                CSReporter.debug(`Loading TypeScript file directly: ${filePath}`);
-            } else if (filePath.endsWith('.js')) {
-                // Try to find the TypeScript source if we have a JS file
-                const tsPath = filePath.replace('/dist/', '/src/').replace('.js', '.ts');
-                if (fs.existsSync(tsPath)) {
-                    fileToLoad = tsPath;
-                    CSReporter.debug(`Using TypeScript source: ${tsPath} instead of ${filePath}`);
+                const cwd = process.cwd();
+                const jsFileName = path.basename(filePath).replace('.ts', '.js');
+
+                // Case 1: src/ paths -> dist/ (e.g., src/steps/file.ts -> dist/steps/file.js)
+                if (filePath.includes(`${path.sep}src${path.sep}`) || filePath.includes('/src/')) {
+                    const jsPath = filePath
+                        .replace(`${path.sep}src${path.sep}`, `${path.sep}dist${path.sep}`)
+                        .replace('/src/', '/dist/')
+                        .replace('.ts', '.js');
+                    if (fs.existsSync(jsPath)) {
+                        fileToLoad = jsPath;
+                        CSReporter.debug(`Using compiled: ${path.basename(jsPath)}`);
+                    }
+                }
+
+                // Case 2: Consumer project - test/project/steps/file.ts -> dist/test/project/steps/file.js
+                // Get relative path from CWD
+                if (fileToLoad === filePath) {
+                    const relativePath = path.relative(cwd, filePath);
+                    if (relativePath.startsWith('test') || relativePath.startsWith(`test${path.sep}`)) {
+                        const distPath = path.join(cwd, 'dist', relativePath.replace('.ts', '.js'));
+                        if (fs.existsSync(distPath)) {
+                            fileToLoad = distPath;
+                            CSReporter.debug(`Using compiled: ${path.basename(distPath)}`);
+                        }
+                    }
+                }
+
+                // Still .ts file - will use ts-node (slower)
+                if (fileToLoad === filePath) {
+                    CSReporter.debug(`Loading via ts-node: ${path.basename(filePath)} (no compiled JS found)`);
                 }
             }
+            // For .js files, use them directly (already compiled)
 
             // Load and register the step definitions
-            // Note: We don't clear the require cache here as it can cause issues with singleton patterns
             require(fileToLoad);
-            CSReporter.debug(`Successfully loaded step file: ${path.basename(fileToLoad)}`);
+            CSReporter.debug(`Loaded: ${path.basename(fileToLoad)}`);
         } catch (error: any) {
             CSReporter.error(`Failed to load step file: ${filePath} - ${error.message}`);
         }

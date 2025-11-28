@@ -3,12 +3,16 @@
 /**
  * Comprehensive DateTime Utility class
  * Provides extensive date/time parsing, formatting, manipulation, and comparison methods
- * Supports locale-aware operations with default Americas locale (en-US)
+ * Supports locale-aware and timezone-aware operations with default Americas locale (en-US)
+ * and default Americas timezone (America/New_York)
  */
 export class CSDateTimeUtility {
 
     // Default locale for all operations
     private static defaultLocale: string = 'en-US';
+
+    // Default timezone for all operations (Americas timezone)
+    private static defaultTimezone: string = 'America/New_York';
 
     /**
      * Set the default locale for all date operations
@@ -23,6 +27,21 @@ export class CSDateTimeUtility {
      */
     static getDefaultLocale(): string {
         return this.defaultLocale;
+    }
+
+    /**
+     * Set the default timezone for all date operations
+     * @param timezone - IANA timezone string (e.g., 'America/New_York', 'America/Los_Angeles', 'Europe/London')
+     */
+    static setDefaultTimezone(timezone: string): void {
+        this.defaultTimezone = timezone;
+    }
+
+    /**
+     * Get the current default timezone
+     */
+    static getDefaultTimezone(): string {
+        return this.defaultTimezone;
     }
 
     // ===============================
@@ -690,6 +709,148 @@ export class CSDateTimeUtility {
      */
     static fromUTC(date: Date): Date {
         return new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    }
+
+    /**
+     * Get date components (year, month, day, hour, minute, second) in a specific timezone
+     * @param date - Date to get components from
+     * @param timezone - IANA timezone string (defaults to defaultTimezone)
+     * @returns Object with year, month (1-12), day, hour, minute, second
+     */
+    static getDateComponentsInTimezone(date: Date, timezone?: string): { year: number; month: number; day: number; hour: number; minute: number; second: number; millisecond: number } {
+        const tz = timezone || this.defaultTimezone;
+        const formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: tz,
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: false
+        });
+
+        const parts = formatter.formatToParts(date);
+        const getValue = (type: string): number => {
+            const part = parts.find(p => p.type === type);
+            return part ? parseInt(part.value, 10) : 0;
+        };
+
+        return {
+            year: getValue('year'),
+            month: getValue('month'),
+            day: getValue('day'),
+            hour: getValue('hour') === 24 ? 0 : getValue('hour'), // Handle midnight edge case
+            minute: getValue('minute'),
+            second: getValue('second'),
+            millisecond: date.getMilliseconds() // Milliseconds are the same across timezones
+        };
+    }
+
+    /**
+     * Format date to YYYY-MM-DD in the default timezone (Americas)
+     * This ensures dates are always in Americas timezone regardless of system timezone
+     * @param date - Date to format
+     * @param timezone - IANA timezone string (defaults to defaultTimezone - America/New_York)
+     */
+    static toDateStringInTimezone(date: Date, timezone?: string): string {
+        const components = this.getDateComponentsInTimezone(date, timezone);
+        return `${components.year}-${String(components.month).padStart(2, '0')}-${String(components.day).padStart(2, '0')}`;
+    }
+
+    /**
+     * Format date to MM/DD/YYYY in the default timezone (Americas)
+     * @param date - Date to format
+     * @param timezone - IANA timezone string (defaults to defaultTimezone)
+     */
+    static toUSDateStringInTimezone(date: Date, timezone?: string): string {
+        const components = this.getDateComponentsInTimezone(date, timezone);
+        return `${String(components.month).padStart(2, '0')}/${String(components.day).padStart(2, '0')}/${components.year}`;
+    }
+
+    /**
+     * Format time to HH:mm:ss in the default timezone (Americas)
+     * @param date - Date to format
+     * @param timezone - IANA timezone string (defaults to defaultTimezone)
+     */
+    static toTimeStringInTimezone(date: Date, timezone?: string): string {
+        const components = this.getDateComponentsInTimezone(date, timezone);
+        return `${String(components.hour).padStart(2, '0')}:${String(components.minute).padStart(2, '0')}:${String(components.second).padStart(2, '0')}`;
+    }
+
+    /**
+     * Format date/time to YYYY-MM-DD HH:mm:ss in the default timezone (Americas)
+     * @param date - Date to format
+     * @param timezone - IANA timezone string (defaults to defaultTimezone)
+     */
+    static toDateTimeStringInTimezone(date: Date, timezone?: string): string {
+        return `${this.toDateStringInTimezone(date, timezone)} ${this.toTimeStringInTimezone(date, timezone)}`;
+    }
+
+    /**
+     * Format date with custom format in the default timezone (Americas)
+     * Supported tokens: YYYY, MM, DD, HH, mm, ss, SSS
+     * @param date - Date to format
+     * @param format - Format string
+     * @param timezone - IANA timezone string (defaults to defaultTimezone)
+     */
+    static formatInTimezone(date: Date, format: string, timezone?: string): string {
+        const c = this.getDateComponentsInTimezone(date, timezone);
+
+        const tokens: Record<string, string> = {
+            'YYYY': String(c.year),
+            'YY': String(c.year).slice(-2),
+            'MM': String(c.month).padStart(2, '0'),
+            'M': String(c.month),
+            'DD': String(c.day).padStart(2, '0'),
+            'D': String(c.day),
+            'HH': String(c.hour).padStart(2, '0'),
+            'H': String(c.hour),
+            'hh': String(c.hour % 12 || 12).padStart(2, '0'),
+            'h': String(c.hour % 12 || 12),
+            'mm': String(c.minute).padStart(2, '0'),
+            'm': String(c.minute),
+            'ss': String(c.second).padStart(2, '0'),
+            's': String(c.second),
+            'SSS': String(c.millisecond).padStart(3, '0'),
+            'A': c.hour >= 12 ? 'PM' : 'AM',
+            'a': c.hour >= 12 ? 'pm' : 'am'
+        };
+
+        let result = format;
+        // Sort tokens by length descending to avoid partial replacements (e.g., 'MM' before 'M')
+        const sortedTokens = Object.keys(tokens).sort((a, b) => b.length - a.length);
+        for (const token of sortedTokens) {
+            result = result.replace(new RegExp(token, 'g'), tokens[token]);
+        }
+        return result;
+    }
+
+    /**
+     * Get current date string in Americas timezone (YYYY-MM-DD)
+     * This is a convenience method to get today's date in Americas timezone
+     * regardless of the system's local timezone
+     */
+    static getTodayInAmericasTimezone(): string {
+        return this.toDateStringInTimezone(new Date());
+    }
+
+    /**
+     * Get current datetime string in Americas timezone (YYYY-MM-DD HH:mm:ss)
+     */
+    static getNowInAmericasTimezone(): string {
+        return this.toDateTimeStringInTimezone(new Date());
+    }
+
+    /**
+     * Check if date is today in the default timezone (Americas)
+     * @param date - Date to check
+     * @param timezone - IANA timezone string (defaults to defaultTimezone)
+     */
+    static isTodayInTimezone(date: Date, timezone?: string): boolean {
+        const dateStr = this.toDateStringInTimezone(date, timezone);
+        const todayStr = this.toDateStringInTimezone(new Date(), timezone);
+        return dateStr === todayStr;
     }
 
     // ===============================
