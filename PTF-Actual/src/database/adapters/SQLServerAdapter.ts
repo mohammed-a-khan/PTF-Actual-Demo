@@ -1,10 +1,10 @@
 // src/database/adapters/SQLServerAdapter.ts
 
-import { 
-  DatabaseConnection, 
-  DatabaseConfig, 
-  QueryResult, 
-  QueryOptions, 
+import {
+  DatabaseConnection,
+  DatabaseConfig,
+  QueryResult,
+  QueryOptions,
   PreparedStatement,
   TransactionOptions,
   DatabaseMetadata,
@@ -12,10 +12,12 @@ import {
 } from '../types/database.types';
 import { CSDatabaseAdapter } from './DatabaseAdapter';
 import { CSReporter } from '../../reporter/CSReporter';
-import * as mssql from 'mssql';
+// PERFORMANCE FIX: Removed top-level 'import * as mssql from 'mssql''
+// The mssql package is heavy and was causing 90+ second delays during import
+// Now using lazy loading via loadDriver() method only when needed
 
 export class CSSQLServerAdapter extends CSDatabaseAdapter {
-  private mssql!: typeof mssql;
+  private mssql: any;
   private connectionCounter: number = 0;
 
   constructor() {

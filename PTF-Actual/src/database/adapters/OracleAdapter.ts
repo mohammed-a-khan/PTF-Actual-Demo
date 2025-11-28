@@ -1,10 +1,10 @@
 // src/database/adapters/OracleAdapter.ts
 
-import { 
-  DatabaseConnection, 
-  DatabaseConfig, 
-  QueryResult, 
-  QueryOptions, 
+import {
+  DatabaseConnection,
+  DatabaseConfig,
+  QueryResult,
+  QueryOptions,
   PreparedStatement,
   TransactionOptions,
   DatabaseMetadata,
@@ -12,10 +12,12 @@ import {
 } from '../types/database.types';
 import { CSDatabaseAdapter } from './DatabaseAdapter';
 import { CSReporter } from '../../reporter/CSReporter';
-import * as oracledb from 'oracledb';
+// PERFORMANCE FIX: Removed top-level 'import * as oracledb from 'oracledb''
+// The oracledb package is heavy and was causing delays during import
+// Now using lazy loading via loadDriver() method only when needed
 
 export class CSOracleAdapter extends CSDatabaseAdapter {
-  private oracledb!: typeof oracledb;
+  private oracledb: any;
   private autoCommit: boolean = false;
   private connectionCounter: number = 0;
 

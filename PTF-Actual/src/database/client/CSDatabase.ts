@@ -16,46 +16,55 @@ import { QueryExecutor } from './QueryExecutor';
 import { TransactionManager } from './TransactionManager';
 import { ResultSetParser } from './ResultSetParser';
 import { CSDatabaseAdapter } from '../adapters/DatabaseAdapter';
-import { CSSQLServerAdapter } from '../adapters/SQLServerAdapter';
-import { CSMySQLAdapter } from '../adapters/MySQLAdapter';
-import { CSPostgreSQLAdapter } from '../adapters/PostgreSQLAdapter';
-import { CSOracleAdapter } from '../adapters/OracleAdapter';
-import { CSMongoDBAdapter } from '../adapters/MongoDBAdapter';
-import { CSRedisAdapter } from '../adapters/RedisAdapter';
+// PERFORMANCE FIX: Removed top-level adapter imports
+// Adapters are now loaded lazily in createAdapter() only when needed
+// This prevents loading all 6 database adapters at import time
 import { CSReporter } from '../../reporter/CSReporter';
 import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 
 export class CSDatabase {
   private static instances: Map<string, CSDatabase> = new Map();
-  private adapter: CSDatabaseAdapter;
-  private connectionManager: ConnectionManager;
-  private queryExecutor: QueryExecutor;
-  private transactionManager: TransactionManager;
-  private resultSetParser: ResultSetParser;
+  private adapter!: CSDatabaseAdapter;
+  private connectionManager!: ConnectionManager;
+  private queryExecutor!: QueryExecutor;
+  private transactionManager!: TransactionManager;
+  private resultSetParser!: ResultSetParser;
   private config: DatabaseConfig;
   private connectionAlias: string;
   private connected: boolean = false;
+  private initialized: boolean = false;
 
+  // Private constructor - use factory methods instead
   private constructor(config: DatabaseConfig, alias: string) {
     this.config = this.processConfig(config);
     this.connectionAlias = alias;
-    this.adapter = this.createAdapter(config.type);
+    // Note: adapter and managers are initialized in initializeAsync()
+  }
+
+  // PERFORMANCE FIX: Async initialization - loads adapter lazily
+  private async initializeAsync(): Promise<void> {
+    if (this.initialized) return;
+    this.adapter = await this.createAdapterAsync(this.config.type);
     this.connectionManager = new ConnectionManager(this.adapter);
     this.queryExecutor = new QueryExecutor(this.adapter);
     this.transactionManager = new TransactionManager(this.adapter);
     this.resultSetParser = new ResultSetParser(this.adapter);
+    this.initialized = true;
   }
 
   static async getInstance(alias: string = 'default'): Promise<CSDatabase> {
     if (!this.instances.has(alias)) {
       const config = await this.loadDatabaseConfig(alias);
-      this.instances.set(alias, new CSDatabase(config, alias));
+      const instance = new CSDatabase(config, alias);
+      await instance.initializeAsync();
+      this.instances.set(alias, instance);
     }
     return this.instances.get(alias)!;
   }
 
   static async create(config: DatabaseConfig, alias: string = 'default'): Promise<CSDatabase> {
     const instance = new CSDatabase(config, alias);
+    await instance.initializeAsync();
     await instance.connect();
     return instance;
   }
@@ -63,6 +72,7 @@ export class CSDatabase {
   static async connectWithConnectionString(connectionString: string, alias: string = 'default'): Promise<CSDatabase> {
     const config = this.parseConnectionString(connectionString);
     const instance = new CSDatabase(config, alias);
+    await instance.initializeAsync();
     this.instances.set(alias, instance);
     await instance.connect();
     return instance;
@@ -645,20 +655,33 @@ export class CSDatabase {
     return processed;
   }
 
-  private createAdapter(type: DatabaseType): CSDatabaseAdapter {
+  private async createAdapterAsync(type: DatabaseType): Promise<CSDatabaseAdapter> {
+    // PERFORMANCE FIX: Lazy load adapters only when needed
     switch (type) {
-      case 'sqlserver':
+      case 'sqlserver': {
+        const { CSSQLServerAdapter } = await import('../adapters/SQLServerAdapter');
         return new CSSQLServerAdapter();
-      case 'mysql':
+      }
+      case 'mysql': {
+        const { CSMySQLAdapter } = await import('../adapters/MySQLAdapter');
         return new CSMySQLAdapter();
-      case 'postgresql':
+      }
+      case 'postgresql': {
+        const { CSPostgreSQLAdapter } = await import('../adapters/PostgreSQLAdapter');
         return new CSPostgreSQLAdapter();
-      case 'oracle':
+      }
+      case 'oracle': {
+        const { CSOracleAdapter } = await import('../adapters/OracleAdapter');
         return new CSOracleAdapter();
-      case 'mongodb':
+      }
+      case 'mongodb': {
+        const { CSMongoDBAdapter } = await import('../adapters/MongoDBAdapter');
         return new CSMongoDBAdapter();
-      case 'redis':
+      }
+      case 'redis': {
+        const { CSRedisAdapter } = await import('../adapters/RedisAdapter');
         return new CSRedisAdapter();
+      }
       default:
         throw new Error(`Unsupported database type: ${type}`);
     }

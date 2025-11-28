@@ -4,7 +4,16 @@ import { ResultSet, QueryResult, QueryOptions, ResultMetadata } from '../types/d
 import { CSDatabaseAdapter } from '../adapters/DatabaseAdapter';
 import { CSReporter } from '../../reporter/CSReporter';
 import * as fs from 'fs/promises';
-import * as XLSX from 'xlsx';
+// PERFORMANCE FIX: Removed top-level 'import * as XLSX from 'xlsx''
+// The xlsx package is heavy and was causing delays during import
+// Now using lazy loading only when Excel export/import is needed
+let XLSX: any = null;
+async function getXLSX(): Promise<any> {
+  if (!XLSX) {
+    XLSX = await import('xlsx');
+  }
+  return XLSX;
+}
 
 export class ResultSetParser {
   constructor(_adapter: CSDatabaseAdapter) {
@@ -360,38 +369,39 @@ export class ResultSetParser {
   }
 
   private async exportToExcel(resultSet: ResultSet, filePath: string): Promise<void> {
-    const workbook = XLSX.utils.book_new();
-    
+    const xlsx = await getXLSX();
+    const workbook = xlsx.utils.book_new();
+
     const data = this.toArray(resultSet, true);
-    
-    const worksheet = XLSX.utils.aoa_to_sheet(data);
-    
+
+    const worksheet = xlsx.utils.aoa_to_sheet(data);
+
     const columnWidths: any[] = [];
     const columns = resultSet.columns || [];
     columns.forEach((col: ResultMetadata, index: number) => {
       let maxWidth = col.name.length;
-      
+
       resultSet.rows.forEach(row => {
         const value = String(row[col.name] || '');
         maxWidth = Math.max(maxWidth, value.length);
       });
-      
+
       columnWidths[index] = { wch: Math.min(maxWidth + 2, 50) };
     });
     worksheet['!cols'] = columnWidths;
 
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Query Result');
-    
-    const metadataSheet = XLSX.utils.aoa_to_sheet([
+    xlsx.utils.book_append_sheet(workbook, worksheet, 'Query Result');
+
+    const metadataSheet = xlsx.utils.aoa_to_sheet([
       ['Property', 'Value'],
       ['Row Count', resultSet.rowCount],
       ['Execution Time (ms)', resultSet.executionTime || 0],
       ['Exported At', new Date().toISOString()],
       ['Columns', columns.length]
     ]);
-    XLSX.utils.book_append_sheet(workbook, metadataSheet, 'Metadata');
+    xlsx.utils.book_append_sheet(workbook, metadataSheet, 'Metadata');
 
-    XLSX.writeFile(workbook, filePath);
+    xlsx.writeFile(workbook, filePath);
   }
 
   private async exportToText(resultSet: ResultSet, filePath: string): Promise<void> {
@@ -509,11 +519,12 @@ export class ResultSetParser {
   }
 
   private async importFromExcel(filePath: string, options?: any): Promise<any[]> {
-    const workbook = XLSX.readFile(filePath);
+    const xlsx = await getXLSX();
+    const workbook = xlsx.readFile(filePath);
     const sheetName = options?.sheet || workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-    
-    const data = worksheet ? XLSX.utils.sheet_to_json(worksheet, {
+
+    const data = worksheet ? xlsx.utils.sheet_to_json(worksheet, {
       raw: false,
       dateNF: 'yyyy-mm-dd hh:mm:ss'
     }) : [];

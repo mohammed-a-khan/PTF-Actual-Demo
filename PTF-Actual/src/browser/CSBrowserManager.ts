@@ -188,29 +188,36 @@ export class CSBrowserManager {
 
     private getChromeArgs(): string[] {
         const args = [];
-        
+
         // Always maximize in non-headless mode
         const isHeadless = this.config.getBoolean('HEADLESS', false);
         if (!isHeadless) {
             args.push('--start-maximized');
         }
-        
+
         if (this.config.getBoolean('BROWSER_INCOGNITO', false)) {
             args.push('--incognito');
         }
-        
+
         if (this.config.getBoolean('BROWSER_DISABLE_GPU', false)) {
             args.push('--disable-gpu');
         }
-        
+
         if (this.config.getBoolean('BROWSER_NO_SANDBOX', false)) {
             args.push('--no-sandbox');
         }
-        
+
+        // Ignore certificate errors (for self-signed certs or ERR_CERT_COMMON_NAME_INVALID)
+        if (this.config.getBoolean('BROWSER_IGNORE_HTTPS_ERRORS', true)) {
+            args.push('--ignore-certificate-errors');
+            args.push('--ignore-ssl-errors');
+            args.push('--allow-insecure-localhost');
+        }
+
         // Add custom args
         const customArgs = this.config.getList('BROWSER_CHROME_ARGS');
         args.push(...customArgs);
-        
+
         return args;
     }
 
