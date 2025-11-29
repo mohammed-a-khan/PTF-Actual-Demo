@@ -68,6 +68,8 @@ export abstract class CSBasePage {
 
         // Set up cross-domain handler if enabled
         if (crossDomainHandler) {
+            // Reset handler state before new navigation to ensure clean state between scenarios
+            crossDomainHandler.reset();
             crossDomainHandler.setTargetDomain(targetUrl);
             crossDomainHandler.setOriginalDomain(targetUrl);
         }

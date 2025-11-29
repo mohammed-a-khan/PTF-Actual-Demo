@@ -2981,16 +2981,18 @@ export class CSBDDRunner {
 
         CSReporter.debug(`Creating filter function for expression: ${filterExpression}`);
 
-        // Handle OR conditions (|)
-        if (filterExpression.includes('|')) {
-            const orConditions = filterExpression.split('|');
+        // Handle OR conditions (| or " OR ")
+        if (filterExpression.includes('|') || / OR /i.test(filterExpression)) {
+            // Split by | or " OR " (case-insensitive)
+            const orConditions = filterExpression.split(/\||\s+OR\s+/i);
             const orFilters = orConditions.map(cond => this.createFilterFunction(cond.trim()));
             return (row: any) => orFilters.some(filter => filter(row));
         }
 
-        // Handle AND conditions (&)
-        if (filterExpression.includes('&')) {
-            const andConditions = filterExpression.split('&');
+        // Handle AND conditions (& or " AND ")
+        if (filterExpression.includes('&') || / AND /i.test(filterExpression)) {
+            // Split by & or " AND " (case-insensitive)
+            const andConditions = filterExpression.split(/&|\s+AND\s+/i);
             const andFilters = andConditions.map(cond => this.createFilterFunction(cond.trim()));
             return (row: any) => andFilters.every(filter => filter(row));
         }

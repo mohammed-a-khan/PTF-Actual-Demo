@@ -359,6 +359,14 @@ export class CSCrossDomainNavigationHandler {
      * Force wait for navigation completion
      */
     public async forceWaitForNavigation(): Promise<void> {
+        // If we're on authentication page awaiting user input, don't wait for domain return
+        // The user needs to enter credentials first before we can proceed
+        if (this.isNavigating && this.isAuthenticationPage(this.page.url())) {
+            CSReporter.debug('On authentication page awaiting user input, skipping domain return wait');
+            await this.waitForPageStability();
+            return;
+        }
+
         if (this.isNavigating) {
             await this.handleCrossDomainNavigation();
         }

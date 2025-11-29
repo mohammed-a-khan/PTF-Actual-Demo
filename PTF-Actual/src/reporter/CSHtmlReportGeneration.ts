@@ -1329,6 +1329,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         /* Speedboard Styles - Playwright 1.57 inspired */
         .speedboard-card {
             margin-top: 2rem;
+            margin-bottom: 2rem;
         }
 
         .speedboard-card .card-subtitle {
@@ -1395,6 +1396,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         .speedboard-table {
             width: 100%;
+            table-layout: fixed;
         }
 
         .speedboard-table th {
@@ -1410,27 +1412,36 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             border-bottom: 1px solid var(--border);
         }
 
-        .speedboard-rank {
+        .speedboard-rank, .speedboard-rank-header {
             width: 40px;
+            min-width: 40px;
             text-align: center;
             font-weight: 600;
             color: var(--text-muted);
         }
 
-        .speedboard-status {
-            width: 40px;
+        .speedboard-status, .speedboard-status-header {
+            width: 50px;
+            min-width: 50px;
             text-align: center;
         }
 
-        .speedboard-name {
-            max-width: 400px;
+        .speedboard-name, .speedboard-name-header {
+            width: auto;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
         }
 
-        .speedboard-duration {
-            width: 200px;
+        .speedboard-duration, .speedboard-duration-header {
+            width: 180px;
+            min-width: 180px;
+        }
+
+        .speedboard-indicator, .speedboard-indicator-header {
+            width: 50px;
+            min-width: 50px;
+            text-align: center;
         }
 
         .speedboard-bar-container {
@@ -1470,11 +1481,6 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             font-size: 0.8rem;
             font-weight: 600;
             color: var(--text-color);
-        }
-
-        .speedboard-indicator {
-            width: 40px;
-            text-align: center;
         }
 
         .speedboard-more {
