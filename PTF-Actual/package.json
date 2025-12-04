@@ -1,6 +1,6 @@
 {
   "name": "@mdakhan.mak/cs-playwright-test-framework",
-  "version": "1.5.58",
+  "version": "1.5.72",
   "description": "CS Playwright Test Framework - Lightning-fast, configurable, AI-powered self-healing test automation with Playwright",
   "main": "dist/lib/index.js",
   "types": "dist/lib/index.d.ts",
@@ -56,6 +56,10 @@
     "./database": {
       "types": "./dist/lib/database.d.ts",
       "default": "./dist/lib/database.js"
+    },
+    "./database-utils": {
+      "types": "./dist/lib/database-utils.d.ts",
+      "default": "./dist/lib/database-utils.js"
     },
     "./diagnostics": {
       "types": "./dist/lib/diagnostics.d.ts",
@@ -133,6 +137,10 @@
       "types": "./dist/lib/visual.d.ts",
       "default": "./dist/lib/visual.js"
     },
+    "./suite": {
+      "types": "./dist/lib/suite.d.ts",
+      "default": "./dist/lib/suite.js"
+    },
     "./*": "./dist/*"
   },
   "bin": {
@@ -142,13 +150,14 @@
   },
   "files": [
     "dist/**/*",
+    "scripts/**/*",
     "README.md"
   ],
   "scripts": {
     "build": "tsc && node scripts/post-build.js",
     "prepublishOnly": "npm run build",
     "clean": "rm -rf dist",
-    "postinstall": "playwright install",
+    "postinstall": "node scripts/postinstall-browsers.js",
     "test": "node dist/index.js",
     "test:zero-code": "node dist/index.js --project=orangehrm --tags=\"@zero-code and @smoke\"",
     "test:validation": "node dist/index.js --project=orangehrm --tags=@framework-validation",
@@ -173,7 +182,7 @@
   "author": "CS Team",
   "license": "MIT",
   "dependencies": {
-    "@cucumber/cucumber": "^12.2.0",
+    "@cucumber/cucumber": "^11.3.0",
     "@cucumber/gherkin": "^27.0.0",
     "@cucumber/messages": "^24.0.0",
     "@playwright/test": "^1.57.0",
@@ -184,7 +193,6 @@
     "commander": "^14.0.1",
     "csv-parse": "^5.5.2",
     "dotenv": "^16.3.1",
-    "exceljs": "^4.4.0",
     "glob": "^11.0.0",
     "https-proxy-agent": "^7.0.2",
     "js-yaml": "^4.1.0",
@@ -193,21 +201,25 @@
     "mssql": "^12.0.0",
     "ora": "^9.0.0",
     "reflect-metadata": "^0.2.2",
-    "sharp": "^0.33.1",
     "socks-proxy-agent": "^8.0.2",
     "ws": "^8.14.2",
-    "xlsx": "^0.18.5",
     "xml2js": "^0.6.2"
   },
   "peerDependencies": {
+    "exceljs": "^4.4.0",
     "mongodb": "^6.0.0",
     "msnodesqlv8": "^4.2.1",
     "mysql2": "^3.6.0",
     "oracledb": "^6.0.0",
     "pg": "^8.11.0",
-    "redis": "^4.6.0"
+    "redis": "^4.6.0",
+    "sharp": "^0.33.1",
+    "xlsx": "^0.18.5"
   },
   "peerDependenciesMeta": {
+    "exceljs": {
+      "optional": true
+    },
     "mongodb": {
       "optional": true
     },
@@ -225,6 +237,12 @@
     },
     "redis": {
       "optional": true
+    },
+    "sharp": {
+      "optional": true
+    },
+    "xlsx": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -239,8 +257,14 @@
     "@types/ws": "^8.5.10",
     "ajv": "^8.17.1",
     "cross-env": "^7.0.3",
+    "exceljs": "^4.4.0",
+    "mongodb": "^6.0.0",
+    "mysql2": "^3.6.0",
+    "redis": "^4.6.0",
+    "sharp": "^0.33.1",
     "ts-node": "^10.9.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "xlsx": "^0.18.5"
   },
   "overrides": {
     "tmp": "^0.2.3",

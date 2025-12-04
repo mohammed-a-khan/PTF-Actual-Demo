@@ -1,8 +1,20 @@
 // src/utils/CSExcelUtility.ts
 
-import * as XLSX from 'xlsx';
 import * as fs from 'fs';
 import * as path from 'path';
+
+// Lazy load xlsx to avoid requiring it at startup (optional dependency)
+let XLSX: any = null;
+function getXLSX(): any {
+    if (!XLSX) {
+        try {
+            XLSX = require('xlsx');
+        } catch (error) {
+            throw new Error('XLSX not installed. Run: npm install xlsx');
+        }
+    }
+    return XLSX;
+}
 
 /**
  * Comprehensive Excel Utility Class
@@ -17,21 +29,21 @@ export class CSExcelUtility {
     /**
      * Read Excel file and return workbook
      */
-    static readWorkbook(filePath: string): XLSX.WorkBook {
+    static readWorkbook(filePath: string): any {
         if (!fs.existsSync(filePath)) {
             throw new Error(`Excel file not found: ${filePath}`);
         }
-        return XLSX.readFile(filePath);
+        return getXLSX().readFile(filePath);
     }
 
     /**
      * Read Excel file with specific options
      */
-    static readWorkbookWithOptions(filePath: string, options: XLSX.ParsingOptions): XLSX.WorkBook {
+    static readWorkbookWithOptions(filePath: string, options: any): any {
         if (!fs.existsSync(filePath)) {
             throw new Error(`Excel file not found: ${filePath}`);
         }
-        return XLSX.readFile(filePath, options);
+        return getXLSX().readFile(filePath, options);
     }
 
     /**
@@ -53,7 +65,7 @@ export class CSExcelUtility {
             throw new Error(`Sheet ${sheetName || 'default'} not found in ${filePath}`);
         }
 
-        return XLSX.utils.sheet_to_json<T>(sheet);
+        return getXLSX().utils.sheet_to_json(sheet) as T[];
     }
 
     /**
@@ -67,7 +79,7 @@ export class CSExcelUtility {
             throw new Error(`Sheet ${sheetName || 'default'} not found in ${filePath}`);
         }
 
-        return XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1 });
+        return getXLSX().utils.sheet_to_json(sheet, { header: 1 }) as any[][];
     }
 
     /**
@@ -81,7 +93,7 @@ export class CSExcelUtility {
             throw new Error(`Sheet ${sheetName || 'default'} not found in ${filePath}`);
         }
 
-        return XLSX.utils.sheet_to_csv(sheet);
+        return getXLSX().utils.sheet_to_csv(sheet);
     }
 
     /**
@@ -110,13 +122,13 @@ export class CSExcelUtility {
             throw new Error(`Sheet ${sheetName || 'default'} not found in ${filePath}`);
         }
 
-        const decodedRange = XLSX.utils.decode_range(range);
+        const decodedRange = getXLSX().utils.decode_range(range);
         const result: any[][] = [];
 
         for (let R = decodedRange.s.r; R <= decodedRange.e.r; ++R) {
             const row: any[] = [];
             for (let C = decodedRange.s.c; C <= decodedRange.e.c; ++C) {
-                const cellAddress = XLSX.utils.encode_cell({ r: R, c: C });
+                const cellAddress = getXLSX().utils.encode_cell({ r: R, c: C });
                 const cell = sheet[cellAddress];
                 row.push(cell ? cell.v : undefined);
             }
@@ -211,38 +223,38 @@ export class CSExcelUtility {
     /**
      * Create new Excel workbook
      */
-    static createWorkbook(): XLSX.WorkBook {
-        return XLSX.utils.book_new();
+    static createWorkbook(): any {
+        return getXLSX().utils.book_new();
     }
 
     /**
      * Write workbook to file
      */
-    static writeWorkbook(workbook: XLSX.WorkBook, filePath: string, options?: XLSX.WritingOptions): void {
+    static writeWorkbook(workbook: any, filePath: string, options?: any): void {
         const dir = path.dirname(filePath);
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
         }
-        XLSX.writeFile(workbook, filePath, options);
+        getXLSX().writeFile(workbook, filePath, options);
     }
 
     /**
      * Write JSON array to Excel file
      */
-    static writeJSONToExcel<T = any>(data: T[], filePath: string, sheetName: string = 'Sheet1', options?: XLSX.WritingOptions): void {
+    static writeJSONToExcel<T = any>(data: T[], filePath: string, sheetName: string = 'Sheet1', options?: any): void {
         const workbook = this.createWorkbook();
-        const worksheet = XLSX.utils.json_to_sheet(data);
-        XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+        const worksheet = getXLSX().utils.json_to_sheet(data);
+        getXLSX().utils.book_append_sheet(workbook, worksheet, sheetName);
         this.writeWorkbook(workbook, filePath, options);
     }
 
     /**
      * Write 2D array to Excel file
      */
-    static writeArrayToExcel(data: any[][], filePath: string, sheetName: string = 'Sheet1', options?: XLSX.WritingOptions): void {
+    static writeArrayToExcel(data: any[][], filePath: string, sheetName: string = 'Sheet1', options?: any): void {
         const workbook = this.createWorkbook();
-        const worksheet = XLSX.utils.aoa_to_sheet(data);
-        XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+        const worksheet = getXLSX().utils.aoa_to_sheet(data);
+        getXLSX().utils.book_append_sheet(workbook, worksheet, sheetName);
         this.writeWorkbook(workbook, filePath, options);
     }
 
@@ -250,7 +262,7 @@ export class CSExcelUtility {
      * Add sheet to existing workbook file
      */
     static addSheetToFile(filePath: string, data: any[], sheetName: string, isJSON: boolean = true): void {
-        let workbook: XLSX.WorkBook;
+        let workbook: any;
 
         if (fs.existsSync(filePath)) {
             workbook = this.readWorkbook(filePath);
@@ -259,10 +271,10 @@ export class CSExcelUtility {
         }
 
         const worksheet = isJSON
-            ? XLSX.utils.json_to_sheet(data)
-            : XLSX.utils.aoa_to_sheet(data);
+            ? getXLSX().utils.json_to_sheet(data)
+            : getXLSX().utils.aoa_to_sheet(data);
 
-        XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+        getXLSX().utils.book_append_sheet(workbook, worksheet, sheetName);
         this.writeWorkbook(workbook, filePath);
     }
 
@@ -292,7 +304,7 @@ export class CSExcelUtility {
     static deleteSheet(filePath: string, sheetName: string): void {
         const workbook = this.readWorkbook(filePath);
         delete workbook.Sheets[sheetName];
-        workbook.SheetNames = workbook.SheetNames.filter(name => name !== sheetName);
+        workbook.SheetNames = workbook.SheetNames.filter((name: string) => name !== sheetName);
         this.writeWorkbook(workbook, filePath);
     }
 
@@ -308,7 +320,7 @@ export class CSExcelUtility {
 
         workbook.Sheets[newName] = workbook.Sheets[oldName];
         delete workbook.Sheets[oldName];
-        workbook.SheetNames = workbook.SheetNames.map(name => name === oldName ? newName : name);
+        workbook.SheetNames = workbook.SheetNames.map((name: string) => name === oldName ? newName : name);
 
         this.writeWorkbook(workbook, filePath);
     }
@@ -323,10 +335,10 @@ export class CSExcelUtility {
             throw new Error(`Source sheet ${sourceSheet} not found`);
         }
 
-        const sourceData = XLSX.utils.sheet_to_json(workbook.Sheets[sourceSheet], { header: 1 }) as any[][];
-        const newSheet = XLSX.utils.aoa_to_sheet(sourceData);
+        const sourceData = getXLSX().utils.sheet_to_json(workbook.Sheets[sourceSheet], { header: 1 }) as any[][];
+        const newSheet = getXLSX().utils.aoa_to_sheet(sourceData);
 
-        XLSX.utils.book_append_sheet(workbook, newSheet, targetSheet);
+        getXLSX().utils.book_append_sheet(workbook, newSheet, targetSheet);
         this.writeWorkbook(workbook, filePath);
     }
 
@@ -342,13 +354,13 @@ export class CSExcelUtility {
         }
 
         const existingData = isJSON
-            ? XLSX.utils.sheet_to_json(sheet)
-            : XLSX.utils.sheet_to_json(sheet, { header: 1 });
+            ? getXLSX().utils.sheet_to_json(sheet)
+            : getXLSX().utils.sheet_to_json(sheet, { header: 1 });
 
         const combinedData = [...existingData, ...rows];
         const newSheet = isJSON
-            ? XLSX.utils.json_to_sheet(combinedData)
-            : XLSX.utils.aoa_to_sheet(combinedData);
+            ? getXLSX().utils.json_to_sheet(combinedData)
+            : getXLSX().utils.aoa_to_sheet(combinedData);
 
         workbook.Sheets[sheetName || workbook.SheetNames[0]] = newSheet;
         this.writeWorkbook(workbook, filePath);
@@ -378,11 +390,11 @@ export class CSExcelUtility {
      */
     static csvToExcel(csvPath: string, excelPath: string, sheetName: string = 'Sheet1'): void {
         const csvContent = fs.readFileSync(csvPath, 'utf8');
-        const workbook = XLSX.read(csvContent, { type: 'string' });
+        const workbook = getXLSX().read(csvContent, { type: 'string' });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
 
         const newWorkbook = this.createWorkbook();
-        XLSX.utils.book_append_sheet(newWorkbook, sheet, sheetName);
+        getXLSX().utils.book_append_sheet(newWorkbook, sheet, sheetName);
         this.writeWorkbook(newWorkbook, excelPath);
     }
 
@@ -401,10 +413,10 @@ export class CSExcelUtility {
 
         filePaths.forEach((filePath, index) => {
             const sourceWorkbook = this.readWorkbook(filePath);
-            sourceWorkbook.SheetNames.forEach((sheetName, sheetIndex) => {
+            sourceWorkbook.SheetNames.forEach((sheetName: string, sheetIndex: number) => {
                 const sheet = sourceWorkbook.Sheets[sheetName];
                 const newSheetName = `File${index + 1}_${sheetName}`;
-                XLSX.utils.book_append_sheet(workbook, sheet, newSheetName);
+                getXLSX().utils.book_append_sheet(workbook, sheet, newSheetName);
             });
         });
 
@@ -421,9 +433,9 @@ export class CSExcelUtility {
             fs.mkdirSync(outputDir, { recursive: true });
         }
 
-        workbook.SheetNames.forEach(sheetName => {
+        workbook.SheetNames.forEach((sheetName: string) => {
             const newWorkbook = this.createWorkbook();
-            XLSX.utils.book_append_sheet(newWorkbook, workbook.Sheets[sheetName], sheetName);
+            getXLSX().utils.book_append_sheet(newWorkbook, workbook.Sheets[sheetName], sheetName);
 
             const outputPath = path.join(outputDir, `${sheetName}.xlsx`);
             this.writeWorkbook(newWorkbook, outputPath);
@@ -482,7 +494,7 @@ export class CSExcelUtility {
                 const val2 = data2[row]?.[col];
 
                 if (val1 !== val2) {
-                    const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+                    const cellAddress = getXLSX().utils.encode_cell({ r: row, c: col });
                     differences.push({ cell: cellAddress, value1: val1, value2: val2 });
                 }
             }
@@ -518,7 +530,7 @@ export class CSExcelUtility {
                 const val2 = data2[row]?.[col];
 
                 if (val1 !== val2) {
-                    const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+                    const cellAddress = getXLSX().utils.encode_cell({ r: row, c: col });
                     differences.push({ cell: cellAddress, value1: val1, value2: val2 });
                 }
             }
@@ -623,17 +635,17 @@ export class CSExcelUtility {
 
         const sheetsToSearch = sheetName ? [sheetName] : workbook.SheetNames;
 
-        sheetsToSearch.forEach(sheet => {
+        sheetsToSearch.forEach((sheet: string) => {
             const worksheet = workbook.Sheets[sheet];
             const range = worksheet['!ref'];
 
             if (!range) return;
 
-            const decodedRange = XLSX.utils.decode_range(range);
+            const decodedRange = getXLSX().utils.decode_range(range);
 
             for (let R = decodedRange.s.r; R <= decodedRange.e.r; ++R) {
                 for (let C = decodedRange.s.c; C <= decodedRange.e.c; ++C) {
-                    const cellAddress = XLSX.utils.encode_cell({ r: R, c: C });
+                    const cellAddress = getXLSX().utils.encode_cell({ r: R, c: C });
                     const cell = worksheet[cellAddress];
 
                     if (cell && cell.v === searchValue) {
@@ -715,7 +727,7 @@ export class CSExcelUtility {
             throw new Error(`Sheet ${sheetName || 'default'} not found in ${filePath}`);
         }
 
-        const html = XLSX.utils.sheet_to_html(sheet);
+        const html = getXLSX().utils.sheet_to_html(sheet);
         fs.writeFileSync(outputPath, html, 'utf8');
     }
 
@@ -733,7 +745,7 @@ export class CSExcelUtility {
         const workbook = this.readWorkbook(filePath);
         const targetSheet = sheetName || workbook.SheetNames[0];
 
-        workbook.Sheets[targetSheet] = XLSX.utils.aoa_to_sheet([]);
+        workbook.Sheets[targetSheet] = getXLSX().utils.aoa_to_sheet([]);
         this.writeWorkbook(workbook, filePath);
     }
 }

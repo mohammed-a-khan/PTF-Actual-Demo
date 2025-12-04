@@ -54,6 +54,16 @@ export class CSTestResultsManager {
             return this.currentTestRunDir;
         }
 
+        // Check for explicit report path (used in multi-project mode)
+        const explicitReportPath = this.config.get('REPORT_PATH') || process.env.REPORT_PATH;
+        if (explicitReportPath) {
+            this.currentTestRunDir = this.resolveReportPath(explicitReportPath, project);
+            this.createDirectoryStructure();
+            CSConfigurationManager.getInstance().set('TEST_RESULTS_DIR', this.currentTestRunDir);
+            CSReporter.info(`Test results directory initialized (explicit path): ${this.currentTestRunDir}`);
+            return this.currentTestRunDir;
+        }
+
         const baseDir = this.config.get('REPORTS_BASE_DIR', './reports');
         const createTimestampFolder = this.config.getBoolean('REPORTS_CREATE_TIMESTAMP_FOLDER', true);
 
@@ -70,6 +80,13 @@ export class CSTestResultsManager {
             this.currentTestRunDir = baseDir;
         }
 
+        // In multi-project mode, auto-append project subfolder
+        const isMultiProjectMode = this.config.getBoolean('MULTI_PROJECT_MODE', false) ||
+                                   process.env.MULTI_PROJECT_MODE === 'true';
+        if (isMultiProjectMode && project) {
+            this.currentTestRunDir = path.join(this.currentTestRunDir, project);
+        }
+
         // Create directory structure
         this.createDirectoryStructure();
 
@@ -78,6 +95,32 @@ export class CSTestResultsManager {
 
         CSReporter.info(`Test results directory initialized: ${this.currentTestRunDir}`);
         return this.currentTestRunDir;
+    }
+
+    /**
+     * Resolve report path with placeholder support
+     */
+    private resolveReportPath(reportPath: string, project?: string): string {
+        let resolved = reportPath;
+
+        // Replace {timestamp} placeholder
+        if (resolved.includes('{timestamp}')) {
+            this.timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, -5);
+            resolved = resolved.replace('{timestamp}', this.timestamp);
+        }
+
+        // Replace {project} placeholder
+        if (resolved.includes('{project}')) {
+            const projectName = project || this.config.get('PROJECT') || 'default';
+            resolved = resolved.replace('{project}', projectName);
+        }
+
+        // Resolve to absolute path
+        if (!path.isAbsolute(resolved)) {
+            resolved = path.resolve(process.cwd(), resolved);
+        }
+
+        return resolved;
     }
     
     /**

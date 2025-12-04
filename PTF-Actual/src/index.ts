@@ -103,23 +103,40 @@ async function main() {
             console.log(`
 CS Test Automation Framework
 
-Usage: npx ts-node src/index.ts [options]
+Usage: npx cs-playwright-test [options]
 
-Options:
+Single Project Mode:
   --project <name>      Project name (required)
   --features <path>     Path to feature files
   --tags <tags>         Tags to filter scenarios
   --modules <list>      Explicit module specification (api, database, ui, soap)
-                        Examples: --modules=api
-                                 --modules=api,database
-                                 --modules=ui,api,database
-  --parallel            Run tests in parallel
+  --parallel            Run scenarios in parallel
   --workers <n>         Number of parallel workers
   --headless            Run browser in headless mode
-  --browser <type>      Browser type (chrome, firefox, webkit)
+  --browser <type>      Browser type (chromium, firefox, webkit)
   --lazy-steps          Enable lazy step loading (30-60x faster startup)
+
+Multi-Project Suite Mode:
+  --suite=multi-project       Run multiple projects sequentially
+  --suite-config <path>       Path to test-suite.yaml config file
+  --suite-mode <mode>         Filter: all, api-only, ui-only
+  --suite-stop-on-failure     Stop execution on first project failure
+  --environment <env>         Override environment for all projects
+  --tags <tags>               Override tags for all projects
+
+General:
   --help                Show this help message
   --version             Show version
+
+Examples:
+  # Run single project
+  npx cs-playwright-test --project=web-app --features=test/features/login.feature
+
+  # Run multi-project suite
+  npx cs-playwright-test --suite=multi-project
+
+  # Run suite with specific mode
+  npx cs-playwright-test --suite=multi-project --suite-mode=api-only
 `);
             process.exit(0);
         }
@@ -182,21 +199,26 @@ Options:
 }
 
 function determineExecutionMode(args: any, config: any): string {
+    // Check if running multi-project suite mode
+    if (args.suite === 'multi-project' || args.suite === true) {
+        return 'suite';
+    }
+
     // Check if running specific tests
     if (args.feature || args.features || config.get('FEATURES')) {
         return 'bdd';
     }
-    
+
     // Check if running API tests
     if (args.api || config.get('API_TESTS')) {
         return 'api';
     }
-    
+
     // Check if running database tests
     if (args.db || config.get('DB_TESTS')) {
         return 'database';
     }
-    
+
     // Default to BDD
     return 'bdd';
 }
@@ -231,8 +253,39 @@ async function execute(mode: string) {
     // Lazy load configuration manager
     const { CSConfigurationManager } = await import('./core/CSConfigurationManager');
     const config = CSConfigurationManager.getInstance();
-    
+
     switch (mode) {
+        case 'suite':
+            // Multi-project suite execution
+            if (shouldLog('INFO')) console.log('[INFO] Starting multi-project suite execution...');
+            const { CSSuiteOrchestrator } = await import('./suite/CSSuiteOrchestrator');
+            const orchestrator = CSSuiteOrchestrator.getInstance();
+
+            // Build CLI options for suite
+            const suiteCliOptions: any = {
+                suite: args.suite,
+                suiteConfig: args['suite-config'],
+                suiteMode: args['suite-mode'],
+                suiteStopOnFailure: args['suite-stop-on-failure'],
+                tags: args.tags,
+                environment: args.environment || args.env,
+                headless: args.headless,
+                parallel: args.parallel,
+                workers: args.workers
+            };
+
+            // Run suite
+            const suiteResult = await orchestrator.run({
+                configPath: args['suite-config'],
+                cliOptions: suiteCliOptions
+            });
+
+            // Exit with appropriate code
+            if (suiteResult.status === 'failed') {
+                process.exit(1);
+            }
+            break;
+
         case 'bdd':
             if (shouldLog('DEBUG')) console.log('[PERF] About to import CSBDDRunner...');
             const importStart = Date.now();

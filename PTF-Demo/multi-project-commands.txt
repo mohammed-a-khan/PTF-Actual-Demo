@@ -1,0 +1,49 @@
+Basic Suite Execution
+
+  # Run all projects in test-suite.yaml
+  npx cs-playwright-test --suite=multi-project
+
+  # Short form
+  npx cs-playwright-test --suite
+
+  Custom Config File
+
+  # Use custom suite config file
+  npx cs-playwright-test --suite=multi-project --suite-config=./my-suite.yaml
+
+  Filter by Project Type
+
+  # Run ALL projects (default)
+  npx cs-playwright-test --suite=multi-project --suite-mode=all
+
+  # Run only API projects
+  npx cs-playwright-test --suite=multi-project --suite-mode=api-only
+
+  # Run only UI projects
+  npx cs-playwright-test --suite=multi-project --suite-mode=ui-only
+
+  Stop on Failure
+
+  npx cs-playwright-test --suite=multi-project --suite-stop-on-failure
+
+  Override Settings
+
+  # Override environment
+  npx cs-playwright-test --suite=multi-project --environment=uat
+
+  # Override tags
+  npx cs-playwright-test --suite=multi-project --tags="@smoke"
+
+  # Run headless
+  npx cs-playwright-test --suite=multi-project --headless
+
+  # Combined
+  npx cs-playwright-test --suite=multi-project --environment=sit --tags="@regression" --headless
+
+  Combined Examples
+
+  # API-only, UAT env, stop on failure
+  npx cs-playwright-test --suite=multi-project --suite-mode=api-only --environment=uat --suite-stop-on-failure
+
+  # Smoke tests across all projects
+  npx cs-playwright-test --suite=multi-project --tags="@smoke" --headless

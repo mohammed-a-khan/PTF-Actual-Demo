@@ -150,9 +150,46 @@ export class CSHtmlReportGenerator {
 
             CSReporter.info(`✅ All reports generated successfully`);
 
+            // Auto-open HTML report in browser (if configured and NOT in suite mode)
+            // In suite mode, only the consolidated report should open (handled by CSSuiteOrchestrator)
+            const isSuiteMode = process.env.CS_SUITE_MODE === 'true';
+            const autoOpenReport = this.config.get('AUTO_OPEN_REPORT', 'true').toLowerCase() === 'true';
+            if (autoOpenReport && !isSuiteMode) {
+                this.openReportInBrowser(reportPath);
+            }
+
         } catch (error) {
             CSReporter.error(`Failed to generate reports: ${error}`);
             throw error;
+        }
+    }
+
+    /**
+     * Open report in default browser (Windows, macOS, Linux)
+     */
+    private static openReportInBrowser(reportPath: string): void {
+        try {
+            const { spawn } = require('child_process');
+            const normalizedPath = path.resolve(reportPath);
+
+            CSReporter.info(`Opening report in browser: ${normalizedPath}`);
+
+            if (process.platform === 'win32') {
+                // Windows: use 'start' command
+                spawn('cmd.exe', ['/c', 'start', '""', normalizedPath], {
+                    detached: true,
+                    stdio: 'ignore',
+                    shell: true
+                }).unref();
+            } else if (process.platform === 'darwin') {
+                // macOS
+                spawn('open', [normalizedPath], { detached: true, stdio: 'ignore' }).unref();
+            } else {
+                // Linux
+                spawn('xdg-open', [normalizedPath], { detached: true, stdio: 'ignore' }).unref();
+            }
+        } catch (error: any) {
+            CSReporter.warn(`Could not auto-open report: ${error.message}`);
         }
     }
 

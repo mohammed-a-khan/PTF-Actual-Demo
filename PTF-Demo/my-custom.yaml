@@ -1,0 +1,102 @@
+# =============================================================================
+# Test Suite Configuration
+# Multi-project test execution configuration
+# =============================================================================
+
+# Version of the configuration format (required for validation)
+version: "1.0"
+
+# Display name for this test suite (shown in console and reports)
+name: "Akhan Multi-Project Test Suite"
+
+# -----------------------------------------------------------------------------
+# DEFAULT SETTINGS
+# These apply to ALL projects unless overridden at project level
+# -----------------------------------------------------------------------------
+defaults:
+  # Environment to use (matches your env files: dev.env, sit.env, uat.env, etc.)
+  environment: dev
+
+  # Run browser in headless mode (true = no visible browser window)
+  headless: true
+
+  # Maximum time (in milliseconds) a project can run before being killed
+  # 300000ms = 5 minutes
+  timeout: 300000
+
+  # Number of parallel workers for scenarios WITHIN each project
+  # 1 = sequential execution, 2+ = parallel scenario execution
+  parallel: 1
+
+  # Number of retry attempts for failed scenarios
+  # 0 = no retries, 1 = retry once on failure, etc.
+  retry: 0
+
+# -----------------------------------------------------------------------------
+# EXECUTION SETTINGS
+# Controls how projects are executed
+# -----------------------------------------------------------------------------
+execution:
+  # Stop executing remaining projects if one fails
+  # false = continue with next project even if current one fails
+  # true = stop suite immediately on first project failure
+  stopOnFailure: false
+
+  # Delay in milliseconds between project executions
+  # Useful to let resources clean up between projects
+  delayBetweenProjects: 2000
+
+# -----------------------------------------------------------------------------
+# REPORTING SETTINGS
+# Controls report generation
+# -----------------------------------------------------------------------------
+reporting:
+  # Generate a consolidated HTML report combining all project results
+  consolidated: true
+
+  # Automatically open the report in browser when suite completes
+  autoOpen: true
+
+# -----------------------------------------------------------------------------
+# PROJECTS TO EXECUTE
+# List of projects to run (executed sequentially in order listed)
+# -----------------------------------------------------------------------------
+projects:
+  # ----- Project 1: Akhan -----
+  - name: Akhan                    # Display name (shown in reports)
+    type: ui                       # Test type: ui, api, or hybrid
+    project: akhan                 # Project folder name (test/akhan/)
+    features: test/akhan/features/data-driven-all-patterns.feature
+    enabled: true                  # Set to false to skip this project
+
+  # ----- Project 2: OrangeHRM -----
+  - name: OrangeHRM
+    type: ui
+    project: orangehrm
+    features: test/orangehrm/features/data-driven-all-patterns.feature
+    enabled: true
+
+# =============================================================================
+# ADDITIONAL PROJECT OPTIONS (can be added to any project above)
+# =============================================================================
+# These override the defaults for that specific project:
+#
+#   tags: "@smoke"              # Run only scenarios with specific tags
+#   environment: uat            # Override environment for this project
+#   headless: false             # Show browser for this project
+#   parallel: 4                 # Use 4 workers for this project
+#   retry: 2                    # Retry failed scenarios twice
+#   browser: firefox            # Use firefox instead of chromium
+#   timeout: 600000             # 10 minute timeout for this project
+#
+# Example with overrides:
+#   - name: Long-Running-Tests
+#     type: ui
+#     project: performance
+#     features: test/performance/features/*.feature
+#     enabled: true
+#     tags: "@slow"
+#     timeout: 600000
+#     parallel: 2
+#     headless: true
+# =============================================================================

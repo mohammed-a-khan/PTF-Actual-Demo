@@ -1367,76 +1367,188 @@ export class CSWebElement {
     // 13. STATE CHECK METHODS
     // ============================================
 
+    /**
+     * Check if element is checked (for checkboxes/radio buttons)
+     * Returns false if element is not found (does not throw error)
+     */
     async isChecked(options?: IsCheckedOptions): Promise<boolean> {
-        return this.executeAction('Check if checked', async () => {
+        try {
             const locator = await this.getLocator();
-            return await locator.isChecked(options);
-        });
+            const result = await locator.isChecked(options);
+            CSReporter.debug(`isChecked on ${this.description}: ${result}`);
+            return result;
+        } catch (error: any) {
+            CSReporter.debug(`isChecked returned false for ${this.description}: Element not found - ${error.message}`);
+            return false;
+        }
     }
 
+    /**
+     * Check if element is checked with timeout
+     * Returns false if element is not found (does not throw error)
+     */
     async isCheckedWithTimeout(timeout: number): Promise<boolean> {
         CSReporter.info(`Checking if checked with ${timeout}ms timeout on ${this.description}`);
         return this.isChecked({ timeout });
     }
 
+    /**
+     * Check if element is disabled
+     * Returns false if element is not found (does not throw error)
+     */
     async isDisabled(options?: IsDisabledOptions): Promise<boolean> {
-        return this.executeAction('Check if disabled', async () => {
+        try {
             const locator = await this.getLocator();
-            return await locator.isDisabled(options);
-        });
+            const result = await locator.isDisabled(options);
+            CSReporter.debug(`isDisabled on ${this.description}: ${result}`);
+            return result;
+        } catch (error: any) {
+            CSReporter.debug(`isDisabled returned false for ${this.description}: Element not found - ${error.message}`);
+            return false;
+        }
     }
 
+    /**
+     * Check if element is disabled with timeout
+     * Returns false if element is not found (does not throw error)
+     */
     async isDisabledWithTimeout(timeout: number): Promise<boolean> {
         CSReporter.info(`Checking if disabled with ${timeout}ms timeout on ${this.description}`);
         return this.isDisabled({ timeout });
     }
 
+    /**
+     * Check if element is editable
+     * Returns false if element is not found (does not throw error)
+     */
     async isEditable(options?: IsEditableOptions): Promise<boolean> {
-        return this.executeAction('Check if editable', async () => {
+        try {
             const locator = await this.getLocator();
-            return await locator.isEditable(options);
-        });
+            const result = await locator.isEditable(options);
+            CSReporter.debug(`isEditable on ${this.description}: ${result}`);
+            return result;
+        } catch (error: any) {
+            CSReporter.debug(`isEditable returned false for ${this.description}: Element not found - ${error.message}`);
+            return false;
+        }
     }
 
+    /**
+     * Check if element is editable with timeout
+     * Returns false if element is not found (does not throw error)
+     */
     async isEditableWithTimeout(timeout: number): Promise<boolean> {
         CSReporter.info(`Checking if editable with ${timeout}ms timeout on ${this.description}`);
         return this.isEditable({ timeout });
     }
 
+    /**
+     * Check if element is enabled
+     * Returns false if element is not found (does not throw error)
+     */
     async isEnabled(options?: IsEnabledOptions): Promise<boolean> {
-        return this.executeAction('Check if enabled', async () => {
+        try {
             const locator = await this.getLocator();
-            return await locator.isEnabled(options);
-        });
+            const result = await locator.isEnabled(options);
+            CSReporter.debug(`isEnabled on ${this.description}: ${result}`);
+            return result;
+        } catch (error: any) {
+            CSReporter.debug(`isEnabled returned false for ${this.description}: Element not found - ${error.message}`);
+            return false;
+        }
     }
 
+    /**
+     * Check if element is enabled with timeout
+     * Returns false if element is not found (does not throw error)
+     */
     async isEnabledWithTimeout(timeout: number): Promise<boolean> {
         CSReporter.info(`Checking if enabled with ${timeout}ms timeout on ${this.description}`);
         return this.isEnabled({ timeout });
     }
 
+    /**
+     * Check if element is hidden
+     * Returns true if element is not found (element not found = hidden)
+     */
     async isHidden(options?: IsHiddenOptions): Promise<boolean> {
-        return this.executeAction('Check if hidden', async () => {
+        try {
             const locator = await this.getLocator();
-            return await locator.isHidden(options);
-        });
+            const result = await locator.isHidden(options);
+            CSReporter.debug(`isHidden on ${this.description}: ${result}`);
+            return result;
+        } catch (error: any) {
+            // Element not found = hidden (return true)
+            CSReporter.debug(`isHidden returned true for ${this.description}: Element not found - ${error.message}`);
+            return true;
+        }
     }
 
+    /**
+     * Check if element is hidden with timeout
+     * Returns true if element is not found (element not found = hidden)
+     */
     async isHiddenWithTimeout(timeout: number): Promise<boolean> {
         CSReporter.info(`Checking if hidden with ${timeout}ms timeout on ${this.description}`);
         return this.isHidden({ timeout });
     }
 
+    /**
+     * Check if element is visible
+     * Returns false if element is not found (does not throw error)
+     */
     async isVisible(options?: IsVisibleOptions): Promise<boolean> {
-        return this.executeAction('Check if visible', async () => {
+        try {
             const locator = await this.getLocator();
-            return await locator.isVisible(options);
-        });
+            const result = await locator.isVisible(options);
+            CSReporter.debug(`isVisible on ${this.description}: ${result}`);
+            return result;
+        } catch (error: any) {
+            CSReporter.debug(`isVisible returned false for ${this.description}: Element not found - ${error.message}`);
+            return false;
+        }
     }
 
+    /**
+     * Check if element is visible with timeout
+     * Returns false if element is not found (does not throw error)
+     */
     async isVisibleWithTimeout(timeout: number): Promise<boolean> {
         CSReporter.info(`Checking if visible with ${timeout}ms timeout on ${this.description}`);
         return this.isVisible({ timeout });
+    }
+
+    /**
+     * Check if element is present in the DOM (exists)
+     * Returns true if element exists, false otherwise (does not throw error)
+     */
+    async isPresent(): Promise<boolean> {
+        try {
+            const locator = await this.getLocator();
+            const count = await locator.count();
+            const result = count > 0;
+            CSReporter.debug(`isPresent on ${this.description}: ${result}`);
+            return result;
+        } catch (error: any) {
+            CSReporter.debug(`isPresent returned false for ${this.description}: ${error.message}`);
+            return false;
+        }
+    }
+
+    /**
+     * Check if element is present in the DOM with timeout
+     * Returns true if element exists, false otherwise (does not throw error)
+     */
+    async isPresentWithTimeout(timeout: number): Promise<boolean> {
+        CSReporter.info(`Checking if present with ${timeout}ms timeout on ${this.description}`);
+        try {
+            const locator = await this.getLocator();
+            await locator.waitFor({ state: 'attached', timeout });
+            return true;
+        } catch (error: any) {
+            CSReporter.debug(`isPresentWithTimeout returned false for ${this.description}: ${error.message}`);
+            return false;
+        }
     }
 
     // ============================================

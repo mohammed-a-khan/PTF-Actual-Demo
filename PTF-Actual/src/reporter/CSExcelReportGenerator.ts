@@ -1,7 +1,19 @@
-import * as ExcelJS from 'exceljs';
 import * as fs from 'fs';
 import * as path from 'path';
 import { CSReporter } from './CSReporter';
+
+// Lazy load exceljs to avoid requiring it at startup (optional dependency)
+let ExcelJS: any = null;
+function getExcelJS(): any {
+    if (!ExcelJS) {
+        try {
+            ExcelJS = require('exceljs');
+        } catch (error) {
+            throw new Error('ExcelJS not installed. Run: npm install exceljs');
+        }
+    }
+    return ExcelJS;
+}
 
 // Import shared types
 interface TestStep {
@@ -65,7 +77,7 @@ export class CSExcelReportGenerator {
             const history = this.loadExecutionHistory(outputDir);
 
             // Create workbook
-            const workbook = new ExcelJS.Workbook();
+            const workbook = new (getExcelJS().Workbook)();
             workbook.creator = 'CS Test Automation Framework';
             workbook.created = new Date();
             workbook.modified = new Date();
@@ -92,7 +104,7 @@ export class CSExcelReportGenerator {
     }
 
     private static async addDashboardSheet(
-        workbook: ExcelJS.Workbook,
+        workbook: any,
         suite: TestSuite,
         stats: any,
         history: ExecutionHistory[]
@@ -356,7 +368,7 @@ export class CSExcelReportGenerator {
     }
 
     private static async addScenariosSheet(
-        workbook: ExcelJS.Workbook,
+        workbook: any,
         suite: TestSuite,
         stats: any
     ): Promise<void> {
@@ -410,7 +422,7 @@ export class CSExcelReportGenerator {
             statusCell.alignment = { horizontal: 'center', vertical: 'middle' };
 
             // Apply borders
-            row.eachCell((cell) => {
+            row.eachCell((cell: any) => {
                 cell.border = this.getBorder();
             });
         });
@@ -426,7 +438,7 @@ export class CSExcelReportGenerator {
     }
 
     private static async addStepsSheet(
-        workbook: ExcelJS.Workbook,
+        workbook: any,
         suite: TestSuite,
         outputDir: string
     ): Promise<void> {
@@ -543,7 +555,7 @@ export class CSExcelReportGenerator {
                 }
 
                 // Apply borders
-                row.eachCell((cell) => {
+                row.eachCell((cell: any) => {
                     cell.border = this.getBorder();
                 });
             });
@@ -561,7 +573,7 @@ export class CSExcelReportGenerator {
     }
 
     private static async addFailureAnalysisSheet(
-        workbook: ExcelJS.Workbook,
+        workbook: any,
         suite: TestSuite,
         stats: any
     ): Promise<void> {
@@ -667,7 +679,7 @@ export class CSExcelReportGenerator {
     }
 
     private static async addPerformanceSheet(
-        workbook: ExcelJS.Workbook,
+        workbook: any,
         suite: TestSuite,
         stats: any
     ): Promise<void> {
@@ -772,7 +784,7 @@ export class CSExcelReportGenerator {
     }
 
     private static async addHistorySheet(
-        workbook: ExcelJS.Workbook,
+        workbook: any,
         history: ExecutionHistory[]
     ): Promise<void> {
         const sheet = workbook.addWorksheet('📈 History', {
@@ -822,7 +834,7 @@ export class CSExcelReportGenerator {
             }
 
             // Apply borders
-            row.eachCell((cell) => {
+            row.eachCell((cell: any) => {
                 cell.border = this.getBorder();
                 cell.alignment = { horizontal: 'center', vertical: 'middle' };
             });
@@ -833,7 +845,7 @@ export class CSExcelReportGenerator {
     }
 
     private static async addSummaryChartsSheet(
-        workbook: ExcelJS.Workbook,
+        workbook: any,
         stats: any,
         history: ExecutionHistory[]
     ): Promise<void> {
@@ -885,7 +897,7 @@ export class CSExcelReportGenerator {
 
     // Helper methods
     private static addKPICard(
-        sheet: ExcelJS.Worksheet,
+        sheet: any,
         range: string,
         title: string,
         value: any,
@@ -906,7 +918,7 @@ export class CSExcelReportGenerator {
         };
     }
 
-    private static getBorder(): Partial<ExcelJS.Borders> {
+    private static getBorder(): Partial<any> {
         return {
             top: { style: 'thin', color: { argb: 'D1D5DB' } },
             left: { style: 'thin', color: { argb: 'D1D5DB' } },
