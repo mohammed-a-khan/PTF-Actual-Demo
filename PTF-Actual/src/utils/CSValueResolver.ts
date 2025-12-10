@@ -48,6 +48,8 @@ export class CSValueResolver {
      * Performs variable substitution in the value
      * Supports multiple formats:
      * - {{variableName}} - Context variables (test data)
+     * - {scenario:variableName} - Scenario context variables (single curly brace format)
+     * - {config:CONFIG_KEY} - Configuration values (single curly brace format)
      * - $variableName - Context variables (alternative syntax)
      * - {{config:CONFIG_KEY}} - Configuration values
      * - {{env:ENV_VAR}} - Environment variables
@@ -71,8 +73,35 @@ export class CSValueResolver {
             return varValue !== undefined ? String(varValue) : value;
         }
 
-        // Handle {{variableName}} and special prefixed formats
-        return value.replace(/\{\{([^}]+)\}\}/g, (match, expression) => {
+        // Handle {scenario:variableName} and {config:KEY} format (single curly braces)
+        // This format is commonly used in Gherkin feature files
+        let resolvedValue = value.replace(/\{(scenario|config|env):([^}]+)\}/g, (match, prefix, varName) => {
+            let varValue: any;
+
+            if (prefix === 'scenario') {
+                // {scenario:KEY} - Get from scenario context (same as regular variable)
+                varValue = context.getVariable(varName.trim());
+            } else if (prefix === 'config') {
+                // {config:KEY} - Get from configuration
+                varValue = context.getVariable(`__config_${varName.trim()}`);
+            } else if (prefix === 'env') {
+                // {env:KEY} - Get from environment variables
+                varValue = context.getVariable(`__env_${varName.trim()}`);
+            }
+
+            // Check if the variable value itself is encrypted
+            if (varValue && typeof varValue === 'string' && this.encryptionUtil.isEncrypted(varValue)) {
+                const decrypted = this.encryptionUtil.decrypt(varValue);
+                if (decrypted) {
+                    varValue = decrypted;
+                }
+            }
+
+            return varValue !== undefined ? String(varValue) : match;
+        });
+
+        // Handle {{variableName}} and special prefixed formats (double curly braces)
+        return resolvedValue.replace(/\{\{([^}]+)\}\}/g, (match, expression) => {
             let varValue: any;
 
             // Check for special prefixes
@@ -144,8 +173,13 @@ export class CSValueResolver {
             return true;
         }
 
-        // Check for variables
+        // Check for variables (all supported formats)
         if (value.startsWith('$') || value.includes('{{')) {
+            return true;
+        }
+
+        // Check for {scenario:...}, {config:...}, {env:...} formats
+        if (/\{(scenario|config|env):[^}]+\}/.test(value)) {
             return true;
         }
 

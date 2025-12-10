@@ -208,13 +208,20 @@ export class CSSuiteOrchestrator {
         const failedProjects = projectResults.filter(p => p.status === 'failed').length;
         const skippedProjects = projectResults.filter(p => p.status === 'skipped').length;
 
-        // Determine overall status
+        // Determine overall status (excluding skipped projects from calculation)
+        const executedProjects = passedProjects + failedProjects;
         let status: 'passed' | 'failed' | 'partial' = 'passed';
-        if (failedProjects === projectResults.length) {
+        if (executedProjects === 0) {
+            // All projects were skipped
+            status = 'failed';
+        } else if (failedProjects === executedProjects) {
+            // All executed projects failed
             status = 'failed';
         } else if (failedProjects > 0) {
+            // Some executed projects failed, some passed
             status = 'partial';
         }
+        // else: all executed projects passed → status remains 'passed'
 
         const successRate = totalScenarios > 0
             ? Math.round((passedScenarios / totalScenarios) * 10000) / 100

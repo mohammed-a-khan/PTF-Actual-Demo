@@ -167,9 +167,11 @@ export class CSStepValidator {
     private scanForMethods(content: string, fileName: string, lines: string[]): void {
         // Pattern to match TypeScript methods and functions
         // Matches: async methodName(...), methodName(...), function methodName(...), etc.
+        // IMPORTANT: Uses negative lookbehind (?<!\.) AND word boundary \b to exclude method CALLS on objects
+        // The \b ensures we match at the START of a word (prevents matching "rim" from ".trim()")
         const methodPatterns = [
-            // Class methods
-            /(?:async\s+)?(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*{/g,
+            // Class methods - exclude method calls by ensuring no dot before method name and word boundary
+            /(?<!\.)(?:async\s+)?\b(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*{/g,
             // Function declarations
             /function\s+(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*{/g,
             // Arrow functions assigned to variables
@@ -223,9 +225,34 @@ export class CSStepValidator {
             while ((match = regex.exec(content)) !== null) {
                 const methodName = match[1];
 
-                // Skip constructor, common lifecycle methods, and already found methods
-                if (['constructor', 'toString', 'valueOf', 'if', 'for', 'while', 'switch', 'catch']
-                    .includes(methodName) || foundMethods.has(methodName)) {
+                // Skip constructor, common lifecycle methods, JS built-in methods, and already found methods
+                const builtInMethods = [
+                    // Control flow keywords that might match
+                    'constructor', 'if', 'for', 'while', 'switch', 'catch', 'return', 'throw',
+                    // Object methods
+                    'toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable',
+                    // String methods
+                    'trim', 'trimStart', 'trimEnd', 'split', 'join', 'slice', 'substring', 'substr',
+                    'replace', 'replaceAll', 'match', 'matchAll', 'search', 'toLowerCase', 'toUpperCase',
+                    'charAt', 'charCodeAt', 'concat', 'includes', 'indexOf', 'lastIndexOf', 'localeCompare',
+                    'normalize', 'padStart', 'padEnd', 'repeat', 'startsWith', 'endsWith',
+                    // Array methods
+                    'push', 'pop', 'shift', 'unshift', 'splice', 'sort', 'reverse', 'fill', 'copyWithin',
+                    'map', 'filter', 'reduce', 'reduceRight', 'forEach', 'every', 'some', 'find', 'findIndex',
+                    'flat', 'flatMap', 'entries', 'keys', 'values', 'from', 'isArray', 'of',
+                    // Promise methods
+                    'then', 'catch', 'finally', 'resolve', 'reject', 'all', 'allSettled', 'race', 'any',
+                    // JSON methods
+                    'parse', 'stringify',
+                    // Math methods
+                    'abs', 'ceil', 'floor', 'round', 'max', 'min', 'pow', 'sqrt', 'random',
+                    // Date methods
+                    'getTime', 'getDate', 'getDay', 'getMonth', 'getFullYear', 'getHours', 'getMinutes',
+                    'setTime', 'setDate', 'setMonth', 'setFullYear', 'toISOString', 'toDateString',
+                    // Console methods
+                    'log', 'error', 'warn', 'info', 'debug', 'trace'
+                ];
+                if (builtInMethods.includes(methodName) || foundMethods.has(methodName)) {
                     continue;
                 }
 

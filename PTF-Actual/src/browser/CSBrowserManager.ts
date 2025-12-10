@@ -255,6 +255,7 @@ export class CSBrowserManager {
             colorScheme: this.config.get('BROWSER_COLOR_SCHEME', 'light') as any,
             reducedMotion: this.config.get('BROWSER_REDUCED_MOTION', 'no-preference') as any,
             forcedColors: this.config.get('BROWSER_FORCED_COLORS', 'none') as any,
+            acceptDownloads: true, // Always accept downloads - file handling is done via event listener
         };
 
         // Add recording options if enabled
@@ -406,6 +407,64 @@ export class CSBrowserManager {
                 this.handleCrash();
             }
         });
+
+        // Add download auto-save listener if enabled
+        // This handles the Playwright behavior where downloads are saved with GUID names
+        // by automatically saving files with their proper suggested filenames
+        if (this.config.getBoolean('DOWNLOAD_AUTO_SAVE', true)) {
+            this.setupDownloadListener();
+        }
+    }
+
+    /**
+     * Setup download event listener for auto-saving files with proper names
+     * Handles browser-specific quirks:
+     * - WebKit/Safari: Download event may not trigger (known issue)
+     * - Firefox: Issues with Blob downloads
+     * - Chromium/Edge: Works reliably
+     */
+    private setupDownloadListener(): void {
+        if (!this.page) return;
+
+        const resultsManager = CSTestResultsManager.getInstance();
+        const dirs = resultsManager.getDirectories();
+        const downloadDir = dirs.downloads;
+        const browserType = this.currentBrowserType;
+        const workerId = this.isWorkerThread ? this.workerId : 0;
+
+        // Warn about WebKit limitations
+        if (browserType === 'webkit' || browserType === 'safari') {
+            CSReporter.warn('WebKit/Safari has known issues with download events - auto-save may not work reliably. See: https://github.com/microsoft/playwright/issues/15417');
+        }
+
+        this.page.on('download', async (download: any) => {
+            try {
+                const suggestedFilename = download.suggestedFilename();
+                const url = download.url();
+
+                CSReporter.info(`Download started: ${suggestedFilename} from ${url}`);
+
+                // Create unique filename with worker ID prefix for parallel execution
+                const timestamp = Date.now();
+                const uniquePrefix = workerId > 0 ? `w${workerId}_` : '';
+                const finalFilename = `${uniquePrefix}${suggestedFilename}`;
+                const savePath = path.join(downloadDir, finalFilename);
+
+                // Wait for download to complete and save with proper name
+                await download.saveAs(savePath);
+
+                // Track the download for test verification
+                resultsManager.addDownloadedFile(savePath, finalFilename, suggestedFilename);
+
+                CSReporter.pass(`Download saved: ${savePath}`);
+            } catch (error: any) {
+                // Don't fail the test if download handling fails
+                // The download may still be available via Playwright's default handling
+                CSReporter.warn(`Download auto-save failed: ${error.message}. File may still be available in temp location.`);
+            }
+        });
+
+        CSReporter.debug(`Download auto-save listener configured for ${browserType} browser`);
     }
 
     private getGeolocation(): any {

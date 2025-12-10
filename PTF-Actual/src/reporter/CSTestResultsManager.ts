@@ -30,7 +30,8 @@ export class CSTestResultsManager {
     private finalizedZipPath: string | null = null;
     private timestamp: string = '';
     private consoleLogs: any[] = [];
-    
+    private downloadedFiles: { filePath: string; fileName: string; timestamp: Date; suggestedName: string }[] = [];
+
     private constructor() {
         this.config = CSConfigurationManager.getInstance();
     }
@@ -134,7 +135,8 @@ export class CSTestResultsManager {
             path.join(this.currentTestRunDir, 'traces'),
             path.join(this.currentTestRunDir, 'har'),
             path.join(this.currentTestRunDir, 'console-logs'),
-            path.join(this.currentTestRunDir, 'reports')
+            path.join(this.currentTestRunDir, 'reports'),
+            path.join(this.currentTestRunDir, 'downloads')
         ];
         
         directories.forEach(dir => {
@@ -167,7 +169,8 @@ export class CSTestResultsManager {
             traces: path.join(baseDir, 'traces'),
             har: path.join(baseDir, 'har'),
             consoleLogs: path.join(baseDir, 'console-logs'),
-            reports: path.join(baseDir, 'reports')
+            reports: path.join(baseDir, 'reports'),
+            downloads: path.join(baseDir, 'downloads')
         };
     }
     
@@ -256,8 +259,55 @@ export class CSTestResultsManager {
         // Clear logs after saving
         this.consoleLogs = [];
     }
-    
-    
+
+    // ===================================================================
+    // DOWNLOAD FILE TRACKING
+    // ===================================================================
+
+    /**
+     * Track a downloaded file
+     * Called by CSBrowserManager when auto-save downloads is enabled
+     */
+    public addDownloadedFile(filePath: string, fileName: string, suggestedName: string): void {
+        this.downloadedFiles.push({
+            filePath,
+            fileName,
+            suggestedName,
+            timestamp: new Date()
+        });
+        CSReporter.debug(`Download tracked: ${fileName} (suggested: ${suggestedName})`);
+    }
+
+    /**
+     * Get all downloaded files in current session
+     */
+    public getDownloadedFiles(): { filePath: string; fileName: string; timestamp: Date; suggestedName: string }[] {
+        return [...this.downloadedFiles];
+    }
+
+    /**
+     * Get the most recent downloaded file
+     */
+    public getLatestDownloadedFile(): { filePath: string; fileName: string; timestamp: Date; suggestedName: string } | null {
+        if (this.downloadedFiles.length === 0) return null;
+        return this.downloadedFiles[this.downloadedFiles.length - 1];
+    }
+
+    /**
+     * Clear downloaded files tracking (call at end of test run)
+     */
+    public clearDownloadedFiles(): void {
+        this.downloadedFiles = [];
+    }
+
+    /**
+     * Get downloads directory path
+     */
+    public getDownloadsDirectory(): string {
+        const dirs = this.getDirectories();
+        return dirs.downloads;
+    }
+
     /**
      * Finalize test run and optionally zip results
      */

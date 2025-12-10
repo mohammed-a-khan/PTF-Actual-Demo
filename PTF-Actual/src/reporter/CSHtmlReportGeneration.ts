@@ -118,6 +118,15 @@ export class CSHtmlReportGenerator {
 
             CSReporter.info(`✨ HTML report generated: ${reportPath}`);
 
+            // Auto-open HTML report in browser IMMEDIATELY after generation
+            // (if configured and NOT in suite mode)
+            // In suite mode, only the consolidated report should open (handled by CSSuiteOrchestrator)
+            const isSuiteMode = process.env.CS_SUITE_MODE === 'true';
+            const autoOpenReport = this.config.get('AUTO_OPEN_REPORT', 'true').toLowerCase() === 'true';
+            if (autoOpenReport && !isSuiteMode) {
+                this.openReportInBrowser(reportPath);
+            }
+
             // Check configuration for report formats
             const generateExcel = this.config.get('GENERATE_EXCEL_REPORT', 'true').toLowerCase() === 'true';
             const generatePdf = this.config.get('GENERATE_PDF_REPORT', 'true').toLowerCase() === 'true';
@@ -149,14 +158,6 @@ export class CSHtmlReportGenerator {
             }
 
             CSReporter.info(`✅ All reports generated successfully`);
-
-            // Auto-open HTML report in browser (if configured and NOT in suite mode)
-            // In suite mode, only the consolidated report should open (handled by CSSuiteOrchestrator)
-            const isSuiteMode = process.env.CS_SUITE_MODE === 'true';
-            const autoOpenReport = this.config.get('AUTO_OPEN_REPORT', 'true').toLowerCase() === 'true';
-            if (autoOpenReport && !isSuiteMode) {
-                this.openReportInBrowser(reportPath);
-            }
 
         } catch (error) {
             CSReporter.error(`Failed to generate reports: ${error}`);
