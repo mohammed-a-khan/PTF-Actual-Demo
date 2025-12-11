@@ -2085,7 +2085,14 @@ export class CSBDDRunner {
         // First, replace <field> placeholders from Examples table
         if (row && headers) {
             headers.forEach((header, index) => {
-                interpolated = interpolated.replace(`<${header}>`, row[index]);
+                const value = row[index];
+                // Validate: replacement value should not be the column name itself (data loading issue)
+                if (value === header || value === header.toLowerCase() || value === header.toUpperCase()) {
+                    CSReporter.warn(`[DATA WARNING] Column "${header}" has value "${value}" which matches the column name - possible data loading issue. Using empty string instead.`);
+                    interpolated = interpolated.replace(`<${header}>`, '');
+                } else {
+                    interpolated = interpolated.replace(`<${header}>`, value);
+                }
             });
         }
 

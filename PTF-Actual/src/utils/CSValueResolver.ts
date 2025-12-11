@@ -1,5 +1,6 @@
 import { CSEncryptionUtil } from './CSEncryptionUtil';
 import { CSReporter } from '../reporter/CSReporter';
+import { CSConfigurationManager } from '../core/CSConfigurationManager';
 
 /**
  * Utility class for resolving values with support for:
@@ -97,7 +98,23 @@ export class CSValueResolver {
                 }
             }
 
-            return varValue !== undefined ? String(varValue) : match;
+            // Handle unresolved scenario variables
+            if (varValue !== undefined) {
+                return String(varValue);
+            }
+
+            // Variable not found - check strict mode (only for scenario variables)
+            if (prefix === 'scenario') {
+                const config = CSConfigurationManager.getInstance();
+                const strictMode = config.getBoolean('STRICT_SCENARIO_VARIABLES', false);
+                if (strictMode) {
+                    throw new Error(`[STRICT MODE] Scenario variable "${varName.trim()}" not found in context. Ensure it is set before use.`);
+                }
+                CSReporter.warn(`[VARIABLE WARNING] Scenario variable "${varName.trim()}" not found in context - returning empty string instead of "${match}"`);
+                return '';  // Return empty instead of the unresolved pattern
+            }
+
+            return match;  // For config/env, return original match (backward compatible)
         });
 
         // Handle {{variableName}} and special prefixed formats (double curly braces)

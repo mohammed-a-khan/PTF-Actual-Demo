@@ -253,8 +253,12 @@ export class CSBDDContext {
     // Cleanup methods
     public async cleanupScenario(): Promise<void> {
         this.scenarioContext.clear();
+        // Clear test data that should not persist between scenarios
+        // This prevents data leakage from previous scenario's Examples table
+        this.worldData.delete('currentRow');
+        this.worldData.delete('testData');
         this.currentStep = undefined;
-        CSReporter.debug('Scenario context cleaned up');
+        CSReporter.debug('Scenario context cleaned up (including currentRow/testData)');
     }
     
     public async cleanupFeature(): Promise<void> {
