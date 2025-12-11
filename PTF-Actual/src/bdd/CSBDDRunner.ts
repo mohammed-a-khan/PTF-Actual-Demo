@@ -2856,6 +2856,7 @@ export class CSBDDRunner {
             if (source.filter) {
                 // Parse and apply filter expression
                 options.filter = this.createFilterFunction(source.filter);
+                options.filterExpression = source.filter;  // Keep original for cache key
             }
 
             // Load data

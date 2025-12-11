@@ -47,6 +47,7 @@ export interface DataProviderOptions {
     source: string;
     sheet?: string;
     filter?: (row: DataRow) => boolean | string;  // Function or string filter
+    filterExpression?: string;  // Original filter expression string for cache key
     transform?: (row: DataRow) => DataRow;
     randomize?: boolean;
     limit?: number;
@@ -125,16 +126,21 @@ export class CSDataProvider {
             ? { source: sourceOrOptions }
             : sourceOrOptions;
 
-        // Build cache key - handle function filters specially since JSON.stringify omits functions
-        // This ensures different filter functions result in different cache keys
+        // Build cache key - use filterExpression (original string) for unique cache entries
+        // JSON.stringify omits functions and closure-based functions have identical .toString()
         let cacheKey: string;
-        if (typeof options.filter === 'function') {
-            // For function filters, use the function's string representation
-            // This ensures each unique filter function gets its own cache entry
+        if (options.filterExpression) {
+            // Use the original filter expression string for cache key uniqueness
+            // This ensures "scenarioId=EXT02" and "scenarioId=EXT04" get different cache entries
+            const optionsForKey = { ...options, filter: options.filterExpression };
+            cacheKey = JSON.stringify(optionsForKey);
+            CSReporter.debug(`Cache key with filter expression: ${options.filterExpression}`);
+        } else if (typeof options.filter === 'function') {
+            // Fallback: use function toString (may not be unique for closure-based functions)
             const filterKey = options.filter.toString();
             const optionsForKey = { ...options, filter: filterKey };
             cacheKey = JSON.stringify(optionsForKey);
-            CSReporter.debug(`Cache key includes filter function: ${filterKey.substring(0, 100)}...`);
+            CSReporter.debug(`Cache key with filter function (fallback)`);
         } else {
             cacheKey = JSON.stringify(options);
         }
