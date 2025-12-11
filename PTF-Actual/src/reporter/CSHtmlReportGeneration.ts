@@ -2126,12 +2126,24 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 </div>
             `).join('');
 
+            // Calculate feature-level statistics
+            const passedCount = scenarios.filter(s => s.status === 'passed').length;
+            const failedCount = scenarios.filter(s => s.status === 'failed').length;
+            const skippedCount = scenarios.filter(s => s.status === 'skipped').length;
+            const featureStatus = failedCount > 0 ? 'failed' : (skippedCount === scenarios.length ? 'skipped' : 'passed');
+            const featureStatusIcon = featureStatus === 'passed' ? '✅' : (featureStatus === 'failed' ? '❌' : '⏭️');
+
             return `
                 <div class="feature-item">
                     <div class="feature-header" onclick="toggleFeature(this)">
                         <div>
-                            <strong>📁 ${featureName}</strong>
+                            <strong>${featureStatusIcon} 📁 ${featureName}</strong>
                             <span class="text-muted" style="margin-left: 1rem;">(${scenarios.length} scenarios)</span>
+                            <span style="margin-left: 0.5rem;">
+                                ${passedCount > 0 ? `<span style="color: #28a745; font-weight: 500;">${passedCount} passed</span>` : ''}
+                                ${failedCount > 0 ? `<span style="color: #dc3545; font-weight: 500; margin-left: 0.5rem;">${failedCount} failed</span>` : ''}
+                                ${skippedCount > 0 ? `<span style="color: #6c757d; font-weight: 500; margin-left: 0.5rem;">${skippedCount} skipped</span>` : ''}
+                            </span>
                         </div>
                         <div>
                             <span class="toggle-icon">▶</span>

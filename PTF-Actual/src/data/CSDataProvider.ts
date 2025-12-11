@@ -125,7 +125,19 @@ export class CSDataProvider {
             ? { source: sourceOrOptions }
             : sourceOrOptions;
 
-        const cacheKey = JSON.stringify(options);
+        // Build cache key - handle function filters specially since JSON.stringify omits functions
+        // This ensures different filter functions result in different cache keys
+        let cacheKey: string;
+        if (typeof options.filter === 'function') {
+            // For function filters, use the function's string representation
+            // This ensures each unique filter function gets its own cache entry
+            const filterKey = options.filter.toString();
+            const optionsForKey = { ...options, filter: filterKey };
+            cacheKey = JSON.stringify(optionsForKey);
+            CSReporter.debug(`Cache key includes filter function: ${filterKey.substring(0, 100)}...`);
+        } else {
+            cacheKey = JSON.stringify(options);
+        }
 
         // Check cache
         if (this.cache.has(cacheKey)) {
