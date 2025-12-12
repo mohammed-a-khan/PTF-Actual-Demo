@@ -73,7 +73,14 @@ export class CSSuiteExecutor {
         console.log(`${'='.repeat(80)}`);
 
         // Determine project report path
-        const projectReportPath = path.join(options.suiteReportPath, project.project);
+        // In multi-project mode: create subfolder per project using display NAME (not project id)
+        // This allows same project to run with different configs (e.g., different browsers)
+        // e.g., reports/suite-xxx/Akhan-Chrome/, reports/suite-xxx/Akhan-Firefox/
+        // In single project (normal) mode: use standard path (e.g., reports/test-results-xxx/)
+        const sanitizedName = project.name.replace(/[<>:"/\\|?*]/g, '-');  // Remove invalid path chars
+        const projectReportPath = options.isMultiProjectMode
+            ? path.join(options.suiteReportPath, sanitizedName)
+            : options.suiteReportPath;
 
         // Build command arguments
         const args = this.buildCommandArgs(project, options, projectReportPath);
@@ -325,13 +332,21 @@ export class CSSuiteExecutor {
 
             if (reportData.suite?.scenarios) {
                 for (const scenario of reportData.suite.scenarios) {
+                    // Extract error from scenario.error OR from first failed step
+                    let scenarioError = scenario.error;
+                    if (!scenarioError && scenario.steps && Array.isArray(scenario.steps)) {
+                        const failedStep = scenario.steps.find((s: any) => s.status === 'failed' && s.error);
+                        if (failedStep) {
+                            scenarioError = failedStep.error;
+                        }
+                    }
                     scenarios.push({
                         name: scenario.name || 'Unknown Scenario',
                         feature: scenario.feature || 'Unknown Feature',
                         status: scenario.status || 'skipped',
                         duration: scenario.duration || 0,
                         tags: scenario.tags || [],
-                        error: scenario.error,
+                        error: scenarioError,
                         screenshots: scenario.screenshots || [],
                         videos: scenario.videos || [],
                         trace: scenario.trace,

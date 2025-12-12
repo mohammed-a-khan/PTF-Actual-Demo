@@ -40,14 +40,18 @@ export class CSConsolidatedReportGenerator {
             skipped: project.skippedScenarios,
             successRate: project.totalScenarios > 0
                 ? ((project.passedScenarios / project.totalScenarios) * 100).toFixed(1) : '0',
-            reportPath: `${project.project}/reports/index.html`,
-            scenarios: project.scenarios.map(s => ({
-                name: s.name, feature: s.feature, status: s.status,
-                duration: s.duration / 1000, durationFormatted: this.formatDuration(s.duration),
-                tags: s.tags, error: s.error,
-                screenshots: s.screenshots.map(ss => `${project.project}/${ss}`),
-                videos: s.videos.map(v => `${project.project}/${v}`)
-            }))
+            // Use sanitized display name for path (matches folder structure created by executor)
+            reportPath: `${project.name.replace(/[<>:"/\\|?*]/g, '-')}/reports/index.html`,
+            scenarios: project.scenarios.map(s => {
+                const sanitizedName = project.name.replace(/[<>:"/\\|?*]/g, '-');
+                return {
+                    name: s.name, feature: s.feature, status: s.status,
+                    duration: s.duration / 1000, durationFormatted: this.formatDuration(s.duration),
+                    tags: s.tags, error: s.error,
+                    screenshots: s.screenshots.map(ss => `${sanitizedName}/${ss}`),
+                    videos: s.videos.map(v => `${sanitizedName}/${v}`)
+                };
+            })
         }));
 
         return {
@@ -253,6 +257,8 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo
 .status-badge.skipped { background: #fef3c7; color: #92400e; }
 .tag { display: inline-block; padding: 0.2rem 0.5rem; background: var(--surface); color: var(--text-secondary); border-radius: 4px; font-size: 0.75rem; margin: 0.1rem; }
 .error-row td { padding: 0.5rem 1.25rem; background: #fef2f2; color: #991b1b; font-size: 0.85rem; }
+.error-cell { max-width: 300px; }
+.error-text { color: #dc2626; font-size: 0.8rem; display: block; word-break: break-word; cursor: help; }
 .timeline-card { background: white; border-radius: 16px; box-shadow: 0 4px 15px var(--shadow); overflow: hidden; margin-bottom: 1.5rem; }
 .timeline-card-header { background: var(--surface); padding: 1rem 1.5rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
 .timeline-card-title { font-weight: 600; font-size: 1.1rem; display: flex; align-items: center; gap: 0.75rem; }
@@ -567,6 +573,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo
                             <th>Status</th>
                             <th>Duration</th>
                             <th>Tags</th>
+                            <th>Error</th>
                         </tr>
                     </thead>
                     <tbody id="scenarios-tbody">
@@ -578,8 +585,8 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo
                                 <td><span class="status-badge ${s.status}">${s.status}</span></td>
                                 <td>${s.durationFormatted}</td>
                                 <td>${(s.tags || []).slice(0, 3).map(t => `<span class="tag">${this.escapeHtml(t)}</span>`).join('')}</td>
+                                <td class="error-cell">${s.error ? `<span class="error-text" title="${this.escapeHtml(s.error)}">&#9888; ${this.escapeHtml(s.error.substring(0, 80))}${s.error.length > 80 ? '...' : ''}</span>` : ''}</td>
                             </tr>
-                            ${s.error ? `<tr class="error-row" data-status="${s.status}" data-project="${this.escapeHtml(s.projectName)}" data-feature="${this.escapeHtml(s.feature)}"><td colspan="6">&#9888; ${this.escapeHtml(s.error.substring(0, 200))}</td></tr>` : ''}
                         `).join('')}
                     </tbody>
                 </table>
@@ -856,7 +863,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo
             const projectFilter = document.getElementById('project-filter')?.value || '';
             const featureFilter = document.getElementById('feature-filter')?.value || '';
 
-            document.querySelectorAll('.scenario-row, .error-row').forEach(row => {
+            document.querySelectorAll('.scenario-row').forEach(row => {
                 const status = row.dataset.status;
                 const project = row.dataset.project;
                 const feature = row.dataset.feature;

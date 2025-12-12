@@ -51,7 +51,15 @@ export class CSConfigurationManager {
         return CSConfigurationManager.instance;
     }
 
+    private initialized = false;
+
     public async initialize(args: any = {}): Promise<void> {
+        // Skip if already initialized - prevents .env files from overwriting CLI args
+        if (this.initialized) {
+            return;
+        }
+        this.initialized = true;
+
         const startTime = Date.now();
 
         // Determine project and environment early

@@ -200,18 +200,15 @@ export class CSSuiteOrchestrator {
         console.log('');
 
         // Execute the single project with isMultiProjectMode = false
+        // Pass the full report path directly - executor won't create subfolder in normal mode
         const executionOptions: ProjectExecutionOptions = {
-            suiteReportPath: this.suiteReportPath,
+            suiteReportPath: this.suiteReportPath,  // e.g., reports/test-results-xxx
             defaults: this.config!.defaults,
             onProgress: options.onProgress,
-            isMultiProjectMode: false  // IMPORTANT: false for normal mode
+            isMultiProjectMode: false  // IMPORTANT: false = no project subfolder
         };
 
-        // Use direct path (not nested in project subfolder) for single project
-        const result = await this.executor.executeProject(project, {
-            ...executionOptions,
-            suiteReportPath: path.dirname(this.suiteReportPath)  // Parent dir so project creates test-results-xxx
-        });
+        const result = await this.executor.executeProject(project, executionOptions);
 
         const endTime = new Date();
         const totalDuration = endTime.getTime() - startTime.getTime();

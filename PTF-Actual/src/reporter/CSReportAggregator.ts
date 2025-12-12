@@ -124,8 +124,11 @@ export class CSReportAggregator {
             }, 0);
 
             // Create world-class suite format for professional report
+            // Use project name from config, fallback to generic name
+            const projectName = this.config.get('PROJECT', 'Unknown');
+            const suiteName = projectName !== 'Unknown' ? `${projectName} Test Suite` : 'CS Test Automation Suite';
             const worldClassSuite = {
-                name: 'CS Test Automation Suite',
+                name: suiteName,
                 scenarios: this.aggregatedResults.scenarios.map((scenario: any) => ({
                     name: scenario.name || 'Unknown',
                     status: scenario.status === 'broken' ? 'failed' : (scenario.status as 'passed' | 'failed' | 'skipped'),

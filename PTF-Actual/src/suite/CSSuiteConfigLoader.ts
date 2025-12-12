@@ -34,10 +34,10 @@ const LOCAL_DEFAULTS: Omit<SuiteConfig, 'projects'> = {
         browser: 'chromium',
         logLevel: 'DEBUG',   // Local: verbose logging
         artifacts: {
-            video: 'off',
-            trace: 'off',
+            video: 'on-failure',   // Local: record video on failure
+            trace: 'on-failure',   // Local: record trace on failure
             screenshot: 'on-failure',
-            har: 'off'
+            har: 'on-failure'      // Local: record HAR on failure
         }
     },
     execution: {

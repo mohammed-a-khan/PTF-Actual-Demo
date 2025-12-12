@@ -337,11 +337,39 @@ async function execute(mode: string) {
                 options.headless = args.headless;
                 config.set('HEADLESS', String(args.headless));
             }
-            
+
             // Handle browser
             if (args.browser) {
                 options.browser = args.browser;
                 config.set('BROWSER', args.browser);
+            }
+
+            // Handle artifact settings (video, trace, screenshot, har)
+            // Note: CSBrowserManager uses specific config keys - must match exactly
+            if (args.video !== undefined) {
+                config.set('BROWSER_VIDEO', args.video);
+            }
+            if (args.trace !== undefined) {
+                // CSBrowserManager reads TRACE_CAPTURE_MODE, values: 'always', 'on-failure', 'never'
+                // Map 'off' to 'never' for compatibility
+                const traceValue = args.trace === 'off' ? 'never' : args.trace;
+                config.set('TRACE_CAPTURE_MODE', traceValue);
+                config.set('BROWSER_TRACE_ENABLED', 'false'); // Disable deprecated flag too
+            }
+            if (args.screenshot !== undefined) {
+                config.set('SCREENSHOT_MODE', args.screenshot);
+            }
+            if (args.har !== undefined) {
+                // CSBrowserManager reads HAR_CAPTURE_MODE, values: 'always', 'on-failure', 'never'
+                // Map 'off' to 'never' for compatibility
+                const harValue = args.har === 'off' ? 'never' : args.har;
+                config.set('HAR_CAPTURE_MODE', harValue);
+                config.set('BROWSER_HAR_ENABLED', 'false'); // Disable deprecated flag too
+            }
+
+            // Handle log level
+            if (args['log-level'] !== undefined) {
+                config.set('LOG_LEVEL', args['log-level']);
             }
 
             // Handle explicit module specification
