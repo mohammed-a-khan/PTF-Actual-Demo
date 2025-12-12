@@ -65,30 +65,57 @@ export class CSSuiteOrchestrator {
         const startTime = new Date();
         this.timestamp = this.generateTimestamp();
 
-        // Set suite mode flag - this prevents individual project reports from auto-opening
-        process.env.CS_SUITE_MODE = 'true';
-
-        console.log('\n');
-        console.log('╔══════════════════════════════════════════════════════════════════════════════╗');
-        console.log('║                     CS MULTI-PROJECT TEST SUITE                              ║');
-        console.log('║                         MohammedAKhan Framework                              ║');
-        console.log('╚══════════════════════════════════════════════════════════════════════════════╝');
-        console.log('');
-
-        // Emit suite start event
-        this.emitEvent(options.onProgress, {
-            type: 'suite:start',
-            timestamp: startTime.toISOString(),
-            data: { timestamp: this.timestamp }
-        });
-
         try {
-            // Load configuration
-            console.log('Loading suite configuration...');
+            // Load configuration FIRST to determine execution mode
+            console.log('\nLoading suite configuration...');
             this.config = await this.configLoader.load(options.configPath, options.cliOptions);
 
+            // Get enabled projects
+            const enabledProjects = this.config.projects.filter(p => p.enabled);
+
+            // Validate - must have at least one project
+            if (enabledProjects.length === 0) {
+                throw new Error('No enabled projects found in suite configuration');
+            }
+
+            // SMART MODE DETECTION
+            if (enabledProjects.length === 1) {
+                // Single project - execute in NORMAL mode (no suite overhead)
+                console.log('\n');
+                console.log('╔══════════════════════════════════════════════════════════════════════════════╗');
+                console.log('║                   SINGLE PROJECT DETECTED - NORMAL MODE                      ║');
+                console.log('║                         MohammedAKhan Framework                              ║');
+                console.log('╚══════════════════════════════════════════════════════════════════════════════╝');
+                console.log('');
+                console.log(`Suite resolved to single project - executing in NORMAL mode`);
+                console.log('(No suite overhead, standard report structure)');
+                console.log('');
+
+                return await this.executeSingleProjectNormalMode(enabledProjects[0], options, startTime);
+            }
+
+            // Multiple projects - execute in SUITE mode
+            console.log('\n');
+            console.log('╔══════════════════════════════════════════════════════════════════════════════╗');
+            console.log('║                     CS MULTI-PROJECT TEST SUITE                              ║');
+            console.log('║                         MohammedAKhan Framework                              ║');
+            console.log('╚══════════════════════════════════════════════════════════════════════════════╝');
+            console.log('');
+            console.log(`Suite has ${enabledProjects.length} projects - executing in SUITE mode`);
+            console.log('');
+
+            // Set suite mode flag - this prevents individual project reports from auto-opening
+            process.env.CS_SUITE_MODE = 'true';
+
+            // Emit suite start event
+            this.emitEvent(options.onProgress, {
+                type: 'suite:start',
+                timestamp: startTime.toISOString(),
+                data: { timestamp: this.timestamp }
+            });
+
             console.log(`  Suite: ${this.config.name}`);
-            console.log(`  Projects: ${this.config.projects.length}`);
+            console.log(`  Projects: ${enabledProjects.length}`);
             console.log(`  Mode: ${this.config.execution.mode}`);
             console.log(`  Stop on Failure: ${this.config.execution.stopOnFailure}`);
             console.log('');
@@ -136,6 +163,108 @@ export class CSSuiteOrchestrator {
             console.error(`\nSuite execution failed: ${error.message}`);
             throw error;
         }
+    }
+
+    /**
+     * Execute a single project in NORMAL mode (no suite overhead)
+     * This is called when the suite resolves to only 1 enabled project
+     */
+    private async executeSingleProjectNormalMode(
+        project: import('./types/CSSuiteTypes').SuiteProjectConfig,
+        options: SuiteOrchestrationOptions,
+        startTime: Date
+    ): Promise<SuiteResult> {
+        // Do NOT set CS_SUITE_MODE - this ensures normal execution behavior
+        // Reports will auto-open if configured, no suite directory structure
+
+        console.log(`  Project: ${project.name} (${project.type.toUpperCase()})`);
+        console.log(`  Features: ${Array.isArray(project.features) ? project.features.join(', ') : project.features}`);
+        if (project.tags) {
+            console.log(`  Tags: ${project.tags}`);
+        }
+        console.log('');
+
+        // Emit suite start event (still needed for consistency)
+        this.emitEvent(options.onProgress, {
+            type: 'suite:start',
+            timestamp: startTime.toISOString(),
+            data: { timestamp: this.timestamp, mode: 'normal' }
+        });
+
+        // Create standard report directory (not suite directory)
+        const baseReportPath = process.env.REPORT_PATH || 'reports';
+        this.suiteReportPath = path.join(process.cwd(), baseReportPath, `test-results-${this.timestamp}`);
+        fs.mkdirSync(this.suiteReportPath, { recursive: true });
+
+        console.log(`Report Directory: ${this.suiteReportPath}`);
+        console.log('');
+
+        // Execute the single project with isMultiProjectMode = false
+        const executionOptions: ProjectExecutionOptions = {
+            suiteReportPath: this.suiteReportPath,
+            defaults: this.config!.defaults,
+            onProgress: options.onProgress,
+            isMultiProjectMode: false  // IMPORTANT: false for normal mode
+        };
+
+        // Use direct path (not nested in project subfolder) for single project
+        const result = await this.executor.executeProject(project, {
+            ...executionOptions,
+            suiteReportPath: path.dirname(this.suiteReportPath)  // Parent dir so project creates test-results-xxx
+        });
+
+        const endTime = new Date();
+        const totalDuration = endTime.getTime() - startTime.getTime();
+
+        // Build suite result (with single project)
+        const suiteResult: SuiteResult = {
+            suiteName: this.config!.name,
+            timestamp: this.timestamp,
+            status: result.status === 'passed' ? 'passed' : 'failed',
+            totalDuration,
+            startTime: startTime.toISOString(),
+            endTime: endTime.toISOString(),
+            projects: [result],
+            totalProjects: 1,
+            passedProjects: result.status === 'passed' ? 1 : 0,
+            failedProjects: result.status === 'failed' ? 1 : 0,
+            skippedProjects: result.status === 'skipped' ? 1 : 0,
+            totalScenarios: result.totalScenarios,
+            passedScenarios: result.passedScenarios,
+            failedScenarios: result.failedScenarios,
+            skippedScenarios: result.skippedScenarios,
+            successRate: result.totalScenarios > 0
+                ? Math.round((result.passedScenarios / result.totalScenarios) * 10000) / 100
+                : 0,
+            reportPath: result.reportPath,
+            consolidatedReportPath: result.htmlReportPath,
+            environment: this.getEnvironmentInfo()
+        };
+
+        // NOTE: Do NOT open report here - the individual project execution already handles
+        // auto-open since CS_SUITE_MODE is not set. Opening here would cause duplicate opens.
+
+        // Log summary
+        console.log('\n');
+        console.log('╔══════════════════════════════════════════════════════════════════════════════╗');
+        console.log('║                         EXECUTION SUMMARY (NORMAL MODE)                      ║');
+        console.log('╠══════════════════════════════════════════════════════════════════════════════╣');
+        const statusIcon = result.status === 'passed' ? '✓' : '✗';
+        console.log(`║  ${statusIcon} ${project.name.padEnd(40)} ${result.status.toUpperCase().padEnd(20)}      ║`);
+        console.log(`║    Scenarios: ${result.passedScenarios} passed, ${result.failedScenarios} failed, ${result.skippedScenarios} skipped`.padEnd(76) + '  ║');
+        console.log(`║    Duration: ${this.formatDuration(totalDuration)}`.padEnd(78) + '║');
+        console.log(`║    Report: ${result.htmlReportPath || result.reportPath}`.slice(0, 78).padEnd(78) + '║');
+        console.log('╚══════════════════════════════════════════════════════════════════════════════╝');
+        console.log('');
+
+        // Emit suite complete event
+        this.emitEvent(options.onProgress, {
+            type: 'suite:complete',
+            timestamp: endTime.toISOString(),
+            data: { result: suiteResult, mode: 'normal' }
+        });
+
+        return suiteResult;
     }
 
     /**

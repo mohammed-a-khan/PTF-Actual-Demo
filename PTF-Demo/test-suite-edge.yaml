@@ -1,0 +1,51 @@
+# Test Suite Configuration - Edge Browser (Visible Mode)
+version: "1.0"
+name: "Akhan Multi-Project Test Suite - Edge"
+description: "Multi-project test execution in Microsoft Edge"
+
+defaults:
+  environment: dev
+  headless: false
+  timeout: 300000
+  browser: edge
+  parallel: 1
+  retry: 0
+  logLevel: DEBUG
+  artifacts:
+    video: off
+    trace: off
+    screenshot: on-failure
+    har: off
+
+execution:
+  mode: sequential
+  stopOnFailure: false
+  delayBetweenProjects: 2000
+
+reporting:
+  consolidated: true
+  autoOpen: true
+  formats:
+    - html
+    - json
+  zipResults: false
+  keepUnzipped: true
+
+projects:
+  - name: Akhan
+    type: ui
+    project: akhan
+    features: test/akhan/features/data-driven-all-patterns.feature
+    enabled: true
+
+  - name: OrangeHRM
+    type: hybrid
+    project: orangehrm
+    features: test/orangehrm/features/data-driven-all-patterns.feature
+    enabled: true
+
+  - name: akhan-api
+    type: api
+    project: akhan-api
+    features: test/akhan-api/features/certificate-auth-example.feature
+    enabled: true

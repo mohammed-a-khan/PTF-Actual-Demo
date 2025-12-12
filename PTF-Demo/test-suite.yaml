@@ -1,28 +1,72 @@
 # =============================================================================
-# Test Suite Configuration
-# Multi-project test execution configuration
+#                    CS PLAYWRIGHT TEST FRAMEWORK - SUITE CONFIGURATION
+#                              Version 1.5.83+
+# =============================================================================
+#
+# This file configures multi-project test execution (similar to TestNG XML)
+#
+# USAGE:
+#   npx cs-playwright-test --suite=multi-project
+#   npx cs-playwright-test --suite=multi-project --suite-mode=api-only
+#   npx cs-playwright-test --suite=multi-project --suite-config=custom-suite.yaml
+#
+# SMART EXECUTION MODE:
+#   - If suite resolves to 1 enabled project  -> NORMAL mode (no suite overhead)
+#   - If suite resolves to 2+ enabled projects -> SUITE mode (consolidated reports)
+#
+# CI/PIPELINE DETECTION:
+#   The framework automatically detects CI environments and ENFORCES certain settings:
+#   - Azure DevOps (TF_BUILD, BUILD_BUILDID, SYSTEM_TEAMFOUNDATIONCOLLECTIONURI)
+#   - GitHub Actions (GITHUB_ACTIONS)
+#   - Jenkins (JENKINS_URL)
+#   - GitLab CI (GITLAB_CI)
+#   - CircleCI (CIRCLECI)
+#   - Travis CI (TRAVIS)
+#
+# PIPELINE ENFORCED SETTINGS (Cannot be overridden in CI):
+#   - headless: true        (always headless in pipeline)
+#   - autoOpen: false       (never auto-open reports in pipeline)
+#   - video: off            (no video recording in pipeline)
+#   - trace: off            (no trace capture in pipeline)
+#   - screenshot: off       (no screenshots in pipeline)
+#   - har: off              (no HAR files in pipeline)
+#   - zipResults: true      (always zip for artifacts)
+#   - logLevel: INFO        (less verbose logging)
+#
 # =============================================================================
 
-# Version of the configuration format (required for validation)
+# Version of the configuration format (required)
 version: "1.0"
 
 # Display name for this test suite (shown in console and reports)
 name: "Akhan Multi-Project Test Suite"
 
-# -----------------------------------------------------------------------------
+# Optional description
+description: "Comprehensive test suite for Akhan demo projects"
+
+# =============================================================================
 # DEFAULT SETTINGS
 # These apply to ALL projects unless overridden at project level
-# -----------------------------------------------------------------------------
+# =============================================================================
 defaults:
+  # ---------------------------------------------------------------------------
+  # ENVIRONMENT & EXECUTION
+  # ---------------------------------------------------------------------------
+
   # Environment to use (matches your env files: dev.env, sit.env, uat.env, etc.)
   environment: dev
 
-  # Run browser in headless mode (true = no visible browser window)
+  # Run browser in headless mode
+  # LOCAL: User can override | PIPELINE: ENFORCED to true
   headless: true
 
-  # Maximum time (in milliseconds) a project can run before being killed
+  # Maximum time (in milliseconds) a project can run before timeout
   # 300000ms = 5 minutes
   timeout: 300000
+
+  # Default browser for UI tests
+  # Options: chromium, firefox, webkit
+  browser: chromium
 
   # Number of parallel workers for scenarios WITHIN each project
   # 1 = sequential execution, 2+ = parallel scenario execution
@@ -32,78 +76,224 @@ defaults:
   # 0 = no retries, 1 = retry once on failure, etc.
   retry: 0
 
-# -----------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # LOGGING
+  # ---------------------------------------------------------------------------
+
+  # Log level for test execution
+  # Options: DEBUG, INFO, WARN, ERROR
+  # LOCAL: User can override | PIPELINE: ENFORCED to INFO
+  logLevel: DEBUG
+
+  # ---------------------------------------------------------------------------
+  # ARTIFACTS (Video, Trace, Screenshot, HAR)
+  # ---------------------------------------------------------------------------
+  # Settings: off, on-failure, always
+  # LOCAL: User can override | PIPELINE: ALL ENFORCED to 'off'
+
+  artifacts:
+    # Video recording of test execution
+    # off        = no video
+    # on-failure = record video only for failed scenarios
+    # always     = record video for all scenarios
+    video: off
+
+    # Playwright trace capture (includes snapshots, network, console)
+    # off        = no trace
+    # on-failure = capture trace only for failed scenarios
+    # always     = capture trace for all scenarios
+    trace: off
+
+    # Screenshot capture
+    # off        = no screenshots
+    # on-failure = capture screenshots only on failure
+    # always     = capture screenshots at each step
+    screenshot: on-failure
+
+    # HAR (HTTP Archive) file capture for network analysis
+    # off        = no HAR files
+    # on-failure = capture HAR only for failed scenarios
+    # always     = capture HAR for all scenarios
+    har: off
+
+# =============================================================================
 # EXECUTION SETTINGS
 # Controls how projects are executed
-# -----------------------------------------------------------------------------
+# =============================================================================
 execution:
+  # Execution mode (currently only 'sequential' is supported)
+  mode: sequential
+
   # Stop executing remaining projects if one fails
   # false = continue with next project even if current one fails
-  # true = stop suite immediately on first project failure
+  # true  = stop suite immediately on first project failure
   stopOnFailure: false
 
   # Delay in milliseconds between project executions
   # Useful to let resources clean up between projects
   delayBetweenProjects: 2000
 
-# -----------------------------------------------------------------------------
+# =============================================================================
 # REPORTING SETTINGS
-# Controls report generation
-# -----------------------------------------------------------------------------
+# Controls report generation and output
+# =============================================================================
 reporting:
   # Generate a consolidated HTML report combining all project results
   consolidated: true
 
   # Automatically open the report in browser when suite completes
+  # LOCAL: User can override | PIPELINE: ENFORCED to false
   autoOpen: true
 
-# -----------------------------------------------------------------------------
+  # Report formats to generate
+  formats:
+    - html
+    - json
+
+  # Zip the results folder after execution
+  # Useful for CI/CD pipeline artifacts
+  # LOCAL: User can override | PIPELINE: ENFORCED to true
+  zipResults: false
+
+  # Keep the unzipped folder when zipping
+  # true  = keep both zipped and unzipped versions
+  # false = delete unzipped folder after creating zip
+  keepUnzipped: true
+
+# =============================================================================
 # PROJECTS TO EXECUTE
 # List of projects to run (executed sequentially in order listed)
-# -----------------------------------------------------------------------------
+# =============================================================================
 projects:
-  # ----- Project 1: Akhan -----
-  - name: Akhan                    # Display name (shown in reports)
-    type: ui                       # Test type: ui, api, or hybrid
-    project: akhan                 # Project folder name (test/akhan/)
+  # -------------------------------------------------------------------------
+  # Project 1: Akhan UI Tests
+  # -------------------------------------------------------------------------
+  - name: Akhan                        # Display name (shown in reports)
+    type: ui                           # Test type: ui, api, or hybrid
+    project: akhan                     # Project folder name (config/akhan/)
     features: test/akhan/features/data-driven-all-patterns.feature
-    enabled: true                  # Set to false to skip this project
+    enabled: true                      # Set to false to skip this project
+    # Optional overrides for this project:
+    # tags: "@smoke"                   # Run only scenarios with specific tags
+    # environment: sit                 # Override environment
+    # headless: false                  # Show browser
+    # browser: firefox                 # Use different browser
+    # parallel: 2                      # Override parallel workers
+    # retry: 1                         # Override retry count
+    # timeout: 600000                  # Override timeout (10 minutes)
+    # logLevel: DEBUG                  # Override log level
+    # artifacts:                       # Override artifact settings
+    #   video: on-failure
+    #   screenshot: always
 
-  # ----- Project 2: OrangeHRM -----
+  # -------------------------------------------------------------------------
+  # Project 2: OrangeHRM Hybrid Tests (UI + Database)
+  # -------------------------------------------------------------------------
   - name: OrangeHRM
-    type: hybrid
+    type: hybrid                       # hybrid = UI tests with database/api modules
     project: orangehrm
     features: test/orangehrm/features/data-driven-all-patterns.feature
     enabled: true
-  
-  # ----- Project 3: OrangeHRM -----
+    # modules: database                # Explicit module loading (database, api, soap)
+
+  # -------------------------------------------------------------------------
+  # Project 3: Akhan API Tests
+  # -------------------------------------------------------------------------
   - name: akhan-api
-    type: api
+    type: api                          # api = API-only tests (no browser)
     project: akhan-api
     features: test/akhan-api/features/certificate-auth-example.feature
     enabled: true
 
 # =============================================================================
-# ADDITIONAL PROJECT OPTIONS (can be added to any project above)
+# COMPLETE OPTION REFERENCE
 # =============================================================================
-# These override the defaults for that specific project:
 #
-#   tags: "@smoke"              # Run only scenarios with specific tags
-#   environment: uat            # Override environment for this project
-#   headless: false             # Show browser for this project
-#   parallel: 4                 # Use 4 workers for this project
-#   retry: 2                    # Retry failed scenarios twice
-#   browser: firefox            # Use firefox instead of chromium
-#   timeout: 600000             # 10 minute timeout for this project
+# SUITE-LEVEL OPTIONS:
+# --------------------
+# version          : "1.0"                    (required)
+# name             : string                   (required)
+# description      : string                   (optional)
 #
-# Example with overrides:
-#   - name: Long-Running-Tests
-#     type: ui
-#     project: performance
-#     features: test/performance/features/*.feature
-#     enabled: true
-#     tags: "@slow"
-#     timeout: 600000
-#     parallel: 2
-#     headless: true
+# DEFAULTS SECTION:
+# -----------------
+# environment      : string                   (default: SIT)
+# headless         : boolean                  (LOCAL: false, PIPELINE: true ENFORCED)
+# timeout          : number (ms)              (default: 300000)
+# browser          : chromium|firefox|webkit  (default: chromium)
+# parallel         : number                   (default: 1)
+# retry            : number                   (default: 0)
+# logLevel         : DEBUG|INFO|WARN|ERROR    (LOCAL: DEBUG, PIPELINE: INFO ENFORCED)
+# artifacts:
+#   video          : off|on-failure|always    (PIPELINE: off ENFORCED)
+#   trace          : off|on-failure|always    (PIPELINE: off ENFORCED)
+#   screenshot     : off|on-failure|always    (PIPELINE: off ENFORCED)
+#   har            : off|on-failure|always    (PIPELINE: off ENFORCED)
+#
+# EXECUTION SECTION:
+# ------------------
+# mode             : sequential               (only supported value)
+# stopOnFailure    : boolean                  (default: false)
+# delayBetweenProjects: number (ms)           (default: 2000)
+#
+# REPORTING SECTION:
+# ------------------
+# consolidated     : boolean                  (default: true)
+# autoOpen         : boolean                  (LOCAL: true, PIPELINE: false ENFORCED)
+# formats          : [html, json, xlsx]       (default: [html, json])
+# zipResults       : boolean                  (LOCAL: false, PIPELINE: true ENFORCED)
+# keepUnzipped     : boolean                  (default: true)
+#
+# PROJECT OPTIONS:
+# ----------------
+# name             : string                   (required - display name)
+# type             : ui|api|hybrid            (required)
+# project          : string                   (required - config folder name)
+# features         : string|string[]          (required - feature file paths)
+# enabled          : boolean                  (default: true)
+# tags             : string                   (optional - tag filter)
+# environment      : string                   (optional - override defaults)
+# headless         : boolean                  (optional - override defaults)
+# browser          : string                   (optional - override defaults)
+# parallel         : number                   (optional - override defaults)
+# retry            : number                   (optional - override defaults)
+# timeout          : number                   (optional - override defaults)
+# logLevel         : string                   (optional - override defaults)
+# modules          : string|string[]          (optional - explicit module loading)
+# artifacts        : object                   (optional - override defaults)
+#
+# =============================================================================
+# CLI OVERRIDE OPTIONS
+# =============================================================================
+#
+# These CLI flags override values in this file:
+#
+#   --suite-mode=all|api-only|ui-only   Filter projects by type
+#   --suite-stop-on-failure             Stop on first project failure
+#   --environment=<env>                 Override environment for all projects
+#   --tags=<tags>                       Add tag filter to all projects
+#   --headless=true|false               Override headless mode
+#   --parallel=<n>                      Override parallel workers
+#   --workers=<n>                       Same as --parallel
+#
+# EXAMPLES:
+#
+#   # Run all projects
+#   npx cs-playwright-test --suite=multi-project
+#
+#   # Run only API projects
+#   npx cs-playwright-test --suite=multi-project --suite-mode=api-only
+#
+#   # Run only UI projects
+#   npx cs-playwright-test --suite=multi-project --suite-mode=ui-only
+#
+#   # Run with specific environment
+#   npx cs-playwright-test --suite=multi-project --environment=uat
+#
+#   # Run specific tags across all projects
+#   npx cs-playwright-test --suite=multi-project --tags="@smoke"
+#
+#   # Use custom suite file
+#   npx cs-playwright-test --suite=multi-project --suite-config=my-suite.yaml
+#
 # =============================================================================

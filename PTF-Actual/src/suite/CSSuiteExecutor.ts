@@ -202,6 +202,35 @@ export class CSSuiteExecutor {
             args.push(`--browser=${browser}`);
         }
 
+        // Artifact settings (video, trace, screenshot, har)
+        const artifacts = project.artifacts || options.defaults.artifacts;
+        if (artifacts) {
+            if (artifacts.video) {
+                args.push(`--video=${artifacts.video}`);
+            }
+            if (artifacts.trace) {
+                args.push(`--trace=${artifacts.trace}`);
+            }
+            if (artifacts.screenshot) {
+                args.push(`--screenshot=${artifacts.screenshot}`);
+            }
+            if (artifacts.har) {
+                args.push(`--har=${artifacts.har}`);
+            }
+        }
+
+        // Log level
+        const logLevel = project.logLevel || options.defaults.logLevel;
+        if (logLevel) {
+            args.push(`--log-level=${logLevel}`);
+        }
+
+        // Modules (database, api, etc.)
+        if (project.modules) {
+            const modules = Array.isArray(project.modules) ? project.modules.join(',') : project.modules;
+            args.push(`--modules=${modules}`);
+        }
+
         // Set report path for this project
         // The framework will generate reports in this project-specific folder
         args.push(`--report-path=${projectReportPath}`);

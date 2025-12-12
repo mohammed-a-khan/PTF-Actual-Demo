@@ -13,22 +13,32 @@ import {
     SuiteExecutionConfig,
     SuiteReportingConfig,
     SuiteMode,
-    SuiteCLIOptions
+    SuiteCLIOptions,
+    ArtifactConfig
 } from './types/CSSuiteTypes';
+import { CSCIDetector } from './CSCIDetector';
 
 /**
- * Default suite configuration values
+ * LOCAL execution defaults (user can override everything)
  */
-const DEFAULT_SUITE_CONFIG: Omit<SuiteConfig, 'projects'> = {
+const LOCAL_DEFAULTS: Omit<SuiteConfig, 'projects'> = {
     version: '1.0',
     name: 'Test Suite',
     description: 'Multi-project test execution suite',
     defaults: {
         environment: 'SIT',
-        headless: true,
+        headless: false,     // Local: show browser
         timeout: 300000,
         parallel: 1,
-        retry: 0
+        retry: 0,
+        browser: 'chromium',
+        logLevel: 'DEBUG',   // Local: verbose logging
+        artifacts: {
+            video: 'off',
+            trace: 'off',
+            screenshot: 'on-failure',
+            har: 'off'
+        }
     },
     execution: {
         mode: 'sequential',
@@ -37,10 +47,71 @@ const DEFAULT_SUITE_CONFIG: Omit<SuiteConfig, 'projects'> = {
     },
     reporting: {
         consolidated: true,
-        autoOpen: true,
-        formats: ['html', 'json']
+        autoOpen: true,      // Local: auto-open report
+        formats: ['html', 'json'],
+        zipResults: false,   // Local: no zip needed
+        keepUnzipped: true
     }
 };
+
+/**
+ * PIPELINE execution defaults (some settings ENFORCED, cannot be overridden)
+ */
+const PIPELINE_DEFAULTS: Omit<SuiteConfig, 'projects'> = {
+    version: '1.0',
+    name: 'Test Suite',
+    description: 'Multi-project test execution suite',
+    defaults: {
+        environment: 'SIT',
+        headless: true,      // Pipeline: headless mode
+        timeout: 300000,
+        parallel: 1,
+        retry: 1,            // Pipeline: retry once
+        browser: 'chromium',
+        logLevel: 'INFO',    // Pipeline: less verbose
+        artifacts: {
+            video: 'off',    // Pipeline: all artifacts OFF
+            trace: 'off',
+            screenshot: 'off',
+            har: 'off'
+        }
+    },
+    execution: {
+        mode: 'sequential',
+        stopOnFailure: false,
+        delayBetweenProjects: 2000
+    },
+    reporting: {
+        consolidated: true,
+        autoOpen: false,     // Pipeline: no auto-open
+        formats: ['html', 'json'],
+        zipResults: true,    // Pipeline: zip for artifacts
+        keepUnzipped: true
+    }
+};
+
+/**
+ * Settings ENFORCED in pipeline - user YAML CANNOT override these
+ * These values are applied LAST to ensure consistent pipeline behavior
+ */
+const PIPELINE_ENFORCED = {
+    headless: true,
+    autoOpen: false,
+    zipResults: true,
+    logLevel: 'INFO' as const,
+    artifacts: {
+        video: 'off' as const,
+        trace: 'off' as const,
+        screenshot: 'off' as const,
+        har: 'off' as const
+    }
+};
+
+/**
+ * Default suite configuration (backward compatibility alias)
+ * @deprecated Use LOCAL_DEFAULTS or PIPELINE_DEFAULTS
+ */
+const DEFAULT_SUITE_CONFIG = LOCAL_DEFAULTS;
 
 /**
  * Suite configuration loader
@@ -71,14 +142,24 @@ export class CSSuiteConfigLoader {
         // Determine config file path
         this.configPath = this.resolveConfigPath(configPath);
 
+        // Log CI detection
+        const isCI = CSCIDetector.isCI();
+        const ciProvider = CSCIDetector.getProvider();
+        if (isCI) {
+            console.log(`[Suite] CI environment detected: ${ciProvider}`);
+            console.log('[Suite] Pipeline enforced settings will be applied');
+        } else {
+            console.log('[Suite] Local environment detected - user settings apply');
+        }
+
         // Load and parse YAML
         const rawConfig = this.loadYamlFile(this.configPath);
 
-        // Merge with defaults
+        // Merge with defaults (uses LOCAL_DEFAULTS or PIPELINE_DEFAULTS based on CI)
         const mergedConfig = this.mergeWithDefaults(rawConfig);
 
         // Apply CLI overrides
-        const finalConfig = this.applyCLIOverrides(mergedConfig, cliOptions);
+        let finalConfig = this.applyCLIOverrides(mergedConfig, cliOptions);
 
         // Validate configuration
         this.validateConfig(finalConfig);
@@ -90,6 +171,11 @@ export class CSSuiteConfigLoader {
 
         // Filter enabled projects only
         finalConfig.projects = finalConfig.projects.filter(p => p.enabled);
+
+        // IMPORTANT: Apply pipeline enforcements LAST (overrides user YAML in CI)
+        if (isCI) {
+            finalConfig = this.applyPipelineEnforcements(finalConfig);
+        }
 
         this.config = finalConfig;
         return finalConfig;
@@ -161,26 +247,43 @@ export class CSSuiteConfigLoader {
     }
 
     /**
+     * Get appropriate defaults based on CI detection
+     */
+    private getDefaultConfig(): Omit<SuiteConfig, 'projects'> {
+        return CSCIDetector.isCI() ? PIPELINE_DEFAULTS : LOCAL_DEFAULTS;
+    }
+
+    /**
      * Merge loaded config with defaults
+     * Uses LOCAL_DEFAULTS or PIPELINE_DEFAULTS based on CI environment
      */
     private mergeWithDefaults(rawConfig: any): SuiteConfig {
+        const defaults = this.getDefaultConfig();
+
+        // Deep merge artifacts if provided
+        const mergedArtifacts: ArtifactConfig = {
+            ...defaults.defaults.artifacts,
+            ...(rawConfig.defaults?.artifacts || {})
+        };
+
         const config: SuiteConfig = {
-            version: rawConfig.version || DEFAULT_SUITE_CONFIG.version,
-            name: rawConfig.name || DEFAULT_SUITE_CONFIG.name,
-            description: rawConfig.description || DEFAULT_SUITE_CONFIG.description,
+            version: rawConfig.version || defaults.version,
+            name: rawConfig.name || defaults.name,
+            description: rawConfig.description || defaults.description,
             defaults: {
-                ...DEFAULT_SUITE_CONFIG.defaults,
-                ...(rawConfig.defaults || {})
+                ...defaults.defaults,
+                ...(rawConfig.defaults || {}),
+                artifacts: mergedArtifacts  // Use merged artifacts
             },
             execution: {
-                ...DEFAULT_SUITE_CONFIG.execution,
+                ...defaults.execution,
                 ...(rawConfig.execution || {})
             },
             reporting: {
-                ...DEFAULT_SUITE_CONFIG.reporting,
+                ...defaults.reporting,
                 ...(rawConfig.reporting || {})
             },
-            projects: this.parseProjects(rawConfig.projects || [])
+            projects: this.parseProjects(rawConfig.projects || [], defaults.defaults)
         };
 
         return config;
@@ -188,8 +291,10 @@ export class CSSuiteConfigLoader {
 
     /**
      * Parse and normalize project configurations
+     * @param projects Raw projects array from YAML
+     * @param suiteDefaults Suite-level defaults to inherit from
      */
-    private parseProjects(projects: any[]): SuiteProjectConfig[] {
+    private parseProjects(projects: any[], suiteDefaults: SuiteDefaults): SuiteProjectConfig[] {
         if (!Array.isArray(projects)) {
             throw new Error('Projects must be an array in suite configuration');
         }
@@ -205,6 +310,12 @@ export class CSSuiteConfigLoader {
                 throw new Error(`Project "${project.name}" must have features defined`);
             }
 
+            // Merge project artifacts with suite defaults
+            const projectArtifacts: ArtifactConfig | undefined = project.artifacts ? {
+                ...suiteDefaults.artifacts,
+                ...project.artifacts
+            } : undefined;
+
             return {
                 name: project.name,
                 type: project.type || 'ui',
@@ -217,7 +328,11 @@ export class CSSuiteConfigLoader {
                 browser: project.browser,
                 headless: project.headless,
                 parallel: project.parallel,
-                retry: project.retry
+                retry: project.retry,
+                // New fields
+                artifacts: projectArtifacts,
+                logLevel: project.logLevel,
+                modules: project.modules
             };
         });
     }
@@ -288,6 +403,41 @@ export class CSSuiteConfigLoader {
             default:
                 return projects;
         }
+    }
+
+    /**
+     * Apply pipeline enforcements - called LAST in CI environment
+     * These settings CANNOT be overridden by user YAML in pipeline
+     * Ensures consistent behavior in CI/CD environments
+     */
+    private applyPipelineEnforcements(config: SuiteConfig): SuiteConfig {
+        console.log('[Suite] Applying pipeline enforced settings...');
+
+        // Enforce suite-level defaults
+        config.defaults.headless = PIPELINE_ENFORCED.headless;
+        config.defaults.logLevel = PIPELINE_ENFORCED.logLevel;
+        config.defaults.artifacts = { ...PIPELINE_ENFORCED.artifacts };
+
+        // Enforce reporting settings
+        config.reporting.autoOpen = PIPELINE_ENFORCED.autoOpen;
+        config.reporting.zipResults = PIPELINE_ENFORCED.zipResults;
+
+        // Enforce project-level settings
+        config.projects = config.projects.map(project => ({
+            ...project,
+            headless: PIPELINE_ENFORCED.headless,
+            logLevel: PIPELINE_ENFORCED.logLevel,
+            artifacts: { ...PIPELINE_ENFORCED.artifacts }
+        }));
+
+        console.log('[Suite] Pipeline enforcements applied:');
+        console.log(`  - headless: ${PIPELINE_ENFORCED.headless}`);
+        console.log(`  - autoOpen: ${PIPELINE_ENFORCED.autoOpen}`);
+        console.log(`  - zipResults: ${PIPELINE_ENFORCED.zipResults}`);
+        console.log(`  - logLevel: ${PIPELINE_ENFORCED.logLevel}`);
+        console.log(`  - artifacts: video=off, trace=off, screenshot=off, har=off`);
+
+        return config;
     }
 
     /**

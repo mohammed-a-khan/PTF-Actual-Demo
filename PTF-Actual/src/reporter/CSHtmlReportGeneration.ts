@@ -119,12 +119,21 @@ export class CSHtmlReportGenerator {
             CSReporter.info(`✨ HTML report generated: ${reportPath}`);
 
             // Auto-open HTML report in browser IMMEDIATELY after generation
-            // (if configured and NOT in suite mode)
-            // In suite mode, only the consolidated report should open (handled by CSSuiteOrchestrator)
+            // Conditions to skip auto-open:
+            // 1. In suite mode (CS_SUITE_MODE=true) - consolidated report handles it
+            // 2. In CI/Pipeline environment - never auto-open in CI
+            // 3. AUTO_OPEN_REPORT config is false
             const isSuiteMode = process.env.CS_SUITE_MODE === 'true';
+            const isCI = !!(process.env.CI || process.env.TF_BUILD ||
+                           process.env.SYSTEM_TEAMFOUNDATIONCOLLECTIONURI ||
+                           process.env.BUILD_BUILDID || process.env.GITHUB_ACTIONS ||
+                           process.env.JENKINS_URL || process.env.GITLAB_CI);
             const autoOpenReport = this.config.get('AUTO_OPEN_REPORT', 'true').toLowerCase() === 'true';
-            if (autoOpenReport && !isSuiteMode) {
+
+            if (autoOpenReport && !isSuiteMode && !isCI) {
                 this.openReportInBrowser(reportPath);
+            } else if (isCI) {
+                CSReporter.debug('Auto-open skipped: CI environment detected');
             }
 
             // Check configuration for report formats

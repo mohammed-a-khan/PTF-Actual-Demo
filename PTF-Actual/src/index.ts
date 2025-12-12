@@ -433,3 +433,7 @@ if (require.main === module) {
 }
 
 export { main };
+
+// Suite utilities - lightweight exports that don't impact CLI performance
+export { CSCIDetector, CIProvider } from './suite/CSCIDetector';
+export { ArtifactConfig, ArtifactSetting, LogLevel } from './suite/types/CSSuiteTypes';

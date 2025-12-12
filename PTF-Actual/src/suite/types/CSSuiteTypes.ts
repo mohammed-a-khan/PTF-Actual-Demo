@@ -28,6 +28,33 @@ export type ScenarioStatus = 'passed' | 'failed' | 'skipped' | 'pending';
 export type SuiteMode = 'all' | 'api-only' | 'ui-only';
 
 /**
+ * Log level type
+ */
+export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+
+/**
+ * Artifact setting type
+ */
+export type ArtifactSetting = 'off' | 'on-failure' | 'always';
+
+/**
+ * Artifact configuration for video, trace, screenshot, har
+ */
+export interface ArtifactConfig {
+    /** Video recording setting */
+    video?: ArtifactSetting;
+
+    /** Trace capture setting */
+    trace?: ArtifactSetting;
+
+    /** Screenshot capture setting */
+    screenshot?: ArtifactSetting;
+
+    /** HAR file capture setting */
+    har?: ArtifactSetting;
+}
+
+/**
  * Individual project configuration in suite
  */
 export interface SuiteProjectConfig {
@@ -66,6 +93,15 @@ export interface SuiteProjectConfig {
 
     /** Optional retry count override */
     retry?: number;
+
+    /** Optional artifact configuration override */
+    artifacts?: ArtifactConfig;
+
+    /** Optional log level override */
+    logLevel?: LogLevel;
+
+    /** Optional modules to load (e.g., 'database', 'api') */
+    modules?: string | string[];
 }
 
 /**
@@ -89,6 +125,12 @@ export interface SuiteDefaults {
 
     /** Default retry count */
     retry?: number;
+
+    /** Default artifact configuration */
+    artifacts?: ArtifactConfig;
+
+    /** Default log level */
+    logLevel?: LogLevel;
 }
 
 /**
@@ -117,6 +159,12 @@ export interface SuiteReportingConfig {
 
     /** Report formats to generate */
     formats: ('html' | 'json' | 'xlsx')[];
+
+    /** Zip results folder after execution (useful for pipeline artifacts) */
+    zipResults?: boolean;
+
+    /** Keep unzipped folder when zipping (default: true) */
+    keepUnzipped?: boolean;
 }
 
 /**
