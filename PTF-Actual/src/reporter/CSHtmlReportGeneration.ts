@@ -185,8 +185,8 @@ export class CSHtmlReportGenerator {
             CSReporter.info(`Opening report in browser: ${normalizedPath}`);
 
             if (process.platform === 'win32') {
-                // Windows: use 'start' command
-                spawn('cmd.exe', ['/c', 'start', '""', normalizedPath], {
+                // Windows: use 'start' command - quote path for spaces
+                spawn('cmd.exe', ['/c', 'start', '""', `"${normalizedPath}"`], {
                     detached: true,
                     stdio: 'ignore',
                     shell: true

@@ -1067,6 +1067,110 @@ export abstract class CSBasePage {
         CSReporter.debug('Emulated light mode');
     }
 
+    // =========================================================================
+    // FILE CHOOSER METHODS - Handle native file picker dialogs
+    // =========================================================================
+
+    /**
+     * Upload file via file chooser dialog
+     * Use this when clicking a button triggers a native file picker dialog
+     * @param triggerElement The element to click that triggers the file chooser (e.g., "Add files" button)
+     * @param filePath Full path to the file to upload
+     * @param timeout Timeout in milliseconds (default 30000)
+     */
+    public async uploadFileViaChooser(triggerElement: CSWebElement, filePath: string, timeout: number = 30000): Promise<void> {
+        CSReporter.info(`Uploading file via file chooser: ${filePath}`);
+
+        // Set up file chooser listener before clicking the trigger element
+        const fileChooserPromise = this.page.waitForEvent('filechooser', { timeout });
+
+        // Click the element that triggers the file chooser
+        await triggerElement.clickWithTimeout(timeout);
+
+        // Handle the file chooser
+        const fileChooser = await fileChooserPromise;
+        await fileChooser.setFiles(filePath);
+
+        await this.waitForPageLoad();
+        CSReporter.pass(`File uploaded via chooser: ${filePath}`);
+    }
+
+    /**
+     * Upload multiple files via file chooser dialog
+     * Use this when clicking a button triggers a native file picker dialog
+     * @param triggerElement The element to click that triggers the file chooser
+     * @param filePaths Array of full paths to files to upload
+     * @param timeout Timeout in milliseconds (default 30000)
+     */
+    public async uploadMultipleFilesViaChooser(triggerElement: CSWebElement, filePaths: string[], timeout: number = 30000): Promise<void> {
+        CSReporter.info(`Uploading ${filePaths.length} files via file chooser`);
+
+        for (const filePath of filePaths) {
+            // Set up file chooser listener before clicking the trigger element
+            const fileChooserPromise = this.page.waitForEvent('filechooser', { timeout });
+
+            // Click the element that triggers the file chooser
+            await triggerElement.clickWithTimeout(timeout);
+
+            // Handle the file chooser
+            const fileChooser = await fileChooserPromise;
+            await fileChooser.setFiles(filePath);
+
+            await this.waitForPageLoad();
+            CSReporter.debug(`File added via chooser: ${filePath}`);
+        }
+
+        CSReporter.pass(`${filePaths.length} files uploaded via chooser`);
+    }
+
+    /**
+     * Upload file via file chooser with custom action before choosing file
+     * Use this when you need to perform custom actions after file chooser opens
+     * @param triggerAction Function that triggers the file chooser
+     * @param filePath Full path to the file to upload
+     * @param timeout Timeout in milliseconds (default 30000)
+     */
+    public async uploadFileViaChooserWithAction(triggerAction: () => Promise<void>, filePath: string, timeout: number = 30000): Promise<void> {
+        CSReporter.info(`Uploading file via file chooser with custom action: ${filePath}`);
+
+        // Set up file chooser listener before executing the trigger action
+        const fileChooserPromise = this.page.waitForEvent('filechooser', { timeout });
+
+        // Execute the trigger action
+        await triggerAction();
+
+        // Handle the file chooser
+        const fileChooser = await fileChooserPromise;
+        await fileChooser.setFiles(filePath);
+
+        await this.waitForPageLoad();
+        CSReporter.pass(`File uploaded via chooser with custom action: ${filePath}`);
+    }
+
+    /**
+     * Get element count by XPath selector
+     * Uses Playwright locator to count elements matching the XPath
+     * @param xpath XPath selector
+     * @returns Number of elements matching the XPath
+     */
+    public async getElementCountByXPath(xpath: string): Promise<number> {
+        const count = await this.page.locator(`xpath=${xpath}`).count();
+        CSReporter.debug(`Element count for XPath "${xpath}": ${count}`);
+        return count;
+    }
+
+    /**
+     * Get element count by CSS selector
+     * Uses Playwright locator to count elements matching the CSS selector
+     * @param cssSelector CSS selector
+     * @returns Number of elements matching the selector
+     */
+    public async getElementCountByCSS(cssSelector: string): Promise<number> {
+        const count = await this.page.locator(cssSelector).count();
+        CSReporter.debug(`Element count for CSS "${cssSelector}": ${count}`);
+        return count;
+    }
+
     /**
      * Set default timeout for all operations
      */

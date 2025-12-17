@@ -248,9 +248,12 @@ export class CodegenOrchestrator {
         const featureDir = path.join(outputDir, 'features');
         const pageDir = path.join(outputDir, 'pages');
         const stepDir = path.join(outputDir, 'steps');
+        const configDir = path.join(outputDir, 'config');
+        const commonConfigDir = path.join(configDir, 'common');
+        const envConfigDir = path.join(configDir, 'environments');
 
-        // Always create feature, page, and step directories
-        [featureDir, pageDir, stepDir].forEach(dir => {
+        // Always create feature, page, step, and config directories
+        [featureDir, pageDir, stepDir, configDir, commonConfigDir, envConfigDir].forEach(dir => {
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
@@ -294,6 +297,457 @@ export class CodegenOrchestrator {
                 console.log(chalk.gray(`   ✓ ${component.fileName}`));
             }
         }
+
+        // Generate and write config files
+        await this.writeConfigFiles(configDir, commonConfigDir, envConfigDir);
+    }
+
+    /**
+     * Write configuration files for the generated project
+     */
+    private async writeConfigFiles(configDir: string, commonConfigDir: string, envConfigDir: string): Promise<void> {
+        // Extract project info from URL
+        const urlInfo = this.extractUrlInfo(this.options.url);
+
+        // Write global.env
+        const globalEnvPath = path.join(configDir, 'global.env');
+        fs.writeFileSync(globalEnvPath, this.generateGlobalEnv(urlInfo), 'utf-8');
+        console.log(chalk.gray(`   ✓ config/global.env`));
+
+        // Write common/common.env
+        const commonEnvPath = path.join(commonConfigDir, 'common.env');
+        fs.writeFileSync(commonEnvPath, this.generateCommonEnv(urlInfo), 'utf-8');
+        console.log(chalk.gray(`   ✓ config/common/common.env`));
+
+        // Write environment files
+        const environments = ['dev', 'qa', 'uat'];
+        for (const env of environments) {
+            const envPath = path.join(envConfigDir, `${env}.env`);
+            fs.writeFileSync(envPath, this.generateEnvironmentEnv(urlInfo, env), 'utf-8');
+            console.log(chalk.gray(`   ✓ config/environments/${env}.env`));
+        }
+    }
+
+    /**
+     * Extract project information from URL
+     */
+    private extractUrlInfo(url?: string): { baseUrl: string; projectName: string; domain: string; protocol: string } {
+        if (!url) {
+            return {
+                baseUrl: 'https://example.com',
+                projectName: 'myproject',
+                domain: 'example.com',
+                protocol: 'https'
+            };
+        }
+
+        try {
+            const urlObj = new URL(url);
+            const hostname = urlObj.hostname;
+            const protocol = urlObj.protocol.replace(':', '');
+
+            // Extract project name from hostname
+            // e.g., "opensource-demo.orangehrmlive.com" -> "orangehrm"
+            // e.g., "app.myproject.com" -> "myproject"
+            // e.g., "myproject-dev.company.com" -> "myproject"
+            let projectName = 'myproject';
+
+            // Try different extraction patterns
+            const hostParts = hostname.split('.');
+
+            if (hostParts.length >= 2) {
+                // Get the main domain part (not TLD)
+                const mainPart = hostParts[hostParts.length - 2];
+
+                // Check if it contains common patterns
+                if (hostname.includes('orangehrm')) {
+                    projectName = 'orangehrm';
+                } else if (hostname.includes('demo')) {
+                    // For demo sites, try to extract from subdomain
+                    projectName = hostParts[0].replace(/[-_]?(demo|test|dev|qa|staging|prod)[-_]?/gi, '') || mainPart;
+                } else if (hostParts[0] !== 'www' && hostParts[0] !== 'app') {
+                    // Use first subdomain if meaningful
+                    projectName = hostParts[0].replace(/[-_]?(dev|qa|staging|prod)[-_]?/gi, '') || mainPart;
+                } else {
+                    projectName = mainPart;
+                }
+            }
+
+            // Clean up project name
+            projectName = projectName.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+            // Build base URL (origin without path)
+            const baseUrl = urlObj.origin;
+
+            return {
+                baseUrl,
+                projectName: projectName || 'myproject',
+                domain: hostname,
+                protocol
+            };
+        } catch {
+            return {
+                baseUrl: url,
+                projectName: 'myproject',
+                domain: 'localhost',
+                protocol: 'https'
+            };
+        }
+    }
+
+    /**
+     * Generate global.env content with framework defaults
+     */
+    private generateGlobalEnv(urlInfo: { baseUrl: string; projectName: string; domain: string; protocol: string }): string {
+        const timestamp = new Date().toISOString().split('T')[0];
+
+        return `# ============================================================================
+#                CS TEST AUTOMATION FRAMEWORK - GLOBAL CONFIGURATION
+#                      Generated by CS Codegen on ${timestamp}
+# ============================================================================
+# This file contains all configuration properties used throughout the framework.
+# Properties support environment variable overrides and interpolation.
+# ============================================================================
+
+# ====================================================================================
+# CORE FRAMEWORK CONFIGURATION
+# ====================================================================================
+
+# Project and environment settings
+PROJECT=${urlInfo.projectName}
+ENVIRONMENT=dev
+BASE_URL=${urlInfo.baseUrl}
+
+# ====================================================================================
+# BROWSER CONFIGURATION
+# ====================================================================================
+
+# Browser type: chrome | firefox | webkit | edge
+BROWSER=chrome
+
+# Run browser in headless mode
+HEADLESS=false
+
+# Browser viewport settings
+BROWSER_VIEWPORT_WIDTH=1920
+BROWSER_VIEWPORT_HEIGHT=1080
+
+# Browser launch settings
+BROWSER_LAUNCH_TIMEOUT=30000
+BROWSER_DEVTOOLS=false
+BROWSER_SLOWMO=0
+
+# Browser security settings
+BROWSER_IGNORE_HTTPS_ERRORS=true
+
+# Browser locale and timezone
+BROWSER_LOCALE=en-US
+BROWSER_TIMEZONE=America/New_York
+
+# ====================================================================================
+# TIMEOUTS
+# ====================================================================================
+
+# Default timeout for all operations in milliseconds
+TIMEOUT=30000
+
+# Specific timeout configurations
+BROWSER_ACTION_TIMEOUT=10000
+BROWSER_NAVIGATION_TIMEOUT=30000
+BROWSER_AUTO_WAIT_TIMEOUT=5000
+ELEMENT_TIMEOUT=10000
+
+# ====================================================================================
+# BROWSER INSTANCE MANAGEMENT
+# ====================================================================================
+
+# Browser reuse configuration
+BROWSER_REUSE_ENABLED=true
+BROWSER_REUSE_CLEAR_STATE=true
+
+# Browser health settings
+BROWSER_AUTO_RESTART_ON_CRASH=true
+BROWSER_MAX_RESTART_ATTEMPTS=3
+
+# ====================================================================================
+# MEDIA CAPTURE CONFIGURATION
+# ====================================================================================
+
+# Video recording: off | on | retain-on-failure | on-first-retry
+BROWSER_VIDEO=retain-on-failure
+VIDEO_DIR=./videos
+
+# Screenshot configuration
+SCREENSHOT_CAPTURE_MODE=on-failure
+SCREENSHOT_ON_FAILURE=true
+
+# Browser trace recording
+TRACE_CAPTURE_MODE=on-failure
+
+# Framework log level: DEBUG | INFO | WARN | ERROR
+LOG_LEVEL=INFO
+
+# ====================================================================================
+# PARALLEL EXECUTION
+# ====================================================================================
+
+# Enable parallel execution
+PARALLEL=false
+MAX_PARALLEL_WORKERS=4
+PARALLEL_WORKERS=3
+
+# ====================================================================================
+# TEST EXECUTION CONFIGURATION
+# ====================================================================================
+
+# Feature file paths
+FEATURES=codegen/features/*.feature
+FEATURE_PATH=codegen/features
+
+# Test retry configuration
+RETRY_COUNT=2
+
+# Step definition paths
+STEP_DEFINITIONS_PATH=codegen/steps
+
+# ====================================================================================
+# ELEMENT INTERACTION
+# ====================================================================================
+
+# Number of retries for element operations
+ELEMENT_RETRY_COUNT=3
+ELEMENT_CLEAR_BEFORE_TYPE=true
+
+# Wait for spinners to disappear before actions
+WAIT_FOR_SPINNERS=true
+
+# ====================================================================================
+# SELF-HEALING & AI
+# ====================================================================================
+
+# Enable self-healing for broken locators
+SELF_HEALING_ENABLED=true
+
+# Enable AI-powered features
+AI_ENABLED=false
+AI_CONFIDENCE_THRESHOLD=0.7
+
+# ====================================================================================
+# REPORTING CONFIGURATION
+# ====================================================================================
+
+# Report output directory
+REPORTS_BASE_DIR=./reports
+REPORTS_CREATE_TIMESTAMP_FOLDER=true
+
+# Report types to generate
+REPORT_TYPES=html
+
+# Generate Excel and PDF reports
+GENERATE_EXCEL_REPORT=true
+GENERATE_PDF_REPORT=true
+
+# ====================================================================================
+# INTELLIGENT STEP EXECUTION
+# ====================================================================================
+
+# Enable intelligent step execution (AI-powered)
+INTELLIGENT_STEP_EXECUTION_ENABLED=false
+`;
+    }
+
+    /**
+     * Generate common/common.env content with project-specific settings
+     */
+    private generateCommonEnv(urlInfo: { baseUrl: string; projectName: string; domain: string; protocol: string }): string {
+        const projectNameUpper = urlInfo.projectName.toUpperCase();
+        const timestamp = new Date().toISOString().split('T')[0];
+
+        return `# ============================================================================
+#              ${projectNameUpper} PROJECT - COMMON CONFIGURATION
+#                      Generated by CS Codegen on ${timestamp}
+# ============================================================================
+# This file contains project-specific settings shared across all environments.
+# ============================================================================
+
+# ====================================================================================
+# PROJECT IDENTIFICATION
+# ====================================================================================
+
+PROJECT_NAME=${projectNameUpper}
+PROJECT_TYPE=web
+PROJECT_VERSION=1.0.0
+
+# ====================================================================================
+# PROJECT URLs (with interpolation support)
+# ====================================================================================
+
+# Base URL supports {ENVIRONMENT} placeholder for environment-specific URLs
+# Examples:
+#   https://${urlInfo.projectName}.{ENVIRONMENT}.company.com
+#   https://{ENVIRONMENT}-${urlInfo.projectName}.company.com
+BASE_URL=${urlInfo.baseUrl}
+API_BASE_URL=${urlInfo.protocol}://api.${urlInfo.domain}
+
+# ====================================================================================
+# PROJECT FEATURES
+# ====================================================================================
+
+# Default feature file path pattern
+DEFAULT_FEATURES=codegen/features/**/*.feature
+
+# Default tags to run (exclude work-in-progress)
+DEFAULT_TAGS=@${urlInfo.projectName} and not @wip
+
+# ====================================================================================
+# STEP DEFINITIONS
+# ====================================================================================
+
+# Step definition paths (semicolon separated)
+STEP_DEFINITIONS_PATH=codegen/steps
+
+# Enable common steps from framework
+COMMON_STEPS_ENABLED=true
+
+# ====================================================================================
+# PROJECT TIMEOUTS
+# ====================================================================================
+
+# Project-specific timeouts (override global defaults if needed)
+DEFAULT_TIMEOUT=30000
+PAGE_LOAD_TIMEOUT=60000
+
+# ====================================================================================
+# PROJECT CREDENTIALS (use encrypted values in production)
+# ====================================================================================
+
+# Default test user credentials
+# Use ENCRYPTED: prefix for encrypted passwords
+DEFAULT_USERNAME=
+DEFAULT_PASSWORD=
+
+# Admin credentials (if applicable)
+ADMIN_USERNAME=
+ADMIN_PASSWORD=
+
+# ====================================================================================
+# PROJECT BROWSER SETTINGS
+# ====================================================================================
+
+# Project-specific viewport (override if different from global)
+BROWSER_VIEWPORT_WIDTH=1920
+BROWSER_VIEWPORT_HEIGHT=1080
+
+# ====================================================================================
+# PROJECT FEATURE FLAGS
+# ====================================================================================
+
+# Feature flags for conditional test execution
+# Format: flagName:value;flagName2:value2
+FEATURE_FLAGS=
+`;
+    }
+
+    /**
+     * Generate environment-specific .env file
+     */
+    private generateEnvironmentEnv(
+        urlInfo: { baseUrl: string; projectName: string; domain: string; protocol: string },
+        environment: string
+    ): string {
+        const envUpper = environment.toUpperCase();
+        const envLower = environment.toLowerCase();
+        const projectNameUpper = urlInfo.projectName.toUpperCase();
+        const timestamp = new Date().toISOString().split('T')[0];
+
+        // Environment-specific settings
+        const envSettings: Record<string, { headless: string; debug: string; logLevel: string; devtools: string; slowmo: string }> = {
+            dev: { headless: 'false', debug: 'true', logLevel: 'DEBUG', devtools: 'true', slowmo: '0' },
+            qa: { headless: 'true', debug: 'false', logLevel: 'INFO', devtools: 'false', slowmo: '0' },
+            uat: { headless: 'true', debug: 'false', logLevel: 'INFO', devtools: 'false', slowmo: '0' }
+        };
+
+        const settings = envSettings[envLower] || envSettings.dev;
+
+        // Generate environment-specific URL
+        let envUrl = urlInfo.baseUrl;
+        // Try to create environment-specific URL pattern
+        // e.g., https://app-dev.example.com or https://dev.app.example.com
+        try {
+            const urlObj = new URL(urlInfo.baseUrl);
+            if (!urlObj.hostname.includes(envLower)) {
+                // Add environment prefix to hostname
+                const hostParts = urlObj.hostname.split('.');
+                if (hostParts[0] === 'www') {
+                    hostParts[0] = envLower;
+                } else {
+                    hostParts.unshift(envLower);
+                }
+                urlObj.hostname = hostParts.join('.');
+                envUrl = urlObj.origin;
+            }
+        } catch {
+            // Keep original URL if parsing fails
+            envUrl = urlInfo.baseUrl;
+        }
+
+        return `# ============================================================================
+#              ${projectNameUpper} - ${envUpper} ENVIRONMENT CONFIGURATION
+#                      Generated by CS Codegen on ${timestamp}
+# ============================================================================
+# Environment-specific settings for ${envUpper} environment.
+# These override common and global settings.
+# ============================================================================
+
+# ====================================================================================
+# ENVIRONMENT IDENTIFICATION
+# ====================================================================================
+
+ENVIRONMENT_NAME=${this.toTitleCase(environment)}
+ENVIRONMENT_TYPE=${envLower}
+
+# ====================================================================================
+# ENVIRONMENT URLs
+# ====================================================================================
+
+# ${envUpper} environment URLs
+BASE_URL=${envUrl}
+API_BASE_URL=${urlInfo.protocol}://api-${envLower}.${urlInfo.domain}
+
+# ====================================================================================
+# ENVIRONMENT BROWSER SETTINGS
+# ====================================================================================
+
+# Browser configuration for ${envUpper}
+HEADLESS=${settings.headless}
+DEBUG_MODE=${settings.debug}
+LOG_LEVEL=${settings.logLevel}
+BROWSER_DEVTOOLS=${settings.devtools}
+BROWSER_SLOWMO=${settings.slowmo}
+
+# ====================================================================================
+# ENVIRONMENT FEATURE FLAGS
+# ====================================================================================
+
+# ${envUpper}-specific feature flags
+FEATURE_FLAGS=
+
+# ====================================================================================
+# ENVIRONMENT TEST DATA
+# ====================================================================================
+
+# Test data configuration for ${envUpper}
+TEST_USER_PREFIX=${envLower}_test_
+TEST_DATA_CLEANUP=${envLower === 'dev' ? 'true' : 'false'}
+
+# ====================================================================================
+# ENVIRONMENT TIMEOUTS
+# ====================================================================================
+
+# ${envUpper}-specific timeouts${envLower === 'dev' ? ' (more lenient for debugging)' : ''}
+DEFAULT_TIMEOUT=${envLower === 'dev' ? '60000' : '30000'}
+BROWSER_ACTION_TIMEOUT=${envLower === 'dev' ? '15000' : '10000'}
+`;
     }
 
     /**
@@ -308,14 +762,19 @@ export class CodegenOrchestrator {
         console.log(chalk.white(`  Feature Files:      ${features.length}`));
         console.log(chalk.white(`  Page Objects:       ${code.pageObjects.length}`));
         console.log(chalk.white(`  Step Definitions:   ${code.stepDefinitions.length}`));
+        console.log(chalk.white(`  Config Files:       5 (global + common + 3 environments)`));
         console.log(chalk.white(`  Total Actions:      ${totalActions}`));
 
         console.log(chalk.gray('\n━'.repeat(60)));
         console.log(chalk.green('✅ Your test is ready to run!'));
         console.log(chalk.white(`\n📁 Output directory: ${this.options.outputDir}`));
-        console.log(chalk.gray('   ├── features/     (Gherkin scenarios)'));
-        console.log(chalk.gray('   ├── pages/        (Page Objects)'));
-        console.log(chalk.gray('   └── steps/        (Step Definitions)\n'));
+        console.log(chalk.gray('   ├── features/           (Gherkin scenarios)'));
+        console.log(chalk.gray('   ├── pages/              (Page Objects)'));
+        console.log(chalk.gray('   ├── steps/              (Step Definitions)'));
+        console.log(chalk.gray('   └── config/'));
+        console.log(chalk.gray('       ├── global.env      (Framework defaults)'));
+        console.log(chalk.gray('       ├── common/         (Project settings)'));
+        console.log(chalk.gray('       └── environments/   (dev, qa, uat)\n'));
     }
 
     /**

@@ -306,69 +306,169 @@ export class DirectCodeGenerator {
      * Analyzes the selector to find the most descriptive part
      */
     private extractNameFromCSSSelector(selector: string): string {
-        // Try to find meaningful class names (not utility classes)
-        const classMatches = selector.match(/\.([a-zA-Z][\w-]*)/g);
-        if (classMatches && classMatches.length > 0) {
-            // Filter out common utility/layout classes
-            const utilityPrefixes = ['oxd-', 'btn-', 'form-', 'input-', 'flex-', 'grid-', 'col-', 'row-', 'container-', 'wrapper-', 'box-'];
-            const meaningfulClasses = classMatches
-                .map(c => c.substring(1)) // Remove the dot
-                .filter(c => !utilityPrefixes.some(prefix => c.startsWith(prefix)));
-
-            if (meaningfulClasses.length > 0) {
-                // Use the first meaningful class name
-                return meaningfulClasses[0];
-            }
-
-            // If no meaningful classes, use the last class (often most specific)
-            const lastClass = classMatches[classMatches.length - 1].substring(1);
-            // Remove common prefixes
-            const withoutPrefix = lastClass.replace(/^(oxd-|btn-|form-|input-)/, '');
-            if (withoutPrefix) {
-                return withoutPrefix;
-            }
-        }
-
-        // Try to find ID
+        // Try to find ID first (most specific)
         const idMatch = selector.match(/#([a-zA-Z][\w-]*)/);
         if (idMatch) {
-            return idMatch[1];
+            return this.cleanName(idMatch[1]);
         }
 
-        // Try to find data attributes with meaningful names
-        const dataAttrMatch = selector.match(/\[data-[\w-]+=["']([^"']+)["']\]/);
-        if (dataAttrMatch) {
-            return this.cleanName(dataAttrMatch[1]);
-        }
-
-        // Try to find aria-label
+        // Try to find aria-label (semantic name)
         const ariaLabelMatch = selector.match(/\[aria-label=["']([^"']+)["']\]/);
         if (ariaLabelMatch) {
             return this.cleanName(ariaLabelMatch[1]);
         }
 
-        // Try to extract element type (button, input, etc.)
-        const elementMatch = selector.match(/^([a-z]+)[\[\.\:#\s>+~]/);
-        if (elementMatch && elementMatch[1] !== 'div' && elementMatch[1] !== 'span') {
-            return `${elementMatch[1]}Element`;
+        // Try to find data-testid (semantic identifier)
+        const testIdMatch = selector.match(/\[data-testid=["']([^"']+)["']\]/);
+        if (testIdMatch) {
+            return this.cleanName(testIdMatch[1]);
         }
 
-        // Last resort: look for the most specific part of the selector
-        // If selector has child combinators, use the last part
-        const parts = selector.split(/\s*>\s*/);
-        if (parts.length > 1) {
-            const lastPart = parts[parts.length - 1].trim();
-            // Try to extract class from last part
-            const lastClassMatch = lastPart.match(/\.([a-zA-Z][\w-]*)/);
-            if (lastClassMatch) {
-                const className = lastClassMatch[1].replace(/^(oxd-|btn-|form-|input-)/, '');
-                if (className) {
-                    return className;
+        // Try to find role attribute with context
+        const roleMatch = selector.match(/\[role=["']([^"']+)["']\]/);
+        if (roleMatch) {
+            const role = roleMatch[1];
+            // Extract additional context from selector if present
+            const nameMatch = selector.match(/\[(?:aria-label|name)=["']([^"']+)["']\]/);
+            if (nameMatch) {
+                return this.cleanName(`${nameMatch[1]} ${role}`);
+            }
+            return this.cleanName(role);
+        }
+
+        // Extract context from parent elements in selector
+        const contextName = this.extractContextFromSelector(selector);
+        if (contextName) {
+            return contextName;
+        }
+
+        // Try to find meaningful class names (not utility classes)
+        const classMatches = selector.match(/\.([a-zA-Z][\w-]*)/g);
+        if (classMatches && classMatches.length > 0) {
+            // Filter out common utility/layout classes and extract semantic meaning
+            const utilityPrefixes = ['oxd-', 'btn-', 'form-', 'input-', 'flex-', 'grid-', 'col-', 'row-', 'container-', 'wrapper-', 'box-', 'css-'];
+            const meaningfulClasses = classMatches
+                .map(c => c.substring(1)) // Remove the dot
+                .filter(c => !utilityPrefixes.some(prefix => c.startsWith(prefix)))
+                .filter(c => c !== 'icon' && c !== 'button' && c !== 'input'); // Filter generic names
+
+            if (meaningfulClasses.length > 0) {
+                return this.cleanName(meaningfulClasses[0]);
+            }
+
+            // If only utility classes, extract the semantic part
+            const lastClass = classMatches[classMatches.length - 1].substring(1);
+            const semanticPart = this.extractSemanticFromClassName(lastClass);
+            if (semanticPart) {
+                return semanticPart;
+            }
+        }
+
+        // If all else fails, generate a descriptive generic name based on element type
+        return this.generateDescriptiveGenericName(selector);
+    }
+
+    /**
+     * Extract context from parent elements in selector chain
+     */
+    private extractContextFromSelector(selector: string): string | null {
+        // Split by child combinator and analyze parent context
+        const parts = selector.split(/\s*>\s*|\s+/);
+
+        // Look for context words in the selector
+        const contextPatterns = [
+            { pattern: /select|dropdown|picker/i, suffix: 'Dropdown' },
+            { pattern: /checkbox|check/i, suffix: 'Checkbox' },
+            { pattern: /table|grid/i, suffix: 'Table' },
+            { pattern: /modal|dialog|popup/i, suffix: 'Modal' },
+            { pattern: /search/i, suffix: 'Search' },
+            { pattern: /filter/i, suffix: 'Filter' },
+            { pattern: /menu|nav/i, suffix: 'Menu' },
+            { pattern: /card/i, suffix: 'Card' },
+            { pattern: /form/i, suffix: 'Form' },
+            { pattern: /header/i, suffix: 'Header' },
+            { pattern: /footer/i, suffix: 'Footer' },
+            { pattern: /sidebar/i, suffix: 'Sidebar' },
+        ];
+
+        for (const part of parts) {
+            for (const { pattern, suffix } of contextPatterns) {
+                if (pattern.test(part)) {
+                    // Check if it's an icon within this context
+                    if (selector.includes('icon')) {
+                        return `${suffix.toLowerCase()}Icon`;
+                    }
+                    return suffix.toLowerCase() + 'Element';
                 }
             }
         }
 
-        // If all else fails, generate a generic name
+        return null;
+    }
+
+    /**
+     * Extract semantic meaning from class name
+     */
+    private extractSemanticFromClassName(className: string): string | null {
+        // Remove common prefixes
+        let cleaned = className.replace(/^(oxd-|btn-|form-|input-|css-)/, '');
+
+        // Map common patterns to semantic names
+        const patterns: { [key: string]: string } = {
+            'select-text': 'dropdownText',
+            'select-wrapper': 'dropdownWrapper',
+            'checkbox-input': 'checkboxInput',
+            'checkbox-wrapper': 'checkboxWrapper',
+            'table-card': 'tableCard',
+            'table-cell': 'tableCell',
+            'input-group': 'inputGroup',
+            'button': 'actionButton',
+            'icon': 'iconElement',
+        };
+
+        for (const [pattern, name] of Object.entries(patterns)) {
+            if (cleaned.includes(pattern)) {
+                return name;
+            }
+        }
+
+        // If cleaned name is meaningful (not just generic)
+        if (cleaned && cleaned.length > 3 && !['div', 'span', 'icon'].includes(cleaned)) {
+            return this.toCamelCase(cleaned);
+        }
+
+        return null;
+    }
+
+    /**
+     * Generate a descriptive generic name based on selector analysis
+     */
+    private generateDescriptiveGenericName(selector: string): string {
+        // Analyze selector for hints
+        if (selector.includes('checkbox')) {
+            return `checkbox${this.elementCounter++}`;
+        }
+        if (selector.includes('select') || selector.includes('dropdown')) {
+            return `dropdown${this.elementCounter++}`;
+        }
+        if (selector.includes('icon')) {
+            // Try to determine icon type from context
+            if (selector.includes('checkbox')) return `checkboxIcon${this.elementCounter++}`;
+            if (selector.includes('select')) return `dropdownIcon${this.elementCounter++}`;
+            if (selector.includes('table')) return `tableIcon${this.elementCounter++}`;
+            if (selector.includes('action')) return `actionIcon${this.elementCounter++}`;
+            return `actionIcon${this.elementCounter++}`;
+        }
+        if (selector.includes('button')) {
+            return `actionButton${this.elementCounter++}`;
+        }
+        if (selector.includes('input')) {
+            return `inputField${this.elementCounter++}`;
+        }
+        if (selector.includes('listbox') || selector.includes('option')) {
+            return `listboxOption${this.elementCounter++}`;
+        }
+
         return `element${this.elementCounter++}`;
     }
 
@@ -560,104 +660,293 @@ export class DirectCodeGenerator {
     }
 
     /**
-     * Build page object content
+     * Build page object content - Production quality code generation
      */
     private buildPageContent(page: PageData): string {
+        // Proper imports matching production code patterns
         let content = `import { CSBasePage, CSPage, CSGetElement } from '@mdakhan.mak/cs-playwright-test-framework/core';\n`;
-        content += `import { CSWebElement } from '@mdakhan.mak/cs-playwright-test-framework/element';\n`;
-        content += `import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporting';\n`;
-        content += `import { expect } from '@mdakhan.mak/cs-playwright-test-framework/assertions';\n\n`;
+        content += `import { CSWebElement, CSElementFactory } from '@mdakhan.mak/cs-playwright-test-framework/element';\n`;
+        content += `import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';\n\n`;
 
-        content += `@CSPage('${page.name.toLowerCase()}')\n`;
+        // Class documentation
+        content += `/**\n`;
+        content += ` * ${page.name} Page Object\n`;
+        content += ` * Generated by CS Playwright Test Framework\n`;
+        content += ` */\n`;
+        content += `@CSPage('${this.toKebabCase(page.name)}')\n`;
         content += `export class ${page.name}Page extends CSBasePage {\n\n`;
 
-        // Add elements
+        // Add section header for elements
+        content += `    // ===================================================================\n`;
+        content += `    // PAGE ELEMENTS\n`;
+        content += `    // ===================================================================\n\n`;
+
+        // Add elements with proper decorators and alternative locators
         for (const element of page.elements) {
-            content += `    // ${element.description}\n`;
+            const alternativeLocators = this.generateAlternativeLocators(element);
+            const primaryLocator = this.determinePrimaryLocator(element.selector);
+
             content += `    @CSGetElement({\n`;
-            content += `        css: '${element.selector}',\n`;
-            content += `        description: '${element.description}',\n`;
+            content += `        ${primaryLocator.type}: '${this.escapeString(primaryLocator.value)}',\n`;
+            content += `        description: '${this.escapeString(element.description)}',\n`;
             content += `        waitForVisible: true,\n`;
-            content += `        selfHeal: true\n`;
+            content += `        selfHeal: true${alternativeLocators.length > 0 ? ',' : ''}\n`;
+            if (alternativeLocators.length > 0) {
+                content += `        alternativeLocators: [${alternativeLocators.map(l => `'${this.escapeString(l)}'`).join(', ')}]\n`;
+            }
             content += `    })\n`;
             content += `    public ${element.name}!: CSWebElement;\n\n`;
         }
 
+        // Add initializeElements method
         content += `    protected initializeElements(): void {\n`;
         content += `        CSReporter.debug('${page.name}Page elements initialized');\n`;
         content += `    }\n\n`;
 
-        // Add methods
+        // Add section header for methods
+        content += `    // ===================================================================\n`;
+        content += `    // PAGE METHODS - Using Framework Wrapper Methods\n`;
+        content += `    // ===================================================================\n\n`;
+
+        // Add methods with proper framework wrapper patterns
         for (const method of page.methods) {
             const params = method.params.map(p => `${p.name}: ${p.type}`).join(', ');
             content += `    /**\n`;
             content += `     * ${method.gherkinStep}\n`;
             content += `     */\n`;
             content += `    public async ${method.name}(${params}): Promise<void> {\n`;
-            content += `        CSReporter.info('${method.gherkinStep}');\n`;
+            content += `        CSReporter.info('${this.escapeString(method.gherkinStep)}');\n\n`;
 
-            // Generate implementation based on action
+            // Generate implementation based on action using framework wrapper methods
             if (method.action === 'goto') {
-                // Navigation uses page.goto()
-                content += `        await this.page.goto(${method.params.length > 0 ? method.params[0].name : "''"});\n`;
+                // Navigation uses page.goto() with waitForPageLoad
+                const urlParam = method.params.length > 0 ? method.params[0].name : "''";
+                content += `        await this.page.goto(${urlParam});\n`;
+                content += `        await this.waitForPageLoad();\n`;
             } else if (method.action === 'fill') {
-                content += `        await this.${method.element}.fill(${method.params[0].name});\n`;
+                // Use framework wrapper methods with waitForVisible
+                content += `        await this.${method.element}.waitForVisible(10000);\n`;
+                content += `        await this.${method.element}.fillWithTimeout(${method.params[0].name}, 10000);\n`;
             } else if (method.action === 'click') {
-                content += `        await this.${method.element}.click();\n`;
+                // Use framework wrapper methods with waitForVisible
+                content += `        await this.${method.element}.waitForVisible(10000);\n`;
+                content += `        await this.${method.element}.clickWithTimeout(10000);\n`;
+                content += `        await this.waitForPageLoad();\n`;
             } else if (method.action === 'press' && method.pressKey) {
                 // Handle press() with key argument
+                content += `        await this.${method.element}.waitForVisible(10000);\n`;
                 content += `        await this.${method.element}.press('${method.pressKey}');\n`;
             } else if (method.action.includes('toBeVisible')) {
-                content += `        await expect().toBeVisible(this.${method.element});\n`;
+                // Verification with proper pass/fail pattern
+                content += `        const isVisible = await this.${method.element}.isVisibleWithTimeout(10000);\n\n`;
+                content += `        if (isVisible) {\n`;
+                content += `            CSReporter.pass('Element is visible');\n`;
+                content += `        } else {\n`;
+                content += `            CSReporter.fail('Element is not visible');\n`;
+                content += `            throw new Error('Element visibility verification failed');\n`;
+                content += `        }\n`;
             } else if (method.action.includes('toContainText')) {
-                // Use parameter if method has params, otherwise hardcode text
+                // Text verification with proper pass/fail pattern
                 const textParam = method.params.length > 0 ? method.params[0].name : "'text'";
-                content += `        await expect().toContainText(this.${method.element}, ${textParam});\n`;
+                content += `        await this.${method.element}.waitForVisible(10000);\n`;
+                content += `        const actualText = await this.${method.element}.textContentWithTimeout(5000);\n\n`;
+                content += `        if (actualText?.includes(${textParam})) {\n`;
+                content += `            CSReporter.pass(\`Element contains expected text: \${${textParam}}\`);\n`;
+                content += `        } else {\n`;
+                content += `            CSReporter.fail(\`Element does not contain expected text. Expected: \${${textParam}}, Actual: \${actualText}\`);\n`;
+                content += `            throw new Error('Text verification failed');\n`;
+                content += `        }\n`;
             } else {
+                // Default action with framework wrapper
+                content += `        await this.${method.element}.waitForVisible(10000);\n`;
                 content += `        await this.${method.element}.${method.action}();\n`;
             }
 
-            content += `        CSReporter.pass('${method.gherkinStep} completed');\n`;
+            content += `\n        CSReporter.pass('${this.escapeString(method.gherkinStep)} completed');\n`;
             content += `    }\n\n`;
         }
 
-        content += `}\n`;
+        content += `}\n\n`;
+        content += `export default ${page.name}Page;\n`;
         return content;
     }
 
     /**
-     * Build step definitions content
+     * Determine primary locator type and value from selector
+     */
+    private determinePrimaryLocator(selector: string): { type: string; value: string } {
+        // If it's already an XPath, use xpath
+        if (selector.startsWith('/') || selector.startsWith('(//')) {
+            return { type: 'xpath', value: selector };
+        }
+
+        // If it has attributes like [role=], convert to xpath for better reliability
+        if (selector.includes('[role=') || selector.includes('[aria-')) {
+            // Convert CSS attribute selector to XPath
+            const xpathSelector = this.cssToXPath(selector);
+            return { type: 'xpath', value: xpathSelector };
+        }
+
+        // Default to CSS for simple selectors
+        return { type: 'css', value: selector };
+    }
+
+    /**
+     * Convert simple CSS selector to XPath
+     */
+    private cssToXPath(css: string): string {
+        // Handle [role="..."] patterns
+        let xpath = css;
+
+        // Replace [role="value"] with [@role="value"]
+        xpath = xpath.replace(/\[role="([^"]+)"\]/g, '[@role="$1"]');
+
+        // Replace [aria-label="value"] with [@aria-label="value"]
+        xpath = xpath.replace(/\[aria-label="([^"]+)"\]/g, '[@aria-label="$1"]');
+
+        // If it's a pure attribute selector, wrap with //*
+        if (xpath.startsWith('[')) {
+            xpath = '//*' + xpath;
+        }
+
+        return xpath;
+    }
+
+    /**
+     * Generate alternative locators for self-healing
+     */
+    private generateAlternativeLocators(element: Element): string[] {
+        const alternatives: string[] = [];
+        const selector = element.selector;
+
+        // Generate CSS alternative if primary is XPath
+        if (selector.startsWith('/') || selector.startsWith('(//')) {
+            // Try to generate CSS equivalent
+            const cssEquivalent = this.xpathToCssHint(selector);
+            if (cssEquivalent) {
+                alternatives.push(`css:${cssEquivalent}`);
+            }
+        } else {
+            // If primary is CSS, add XPath alternative
+            const xpathEquivalent = this.cssToXPath(selector);
+            if (xpathEquivalent !== selector) {
+                alternatives.push(`xpath:${xpathEquivalent}`);
+            }
+        }
+
+        // Add text-based alternative if element has a description
+        if (element.description && !element.description.includes('element')) {
+            const textSelector = `//*[contains(text(), '${this.escapeString(element.description)}')]`;
+            alternatives.push(`xpath:${textSelector}`);
+        }
+
+        return alternatives;
+    }
+
+    /**
+     * Try to convert XPath to CSS hint for alternative locator
+     */
+    private xpathToCssHint(xpath: string): string | null {
+        // Extract role from XPath
+        const roleMatch = xpath.match(/@role="([^"]+)"/);
+        if (roleMatch) {
+            return `[role="${roleMatch[1]}"]`;
+        }
+
+        // Extract aria-label from XPath
+        const ariaMatch = xpath.match(/@aria-label="([^"]+)"/);
+        if (ariaMatch) {
+            return `[aria-label="${ariaMatch[1]}"]`;
+        }
+
+        return null;
+    }
+
+    /**
+     * Escape string for use in single-quoted strings in generated code
+     * Only escapes single quotes and backslashes - double quotes are fine in single-quoted strings
+     */
+    private escapeString(str: string): string {
+        return str
+            .replace(/\\/g, '\\\\')
+            .replace(/'/g, "\\'")
+            .replace(/\n/g, '\\n')
+            .replace(/\r/g, '\\r');
+    }
+
+    /**
+     * Convert to kebab-case for page identifiers
+     */
+    private toKebabCase(str: string): string {
+        return str
+            .replace(/([a-z])([A-Z])/g, '$1-$2')
+            .replace(/[\s_]+/g, '-')
+            .toLowerCase();
+    }
+
+    /**
+     * Build step definitions content - Production quality with proper patterns
      */
     private buildStepsContent(page: PageData): string {
+        const pageIdentifier = this.toKebabCase(page.name);
+        const pagePropertyName = this.toCamelCase(page.name) + 'Page';
+
+        // Proper imports matching production code patterns
         let content = `import {\n`;
         content += `    CSBDDStepDef, Page, StepDefinitions,\n`;
         content += `    CSScenarioContext, CSFeatureContext, CSBDDContext\n`;
         content += `} from '@mdakhan.mak/cs-playwright-test-framework/bdd';\n`;
-        content += `import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporting';\n`;
+        content += `import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';\n`;
         content += `import { ${page.name}Page } from '../pages/${page.name}Page';\n\n`;
 
+        // Class documentation
+        content += `/**\n`;
+        content += ` * ${page.name} Step Definitions\n`;
+        content += ` * Generated by CS Playwright Test Framework\n`;
+        content += ` */\n`;
         content += `@StepDefinitions\n`;
         content += `export class ${page.name}Steps {\n\n`;
 
-        content += `    @Page('${page.name.toLowerCase()}')\n`;
-        content += `    private ${this.toCamelCase(page.name)}Page!: ${page.name}Page;\n\n`;
+        // Page injection with proper decorator
+        content += `    @Page('${pageIdentifier}')\n`;
+        content += `    private ${pagePropertyName}!: ${page.name}Page;\n\n`;
 
+        // Context instances
         content += `    private scenarioContext = CSScenarioContext.getInstance();\n`;
         content += `    private featureContext = CSFeatureContext.getInstance();\n`;
         content += `    private bddContext = CSBDDContext.getInstance();\n\n`;
 
-        // Add step methods
+        // Add section header for step definitions
+        content += `    // ===================================================================\n`;
+        content += `    // STEP DEFINITIONS - Using Cucumber Expressions\n`;
+        content += `    // ===================================================================\n\n`;
+
+        // Add step methods with proper Cucumber expressions (NOT regex)
         for (const method of page.methods) {
             const gherkinText = method.gherkinStep.replace(/^(Given|When|Then)\s+/, '');
+
+            // Convert to Cucumber expression pattern (NOT regex!)
+            // Replace quoted strings with {string} parameter
             const cucumberPattern = gherkinText.replace(/"([^"]+)"/g, '{string}');
 
-            const params = method.params.map(p => `${p.name}: ${p.type}`).join(', ');
+            // Generate step method name that's unique (avoid collision with page method)
+            const stepMethodName = `step${this.toPascalCase(method.name)}`;
 
-            content += `    @CSBDDStepDef('${cucumberPattern}')\n`;
-            content += `    async ${method.name}(${params}) {\n`;
-            content += `        CSReporter.info('${gherkinText}');\n`;
-            content += `        await this.${this.toCamelCase(page.name)}Page.${method.name}(${method.params.map(p => p.name).join(', ')});\n`;
-            content += `        CSReporter.pass('Step completed: ${gherkinText}');\n`;
+            const params = method.params.map(p => `${p.name}: ${p.type}`).join(', ');
+            const paramNames = method.params.map(p => p.name).join(', ');
+
+            content += `    /**\n`;
+            content += `     * Step: ${gherkinText}\n`;
+            content += `     */\n`;
+            content += `    @CSBDDStepDef('${this.escapeString(cucumberPattern)}')\n`;
+            content += `    async ${stepMethodName}(${params}): Promise<void> {\n`;
+            content += `        CSReporter.info('Executing step: ${this.escapeString(gherkinText)}');\n\n`;
+
+            // Call page object method (NOT recursive step call!)
+            content += `        // Call page object method to perform the action\n`;
+            content += `        await this.${pagePropertyName}.${method.name}(${paramNames});\n\n`;
+
+            content += `        CSReporter.pass('Step completed: ${this.escapeString(gherkinText)}');\n`;
             content += `    }\n\n`;
         }
 

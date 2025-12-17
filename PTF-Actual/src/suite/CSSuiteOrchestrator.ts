@@ -548,7 +548,8 @@ export class CSSuiteOrchestrator {
             if (process.platform === 'win32') {
                 // Windows: use 'start' command via cmd.exe
                 // The empty string '' is required as the window title
-                spawn('cmd.exe', ['/c', 'start', '""', normalizedPath], {
+                // Quote path to handle spaces in folder names
+                spawn('cmd.exe', ['/c', 'start', '""', `"${normalizedPath}"`], {
                     detached: true,
                     stdio: 'ignore',
                     shell: true
