@@ -130,7 +130,9 @@ export class CSSuiteExecutor {
             duration,
             startTime: startTimestamp,
             endTime: endTime.toISOString(),
-            features: Array.isArray(project.features) ? project.features : [project.features],
+            features: project.specs
+                ? (Array.isArray(project.specs) ? project.specs : [project.specs])
+                : (Array.isArray(project.features) ? project.features : (project.features ? [project.features] : [])),
             scenarios: scenarioResults,
             totalScenarios: scenarioResults.length,
             passedScenarios,
@@ -173,9 +175,27 @@ export class CSSuiteExecutor {
         // Project name
         args.push(`--project=${project.project}`);
 
-        // Features
-        const features = Array.isArray(project.features) ? project.features.join(',') : project.features;
-        args.push(`--features=${features}`);
+        // Features OR Specs (auto-detect format from which property is set)
+        if (project.specs) {
+            // Spec format (describe/it)
+            const specs = Array.isArray(project.specs) ? project.specs.join(',') : project.specs;
+            args.push(`--specs=${specs}`);
+
+            // Spec-specific options
+            if (project.grep) {
+                args.push(`--grep=${project.grep}`);
+            }
+            if (project.test) {
+                args.push(`--test=${project.test}`);
+            }
+        } else if (project.features) {
+            // BDD format (Given/When/Then)
+            const features = Array.isArray(project.features) ? project.features.join(',') : project.features;
+            args.push(`--features=${features}`);
+        } else {
+            // Default to features if nothing specified (backward compatibility)
+            console.warn(`  Warning: Project ${project.name} has neither specs nor features defined`);
+        }
 
         // Environment
         const env = project.environment || options.defaults.environment;

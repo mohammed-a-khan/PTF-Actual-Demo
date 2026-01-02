@@ -44,81 +44,95 @@ export class OrangeHRMDashboardPage extends CSBasePage {
     })
     public logoutOption!: CSWebElement;
     
-    // Admin menu
+    // Admin menu - use specific selector to avoid matching "Administration" text
     @CSGetElement({
-        text: 'Admin',
+        xpath: '//span[@class="oxd-text oxd-text--span oxd-main-menu-item--name" and text()="Admin"]',
         description: 'Admin menu',
         alternativeLocators: [
-            'css:span.oxd-main-menu-item--name',
-            'xpath://span[text()="Admin"]'
+            'css:a.oxd-main-menu-item span.oxd-main-menu-item--name:has-text("Admin")',
+            'xpath://a[contains(@class,"oxd-main-menu-item")]//span[text()="Admin"]'
         ]
     })
     public adminMenuItem!: CSWebElement;
     
+    // PIM menu - use specific selector for main menu item
     @CSGetElement({
-        text: 'PIM',
+        xpath: '//a[contains(@class,"oxd-main-menu-item")]//span[text()="PIM"]',
         description: 'PIM menu',
         alternativeLocators: [
-            'xpath://span[text()="PIM"]'
+            'css:a.oxd-main-menu-item span.oxd-main-menu-item--name:has-text("PIM")',
+            'xpath://span[@class="oxd-text oxd-text--span oxd-main-menu-item--name" and text()="PIM"]'
         ]
     })
     public pimMenuItem!: CSWebElement;
     
+    // Leave menu - use specific selector to avoid matching leave-related texts
     @CSGetElement({
-        text: 'Leave',
+        xpath: '//a[contains(@class,"oxd-main-menu-item")]//span[text()="Leave"]',
         description: 'Leave menu',
         alternativeLocators: [
-            'xpath://span[text()="Leave"]'
+            'css:a.oxd-main-menu-item span.oxd-main-menu-item--name:has-text("Leave")',
+            'xpath://span[@class="oxd-text oxd-text--span oxd-main-menu-item--name" and text()="Leave"]'
         ]
     })
     public leaveMenuItem!: CSWebElement;
     
+    // Time menu - specific selector for main menu
     @CSGetElement({
-        xpath: '//span[text()="Time"]',
+        xpath: '//a[contains(@class,"oxd-main-menu-item")]//span[text()="Time"]',
         description: 'Time menu item',
         waitForVisible: true,
         alternativeLocators: [
-            'text:Time'
+            'css:a.oxd-main-menu-item span.oxd-main-menu-item--name:has-text("Time")',
+            'xpath://span[@class="oxd-text oxd-text--span oxd-main-menu-item--name" and text()="Time"]'
         ]
     })
     public timeMenuItem!: CSWebElement;
-    
+
+    // Recruitment menu - specific selector
     @CSGetElement({
-        xpath: '//span[text()="Recruitment"]',
+        xpath: '//a[contains(@class,"oxd-main-menu-item")]//span[text()="Recruitment"]',
         description: 'Recruitment menu item',
         waitForVisible: true,
         alternativeLocators: [
-            'text:Recruitment'
+            'css:a.oxd-main-menu-item span.oxd-main-menu-item--name:has-text("Recruitment")',
+            'xpath://span[@class="oxd-text oxd-text--span oxd-main-menu-item--name" and text()="Recruitment"]'
         ]
     })
     public recruitmentMenuItem!: CSWebElement;
-    
+
+    // My Info menu - specific selector
     @CSGetElement({
-        xpath: '//span[text()="My Info"]',
+        xpath: '//a[contains(@class,"oxd-main-menu-item")]//span[text()="My Info"]',
         description: 'My Info menu item',
         waitForVisible: true,
         alternativeLocators: [
-            'text:My Info'
+            'css:a.oxd-main-menu-item span.oxd-main-menu-item--name:has-text("My Info")',
+            'xpath://span[@class="oxd-text oxd-text--span oxd-main-menu-item--name" and text()="My Info"]'
         ]
     })
     public myInfoMenuItem!: CSWebElement;
-    
+
+    // Performance menu - specific selector
     @CSGetElement({
-        xpath: '//span[text()="Performance"]',
+        xpath: '//a[contains(@class,"oxd-main-menu-item")]//span[text()="Performance"]',
         description: 'Performance menu item',
         waitForVisible: true,
         alternativeLocators: [
-            'text:Performance'
+            'css:a.oxd-main-menu-item span.oxd-main-menu-item--name:has-text("Performance")',
+            'xpath://span[@class="oxd-text oxd-text--span oxd-main-menu-item--name" and text()="Performance"]'
         ]
     })
     public performanceMenuItem!: CSWebElement;
-    
+
+    // Directory menu - specific selector
     @CSGetElement({
-        xpath: '//span[text()="Directory"]',
+        xpath: '//a[contains(@class,"oxd-main-menu-item")]//span[text()="Directory"]',
         description: 'Directory menu item',
         waitForVisible: true,
         alternativeLocators: [
-            'text:Directory'
+            'css:a.oxd-main-menu-item span.oxd-main-menu-item--name:has-text("Directory")',
+            'xpath://span[@class="oxd-text oxd-text--span oxd-main-menu-item--name" and text()="Directory"]'
         ]
     })
     public directoryMenuItem!: CSWebElement;
@@ -319,6 +333,7 @@ export class OrangeHRMDashboardPage extends CSBasePage {
     public async getMenuItems(): Promise<string[]> {
         try {
             // navigationMenuItems is already an array, no need to call getAll()
+            CSReporter.info(`Retrieving menu items from navigationMenuItems`);
             const menuElements = this.navigationMenuItems;
             const menuTexts: string[] = [];
 
@@ -328,7 +343,7 @@ export class OrangeHRMDashboardPage extends CSBasePage {
                     menuTexts.push(text.trim());
                 }
             }
-            
+            CSReporter.info(`Menu items retrieved: ${menuTexts.join(', ')}`);
             return menuTexts;
         } catch (error) {
             CSReporter.debug(`Failed to get menu items: ${(error as Error).message}`);

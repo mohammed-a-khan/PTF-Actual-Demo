@@ -367,8 +367,14 @@ export class AdvancedASTParser {
             'waitFor': 'wait',
             'expect': 'assertion',
             'toBeVisible': 'assertion',
+            'toContainText': 'assertion',
             'toHaveText': 'assertion',
             'toHaveValue': 'assertion',
+            'toHaveAttribute': 'assertion',
+            'toBeChecked': 'assertion',
+            'toBeEnabled': 'assertion',
+            'toBeDisabled': 'assertion',
+            'toBeHidden': 'assertion',
             'setInputFiles': 'file-upload',
             'dragTo': 'drag-drop'
         };

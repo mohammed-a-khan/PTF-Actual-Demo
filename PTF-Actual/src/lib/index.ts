@@ -169,6 +169,15 @@ export { CSMobileTesting } from '../mobile/CSMobileTesting';
 // Navigation
 export { CSCrossDomainNavigationHandler } from '../navigation/CSCrossDomainNavigationHandler';
 
+// Smart Wait System
+export { CSSmartWaitEngine } from '../wait/CSSmartWaitEngine';
+export { CSSmartWaitConfig, SmartWaitLevel } from '../wait/CSSmartWaitConfig';
+export { CSDomStabilityMonitor } from '../wait/CSDomStabilityMonitor';
+export { CSNetworkIdleTracker } from '../wait/CSNetworkIdleTracker';
+export { CSSpinnerDetector } from '../wait/CSSpinnerDetector';
+export { CSAnimationDetector } from '../wait/CSAnimationDetector';
+export { CSSmartPoller } from '../wait/CSSmartPoller';
+
 // Parallel Execution
 export { CSParallelMediaHandler } from '../parallel/CSParallelMediaHandler';
 export { CSTerminalLogCapture } from '../parallel/CSTerminalLogCapture';

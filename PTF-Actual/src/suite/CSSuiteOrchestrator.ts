@@ -178,7 +178,12 @@ export class CSSuiteOrchestrator {
         // Reports will auto-open if configured, no suite directory structure
 
         console.log(`  Project: ${project.name} (${project.type.toUpperCase()})`);
-        console.log(`  Features: ${Array.isArray(project.features) ? project.features.join(', ') : project.features}`);
+        // Display specs or features depending on which is configured
+        if (project.specs) {
+            console.log(`  Specs: ${Array.isArray(project.specs) ? project.specs.join(', ') : project.specs}`);
+        } else if (project.features) {
+            console.log(`  Features: ${Array.isArray(project.features) ? project.features.join(', ') : project.features}`);
+        }
         if (project.tags) {
             console.log(`  Tags: ${project.tags}`);
         }

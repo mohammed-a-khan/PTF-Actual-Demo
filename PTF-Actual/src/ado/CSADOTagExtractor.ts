@@ -146,6 +146,14 @@ export class CSADOTagExtractor {
         metadata.buildId = scenarioBuildId || featureBuildId;
         metadata.releaseId = scenarioReleaseId || featureReleaseId;
 
+        // If no test case IDs found in scenario tags, check feature tags as fallback
+        // This supports spec format where TestCaseId may be at describe level for data-driven tests
+        if (metadata.testCaseIds.length === 0) {
+            for (const tag of featureTags) {
+                this.extractTestCaseIds(tag, metadata);
+            }
+        }
+
         // Set primary test case ID (first one in the list)
         if (metadata.testCaseIds.length > 0) {
             metadata.testCaseId = metadata.testCaseIds[0];

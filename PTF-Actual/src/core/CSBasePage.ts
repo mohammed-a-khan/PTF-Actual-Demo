@@ -7,14 +7,20 @@ import { CSConfigurationManager } from './CSConfigurationManager';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSWebElement } from '../element/CSWebElement';
 import { CSCrossDomainNavigationHandler } from '../navigation/CSCrossDomainNavigationHandler';
+import { CSSmartPoller, PollResult } from '../wait/CSSmartPoller';
 
 export abstract class CSBasePage {
-    protected page: any; // Page type from Playwright
     protected config: CSConfigurationManager;
     protected browserManager: any; // CSBrowserManager - lazy loaded
     protected url: string = '';
     protected elements: Map<string, CSWebElement> = new Map();
     private static crossDomainHandlers: Map<any, CSCrossDomainNavigationHandler> = new Map();
+
+    // Dynamic page getter - always returns current page from browserManager
+    // This ensures page objects always use the current page after browser switch
+    protected get page(): any {
+        return this.browserManager.getPage();
+    }
 
     constructor() {
         this.config = CSConfigurationManager.getInstance();
@@ -23,7 +29,6 @@ export abstract class CSBasePage {
             CSBrowserManager = require('../browser/CSBrowserManager').CSBrowserManager;
         }
         this.browserManager = CSBrowserManager.getInstance();
-        this.page = this.browserManager.getPage();
         this.initializeElements();
         this.initializeCrossDomainHandler();
     }
@@ -202,16 +207,14 @@ export abstract class CSBasePage {
     /**
      * Update page reference (useful after browser restart or context switch)
      */
+    /**
+     * @deprecated No longer needed - page is now dynamically fetched from browserManager
+     * Kept for backward compatibility, but does nothing since page is a getter
+     */
     public updatePageReference(newPage: Page): void {
-        const oldPage = this.page;
-        this.page = newPage;
-        // Remove old handler and create new one for new page
-        if (this.config.getBoolean('CROSS_DOMAIN_NAVIGATION_ENABLED', true)) {
-            CSBasePage.crossDomainHandlers.delete(oldPage);
-            const handler = new CSCrossDomainNavigationHandler(this.page);
-            CSBasePage.crossDomainHandlers.set(this.page, handler);
-            CSReporter.debug('Cross-domain handler reinitialized with new page');
-        }
+        // No-op: page is now a getter that always returns current page from browserManager
+        // Cross-domain handlers are updated when the page is accessed
+        CSReporter.debug(`[${this.constructor.name}] updatePageReference called (no-op, using dynamic page getter)`);
     }
 
     // =========================================================================
@@ -689,6 +692,187 @@ export abstract class CSBasePage {
     }
 
     // =========================================================================
+    // GENERIC ELEMENT WAIT METHODS - Wait for element states with polling
+    // =========================================================================
+
+    /**
+     * Wait for element to appear (become visible)
+     * @param element - CSWebElement to wait for
+     * @param timeout - Maximum wait time in milliseconds (default: 15000)
+     * @returns PollResult with success status and timing info
+     */
+    public async waitForElementToAppear(element: CSWebElement, timeout: number = 15000): Promise<PollResult> {
+        const poller = new CSSmartPoller(this.page);
+        const description = (element as any).description || 'element';
+
+        CSReporter.debug(`Waiting for ${description} to appear...`);
+
+        const result = await poller.poll({
+            condition: async () => await element.isVisibleWithTimeout(500),
+            timeout,
+            interval: 300,
+            backoff: 'none',
+            message: `Wait for ${description} to appear`,
+            throwOnTimeout: false
+        });
+
+        if (result.success) {
+            CSReporter.debug(`${description} appeared after ${result.elapsed}ms`);
+        } else {
+            CSReporter.warn(`${description} did not appear within ${timeout}ms`);
+        }
+
+        return result;
+    }
+
+    /**
+     * Wait for element to disappear (become hidden)
+     * @param element - CSWebElement to wait for
+     * @param timeout - Maximum wait time in milliseconds (default: 15000)
+     * @returns PollResult with success status and timing info
+     */
+    public async waitForElementToDisappear(element: CSWebElement, timeout: number = 15000): Promise<PollResult> {
+        const poller = new CSSmartPoller(this.page);
+        const description = (element as any).description || 'element';
+
+        CSReporter.debug(`Waiting for ${description} to disappear...`);
+
+        const result = await poller.poll({
+            condition: async () => !(await element.isVisibleWithTimeout(500)),
+            timeout,
+            interval: 300,
+            backoff: 'none',
+            message: `Wait for ${description} to disappear`,
+            throwOnTimeout: false
+        });
+
+        if (result.success) {
+            CSReporter.debug(`${description} disappeared after ${result.elapsed}ms`);
+        } else {
+            CSReporter.warn(`${description} did not disappear within ${timeout}ms`);
+        }
+
+        return result;
+    }
+
+    /**
+     * Wait for element to contain specific text
+     * @param element - CSWebElement to check
+     * @param text - Text to wait for (case-insensitive partial match)
+     * @param timeout - Maximum wait time in milliseconds (default: 15000)
+     * @returns PollResult with success status and timing info
+     */
+    public async waitForElementText(element: CSWebElement, text: string, timeout: number = 15000): Promise<PollResult> {
+        const poller = new CSSmartPoller(this.page);
+        const description = (element as any).description || 'element';
+
+        CSReporter.debug(`Waiting for ${description} to contain text: "${text}"...`);
+
+        const result = await poller.poll({
+            condition: async () => {
+                try {
+                    const content = await element.textContentWithTimeout(1000);
+                    return content?.toLowerCase().includes(text.toLowerCase()) || false;
+                } catch {
+                    return false;
+                }
+            },
+            timeout,
+            interval: 300,
+            backoff: 'none',
+            message: `Wait for ${description} to contain "${text}"`,
+            throwOnTimeout: false
+        });
+
+        if (result.success) {
+            CSReporter.debug(`${description} contains "${text}" after ${result.elapsed}ms`);
+        } else {
+            CSReporter.warn(`${description} did not contain "${text}" within ${timeout}ms`);
+        }
+
+        return result;
+    }
+
+    /**
+     * Wait for element to NOT contain specific text (useful for loading placeholders)
+     * @param element - CSWebElement to check
+     * @param text - Text that should disappear (case-insensitive partial match)
+     * @param timeout - Maximum wait time in milliseconds (default: 15000)
+     * @returns PollResult with success status and timing info
+     */
+    public async waitForElementTextToDisappear(element: CSWebElement, text: string, timeout: number = 15000): Promise<PollResult> {
+        const poller = new CSSmartPoller(this.page);
+        const description = (element as any).description || 'element';
+
+        CSReporter.debug(`Waiting for "${text}" to disappear from ${description}...`);
+
+        const result = await poller.poll({
+            condition: async () => {
+                try {
+                    const content = await element.textContentWithTimeout(1000);
+                    // Return true when text is NOT found
+                    return !content?.toLowerCase().includes(text.toLowerCase());
+                } catch {
+                    return true; // Element not accessible = text gone
+                }
+            },
+            timeout,
+            interval: 300,
+            backoff: 'none',
+            message: `Wait for "${text}" to disappear from ${description}`,
+            throwOnTimeout: false
+        });
+
+        if (result.success) {
+            CSReporter.debug(`"${text}" disappeared from ${description} after ${result.elapsed}ms`);
+        } else {
+            CSReporter.warn(`"${text}" still present in ${description} after ${timeout}ms`);
+        }
+
+        return result;
+    }
+
+    /**
+     * Wait for table to have data (not show "No data" placeholder)
+     * Generic method for any table with a loading/empty placeholder
+     * @param tableElement - Table CSWebElement
+     * @param noDataText - Placeholder text to wait to disappear (default: "No data available")
+     * @param timeout - Maximum wait time in milliseconds (default: 15000)
+     * @returns PollResult with success status and timing info
+     */
+    public async waitForTableData(tableElement: CSWebElement, noDataText: string = 'No data available', timeout: number = 15000): Promise<PollResult> {
+        const poller = new CSSmartPoller(this.page);
+        const description = (tableElement as any).description || 'table';
+
+        CSReporter.debug(`Waiting for ${description} to load data...`);
+
+        const result = await poller.poll({
+            condition: async () => {
+                try {
+                    const content = await tableElement.textContentWithTimeout(1000);
+                    // Return true when "No data" text is NOT found
+                    return !content?.toLowerCase().includes(noDataText.toLowerCase());
+                } catch {
+                    return false;
+                }
+            },
+            timeout,
+            interval: 500,
+            backoff: 'none',
+            message: `Wait for ${description} to load data`,
+            throwOnTimeout: false
+        });
+
+        if (result.success) {
+            CSReporter.debug(`${description} loaded data after ${result.elapsed}ms`);
+        } else {
+            CSReporter.warn(`${description} still showing "${noDataText}" after ${timeout}ms`);
+        }
+
+        return result;
+    }
+
+    // =========================================================================
     // DIALOG/ALERT METHODS - Handle browser dialogs
     // =========================================================================
 
@@ -1121,6 +1305,31 @@ export abstract class CSBasePage {
         }
 
         CSReporter.pass(`${filePaths.length} files uploaded via chooser`);
+    }
+
+    /**
+     * Upload multiple files at once via file chooser dialog (ALL FILES IN SINGLE DIALOG)
+     * Use this when the application requires all files to be selected at once in a single file dialog
+     * This is useful when the trigger element (e.g., Add files button) gets disabled after first file selection
+     * @param triggerElement The element to click that triggers the file chooser
+     * @param filePaths Array of full paths to files to upload
+     * @param timeout Timeout in milliseconds (default 30000)
+     */
+    public async uploadMultipleFilesAtOnceViaChooser(triggerElement: CSWebElement, filePaths: string[], timeout: number = 30000): Promise<void> {
+        CSReporter.info(`Uploading ${filePaths.length} files at once via file chooser`);
+
+        // Set up file chooser listener before clicking the trigger element
+        const fileChooserPromise = this.page.waitForEvent('filechooser', { timeout });
+
+        // Click the element that triggers the file chooser
+        await triggerElement.clickWithTimeout(timeout);
+
+        // Handle the file chooser - set ALL files at once
+        const fileChooser = await fileChooserPromise;
+        await fileChooser.setFiles(filePaths);
+
+        await this.waitForPageLoad();
+        CSReporter.pass(`${filePaths.length} files selected at once via chooser`);
     }
 
     /**

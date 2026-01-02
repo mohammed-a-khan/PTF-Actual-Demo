@@ -105,15 +105,28 @@ CS Test Automation Framework
 
 Usage: npx cs-playwright-test [options]
 
-Single Project Mode:
+BDD Format (Feature files):
   --project <name>      Project name (required)
-  --features <path>     Path to feature files
+  --features <path>     Path to feature files (glob pattern)
   --tags <tags>         Tags to filter scenarios
   --modules <list>      Explicit module specification (api, database, ui, soap)
-  --parallel            Run scenarios in parallel
-  --workers <n>         Number of parallel workers
+
+Spec Format (describe/it tests):
+  --project <name>      Project name (required)
+  --specs <path>        Path to spec files (glob pattern) - auto-detects format
+  --test <name>         Run specific test(s) by name (comma-separated for multiple)
+  --grep <pattern>      Run tests matching pattern
+
+Common Options:
+  --env <env>           Environment (sit, uat, prod)
+  --parallel            Run tests in parallel
+  --workers <n>         Number of parallel workers (default: 4)
   --headless            Run browser in headless mode
+  --headed              Run browser with visible UI
   --browser <type>      Browser type (chromium, firefox, webkit)
+  --retries <n>         Retry failed tests
+  --timeout <ms>        Test timeout in milliseconds
+  --debug               Enable debug mode
   --lazy-steps          Enable lazy step loading (30-60x faster startup)
 
 Multi-Project Suite Mode:
@@ -124,19 +137,39 @@ Multi-Project Suite Mode:
   --environment <env>         Override environment for all projects
   --tags <tags>               Override tags for all projects
 
+Code Generation:
+  generate-fixtures           Generate typed fixtures file for IntelliSense
+    --project <name>          Project name (required)
+    --output <path>           Custom output path (optional)
+
 General:
   --help                Show this help message
   --version             Show version
 
 Examples:
-  # Run single project
-  npx cs-playwright-test --project=web-app --features=test/features/login.feature
+  # Run BDD tests (feature files)
+  npx cs-playwright-test --project=crru --features=test/crru/features/*.feature
+
+  # Run Spec tests (describe/it format)
+  npx cs-playwright-test --project=crru --specs=test/crru/specs/**/*.spec.ts
+
+  # Run specific test in spec file
+  npx cs-playwright-test --project=crru --specs=test/crru/specs/login.spec.ts --test="should login"
+
+  # Run multiple specific tests (comma-separated)
+  npx cs-playwright-test --project=crru --specs=test/crru/specs/**/*.spec.ts --test="should login,should logout,should register"
+
+  # Run tests matching pattern (regex)
+  npx cs-playwright-test --project=crru --specs=test/crru/specs/**/*.spec.ts --grep="login|logout"
 
   # Run multi-project suite
   npx cs-playwright-test --suite=multi-project
 
   # Run suite with specific mode
   npx cs-playwright-test --suite=multi-project --suite-mode=api-only
+
+  # Generate typed fixtures for IntelliSense support
+  npx cs-playwright-test generate-fixtures --project=orangehrm
 `);
             process.exit(0);
         }
@@ -199,12 +232,22 @@ Examples:
 }
 
 function determineExecutionMode(args: any, config: any): string {
+    // Check if running code generation commands
+    if (args._[0] === 'generate-fixtures') {
+        return 'generate-fixtures';
+    }
+
     // Check if running multi-project suite mode
     if (args.suite === 'multi-project' || args.suite === true) {
         return 'suite';
     }
 
-    // Check if running specific tests
+    // Check if running spec format tests (describe/it)
+    if (args.specs || args.spec) {
+        return 'spec';
+    }
+
+    // Check if running BDD feature tests
     if (args.feature || args.features || config.get('FEATURES')) {
         return 'bdd';
     }
@@ -255,6 +298,23 @@ async function execute(mode: string) {
     const config = CSConfigurationManager.getInstance();
 
     switch (mode) {
+        case 'generate-fixtures':
+            // Generate typed fixtures file for IntelliSense support
+            if (!args.project) {
+                console.error('Error: --project is required for generate-fixtures');
+                console.error('Usage: npx cs-playwright-test generate-fixtures --project=<name>');
+                process.exit(1);
+            }
+
+            console.log(`\n🔍 Scanning pages for project: ${args.project}...`);
+
+            const { CSSpecPageInjector } = await import('./spec/CSSpecPageInjector');
+            const injector = CSSpecPageInjector.getInstance();
+
+            // Generate fixtures file
+            await injector.generateFixturesFile(args.output);
+            break;
+
         case 'suite':
             // Multi-project suite execution
             if (shouldLog('INFO')) console.log('[INFO] Starting multi-project suite execution...');
@@ -441,7 +501,62 @@ async function execute(mode: string) {
             const dbRunner = new CSDatabaseRunner();
             await dbRunner.run();
             break;
-            
+
+        case 'spec':
+            // Spec format (describe/it tests)
+            if (shouldLog('INFO')) console.log('[INFO] Starting spec format test execution...');
+            const { CSSpecRunner } = await import('./spec/CSSpecRunner');
+            const specRunner = CSSpecRunner.getInstance();
+
+            // Build spec runner options
+            const specOptions: any = {
+                project: args.project,
+                env: args.env || args.environment,
+                specs: args.specs || args.spec,
+                tags: args.tags,
+                grep: args.grep,
+                test: args.test,
+                parallel: args.parallel,
+                workers: args.workers ? parseInt(args.workers) : undefined,
+                retries: args.retries !== undefined ? parseInt(args.retries) : undefined,
+                timeout: args.timeout ? parseInt(args.timeout) : undefined,
+                headed: args.headed,
+                debug: args.debug,
+                report: args.report ? args.report.split(',') : undefined
+            };
+
+            // Validate required options
+            if (!specOptions.project) {
+                console.error('Error: --project is required for spec format tests');
+                process.exit(1);
+            }
+            if (!specOptions.specs) {
+                console.error('Error: --specs is required for spec format tests');
+                process.exit(1);
+            }
+
+            // Handle headless mode
+            if (args.headless !== undefined) {
+                config.set('HEADLESS', String(args.headless));
+            }
+            if (args.headed !== undefined) {
+                config.set('HEADLESS', args.headed ? 'false' : 'true');
+            }
+
+            // Handle browser
+            if (args.browser) {
+                config.set('BROWSER', args.browser);
+            }
+
+            // Run spec tests
+            const specResult = await specRunner.run(specOptions);
+
+            // Exit with appropriate code
+            if (specResult.failedTests > 0) {
+                process.exit(1);
+            }
+            break;
+
         default:
             throw new Error(`Unknown execution mode: ${mode}`);
     }

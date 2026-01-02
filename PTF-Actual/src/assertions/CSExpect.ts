@@ -439,6 +439,146 @@ export class CSExpect {
         this.failedAssertions = [];
         this.softMode = false;
     }
+
+    // ============================================================================
+    // SYNCHRONOUS VALUE ASSERTIONS
+    // These methods are synchronous and don't capture screenshots.
+    // Use these for simple value comparisons where screenshots aren't needed.
+    // These are safer to use without await - they throw immediately on failure.
+    // ============================================================================
+
+    /**
+     * Synchronously assert that a value equals expected (no screenshot)
+     * @example expect.equals(actual, expected)
+     */
+    public equals<T>(actual: T, expected: T, message?: string): void {
+        this.assertionCount++;
+        if (actual !== expected) {
+            const errorMsg = message || `Expected ${expected} but got ${actual}`;
+            CSReporter.error(`Assertion failed: ${errorMsg}`);
+            throw new Error(errorMsg);
+        }
+        CSReporter.pass(`Assertion passed: Value equals ${expected}`);
+    }
+
+    /**
+     * Synchronously assert that a value is truthy (no screenshot)
+     * @example expect.isTrue(value)
+     */
+    public isTrue(actual: any, message?: string): void {
+        this.assertionCount++;
+        if (!actual) {
+            const errorMsg = message || `Expected value to be truthy but got ${actual}`;
+            CSReporter.error(`Assertion failed: ${errorMsg}`);
+            throw new Error(errorMsg);
+        }
+        CSReporter.pass(`Assertion passed: Value is truthy`);
+    }
+
+    /**
+     * Synchronously assert that a value is falsy (no screenshot)
+     * @example expect.isFalse(value)
+     */
+    public isFalse(actual: any, message?: string): void {
+        this.assertionCount++;
+        if (actual) {
+            const errorMsg = message || `Expected value to be falsy but got ${actual}`;
+            CSReporter.error(`Assertion failed: ${errorMsg}`);
+            throw new Error(errorMsg);
+        }
+        CSReporter.pass(`Assertion passed: Value is falsy`);
+    }
+
+    /**
+     * Synchronously assert that a value is null or undefined (no screenshot)
+     * @example expect.isNull(value)
+     */
+    public isNull(actual: any, message?: string): void {
+        this.assertionCount++;
+        if (actual != null) {
+            const errorMsg = message || `Expected null/undefined but got ${actual}`;
+            CSReporter.error(`Assertion failed: ${errorMsg}`);
+            throw new Error(errorMsg);
+        }
+        CSReporter.pass(`Assertion passed: Value is null/undefined`);
+    }
+
+    /**
+     * Synchronously assert that a value is not null or undefined (no screenshot)
+     * @example expect.isNotNull(value)
+     */
+    public isNotNull(actual: any, message?: string): void {
+        this.assertionCount++;
+        if (actual == null) {
+            const errorMsg = message || `Expected non-null value but got ${actual}`;
+            CSReporter.error(`Assertion failed: ${errorMsg}`);
+            throw new Error(errorMsg);
+        }
+        CSReporter.pass(`Assertion passed: Value is not null/undefined`);
+    }
+
+    /**
+     * Synchronously assert that a string/array contains expected value (no screenshot)
+     * @example expect.contains(array, item) or expect.contains(str, substring)
+     */
+    public contains(actual: string | any[], expected: any, message?: string): void {
+        this.assertionCount++;
+        const hasValue = Array.isArray(actual)
+            ? actual.includes(expected)
+            : String(actual).includes(String(expected));
+
+        if (!hasValue) {
+            const errorMsg = message || `Expected to contain ${expected} but got ${actual}`;
+            CSReporter.error(`Assertion failed: ${errorMsg}`);
+            throw new Error(errorMsg);
+        }
+        CSReporter.pass(`Assertion passed: Value contains ${expected}`);
+    }
+
+    /**
+     * Synchronously assert that values are deeply equal (no screenshot)
+     * @example expect.deepEquals(obj1, obj2)
+     */
+    public deepEquals<T>(actual: T, expected: T, message?: string): void {
+        this.assertionCount++;
+        const actualStr = JSON.stringify(actual);
+        const expectedStr = JSON.stringify(expected);
+
+        if (actualStr !== expectedStr) {
+            const errorMsg = message || `Expected ${expectedStr} but got ${actualStr}`;
+            CSReporter.error(`Assertion failed: ${errorMsg}`);
+            throw new Error(errorMsg);
+        }
+        CSReporter.pass(`Assertion passed: Values are deeply equal`);
+    }
+
+    /**
+     * Synchronously assert that a number is greater than expected (no screenshot)
+     * @example expect.greaterThan(10, 5)
+     */
+    public greaterThan(actual: number, expected: number, message?: string): void {
+        this.assertionCount++;
+        if (actual <= expected) {
+            const errorMsg = message || `Expected ${actual} to be greater than ${expected}`;
+            CSReporter.error(`Assertion failed: ${errorMsg}`);
+            throw new Error(errorMsg);
+        }
+        CSReporter.pass(`Assertion passed: ${actual} > ${expected}`);
+    }
+
+    /**
+     * Synchronously assert that a number is less than expected (no screenshot)
+     * @example expect.lessThan(5, 10)
+     */
+    public lessThan(actual: number, expected: number, message?: string): void {
+        this.assertionCount++;
+        if (actual >= expected) {
+            const errorMsg = message || `Expected ${actual} to be less than ${expected}`;
+            CSReporter.error(`Assertion failed: ${errorMsg}`);
+            throw new Error(errorMsg);
+        }
+        CSReporter.pass(`Assertion passed: ${actual} < ${expected}`);
+    }
 }
 
 // Export singleton instance for convenience

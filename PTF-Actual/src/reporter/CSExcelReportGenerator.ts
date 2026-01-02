@@ -1036,16 +1036,19 @@ export class CSExcelReportGenerator {
         };
     }
 
-    private static categorizeFailure(error: string): string {
-        if (error.includes('timeout') || error.includes('Timeout')) {
+    private static categorizeFailure(error: string | Error | any): string {
+        // Convert error to string if needed
+        const errorStr = typeof error === 'string' ? error :
+                         (error?.message || error?.toString?.() || String(error));
+        if (errorStr.includes('timeout') || errorStr.includes('Timeout')) {
             return 'Timeout';
-        } else if (error.includes('selector') || error.includes('Selector') || error.includes('element not found')) {
+        } else if (errorStr.includes('selector') || errorStr.includes('Selector') || errorStr.includes('element not found')) {
             return 'Element Not Found';
-        } else if (error.includes('assertion') || error.includes('Expected') || error.includes('expect')) {
+        } else if (errorStr.includes('assertion') || errorStr.includes('Expected') || errorStr.includes('expect')) {
             return 'Assertion Failed';
-        } else if (error.includes('network') || error.includes('Network') || error.includes('ERR_')) {
+        } else if (errorStr.includes('network') || errorStr.includes('Network') || errorStr.includes('ERR_')) {
             return 'Network Error';
-        } else if (error.includes('undefined') || error.includes('null') || error.includes('TypeError')) {
+        } else if (errorStr.includes('undefined') || errorStr.includes('null') || errorStr.includes('TypeError')) {
             return 'Type Error';
         } else {
             return 'Other';

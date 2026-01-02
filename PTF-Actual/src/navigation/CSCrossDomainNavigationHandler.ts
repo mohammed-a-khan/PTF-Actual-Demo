@@ -263,39 +263,37 @@ export class CSCrossDomainNavigationHandler {
             if (this.page.url() === 'about:blank') {
                 await this.page.waitForNavigation({
                     waitUntil: 'domcontentloaded',
-                    timeout: 10000
+                    timeout: 5000
                 }).catch(() => {
                     // Ignore navigation timeout on blank page
                 });
             }
 
-            // Wait for network to be idle or DOM to be loaded
-            await this.page.waitForLoadState('networkidle', { timeout: 30000 }).catch(async () => {
-                // Fallback to domcontentloaded if networkidle times out
-                CSReporter.debug('Network idle timeout, falling back to domcontentloaded');
-                return this.page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+            // Wait for DOM to be loaded (faster than networkidle which can hang on analytics)
+            // Use domcontentloaded as primary, with short timeout
+            await this.page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {
+                CSReporter.debug('DOM content loaded timeout, continuing anyway');
             });
 
-            // Additional stability check using JavaScript
+            // Brief stability check - just ensure page is interactive
             try {
                 await this.page.evaluate(() => {
                     return new Promise<void>((resolve) => {
-                        if (document.readyState === 'complete') {
-                            // Page is already loaded, wait a bit for dynamic content
-                            setTimeout(resolve, 1000);
+                        if (document.readyState === 'complete' || document.readyState === 'interactive') {
+                            // Page is ready, minimal wait for initial render
+                            setTimeout(resolve, 200);
                         } else {
-                            window.addEventListener('load', () => {
-                                // Wait after load event for dynamic content
-                                setTimeout(resolve, 1000);
+                            window.addEventListener('DOMContentLoaded', () => {
+                                setTimeout(resolve, 200);
                             });
                         }
                     });
                 });
             } catch (error: any) {
-                // Handle CSP restrictions
+                // Handle CSP restrictions - use minimal timeout
                 if (error.message?.includes('unsafe-eval') || error.message?.includes('CSP')) {
-                    CSReporter.debug('CSP restriction detected, using timeout-based wait');
-                    await this.page.waitForTimeout(2000);
+                    CSReporter.debug('CSP restriction detected, using minimal wait');
+                    await this.page.waitForTimeout(500);
                 } else {
                     throw error;
                 }
@@ -383,12 +381,12 @@ export class CSCrossDomainNavigationHandler {
         // Set both original and target domain
         this.originalDomain = targetDomain;
         this.targetDomain = targetDomain;
-        CSReporter.info(`Navigating to: ${targetUrl}`);
+        // Note: "Navigating to:" is already logged by the caller
         CSReporter.debug(`Target domain: ${targetDomain}`);
 
-        // Wait for initial navigation
+        // Wait for initial navigation (max 1 second)
         let attempts = 0;
-        while (this.page.url() === 'about:blank' && attempts < 20) {
+        while (this.page.url() === 'about:blank' && attempts < 10) {
             await this.page.waitForTimeout(100);
             attempts++;
         }
@@ -419,15 +417,15 @@ export class CSCrossDomainNavigationHandler {
             return;
         }
 
-        // Wait to see if we get redirected to auth page
-        const maxWaitTime = 10000;
+        // Wait to see if we get redirected to auth page (max 3 seconds)
+        const maxWaitTime = 3000;
         const startTime = Date.now();
 
         while (Date.now() - startTime < maxWaitTime) {
             const currentUrl = this.page.url();
 
             if (currentUrl === 'about:blank') {
-                await this.page.waitForTimeout(500);
+                await this.page.waitForTimeout(200);
                 continue;
             }
 
@@ -461,7 +459,7 @@ export class CSCrossDomainNavigationHandler {
                 return;
             }
 
-            await this.page.waitForTimeout(500);
+            await this.page.waitForTimeout(200);
         }
 
         CSReporter.debug(`Navigation monitoring timeout. Current URL: ${this.page.url()}`);

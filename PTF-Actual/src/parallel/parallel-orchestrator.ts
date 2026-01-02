@@ -200,12 +200,36 @@ export class ParallelOrchestrator {
         };
     }
 
+    /**
+     * Check if scenario is enabled based on @enabled tag
+     * Default is true (enabled) if no @enabled tag is present
+     */
+    private isScenarioEnabled(scenario: ParsedScenario, feature: ParsedFeature): boolean {
+        const allTags = [...(feature.tags || []), ...(scenario.tags || [])];
+        const enabledTag = allTags.find(tag =>
+            tag.toLowerCase().startsWith('@enabled:') || tag.toLowerCase().startsWith('enabled:')
+        );
+        if (enabledTag) {
+            const value = enabledTag.split(':')[1]?.toLowerCase().trim();
+            if (value === 'false' || value === 'no' || value === '0') {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private async createWorkItems(features: ParsedFeature[]) {
         let workId = 0;
 
         for (const feature of features) {
             for (let i = 0; i < feature.scenarios.length; i++) {
                 const scenario = feature.scenarios[i];
+
+                // Check if scenario is enabled via @enabled tag
+                if (!this.isScenarioEnabled(scenario, feature)) {
+                    CSReporter.debug(`[Parallel] Skipping disabled scenario: ${scenario.name}`);
+                    continue;
+                }
 
                 // Check if scenario has examples (scenario outline)
                 if (scenario.examples) {

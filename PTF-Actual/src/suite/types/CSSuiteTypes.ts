@@ -67,8 +67,11 @@ export interface SuiteProjectConfig {
     /** Project identifier (matches config folder name) */
     project: string;
 
-    /** Feature file path(s) - can be single file or glob pattern */
-    features: string | string[];
+    /** Feature file path(s) - can be single file or glob pattern (BDD format) */
+    features?: string | string[];
+
+    /** Spec file path(s) - can be single file or glob pattern (describe/it format) */
+    specs?: string | string[];
 
     /** Optional tags to filter scenarios */
     tags?: string;
@@ -102,6 +105,12 @@ export interface SuiteProjectConfig {
 
     /** Optional modules to load (e.g., 'database', 'api') */
     modules?: string | string[];
+
+    /** Optional grep pattern for spec tests */
+    grep?: string;
+
+    /** Optional specific test name for spec tests */
+    test?: string;
 }
 
 /**

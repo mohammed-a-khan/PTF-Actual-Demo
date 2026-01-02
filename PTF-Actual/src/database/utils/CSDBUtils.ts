@@ -223,6 +223,246 @@ export class CSDBUtils {
     }
 
     /**
+     * Execute a SQL query from a .sql file
+     *
+     * @param alias - Database connection alias
+     * @param filePath - Path to the .sql file (relative to project root or absolute)
+     * @param params - Optional query parameters (use ? placeholders in SQL file)
+     * @returns Promise<ResultSet> - Complete result set
+     *
+     * @example
+     * ```typescript
+     * // Execute query from file without parameters
+     * // File: queries/get-all-active-users.sql
+     * // Content: SELECT * FROM Users WHERE Status = 'active'
+     * const users = await CSDBUtils.executeFromFile('MY_DB', 'queries/get-all-active-users.sql');
+     *
+     * // Execute query from file with parameters
+     * // File: queries/get-user-by-id.sql
+     * // Content: SELECT * FROM Users WHERE Id = ?
+     * const user = await CSDBUtils.executeFromFile('MY_DB', 'queries/get-user-by-id.sql', [123]);
+     *
+     * // Execute query with multiple parameters
+     * // File: queries/get-orders-by-date-range.sql
+     * // Content: SELECT * FROM Orders WHERE OrderDate >= ? AND OrderDate <= ? AND Status = ?
+     * const orders = await CSDBUtils.executeFromFile('MY_DB', 'queries/get-orders-by-date-range.sql', ['2024-01-01', '2024-12-31', 'completed']);
+     * ```
+     */
+    public static async executeFromFile(alias: string, filePath: string, params?: any[]): Promise<ResultSet> {
+        try {
+            CSReporter.debug(`CSDBUtils.executeFromFile - File: ${filePath}, Alias: ${alias}`);
+
+            const fs = await import('fs/promises');
+            const path = await import('path');
+
+            // Resolve the file path relative to project root
+            const resolvedPath = path.resolve(process.cwd(), filePath);
+
+            // Check if file exists
+            try {
+                await fs.access(resolvedPath);
+            } catch {
+                throw new Error(`SQL file not found: ${resolvedPath}`);
+            }
+
+            // Read the SQL content from file
+            const sqlContent = await fs.readFile(resolvedPath, 'utf-8');
+
+            if (!sqlContent || sqlContent.trim().length === 0) {
+                throw new Error(`SQL file is empty: ${filePath}`);
+            }
+
+            CSReporter.debug(`CSDBUtils.executeFromFile - SQL loaded (${sqlContent.length} chars)`);
+
+            // Split SQL into individual statements (handles multiple statements separated by ;)
+            const statements = this.splitSqlStatements(sqlContent);
+
+            if (statements.length === 0) {
+                throw new Error(`No valid SQL statements found in file: ${filePath}`);
+            }
+
+            CSReporter.debug(`CSDBUtils.executeFromFile - Found ${statements.length} statement(s)`);
+
+            // If single statement, execute directly with params
+            if (statements.length === 1) {
+                return await this.executeQuery(alias, statements[0], params);
+            }
+
+            // Multiple statements: execute sequentially
+            // - Non-SELECT statements (ALTER, SET, etc.) execute without params
+            // - Last SELECT statement uses the provided params
+            // - Return the result of the last SELECT (or last statement if no SELECT)
+            let lastSelectResult: ResultSet | null = null;
+            let lastResult: ResultSet | null = null;
+
+            for (let i = 0; i < statements.length; i++) {
+                const stmt = statements[i];
+                const isLastStatement = i === statements.length - 1;
+                const isSelectStatement = stmt.trim().toUpperCase().startsWith('SELECT');
+
+                CSReporter.debug(`CSDBUtils.executeFromFile - Executing statement ${i + 1}/${statements.length}: ${stmt.substring(0, 50)}...`);
+
+                // Apply params only to SELECT statements or the last statement
+                const stmtParams = (isSelectStatement || isLastStatement) ? params : undefined;
+
+                try {
+                    const result = await this.executeQuery(alias, stmt, stmtParams);
+                    lastResult = result;
+
+                    if (isSelectStatement) {
+                        lastSelectResult = result;
+                    }
+
+                    CSReporter.debug(`CSDBUtils.executeFromFile - Statement ${i + 1} executed successfully (${result.rowCount} rows)`);
+                } catch (error) {
+                    const errorMsg = error instanceof Error ? error.message : String(error);
+                    CSReporter.error(`CSDBUtils.executeFromFile - Statement ${i + 1} failed: ${errorMsg}`);
+                    throw new Error(`Failed executing statement ${i + 1} in ${filePath}: ${errorMsg}`);
+                }
+            }
+
+            // Return last SELECT result, or last result if no SELECT was found
+            return lastSelectResult || lastResult!;
+
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            CSReporter.error(`CSDBUtils.executeFromFile failed: ${errorMessage}`);
+            throw error;
+        }
+    }
+
+    /**
+     * Split SQL content into individual statements
+     * Handles semicolons inside strings and comments
+     *
+     * @param sql - Raw SQL content from file
+     * @returns Array of individual SQL statements
+     * @private
+     */
+    private static splitSqlStatements(sql: string): string[] {
+        const statements: string[] = [];
+        let currentStatement = '';
+        let inSingleQuote = false;
+        let inDoubleQuote = false;
+        let inLineComment = false;
+        let inBlockComment = false;
+
+        for (let i = 0; i < sql.length; i++) {
+            const char = sql[i];
+            const nextChar = sql[i + 1] || '';
+            const prevChar = sql[i - 1] || '';
+
+            // Handle line comments (--)
+            if (!inSingleQuote && !inDoubleQuote && !inBlockComment && char === '-' && nextChar === '-') {
+                inLineComment = true;
+            }
+            if (inLineComment && (char === '\n' || char === '\r')) {
+                inLineComment = false;
+            }
+
+            // Handle block comments (/* */)
+            if (!inSingleQuote && !inDoubleQuote && !inLineComment && char === '/' && nextChar === '*') {
+                inBlockComment = true;
+            }
+            if (inBlockComment && char === '*' && nextChar === '/') {
+                inBlockComment = false;
+                currentStatement += '*/';
+                i++; // Skip the '/'
+                continue;
+            }
+
+            // Handle single quotes (skip escaped quotes '')
+            if (!inDoubleQuote && !inLineComment && !inBlockComment && char === "'") {
+                if (nextChar === "'") {
+                    // Escaped quote, add both and skip next
+                    currentStatement += "''";
+                    i++;
+                    continue;
+                }
+                inSingleQuote = !inSingleQuote;
+            }
+
+            // Handle double quotes
+            if (!inSingleQuote && !inLineComment && !inBlockComment && char === '"') {
+                inDoubleQuote = !inDoubleQuote;
+            }
+
+            // Check for statement separator (;) outside of quotes and comments
+            if (char === ';' && !inSingleQuote && !inDoubleQuote && !inLineComment && !inBlockComment) {
+                const trimmed = currentStatement.trim();
+                if (trimmed.length > 0) {
+                    statements.push(trimmed);
+                }
+                currentStatement = '';
+                continue;
+            }
+
+            currentStatement += char;
+        }
+
+        // Add the last statement if it exists (handles files without trailing semicolon)
+        const lastTrimmed = currentStatement.trim();
+        if (lastTrimmed.length > 0) {
+            statements.push(lastTrimmed);
+        }
+
+        return statements;
+    }
+
+    /**
+     * Execute a SQL query from a .sql file and return a single value
+     *
+     * @template T - Type of the value to return
+     * @param alias - Database connection alias
+     * @param filePath - Path to the .sql file
+     * @param params - Optional query parameters
+     * @returns Promise<T> - Single value of type T
+     *
+     * @example
+     * ```typescript
+     * // File: queries/count-active-users.sql
+     * // Content: SELECT COUNT(*) FROM Users WHERE Status = 'active'
+     * const count = await CSDBUtils.executeFromFileSingleValue<number>('MY_DB', 'queries/count-active-users.sql');
+     * ```
+     */
+    public static async executeFromFileSingleValue<T = any>(alias: string, filePath: string, params?: any[]): Promise<T> {
+        const result = await this.executeFromFile(alias, filePath, params);
+
+        if (result.rowCount === 0) {
+            throw new Error(`Query from file '${filePath}' returned no rows`);
+        }
+
+        const firstRow = result.rows[0];
+        const firstColumnKey = Object.keys(firstRow)[0];
+        return firstRow[firstColumnKey] as T;
+    }
+
+    /**
+     * Execute a SQL query from a .sql file and return a single row
+     *
+     * @param alias - Database connection alias
+     * @param filePath - Path to the .sql file
+     * @param params - Optional query parameters
+     * @returns Promise<Record<string, any>> - Single row as object
+     *
+     * @example
+     * ```typescript
+     * // File: queries/get-user-by-email.sql
+     * // Content: SELECT * FROM Users WHERE Email = ?
+     * const user = await CSDBUtils.executeFromFileSingleRow('MY_DB', 'queries/get-user-by-email.sql', ['john@example.com']);
+     * ```
+     */
+    public static async executeFromFileSingleRow(alias: string, filePath: string, params?: any[]): Promise<Record<string, any>> {
+        const result = await this.executeFromFile(alias, filePath, params);
+
+        if (result.rowCount === 0) {
+            throw new Error(`Query from file '${filePath}' returned no rows`);
+        }
+
+        return result.rows[0];
+    }
+
+    /**
      * Execute a query and return a single value from the first row, first column
      *
      * @template T - Type of the value to return

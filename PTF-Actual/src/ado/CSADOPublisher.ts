@@ -189,9 +189,9 @@ export class CSADOPublisher {
                             }
                         }
 
-                        // CSReporter.info(`✓ Collected test point ${testPoint.id} for test case ${testCaseId}`);
+                        CSReporter.info(`[ADO] ✓ Collected test point ${testPoint.id} for test case ${testCaseId} (Plan ${metadata.testPlanId})`);
                     } else {
-                        CSReporter.warn(`No test point found for test case ${testCaseId} in plan ${metadata.testPlanId}, suite ${metadata.testSuiteId}`);
+                        CSReporter.warn(`[ADO] No test point found for test case ${testCaseId} in plan ${metadata.testPlanId}, suite ${metadata.testSuiteId}`);
                         // Log structure of first test point for debugging
                         if (testPoints.length > 0 && !this.debuggedTestPoint) {
                             CSReporter.debug(`Available test points (first 3): ${JSON.stringify(testPoints.slice(0, 3), null, 2)}`);
@@ -242,9 +242,16 @@ export class CSADOPublisher {
             // Format: FeatureName - Environment - TestRun - Timestamp
             const baseRunName = name || `${featureName} - ${environment} - TestRun - ${timestamp}`;
 
+            // Log what we have before creating test runs
+            CSReporter.info(`[ADO] Creating test runs for ${this.planTestPointsMap.size} plan(s)`);
+            for (const [planId, testPoints] of this.planTestPointsMap.entries()) {
+                CSReporter.info(`[ADO] Plan ${planId}: ${testPoints.size} test point(s)`);
+            }
+
             // Create a test run for each plan that has test points
             for (const [planId, testPoints] of this.planTestPointsMap.entries()) {
                 if (testPoints.size === 0) {
+                    CSReporter.warn(`[ADO] Skipping plan ${planId} - no test points`);
                     continue;
                 }
 
@@ -252,6 +259,8 @@ export class CSADOPublisher {
                 const runName = this.planTestPointsMap.size > 1
                     ? `${baseRunName} (Plan ${planId})`
                     : baseRunName;
+
+                CSReporter.info(`[ADO] Creating test run for plan ${planId} with ${planSpecificPoints.length} test point(s): [${planSpecificPoints.join(', ')}]`);
 
                 try {
                     const testRunId = await this.client.createTestRun(
@@ -266,15 +275,14 @@ export class CSADOPublisher {
                     };
 
                     this.testRunsByPlan.set(planId, testRun);
+                    CSReporter.info(`[ADO] ✅ Test Run ${testRunId} created for plan ${planId}`);
 
                     // Set as current run if it's the primary plan
                     if (planId === this.testPlanId) {
                         this.currentTestRun = testRun;
                     }
-
-                    // CSReporter.info(`✅ ADO Test Run created with ID ${testRunId} for plan ${planId} with ${planSpecificPoints.length} test points`);
                 } catch (error) {
-                    CSReporter.error(`Failed to create test run for plan ${planId}: ${error}`);
+                    CSReporter.error(`[ADO] Failed to create test run for plan ${planId}: ${error}`);
                 }
             }
 

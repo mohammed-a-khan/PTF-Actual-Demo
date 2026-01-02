@@ -8,7 +8,7 @@ Feature: Certificate Authentication Example
     And user sets base URL to "https://httpbin.org"
     And user sets API timeout to 30 seconds
 
-  @api @httpbin @get @certificate
+  @api @httpbin @get @certificate @smoke
   Scenario: Test HTTPBin GET endpoint with certificate authentication - Simple
     Given user loads certificate from "certificates/client.pfx" with password "test123"
     When user sends GET request to "/get"

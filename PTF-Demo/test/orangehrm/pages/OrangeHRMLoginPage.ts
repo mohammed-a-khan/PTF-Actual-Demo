@@ -56,23 +56,27 @@ export class OrangeHRMLoginPage extends CSBasePage {
     })
     public errorMessage!: CSWebElement;
     
-    // Dashboard header
+    // Dashboard header (specifically the h6 breadcrumb header, not the sidebar menu)
     @CSGetElement({
-        text: 'Dashboard',
+        css: 'h6.oxd-topbar-header-breadcrumb-module',
         description: 'Dashboard header',
         waitForVisible: true,
         alternativeLocators: [
-            'css:h6.oxd-text',
-            'xpath://h6[text()="Dashboard"]'
+            'xpath://h6[contains(@class,"oxd-topbar-header-breadcrumb")]',
+            'role:heading[name="Dashboard"]'
         ]
     })
     public dashboardHeader!: CSWebElement;
     
-    // Navigation menu
+    // Navigation menu (specifically the ul element containing menu items)
     @CSGetElement({
-        css: '.oxd-main-menu',
+        css: 'ul.oxd-main-menu',
         description: 'Navigation menu',
-        waitForVisible: true
+        waitForVisible: true,
+        alternativeLocators: [
+            'xpath://ul[contains(@class,"oxd-main-menu")]',
+            'role:navigation'
+        ]
     })
     public navigationMenu!: CSWebElement;
 
@@ -170,13 +174,15 @@ export class OrangeHRMLoginPage extends CSBasePage {
 
     // Override waitForPageLoad for Orange HRM specific behavior
     public async waitForPageLoad(): Promise<void> {
-        await this.page.waitForLoadState('networkidle', { timeout: 30000 });
+        // Use browserManager.getPage() directly to always get current page after browser switch
+        const currentPage = this.browserManager.getPage();
+        await currentPage.waitForLoadState('networkidle', { timeout: 30000 });
 
         // Wait for login form to be ready
         try {
-            await this.page.waitForSelector('input[name="username"]', { timeout: 10000 });
-            await this.page.waitForSelector('input[name="password"]', { timeout: 5000 });
-            await this.page.waitForSelector('button[type="submit"]', { timeout: 5000 });
+            await currentPage.waitForSelector('input[name="username"]', { timeout: 10000 });
+            await currentPage.waitForSelector('input[name="password"]', { timeout: 5000 });
+            await currentPage.waitForSelector('button[type="submit"]', { timeout: 5000 });
             CSReporter.debug('Orange HRM login page fully loaded');
         } catch (error) {
             CSReporter.warn('Login form elements not found within timeout');

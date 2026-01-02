@@ -756,6 +756,18 @@ export class CSBDDRunner {
         // Check tag filters
         const allTags = [...(feature.tags || []), ...(scenario.tags || [])];
 
+        // Check @enabled tag - @enabled:false skips the scenario
+        // Default is enabled (true) if no @enabled tag is present
+        const enabledTag = allTags.find(tag =>
+            tag.toLowerCase().startsWith('@enabled:') || tag.toLowerCase().startsWith('enabled:')
+        );
+        if (enabledTag) {
+            const value = enabledTag.split(':')[1]?.toLowerCase().trim();
+            if (value === 'false' || value === 'no' || value === '0') {
+                return false;
+            }
+        }
+
         // Include tag filter
         if (options.tags) {
             const includeTags = options.tags.split(',').map(t => t.trim());

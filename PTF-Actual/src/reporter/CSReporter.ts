@@ -412,8 +412,9 @@ export class CSReporter {
         // Store in log buffer
         this.logBuffer.push(logMessage);
 
-        // Add to current step if it exists
-        if (this.currentStep && level !== 'STEP' && level !== 'TEST' && level !== 'FEATURE') {
+        // Add to current step if it exists (exclude DEBUG logs from step-level display)
+        // DEBUG logs are still captured in console-logs.txt via logBuffer
+        if (this.currentStep && level !== 'STEP' && level !== 'TEST' && level !== 'FEATURE' && level !== 'DEBUG') {
             // Add detailed log entry to current step
             if (!this.currentStep.actions) {
                 this.currentStep.actions = [];

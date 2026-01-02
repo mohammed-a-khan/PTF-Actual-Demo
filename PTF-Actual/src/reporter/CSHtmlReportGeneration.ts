@@ -48,6 +48,23 @@ interface TestSuite {
     passedScenarios?: number;
     failedScenarios?: number;
     skippedScenarios?: number;
+    /** Test format: 'spec' for describe/it format, 'bdd' for Cucumber/Gherkin format */
+    testFormat?: 'spec' | 'bdd';
+}
+
+/**
+ * Terminology mapping for different test formats
+ */
+interface TestTerminology {
+    feature: string;
+    features: string;
+    scenario: string;
+    scenarios: string;
+    step: string;
+    steps: string;
+    featurePerformance: string;
+    testCoverage: string;
+    featureDistribution: string;
 }
 
 interface Artifact {
@@ -80,6 +97,49 @@ export class CSHtmlReportGenerator {
     private static brandColorLight = '#b83395';
     private static brandColorDark = '#6b1150';
     private static config = CSConfigurationManager.getInstance();
+
+    /**
+     * Get terminology based on test format
+     */
+    private static getTerminology(testFormat?: 'spec' | 'bdd'): TestTerminology {
+        if (testFormat === 'spec') {
+            return {
+                feature: 'Test Suite',
+                features: 'Test Suites',
+                scenario: 'Test Case',
+                scenarios: 'Test Cases',
+                step: 'Action',
+                steps: 'Actions',
+                featurePerformance: 'Test Suite Performance',
+                testCoverage: 'Test Coverage',
+                featureDistribution: 'Test Suite Distribution'
+            };
+        }
+        // Default BDD terminology
+        return {
+            feature: 'Feature',
+            features: 'Features',
+            scenario: 'Scenario',
+            scenarios: 'Scenarios',
+            step: 'Step',
+            steps: 'Steps',
+            featurePerformance: 'Feature Performance',
+            testCoverage: 'Test Coverage',
+            featureDistribution: 'Feature Distribution'
+        };
+    }
+
+    /**
+     * Detect test format from suite data
+     */
+    private static detectTestFormat(suite: TestSuite): 'spec' | 'bdd' {
+        // Check explicit testFormat property
+        if (suite.testFormat) {
+            return suite.testFormat;
+        }
+        // Default to BDD
+        return 'bdd';
+    }
 
     public static async generateReport(suite: TestSuite, outputDir: string): Promise<void> {
         try {
@@ -538,8 +598,11 @@ export class CSHtmlReportGenerator {
     /**
      * Categorize failure reasons for analysis
      */
-    private static categorizeFailure(error: string): string {
-        const errorLower = error.toLowerCase();
+    private static categorizeFailure(error: string | Error | any): string {
+        // Convert error to string if needed
+        const errorStr = typeof error === 'string' ? error :
+                         (error?.message || error?.toString?.() || String(error));
+        const errorLower = errorStr.toLowerCase();
         
         if (errorLower.includes('timeout') || errorLower.includes('timed out')) {
             return 'Timeout Issues';
@@ -591,8 +654,9 @@ export class CSHtmlReportGenerator {
                 videoRecording: this.config.get('BROWSER_VIDEO', 'off') !== 'off' ? 'Enabled' : 'Disabled'
             },
             execution: {
-                parallel: this.config.getBoolean('PARALLEL', false) ? 'Enabled' : 'Disabled',
-                maxWorkers: this.config.get('WORKERS', '1'),
+                // Use suite's parallel metadata if available, otherwise fall back to config
+                parallel: (suite as any)?.parallel || this.config.getBoolean('PARALLEL', false) ? 'Yes' : 'No',
+                maxWorkers: (suite as any)?.workers || this.config.get('WORKERS', '1'),
                 timeout: this.config.get('TIMEOUT', '30000') + 'ms',
                 networkRecording: this.config.get('HAR_CAPTURE_MODE', 'never') !== 'never' ? 'Enabled' : 'Disabled'
             },
@@ -611,14 +675,16 @@ export class CSHtmlReportGenerator {
     private static generateCompleteHTML(suite: TestSuite, artifacts: Artifacts, history: ExecutionHistory[], logoBase64: string = ''): string {
         const stats = this.calculateStatistics(suite);
         const environment = this.getEnvironmentInfo(suite);
-        
+        const testFormat = this.detectTestFormat(suite);
+        const terms = this.getTerminology(testFormat);
+
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CS Playwright Test Automation Report</title>
-    
+
     <!-- External Libraries -->
     <!-- Custom Chart Library (embedded) -->
     <script>
@@ -627,56 +693,56 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/duration.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/relativeTime.js"></script>
-    
+
     <style>
         ${this.generateEnhancedCSS()}
     </style>
 </head>
 <body>
     <div id="app">
-        ${this.generateEnhancedHeader(suite, stats, logoBase64)}
-        ${this.generateNavigation()}
-        
+        ${this.generateEnhancedHeader(suite, stats, logoBase64, terms)}
+        ${this.generateNavigation(terms)}
+
         <main class="main-content">
             <!-- Dashboard View -->
             <div id="dashboard-view" class="view active">
-                ${this.generateEnhancedDashboard(stats, environment, artifacts, history)}
+                ${this.generateEnhancedDashboard(stats, environment, artifacts, history, terms)}
             </div>
-            
+
             <!-- Tests View -->
             <div id="tests-view" class="view">
-                ${this.generateEnhancedTestsView(suite, stats)}
+                ${this.generateEnhancedTestsView(suite, stats, terms)}
             </div>
-            
+
             <!-- Timeline View -->
             <div id="timeline-view" class="view">
-                ${this.generateTimelineView(suite, stats)}
+                ${this.generateTimelineView(suite, stats, terms)}
             </div>
-            
+
             <!-- Failure Analysis View -->
             <div id="failure-analysis-view" class="view">
-                ${this.generateFailureAnalysisView(suite, stats)}
+                ${this.generateFailureAnalysisView(suite, stats, terms)}
             </div>
-            
+
             <!-- Categories View -->
             <div id="categories-view" class="view">
-                ${this.generateEnhancedCategoriesView(suite, stats)}
+                ${this.generateEnhancedCategoriesView(suite, stats, terms)}
             </div>
-            
+
             <!-- Environment View -->
             <div id="environment-view" class="view">
                 ${this.generateEnhancedEnvironmentView(environment)}
             </div>
-            
+
             <!-- Artifacts View -->
             <div id="artifacts-view" class="view">
                 ${this.generateEnhancedArtifactsView(artifacts)}
             </div>
         </main>
-        
+
         ${this.generateFooter()}
     </div>
-    
+
     <!-- Test Details Modal -->
     <div id="test-modal" class="modal">
         <div class="modal-content">
@@ -684,7 +750,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             <div id="modal-body"></div>
         </div>
     </div>
-    
+
     <!-- Screenshot Viewer Modal -->
     <div id="screenshot-modal" class="modal">
         <div class="modal-content modal-large">
@@ -692,9 +758,9 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             <img id="screenshot-img" src="" alt="Screenshot">
         </div>
     </div>
-    
+
     <script>
-        ${this.generateEnhancedJavaScript(suite, stats, artifacts, history)}
+        ${this.generateEnhancedJavaScript(suite, stats, artifacts, history, terms)}
     </script>
 </body>
 </html>`;
@@ -1040,6 +1106,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         .scenario-steps {
             display: none;
             background: white;
+            padding: 12px 16px 12px 24px;
         }
 
         .scenario-steps.expanded {
@@ -1811,7 +1878,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate enhanced header without stat cards
      */
-    private static generateEnhancedHeader(suite: TestSuite, stats: any, logoBase64: string = ''): string {
+    private static generateEnhancedHeader(suite: TestSuite, stats: any, logoBase64: string = '', terms?: TestTerminology): string {
         const duration = this.formatDuration(suite.duration || 0);
         
         return `
@@ -1837,7 +1904,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate navigation with enhanced tabs
      */
-    private static generateNavigation(): string {
+    private static generateNavigation(terms?: TestTerminology): string {
         return `
         <nav class="nav">
             <div class="nav-container">
@@ -1869,7 +1936,9 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate enhanced dashboard with all requested features
      */
-    private static generateEnhancedDashboard(stats: any, environment: any, artifacts: Artifacts, history: ExecutionHistory[]): string {
+    private static generateEnhancedDashboard(stats: any, environment: any, artifacts: Artifacts, history: ExecutionHistory[], terms?: TestTerminology): string {
+        // Use default BDD terminology if not provided
+        const t = terms || this.getTerminology('bdd');
         return `
         <div class="dashboard-title">Test Execution Dashboard</div>
         
@@ -1908,7 +1977,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 <canvas id="heatmap-chart" class="chart-canvas"></canvas>
             </div>
             <div class="chart-container">
-                <div class="chart-title">Feature Performance</div>
+                <div class="chart-title">${t.featurePerformance}</div>
                 <canvas id="feature-chart" class="chart-canvas"></canvas>
             </div>
             <div class="chart-container">
@@ -1929,11 +1998,14 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate enhanced tests view with hierarchical structure
      */
-    private static generateEnhancedTestsView(suite: TestSuite, stats: any): string {
-        // Group scenarios by feature
+    private static generateEnhancedTestsView(suite: TestSuite, stats: any, terms?: TestTerminology): string {
+        // Use default BDD terminology if not provided
+        const t = terms || this.getTerminology('bdd');
+
+        // Group scenarios by feature/suite
         const featureGroups = new Map<string, TestScenario[]>();
         suite.scenarios.forEach(scenario => {
-            const featureName = scenario.feature || 'Unknown Feature';
+            const featureName = scenario.feature || `Unknown ${t.feature}`;
             if (!featureGroups.has(featureName)) {
                 featureGroups.set(featureName, []);
             }
@@ -1944,15 +2016,15 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         <div class="stats-grid">
             <div class="stat-card features">
                 <div class="stat-value">${stats.totalFeatures}</div>
-                <div class="stat-label">Total Features</div>
+                <div class="stat-label">Total ${t.features}</div>
             </div>
             <div class="stat-card scenarios">
                 <div class="stat-value">${stats.totalScenarios}</div>
-                <div class="stat-label">Total Scenarios</div>
+                <div class="stat-label">Total ${t.scenarios}</div>
             </div>
             <div class="stat-card steps">
                 <div class="stat-value">${stats.totalSteps}</div>
-                <div class="stat-label">No of Steps</div>
+                <div class="stat-label">Total ${t.steps}</div>
             </div>
             <div class="stat-card time">
                 <div class="stat-value">${this.formatDuration(stats.avgScenarioTime)}</div>
@@ -1971,7 +2043,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                         <div>
                             <span class="status-badge ${scenario.status}">${scenario.status}</span>
                             <strong>${htmlEscape(scenario.name)}</strong>
-                            <span class="text-muted">(${scenario.steps.length} steps)</span>
+                            <span class="text-muted">(${scenario.steps.length} ${t.steps.toLowerCase()})</span>
                         </div>
                         <div>
                             <span class="text-muted">${this.formatDuration(scenario.duration || 0)}</span>
@@ -2095,42 +2167,208 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                             </div>
                             `;
                         })() : ''}
-                        ${scenario.steps.map((step, index) => `
-                            <div class="step-item ${step.status}">
-                                <div class="step-header" onclick="toggleStep(this)">
-                                    <div>
-                                        <span class="status-badge ${step.status}">${step.status}</span>
-                                        <span>${htmlEscape(step.name)}</span>
-                                    </div>
-                                    <div>
-                                        <span class="text-muted">Duration: ${step.duration || 0}ms</span>
-                                        <span class="toggle-icon">▶</span>
-                                    </div>
-                                </div>
-                                <div class="step-details">
-                                    <div class="step-tabs">
-                                        <div class="step-tab active" onclick="showStepTab(this, 'actions-${index}')">Actions</div>
-                                        <div class="step-tab" onclick="showStepTab(this, 'screenshots-${index}')">Screenshots</div>
-                                        <div class="step-tab" onclick="showStepTab(this, 'error-${index}')">Error Details</div>
-                                    </div>
-                                    <div class="step-tab-content">
-                                        <div class="step-tab-pane active" id="actions-${index}">
-                                            <div class="actions-list">
-                                                ${this.generateStepActions(step)}
+                        ${(() => {
+                            const scenarioData = scenario as any;
+
+                            // Check if this is a spec runner scenario (use enhanced rendering) or BDD (use original simple rendering)
+                            if (!scenarioData.isSpecRunner) {
+                                // Original BDD step rendering - simple, clean format
+                                const scenarioUniqueId = `bdd-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                                return scenario.steps.map((step: any, index: number) => `
+                                    <div class="step-item ${step.status}">
+                                        <div class="step-header" onclick="toggleStep(this)">
+                                            <div>
+                                                <span class="status-badge ${step.status}">${step.status}</span>
+                                                <span>${htmlEscape(step.name)}</span>
+                                            </div>
+                                            <div>
+                                                <span class="text-muted">Duration: ${CSHtmlReportGenerator.formatDuration(step.duration || 0)}</span>
+                                                <span class="toggle-icon">▶</span>
                                             </div>
                                         </div>
-                                        <div class="step-tab-pane" id="screenshots-${index}">
-                                            ${this.generateStepScreenshots(step)}
-                                        </div>
-                                        <div class="step-tab-pane" id="error-${index}">
-                                            <div class="error-details-container">
-                                                ${this.generateStepErrorDetails(step)}
+                                        <div class="step-details">
+                                            <div class="step-tabs">
+                                                <div class="step-tab active" onclick="showStepTab(this, '${scenarioUniqueId}-actions-${index}')">Actions</div>
+                                                <div class="step-tab" onclick="showStepTab(this, '${scenarioUniqueId}-screenshots-${index}')">Screenshots</div>
+                                                <div class="step-tab" onclick="showStepTab(this, '${scenarioUniqueId}-error-${index}')">Error Details</div>
+                                            </div>
+                                            <div class="step-tab-content">
+                                                <div class="step-tab-pane active" id="${scenarioUniqueId}-actions-${index}">
+                                                    <div class="actions-list">
+                                                        ${this.generateStepActions(step)}
+                                                    </div>
+                                                </div>
+                                                <div class="step-tab-pane" id="${scenarioUniqueId}-screenshots-${index}">
+                                                    ${this.generateStepScreenshots(step)}
+                                                </div>
+                                                <div class="step-tab-pane" id="${scenarioUniqueId}-error-${index}">
+                                                    <div class="error-details-container">
+                                                        ${this.generateStepErrorDetails(step)}
+                                                    </div>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
-                                </div>
-                            </div>
-                        `).join('')}
+                                `).join('');
+                            }
+
+                            // Spec runner enhanced step rendering with hooks and hierarchy
+                            // Recursive function to render a step and its children inline
+                            const renderStepHierarchy = (step: any, index: number, depth: number = 0): string => {
+                                // Skip "Test Actions" fallback - it's just a container, use its children/actions directly
+                                if (step.name === 'Test Actions') {
+                                    // If it has children, render those instead
+                                    if (step.children && step.children.length > 0) {
+                                        return step.children.map((child: any, childIdx: number) =>
+                                            renderStepHierarchy(child, childIdx, depth)
+                                        ).join('');
+                                    }
+                                    // If it only has actions and no name, skip entirely
+                                    if (!step.actions || step.actions.length === 0) {
+                                        return '';
+                                    }
+                                }
+
+                                const indent = depth * 24;
+                                const isHookStep = step.isHook || step.hookType;
+                                const hookBadge = isHookStep && step.hookType ? `<span style="font-size: 0.65em; padding: 2px 5px; border-radius: 3px; background: #6c757d; color: white; margin-right: 6px; text-transform: uppercase;">${step.hookType}</span>` : '';
+                                const stepBorderColor = isHookStep ? '#6c757d' : (step.status === 'passed' ? '#28a745' : (step.status === 'failed' ? '#dc3545' : '#ffc107'));
+                                const hasChildren = step.children && step.children.length > 0;
+                                const hasActions = step.actions && step.actions.length > 0;
+
+                                // Render children recursively
+                                const childrenHtml = hasChildren ? step.children.map((child: any, childIdx: number) =>
+                                    renderStepHierarchy(child, childIdx, depth + 1)
+                                ).join('') : '';
+
+                                return `
+                                    <div class="step-item ${step.status}" style="margin-left: ${indent}px; border-left: 3px solid ${stepBorderColor}; margin-bottom: 8px; border-radius: 4px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
+                                        <div class="step-header" onclick="toggleStep(this)" style="padding: 10px 14px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; background: ${isHookStep ? '#f1f3f4' : 'linear-gradient(to right, #f8f9fa, #ffffff)'}; border-bottom: 1px solid #eee;">
+                                            <div style="display: flex; align-items: center; gap: 10px;">
+                                                ${hookBadge}
+                                                <span class="status-badge ${step.status}" style="font-size: 0.7em; padding: 3px 8px; border-radius: 3px;">${step.status}</span>
+                                                <span style="font-weight: 600; font-size: 0.95em; ${isHookStep ? 'color: #5f6368; font-style: italic;' : 'color: #202124;'}">${htmlEscape(step.name)}</span>
+                                            </div>
+                                            <div style="display: flex; align-items: center; gap: 12px;">
+                                                <span class="text-muted" style="font-size: 0.8em; background: #e8eaed; padding: 2px 8px; border-radius: 10px;">${CSHtmlReportGenerator.formatDuration(step.duration || 0)}</span>
+                                                ${(hasActions || step.error) ? '<span class="toggle-icon" style="font-size: 0.7em; color: #5f6368;">▶</span>' : ''}
+                                            </div>
+                                        </div>
+                                        ${(hasActions || step.error || step.screenshot) ? (() => {
+                                            const stepUniqueId = `step-${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${stepIndex}`;
+                                            // Check for screenshot in multiple places: step.screenshot, step.error.screenshot, action screenshots, or scenario-level screenshots for failed steps
+                                            const scenarioScreenshots = scenarioData.artifacts?.screenshots || scenarioData.screenshots || [];
+                                            const hasScreenshot = !!(step.screenshot ||
+                                                (step.error && (step.error as any).screenshot) ||
+                                                (step.actions && step.actions.some((a: any) => a.screenshot)) ||
+                                                (step.status === 'failed' && scenarioScreenshots.length > 0));
+                                            // For failed steps without direct screenshot, use the scenario's first screenshot
+                                            if (!step.screenshot && step.status === 'failed' && scenarioScreenshots.length > 0) {
+                                                step.screenshot = scenarioScreenshots[0];
+                                            }
+                                            const hasError = !!step.error;
+
+                                            return `
+                                            <div class="step-details">
+                                                <div class="step-tabs" style="display: flex; background: #f8f9fa; border-bottom: 1px solid #dee2e6;">
+                                                    <div class="step-tab active" onclick="showStepTab(this, '${stepUniqueId}-actions')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid #93186C; font-size: 0.85em; font-weight: 700; color: #93186C;">
+                                                        📋 <strong>Actions</strong>${hasActions ? ` (${step.actions.length})` : ''}
+                                                    </div>
+                                                    <div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-screenshots')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: #495057;">
+                                                        📷 <strong>Screenshots</strong>${hasScreenshot ? ' (1)' : ''}
+                                                    </div>
+                                                    <div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-error')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: ${hasError ? '#dc3545' : '#495057'};">
+                                                        ${hasError ? '⚠️' : '✓'} <strong>Error Details</strong>
+                                                    </div>
+                                                </div>
+                                                <div class="step-tab-content" style="padding: 12px;">
+                                                    <div id="${stepUniqueId}-actions" class="step-tab-pane active" style="display: block;">
+                                                        ${hasActions ? this.generateStepActions(step) : '<div class="text-muted" style="color: #6c757d; font-style: italic;">No actions recorded</div>'}
+                                                    </div>
+                                                    <div id="${stepUniqueId}-screenshots" class="step-tab-pane" style="display: none;">
+                                                        ${hasScreenshot ? this.generateStepScreenshots(step) : '<div class="text-muted" style="color: #6c757d; font-style: italic;">No screenshots captured</div>'}
+                                                    </div>
+                                                    <div id="${stepUniqueId}-error" class="step-tab-pane" style="display: none;">
+                                                        ${hasError ? `
+                                                        <div style="padding: 12px; background: #fff5f5; border-radius: 4px; border-left: 4px solid #dc3545;">
+                                                            <div style="font-weight: 600; color: #dc3545; margin-bottom: 8px;">Error Message:</div>
+                                                            <div style="color: #721c24; font-family: monospace; font-size: 0.9em; white-space: pre-wrap;">${htmlEscape(step.error.message || step.error)}</div>
+                                                            ${step.error.stack ? `
+                                                            <div style="margin-top: 12px;">
+                                                                <div style="font-weight: 600; color: #dc3545; margin-bottom: 4px;">Stack Trace:</div>
+                                                                <pre style="background: #f8f8f8; padding: 8px; border-radius: 4px; font-size: 0.8em; overflow-x: auto; color: #666;">${htmlEscape(step.error.stack)}</pre>
+                                                            </div>
+                                                            ` : ''}
+                                                        </div>
+                                                        ` : '<div class="text-muted" style="color: #28a745; font-style: italic;">✓ No errors - step passed successfully</div>'}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            `;
+                                        })() : ''}
+                                        ${childrenHtml}
+                                    </div>
+                                `;
+                            };
+
+                            // Build step list: hooks as separate sections, then main steps
+                            let html = '';
+                            let stepIndex = 0;
+
+                            // Hooks section (collapsed by default)
+                            const hasHooks = scenarioData.beforeAllSteps?.length > 0 || scenarioData.beforeEachSteps?.length > 0 ||
+                                           scenarioData.afterEachSteps?.length > 0 || scenarioData.afterAllSteps?.length > 0;
+
+                            if (hasHooks) {
+                                const allHooksPassed = [
+                                    ...(scenarioData.beforeAllSteps || []),
+                                    ...(scenarioData.beforeEachSteps || []),
+                                    ...(scenarioData.afterEachSteps || []),
+                                    ...(scenarioData.afterAllSteps || [])
+                                ].every((h: any) => h.status === 'passed');
+
+                                html += `
+                                    <div class="hooks-section" style="margin-bottom: 12px; border: 1px solid #dee2e6; border-radius: 4px; background: #f8f9fa;">
+                                        <div class="step-header" onclick="toggleStep(this)" style="padding: 8px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
+                                            <div style="display: flex; align-items: center; gap: 8px;">
+                                                <span class="toggle-icon" style="font-size: 0.7em;">▶</span>
+                                                <span style="font-weight: 500; color: #495057;">🔧 Setup & Teardown Hooks</span>
+                                                <span style="font-size: 0.75em; padding: 2px 6px; border-radius: 3px; background: ${allHooksPassed ? '#d4edda' : '#f8d7da'}; color: ${allHooksPassed ? '#155724' : '#721c24'};">
+                                                    ${allHooksPassed ? 'All Passed' : 'Has Failures'}
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <div class="step-details" style="padding: 8px 8px 8px 8px;">
+                                            ${scenarioData.beforeAllSteps?.map((s: any) => renderStepHierarchy({...s, hookType: 'beforeAll', isHook: true}, stepIndex++, 0)).join('') || ''}
+                                            ${scenarioData.beforeEachSteps?.map((s: any) => renderStepHierarchy({...s, hookType: 'beforeEach', isHook: true}, stepIndex++, 0)).join('') || ''}
+                                            ${scenarioData.afterEachSteps?.map((s: any) => renderStepHierarchy({...s, hookType: 'afterEach', isHook: true}, stepIndex++, 0)).join('') || ''}
+                                            ${scenarioData.afterAllSteps?.map((s: any) => renderStepHierarchy({...s, hookType: 'afterAll', isHook: true}, stepIndex++, 0)).join('') || ''}
+                                        </div>
+                                    </div>
+                                `;
+                            }
+
+                            // Main test steps - filter out "Test Actions" at root level
+                            html += `<div class="test-steps">`;
+                            for (const step of scenario.steps) {
+                                html += renderStepHierarchy(step, stepIndex++, 0);
+                            }
+                            html += `</div>`;
+
+                            // Attachments section (from test.info().attach())
+                            const attachments = scenarioData.attachments || [];
+                            if (attachments.length > 0) {
+                                html += this.generateAttachmentsSection(attachments);
+                            }
+
+                            // Annotations section (from test.info().annotations)
+                            const annotations = scenarioData.customAnnotations || scenarioData.annotations || [];
+                            if (annotations.length > 0) {
+                                html += this.generateAnnotationsSection(annotations);
+                            }
+
+                            return html;
+                        })()}
                     </div>
                 </div>
             `).join('');
@@ -2147,7 +2385,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     <div class="feature-header" onclick="toggleFeature(this)">
                         <div>
                             <strong>${featureStatusIcon} 📁 ${featureName}</strong>
-                            <span class="text-muted" style="margin-left: 1rem;">(${scenarios.length} scenarios)</span>
+                            <span class="text-muted" style="margin-left: 1rem;">(${scenarios.length} ${t.scenarios.toLowerCase()})</span>
                             <span style="margin-left: 0.5rem;">
                                 ${passedCount > 0 ? `<span style="color: #28a745; font-weight: 500;">${passedCount} passed</span>` : ''}
                                 ${failedCount > 0 ? `<span style="color: #dc3545; font-weight: 500; margin-left: 0.5rem;">${failedCount} failed</span>` : ''}
@@ -2192,11 +2430,31 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             // Determine action type from the action name
             let actionType = 'info';
             let icon = '▶️';
-            
+
             const actionName = action.name || action.action || '';
             const lowerAction = actionName.toLowerCase();
-            
-            if (lowerAction.includes('click')) {
+
+            // Check for reporter statement prefixes (✓, ✗, ℹ) first
+            // These are added by hookReporterActions in spec tests
+            const trimmedAction = actionName.trim();
+            let isReporterStatement = false;
+
+            if (trimmedAction.startsWith('✓') || trimmedAction.startsWith('✔')) {
+                // Pass statement from CSReporter.pass()
+                icon = '✅';
+                actionType = 'pass';
+                isReporterStatement = true;
+            } else if (trimmedAction.startsWith('✗') || trimmedAction.startsWith('✘') || trimmedAction.startsWith('❌')) {
+                // Fail statement from CSReporter.fail()
+                icon = '❌';
+                actionType = 'fail';
+                isReporterStatement = true;
+            } else if (trimmedAction.startsWith('ℹ') || trimmedAction.startsWith('ℹ️')) {
+                // Info statement from CSReporter.info()
+                icon = 'ℹ️';
+                actionType = 'info';
+                isReporterStatement = true;
+            } else if (lowerAction.includes('click')) {
                 icon = iconMap.click;
             } else if (lowerAction.includes('type') || lowerAction.includes('fill') || lowerAction.includes('enter')) {
                 icon = iconMap.type;
@@ -2211,19 +2469,25 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 icon = iconMap.screenshot;
             }
 
-            // Override icon for any failed action
-            if (action.status === 'failed' || action.status === 'fail') {
-                actionType = 'fail';
-                // For non-assertion failures, use ❌
-                if (!lowerAction.includes('assert') && !lowerAction.includes('expect')) {
-                    icon = '❌';
+            // Override icon for any failed action (unless already set by reporter prefix)
+            if (!isReporterStatement) {
+                if (action.status === 'failed' || action.status === 'fail') {
+                    actionType = 'fail';
+                    // For non-assertion failures, use ❌
+                    if (!lowerAction.includes('assert') && !lowerAction.includes('expect')) {
+                        icon = '❌';
+                    }
+                } else if (action.status === 'passed' || action.status === 'pass') {
+                    actionType = 'pass';
                 }
-            } else if (action.status === 'passed' || action.status === 'pass') {
-                actionType = 'pass';
             }
-            
+
             // Clean up the action text for better readability
             let displayText = actionName;
+            // Remove reporter statement prefix (✓, ✗, ℹ) since icon already shows status
+            if (isReporterStatement) {
+                displayText = displayText.replace(/^[✓✔✗✘❌ℹℹ️]\s*/, '');
+            }
             // Remove ANSI color codes
             displayText = displayText.replace(/\x1b\[[0-9;]*m/g, '');
             // Limit length for better display
@@ -2244,8 +2508,26 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
      * Generate step screenshots for the Screenshots tab
      */
     private static generateStepScreenshots(step: TestStep): string {
-        // Check for screenshot in the step
+        // Check for screenshot in multiple places
         let screenshotPath = step.screenshot;
+
+        // Check error object for screenshot
+        if (!screenshotPath && step.error) {
+            const errorObj = step.error as any;
+            if (errorObj.screenshot) {
+                screenshotPath = errorObj.screenshot;
+            }
+        }
+
+        // Check actions for screenshots
+        if (!screenshotPath && (step as any).actions) {
+            for (const action of (step as any).actions) {
+                if (action.screenshot) {
+                    screenshotPath = action.screenshot;
+                    break;
+                }
+            }
+        }
 
         // If no direct screenshot property, try to extract from logs
         if (!screenshotPath && step.logs) {
@@ -2255,6 +2537,16 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     screenshotPath = match[1];
                     break;
                 }
+            }
+        }
+
+        // Try to extract from error message/stack
+        if (!screenshotPath && step.error) {
+            const errorStr = typeof step.error === 'string' ? step.error :
+                ((step.error as any).message || '') + ((step.error as any).stack || '');
+            const match = errorStr.match(/screenshot[:\s]+([^\s]+\.png)/i);
+            if (match) {
+                screenshotPath = match[1];
             }
         }
         
@@ -2305,8 +2597,10 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         
         // Show error with stack trace if available
         if (step.error) {
-            // Clean up error message
-            let errorMsg = step.error;
+            // Clean up error message - handle Error objects and strings
+            const err = step.error as any;
+            let errorMsg = typeof err === 'string' ? err :
+                           (err?.message || err?.toString?.() || String(err));
             // Remove ANSI color codes
             errorMsg = errorMsg.replace(/\x1b\[[0-9;]*m/g, '');
             // Escape HTML first to prevent XSS
@@ -2366,8 +2660,10 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         // Show main error message
         if (step.error) {
-            // Clean up error message
-            let errorMsg = step.error;
+            // Clean up error message - handle Error objects and strings
+            const err = step.error as any;
+            let errorMsg = typeof err === 'string' ? err :
+                           (err?.message || err?.toString?.() || String(err));
             // Remove ANSI color codes
             errorMsg = errorMsg.replace(/\x1b\[[0-9;]*m/g, '');
 
@@ -2377,7 +2673,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             let stackTrace = '';
             let isStackTrace = false;
 
-            errorLines.forEach(line => {
+            errorLines.forEach((line: string) => {
                 if (line.includes('    at ') || line.includes('      at ') || isStackTrace) {
                     isStackTrace = true;
                     stackTrace += line + '\n';
@@ -2460,6 +2756,79 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     }
 
     /**
+     * Generate attachments section for test info attachments
+     */
+    private static generateAttachmentsSection(attachments: any[]): string {
+        const attachmentItems = attachments.map((att: any, idx: number) => {
+            const isJson = att.contentType === 'application/json';
+            const isText = att.contentType === 'text/plain';
+            const isImage = att.contentType?.startsWith('image/');
+            const icon = isJson ? '📋' : isText ? '📝' : isImage ? '🖼️' : '📄';
+            const attachId = 'att-' + Date.now() + '-' + idx + '-' + Math.random().toString(36).substr(2, 5);
+
+            let content = '';
+            if (att.body) {
+                if (typeof att.body === 'string') {
+                    content = att.body;
+                } else if (att.body instanceof Buffer) {
+                    content = att.body.toString('utf-8');
+                } else if (att.body?.type === 'Buffer' && att.body.data) {
+                    content = Buffer.from(att.body.data).toString('utf-8');
+                }
+            }
+
+            const contentHtml = isImage && att.path
+                ? '<img src="' + att.path + '" style="max-width: 100%; height: auto;" />'
+                : '<pre style="margin: 0; font-size: 0.85em; white-space: pre-wrap; word-break: break-word;">' + htmlEscape(content) + '</pre>';
+
+            return `
+                <div class="attachment-item" style="background: white; border: 1px solid #dee2e6; border-radius: 4px; overflow: hidden; min-width: 200px; max-width: 400px;">
+                    <div style="padding: 8px 12px; background: #e9ecef; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleAttachment('${attachId}')">
+                        <span style="font-weight: 500;">${icon} ${htmlEscape(att.name)}</span>
+                        <span class="toggle-icon" style="font-size: 0.7em;">▶</span>
+                    </div>
+                    <div id="${attachId}" style="display: none; padding: 10px; max-height: 300px; overflow: auto;">
+                        ${contentHtml}
+                    </div>
+                </div>
+            `;
+        }).join('');
+
+        return `
+            <div class="attachments-section" style="margin: 15px; padding: 12px; background: #f8f9fa; border-radius: 6px; border-left: 3px solid #17a2b8;">
+                <div style="font-weight: 600; color: #17a2b8; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
+                    📎 Attachments (${attachments.length})
+                </div>
+                <div class="attachments-list" style="display: flex; flex-wrap: wrap; gap: 10px;">
+                    ${attachmentItems}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
+     * Generate annotations section for test info annotations
+     */
+    private static generateAnnotationsSection(annotations: any[]): string {
+        const annotationItems = annotations.map((ann: any) => `
+            <span style="background: #ffeeba; padding: 4px 10px; border-radius: 4px; font-size: 0.85em;">
+                <strong>${htmlEscape(ann.type)}:</strong> ${htmlEscape(ann.description || '')}
+            </span>
+        `).join('');
+
+        return `
+            <div class="annotations-section" style="margin: 15px; padding: 12px; background: #fff3cd; border-radius: 6px; border-left: 3px solid #ffc107;">
+                <div style="font-weight: 600; color: #856404; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
+                    🏷️ Annotations (${annotations.length})
+                </div>
+                <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                    ${annotationItems}
+                </div>
+            </div>
+        `;
+    }
+
+    /**
      * Get action type based on log content
      */
     private static getActionType(log: string): string {
@@ -2473,7 +2842,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate Timeline view for test execution timeline
      */
-    private static generateTimelineView(suite: TestSuite, stats: any): string {
+    private static generateTimelineView(suite: TestSuite, stats: any, terms?: TestTerminology): string {
         // Calculate timeline data
         const scenarios = suite.scenarios || [];
         const startTime = suite.startTime ? new Date(suite.startTime).getTime() : Date.now();
@@ -2744,7 +3113,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate comprehensive failure analysis view
      */
-    private static generateFailureAnalysisView(suite: TestSuite, stats: any): string {
+    private static generateFailureAnalysisView(suite: TestSuite, stats: any, terms?: TestTerminology): string {
         // Get test results from CSReporter to access AI data
         const testResults = CSReporter.getResults();
 
@@ -2803,7 +3172,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         <div class="failure-grid">
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">🚀 Fastest Scenarios</div>
+                    <div class="card-title">🚀 Fastest ${terms?.scenarios || 'Scenarios'}</div>
                 </div>
                 <div class="card-content">
                     <table class="data-table">
@@ -2826,7 +3195,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             </div>
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">🐌 Slowest Scenarios</div>
+                    <div class="card-title">🐌 Slowest ${terms?.scenarios || 'Scenarios'}</div>
                 </div>
                 <div class="card-content">
                     <table class="data-table">
@@ -2862,19 +3231,19 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 <div class="stats-grid">
                     <div class="metric-card">
                         <div class="metric-value">${this.formatDuration(stats.avgScenarioTime || 0)}</div>
-                        <div class="metric-label">Avg Scenario Time</div>
+                        <div class="metric-label">Avg ${terms?.scenario || 'Scenario'} Time</div>
                     </div>
                     <div class="metric-card">
                         <div class="metric-value">${this.formatDuration(stats.avgStepTime || 0)}</div>
-                        <div class="metric-label">Avg Step Time</div>
+                        <div class="metric-label">Avg ${terms?.step || 'Step'} Time</div>
                     </div>
                     <div class="metric-card">
                         <div class="metric-value">${stats.totalSteps || 0}</div>
-                        <div class="metric-label">Total Steps</div>
+                        <div class="metric-label">Total ${terms?.steps || 'Steps'}</div>
                     </div>
                     <div class="metric-card">
                         <div class="metric-value">${(stats.stepsPerSecond || 0).toFixed(2)}</div>
-                        <div class="metric-label">Steps/Second</div>
+                        <div class="metric-label">${terms?.steps || 'Steps'}/Second</div>
                     </div>
                 </div>
             </div>
@@ -2900,14 +3269,14 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate enhanced categories view
      */
-    private static generateEnhancedCategoriesView(suite: TestSuite, stats: any): string {
+    private static generateEnhancedCategoriesView(suite: TestSuite, stats: any, terms?: TestTerminology): string {
         return `
         <h2>Test Categories & Analysis</h2>
         
         <div class="dashboard-grid">
             <div class="card">
                 <div class="card-header">
-                    <div class="card-title">📊 Feature Distribution</div>
+                    <div class="card-title">📊 ${terms?.featureDistribution || 'Feature Distribution'}</div>
                 </div>
                 <div class="card-content">
                     <canvas id="feature-distribution-chart" style="width: 100%; height: 400px; max-width: 600px; margin: 0 auto; display: block;"></canvas>
@@ -2950,15 +3319,15 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     <div class="stats-grid">
                         <div class="metric-card">
                             <div class="metric-value">${stats.totalFeatures}</div>
-                            <div class="metric-label">Features Covered</div>
+                            <div class="metric-label">${terms?.features || 'Features'} Covered</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-value">${stats.totalScenarios}</div>
-                            <div class="metric-label">Test Scenarios</div>
+                            <div class="metric-label">${terms?.scenarios || 'Scenarios'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-value">${stats.totalSteps}</div>
-                            <div class="metric-label">Test Steps</div>
+                            <div class="metric-label">${terms?.steps || 'Steps'}</div>
                         </div>
                         <div class="metric-card">
                             <div class="metric-value">${stats.passRate}%</div>
@@ -3110,7 +3479,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         <footer class="footer">
             <div class="footer-content">
                 <p>
-                    Generated by <strong>CS Playwright Test Automation Framework v1.0</strong> |
+                    Generated by <strong>CS Playwright Test Automation Framework v2.0</strong> |
                     ${new Date().toLocaleString()} |
                     <a href="#" onclick="window.print()" style="color: var(--brand-color); text-decoration: none;">🖨️ Print Report</a> |
                     <a href="report-data.json" download style="color: var(--brand-color); text-decoration: none;">💾 Export JSON</a>
@@ -3122,7 +3491,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate enhanced JavaScript with all functionality
      */
-    private static generateEnhancedJavaScript(suite: TestSuite, stats: any, artifacts: Artifacts, history: ExecutionHistory[]): string {
+    private static generateEnhancedJavaScript(suite: TestSuite, stats: any, artifacts: Artifacts, history: ExecutionHistory[], terms?: TestTerminology): string {
         // Generate timeline data here for use in JavaScript
         const scenarios = suite.scenarios || [];
         const startTime = suite.startTime ? new Date(suite.startTime).getTime() : Date.now();
@@ -3852,6 +4221,21 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             }
         }
 
+        function toggleAttachment(attachId) {
+            const content = document.getElementById(attachId);
+            if (content) {
+                const header = content.previousElementSibling;
+                const icon = header ? header.querySelector('.toggle-icon') : null;
+                if (content.style.display === 'none' || !content.style.display) {
+                    content.style.display = 'block';
+                    if (icon) icon.textContent = '▼';
+                } else {
+                    content.style.display = 'none';
+                    if (icon) icon.textContent = '▶';
+                }
+            }
+        }
+
         function toggleAllColumns(scenarioId) {
             const allColumns = document.getElementById('all-columns-' + scenarioId);
             const usedColumns = document.getElementById('used-columns-' + scenarioId);
@@ -3874,21 +4258,26 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             // Find the parent step-details container
             const stepDetails = tabElement.closest('.step-details');
             if (!stepDetails) return;
-            
-            // Remove active class from all tabs in this step
+
+            // Remove active class and styling from all tabs in this step
             stepDetails.querySelectorAll('.step-tab').forEach(tab => {
                 tab.classList.remove('active');
+                // Reset inline border style for spec runner tabs
+                tab.style.borderBottom = '2px solid transparent';
+                tab.style.color = '#495057';
             });
-            
-            // Add active class to clicked tab
+
+            // Add active class and styling to clicked tab
             tabElement.classList.add('active');
-            
+            tabElement.style.borderBottom = '2px solid #93186C';
+            tabElement.style.color = '#93186C';
+
             // Hide all tab panes in this step
             stepDetails.querySelectorAll('.step-tab-pane').forEach(pane => {
                 pane.classList.remove('active');
                 pane.style.display = 'none';
             });
-            
+
             // Show the selected tab pane
             const targetPane = stepDetails.querySelector('#' + tabId);
             if (targetPane) {

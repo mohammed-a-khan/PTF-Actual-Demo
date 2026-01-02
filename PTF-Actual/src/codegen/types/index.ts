@@ -327,6 +327,9 @@ export interface GenerationMetadata {
         pages: number;
         steps: number;
         features: number;
+        testDataFields?: number;
+        sensitiveFields?: number;
+        qualityScore?: number;
     };
 }
 

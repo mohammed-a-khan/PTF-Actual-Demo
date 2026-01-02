@@ -1,0 +1,4 @@
+username,password,result
+Admin,admin123,success
+TestUser,test123,failure
+Manager,mgr123,failure

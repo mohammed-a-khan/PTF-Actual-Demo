@@ -41,6 +41,9 @@ export class CSBrowserManager {
     };
     private traceStarted: boolean = false;
 
+    // Page change listeners - called when page changes (e.g., after browser switch)
+    private pageChangeListeners: Array<(newPage: any) => void> = [];
+
     private constructor() {
         // Don't store config reference - get it fresh each time to avoid initialization order issues
         // Check if running in worker thread
@@ -872,16 +875,28 @@ export class CSBrowserManager {
         const browserReuseEnabled = this.config.getBoolean('BROWSER_REUSE_ENABLED', false);
 
         // Remember video capture mode and final status for later cleanup
-        // Video files are only created after context closes, so we can't get the path yet
         const videoCaptureMode = this.config.get('BROWSER_VIDEO', 'off').toLowerCase();
 
-        const shouldDeleteVideosAfterClose = browserReuseEnabled &&
-                                            videoCaptureMode !== 'never' &&
-                                            videoCaptureMode !== 'off' &&
-                                            this.shouldDeleteArtifact(videoCaptureMode, finalStatus);
+        const shouldDeleteVideo = browserReuseEnabled &&
+                                  videoCaptureMode !== 'never' &&
+                                  videoCaptureMode !== 'off' &&
+                                  this.shouldDeleteArtifact(videoCaptureMode, finalStatus);
 
-        if (shouldDeleteVideosAfterClose) {
-            CSReporter.debug(`Videos will be deleted after context closes (browser reuse, capture mode: ${videoCaptureMode}, tests ${finalStatus})`);
+        CSReporter.debug(`closeAll: finalStatus=${finalStatus}, captureMode=${videoCaptureMode}, shouldDelete=${shouldDeleteVideo}`);
+
+        // Get video path BEFORE closing the context (important for parallel execution)
+        // Each worker should only manage its own video file
+        let workerVideoPath: string | null = null;
+        if (this.page && videoCaptureMode !== 'never' && videoCaptureMode !== 'off') {
+            try {
+                const video = this.page.video();
+                if (video) {
+                    workerVideoPath = await video.path();
+                    CSReporter.debug(`Worker video path: ${workerVideoPath}`);
+                }
+            } catch (e: any) {
+                CSReporter.debug(`Could not get video path before close: ${e.message}`);
+            }
         }
 
         // Handle HAR file for browser reuse scenario
@@ -913,44 +928,30 @@ export class CSBrowserManager {
         // Wait for video/HAR files to be fully written by Playwright
         await new Promise(resolve => setTimeout(resolve, 2000));
 
-        // Delete videos if needed (for browser reuse scenario)
+        // Delete ONLY this worker's video if needed (for browser reuse scenario)
+        // Important: Only delete the specific video for this worker, not all videos in directory
         const fs = require('fs');
-        const path = require('path');
-        if (shouldDeleteVideosAfterClose) {
-            try {
-                // Get results manager singleton (may be different in worker context)
-                const resultsManager = CSTestResultsManager.getInstance();
-                const dirs = resultsManager.getDirectories();
-                const videoDir = dirs.videos;
-
-                if (fs.existsSync(videoDir)) {
-                    const videoFiles = fs.readdirSync(videoDir).filter((file: string) =>
-                        file.endsWith('.webm') || file.endsWith('.mp4')
-                    );
-
-                    for (const videoFile of videoFiles) {
-                        const videoPath = path.join(videoDir, videoFile);
-                        let retries = 3;
-                        while (retries > 0) {
-                            try {
-                                fs.unlinkSync(videoPath);
-                                CSReporter.debug(`Video deleted (browser reuse, all tests passed): ${videoFile}`);
-                                break;
-                            } catch (error: any) {
-                                retries--;
-                                if (retries > 0 && error.code === 'EBUSY') {
-                                    await new Promise(resolve => setTimeout(resolve, 500));
-                                } else {
-                                    CSReporter.debug(`Failed to delete video ${videoFile}: ${error.message}`);
-                                    break;
-                                }
-                            }
-                        }
+        if (shouldDeleteVideo && workerVideoPath) {
+            let retries = 3;
+            while (retries > 0) {
+                try {
+                    if (fs.existsSync(workerVideoPath)) {
+                        fs.unlinkSync(workerVideoPath);
+                        CSReporter.debug(`Video deleted (tests ${finalStatus}, capture mode: ${videoCaptureMode}): ${workerVideoPath}`);
+                    }
+                    break;
+                } catch (error: any) {
+                    retries--;
+                    if (retries > 0 && error.code === 'EBUSY') {
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    } else {
+                        CSReporter.debug(`Failed to delete video ${workerVideoPath}: ${error.message}`);
+                        break;
                     }
                 }
-            } catch (error: any) {
-                CSReporter.debug(`Error cleaning up videos: ${error.message}`);
             }
+        } else if (workerVideoPath && !shouldDeleteVideo) {
+            CSReporter.info(`Video retained (tests ${finalStatus}, capture mode: ${videoCaptureMode}): ${workerVideoPath}`);
         }
 
         // Delete videos that were marked for deletion from close() method (non-browser-reuse scenarios)
@@ -1002,7 +1003,43 @@ export class CSBrowserManager {
         if (!this.page) {
             throw new Error('Page not initialized');
         }
+        CSReporter.debug(`[BrowserManager] getPage() called, page exists: ${!!this.page}`);
         return this.page;
+    }
+
+    /**
+     * Register a listener to be notified when page changes (e.g., after browser switch)
+     * Useful for page objects that need to update their page reference
+     * @param listener - Callback function that receives the new page
+     */
+    public onPageChange(listener: (newPage: any) => void): void {
+        this.pageChangeListeners.push(listener);
+    }
+
+    /**
+     * Remove a page change listener
+     */
+    public offPageChange(listener: (newPage: any) => void): void {
+        const index = this.pageChangeListeners.indexOf(listener);
+        if (index > -1) {
+            this.pageChangeListeners.splice(index, 1);
+        }
+    }
+
+    /**
+     * Notify all listeners that the page has changed
+     */
+    private notifyPageChange(): void {
+        if (this.page && this.pageChangeListeners.length > 0) {
+            CSReporter.debug(`[BrowserManager] Notifying ${this.pageChangeListeners.length} listener(s) of page change`);
+            for (const listener of this.pageChangeListeners) {
+                try {
+                    listener(this.page);
+                } catch (error: any) {
+                    CSReporter.warn(`[BrowserManager] Page change listener error: ${error.message}`);
+                }
+            }
+        }
     }
 
     public clearBrowserState(): void {
@@ -1282,6 +1319,9 @@ export class CSBrowserManager {
                 }
             }
 
+            // Notify listeners that page has changed
+            this.notifyPageChange();
+
             CSReporter.info(`Successfully switched to ${browserType} browser (same type)`);
             return;
         }
@@ -1333,6 +1373,9 @@ export class CSBrowserManager {
         if (shouldSaveState && !clearState && this.browserState.url && this.page) {
             await this.restoreState();
         }
+
+        // Notify listeners that page has changed (e.g., page objects need to update references)
+        this.notifyPageChange();
 
         CSReporter.info(`Successfully switched to ${browserType} browser`);
     }
@@ -1445,6 +1488,9 @@ export class CSBrowserManager {
 
             // Create fresh page
             await this.createPage();
+
+            // Notify listeners that page has changed (new page created)
+            this.notifyPageChange();
 
             CSReporter.info('✓ Fresh context created');
         }

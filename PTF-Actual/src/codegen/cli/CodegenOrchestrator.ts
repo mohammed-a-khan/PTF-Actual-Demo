@@ -240,32 +240,33 @@ export class CodegenOrchestrator {
 
     /**
      * Write generated code to file system
+     * Structure: codegen/test/{pages,steps,features,data} and codegen/config
      */
     private async writeGeneratedCode(code: GeneratedCSCode): Promise<void> {
         const outputDir = this.options.outputDir!;
 
-        // Ensure directories exist
-        const featureDir = path.join(outputDir, 'features');
-        const pageDir = path.join(outputDir, 'pages');
-        const stepDir = path.join(outputDir, 'steps');
+        // Ensure directories exist with new structure
+        // Test artifacts go under test/ subdirectory
+        const testDir = path.join(outputDir, 'test');
+        const featureDir = path.join(testDir, 'features');
+        const pageDir = path.join(testDir, 'pages');
+        const stepDir = path.join(testDir, 'steps');
+        const dataDir = path.join(testDir, 'data');
+
+        // Config stays at top level
         const configDir = path.join(outputDir, 'config');
         const commonConfigDir = path.join(configDir, 'common');
         const envConfigDir = path.join(configDir, 'environments');
 
-        // Always create feature, page, step, and config directories
-        [featureDir, pageDir, stepDir, configDir, commonConfigDir, envConfigDir].forEach(dir => {
+        // Always create feature, page, step, data, and config directories
+        [featureDir, pageDir, stepDir, dataDir, configDir, commonConfigDir, envConfigDir].forEach(dir => {
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
         });
 
-        // Only create components directory if we have components to write
-        const componentDir = path.join(outputDir, 'components');
-        if (code.components && code.components.length > 0) {
-            if (!fs.existsSync(componentDir)) {
-                fs.mkdirSync(componentDir, { recursive: true });
-            }
-        }
+        // Data directory replaces components
+        const componentDir = dataDir;
 
         // Write Feature files (may have multiple)
         const features = code.features || [code.feature];
@@ -501,14 +502,14 @@ PARALLEL_WORKERS=3
 # ====================================================================================
 
 # Feature file paths
-FEATURES=codegen/features/*.feature
-FEATURE_PATH=codegen/features
+FEATURES=codegen/test/features/*.feature
+FEATURE_PATH=codegen/test/features
 
 # Test retry configuration
 RETRY_COUNT=2
 
 # Step definition paths
-STEP_DEFINITIONS_PATH=codegen/steps
+STEP_DEFINITIONS_PATH=codegen/test/steps
 
 # ====================================================================================
 # ELEMENT INTERACTION
@@ -594,7 +595,7 @@ API_BASE_URL=${urlInfo.protocol}://api.${urlInfo.domain}
 # ====================================================================================
 
 # Default feature file path pattern
-DEFAULT_FEATURES=codegen/features/**/*.feature
+DEFAULT_FEATURES=codegen/test/features/**/*.feature
 
 # Default tags to run (exclude work-in-progress)
 DEFAULT_TAGS=@${urlInfo.projectName} and not @wip
@@ -604,7 +605,7 @@ DEFAULT_TAGS=@${urlInfo.projectName} and not @wip
 # ====================================================================================
 
 # Step definition paths (semicolon separated)
-STEP_DEFINITIONS_PATH=codegen/steps
+STEP_DEFINITIONS_PATH=codegen/test/steps
 
 # Enable common steps from framework
 COMMON_STEPS_ENABLED=true
@@ -768,9 +769,11 @@ BROWSER_ACTION_TIMEOUT=${envLower === 'dev' ? '15000' : '10000'}
         console.log(chalk.gray('\n━'.repeat(60)));
         console.log(chalk.green('✅ Your test is ready to run!'));
         console.log(chalk.white(`\n📁 Output directory: ${this.options.outputDir}`));
-        console.log(chalk.gray('   ├── features/           (Gherkin scenarios)'));
-        console.log(chalk.gray('   ├── pages/              (Page Objects)'));
-        console.log(chalk.gray('   ├── steps/              (Step Definitions)'));
+        console.log(chalk.gray('   ├── test/'));
+        console.log(chalk.gray('   │   ├── features/       (Gherkin scenarios)'));
+        console.log(chalk.gray('   │   ├── pages/          (Page Objects)'));
+        console.log(chalk.gray('   │   ├── steps/          (Step Definitions)'));
+        console.log(chalk.gray('   │   └── data/           (Test data JSON)'));
         console.log(chalk.gray('   └── config/'));
         console.log(chalk.gray('       ├── global.env      (Framework defaults)'));
         console.log(chalk.gray('       ├── common/         (Project settings)'));

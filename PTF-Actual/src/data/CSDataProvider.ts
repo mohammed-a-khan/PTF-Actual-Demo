@@ -440,13 +440,28 @@ export class CSDataProvider {
             }
         }
 
-        // Convert XML attributes to properties if needed
+        // Convert XML attributes to properties and unwrap single-element arrays
+        // xml2js returns arrays for all elements by default (e.g., { username: ['Admin'] })
+        // We need to unwrap these to plain strings (e.g., { username: 'Admin' })
         data = data.map(row => {
-            if (row.$ && typeof row.$ === 'object') {
-                // Merge attributes with element content
-                return { ...row.$, ...row };
+            const flattenedRow: DataRow = {};
+
+            for (const [key, value] of Object.entries(row)) {
+                if (key === '$') {
+                    // Merge XML attributes into the row
+                    Object.assign(flattenedRow, value);
+                } else if (Array.isArray(value) && value.length === 1) {
+                    // Unwrap single-element arrays to their value
+                    flattenedRow[key] = value[0];
+                } else if (Array.isArray(value) && value.length === 0) {
+                    // Empty array becomes empty string
+                    flattenedRow[key] = '';
+                } else {
+                    flattenedRow[key] = value;
+                }
             }
-            return row;
+
+            return flattenedRow;
         });
 
         return data;
@@ -623,18 +638,37 @@ export class CSDataProvider {
     }
 
     private applyStringFilter(data: DataRow[], filterString: string): DataRow[] {
-        // Parse filter format: "columnName=value;columnName<value;columnName>value"
-        const filters = filterString.split(';').map(f => f.trim()).filter(f => f.length > 0);
+        // Check for OR logic first (pipe separator or literal " OR ")
+        if (filterString.includes('|') || /\s+OR\s+/i.test(filterString)) {
+            // OR logic: any condition must match
+            // Split by | or " OR " (case-insensitive)
+            const orFilters = filterString.split(/\||\s+OR\s+/i).map(f => f.trim()).filter(f => f.length > 0);
+            CSReporter.debug(`Applying ${orFilters.length} OR filter(s): ${filterString}`);
+
+            return data.filter(row => {
+                return orFilters.some(filterExpr => this.evaluateFilter(row, filterExpr));
+            });
+        }
+
+        // AND logic: split by &, ;, or literal " AND " (case-insensitive)
+        const filters = filterString.split(/[&;]|\s+AND\s+/i).map(f => f.trim()).filter(f => f.length > 0);
 
         if (filters.length === 0) {
             return data;
         }
 
-        CSReporter.debug(`Applying ${filters.length} filter(s): ${filterString}`);
+        CSReporter.debug(`Applying ${filters.length} AND filter(s): ${filterString}`);
 
         return data.filter(row => {
             // All filters must pass (AND logic)
-            return filters.every(filterExpr => {
+            return filters.every(filterExpr => this.evaluateFilter(row, filterExpr));
+        });
+    }
+
+    /**
+     * Evaluate a single filter expression against a data row
+     */
+    private evaluateFilter(row: DataRow, filterExpr: string): boolean {
                 // Parse filter expression
                 let columnName: string;
                 let operator: string;
@@ -670,6 +704,18 @@ export class CSDataProvider {
                     columnName = parts[0].trim();
                     operator = '<';
                     expectedValue = parts[1].trim();
+                } else if (filterExpr.includes('~')) {
+                    // Contains operator: column~value
+                    const parts = filterExpr.split('~');
+                    columnName = parts[0].trim();
+                    operator = '~';
+                    expectedValue = parts[1].trim();
+                } else if (filterExpr.includes(':')) {
+                    // In-list operator: column:value1,value2,value3
+                    const parts = filterExpr.split(':');
+                    columnName = parts[0].trim();
+                    operator = ':';
+                    expectedValue = parts.slice(1).join(':').trim(); // Handle values that might contain ':'
                 } else {
                     CSReporter.warn(`Invalid filter expression: ${filterExpr}`);
                     return true; // Skip invalid filters
@@ -730,13 +776,20 @@ export class CSDataProvider {
                         }
                         return String(actualValue) <= expectedValue;
 
+                    case '~':
+                        // Contains: check if actual value contains expected value
+                        return String(actualValue).toLowerCase().includes(expectedValue.toLowerCase());
+
+                    case ':':
+                        // In-list: check if actual value is in the comma-separated list
+                        const allowedValues = expectedValue.split(',').map(v => v.trim().toLowerCase());
+                        return allowedValues.includes(String(actualValue).toLowerCase());
+
                     default:
                         return true;
                 }
-            });
-        });
     }
-    
+
     private async generateData(options: DataProviderOptions): Promise<DataRow[]> {
         const spec = options.source.substring(9); // Remove 'generate:' prefix
         const [count, template] = spec.split(':');
@@ -903,30 +956,113 @@ export class CSDataProvider {
     }
     
     private resolveFilePath(source: string): string {
+        // First, interpolate environment placeholders like {env}
+        source = this.interpolateEnvironmentPlaceholders(source);
+
         if (path.isAbsolute(source)) {
             return source;
         }
-        
-        // Try relative to project root
-        let filePath = path.join(process.cwd(), source);
-        if (fs.existsSync(filePath)) {
+
+        // Try relative to project root (with case-insensitive matching)
+        let filePath = this.findFileWithCaseInsensitiveMatch(path.join(process.cwd(), source));
+        if (filePath) {
             return filePath;
         }
-        
+
         // Try relative to test data directory
-        filePath = path.join(process.cwd(), 'test', 'data', source);
-        if (fs.existsSync(filePath)) {
+        filePath = this.findFileWithCaseInsensitiveMatch(path.join(process.cwd(), 'test', 'data', source));
+        if (filePath) {
             return filePath;
         }
-        
+
         // Try with project-specific path
         const project = this.config.get('PROJECT');
-        filePath = path.join(process.cwd(), 'test', project, 'data', source);
-        if (fs.existsSync(filePath)) {
-            return filePath;
+        if (project) {
+            filePath = this.findFileWithCaseInsensitiveMatch(path.join(process.cwd(), 'test', project, 'data', source));
+            if (filePath) {
+                return filePath;
+            }
         }
-        
+
         return source;
+    }
+
+    /**
+     * Interpolate environment placeholders in the source path
+     * Supports {env}, {environment}, {ENV} etc.
+     */
+    private interpolateEnvironmentPlaceholders(source: string): string {
+        // Get current environment from config
+        const env = this.config.get('ENVIRONMENT') || this.config.get('ENV') || 'dev';
+
+        // Replace {env}, {ENV}, {environment}, {ENVIRONMENT} with the actual environment value
+        return source.replace(/\{env\}|\{ENV\}|\{environment\}|\{ENVIRONMENT\}/gi, env);
+    }
+
+    /**
+     * Find a file with case-insensitive directory matching
+     * Handles cases where user created folder as 'Sit', 'SIT', 'sit', etc.
+     */
+    private findFileWithCaseInsensitiveMatch(targetPath: string): string | null {
+        // If file exists exactly, return it
+        if (fs.existsSync(targetPath)) {
+            return targetPath;
+        }
+
+        // Split the path into parts
+        const pathParts = targetPath.split(path.sep);
+        let currentPath = '';
+
+        // Handle Windows absolute paths (e.g., C:\)
+        if (pathParts[0].includes(':')) {
+            currentPath = pathParts[0] + path.sep;
+            pathParts.shift();
+        } else if (targetPath.startsWith(path.sep)) {
+            currentPath = path.sep;
+            pathParts.shift();
+        }
+
+        // Iterate through each path segment
+        for (let i = 0; i < pathParts.length; i++) {
+            const segment = pathParts[i];
+            if (!segment) continue;
+
+            const nextPath = path.join(currentPath, segment);
+
+            // If this exact path exists, continue
+            if (fs.existsSync(nextPath)) {
+                currentPath = nextPath;
+                continue;
+            }
+
+            // Try case-insensitive match on the current directory
+            if (fs.existsSync(currentPath) && fs.statSync(currentPath).isDirectory()) {
+                try {
+                    const entries = fs.readdirSync(currentPath);
+                    const match = entries.find((entry: string) =>
+                        entry.toLowerCase() === segment.toLowerCase()
+                    );
+
+                    if (match) {
+                        currentPath = path.join(currentPath, match);
+                        continue;
+                    }
+                } catch (e) {
+                    // Directory read failed, return null
+                    return null;
+                }
+            }
+
+            // No match found for this segment
+            return null;
+        }
+
+        // Verify final path exists
+        if (fs.existsSync(currentPath)) {
+            return currentPath;
+        }
+
+        return null;
     }
     
     private shuffleArray<T>(array: T[]): T[] {

@@ -12,6 +12,9 @@ import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSSelfHealingEngine } from '../self-healing/CSSelfHealingEngine';
 
+// Lazy load smart wait engine to avoid circular dependencies
+let CSSmartWaitEngine: any = null;
+
 // ============================================
 // COMPLETE TYPE DEFINITIONS FOR ALL OPTIONS
 // ============================================
@@ -296,8 +299,9 @@ export interface ElementOptions {
  * Implements all 59+ Playwright methods with 200+ convenience methods
  */
 export class CSWebElement {
-    private page: Page;
+    private _page: Page | null = null;
     private locator: Locator | null = null;
+    private locatorPageRef: Page | null = null; // Track which page the locator was created for
     private description: string;
     private options: ElementOptions;
     private config: CSConfigurationManager;
@@ -305,19 +309,21 @@ export class CSWebElement {
     private retryCount: number;
     private actionTimeout: number;
     private performanceMetrics: Map<string, number[]> = new Map();
+    private smartWaitEngine: any = null;
+
+    // Dynamic page getter - always returns current page from browserManager
+    // This ensures elements work correctly after browser switch
+    private get page(): Page {
+        if (!CSBrowserManager) {
+            CSBrowserManager = require('../browser/CSBrowserManager').CSBrowserManager;
+        }
+        return CSBrowserManager.getInstance().getPage();
+    }
 
     constructor(options: ElementOptions, page?: Page) {
         this.config = CSConfigurationManager.getInstance();
         this.selfHealingEngine = CSSelfHealingEngine.getInstance();
-        // Lazy load CSBrowserManager when needed
-        if (!page) {
-            if (!CSBrowserManager) {
-                CSBrowserManager = require('../browser/CSBrowserManager').CSBrowserManager;
-            }
-            this.page = CSBrowserManager.getInstance().getPage();
-        } else {
-            this.page = page;
-        }
+        this._page = page || null;
         this.options = options;
         this.description = options.description || 'Element';
         this.retryCount = options.retryCount || this.config.getNumber('ELEMENT_RETRY_COUNT', 3);
@@ -328,7 +334,18 @@ export class CSWebElement {
      * Get the Playwright Locator with self-healing support
      */
     private async getLocator(): Promise<Locator> {
-        if (this.locator) return this.locator;
+        const currentPage = this.page;
+
+        // If page has changed (e.g., after browser switch), recreate locator
+        if (this.locator && this.locatorPageRef === currentPage) {
+            return this.locator;
+        }
+
+        // Clear stale locator if page changed
+        if (this.locatorPageRef !== currentPage) {
+            this.locator = null;
+            this.locatorPageRef = currentPage;
+        }
 
         CSReporter.debug(`Getting locator for ${this.description}`);
 
@@ -471,27 +488,68 @@ export class CSWebElement {
     }
 
     /**
-     * Execute action with retry logic, reporting, and performance tracking
+     * Execute action with retry logic, reporting, performance tracking, and smart waits
+     * Smart waits are optional and gracefully degrade if not available
      */
     private async executeAction<T>(
         actionName: string,
         action: () => Promise<T>,
-        options?: { screenshot?: boolean; measurePerformance?: boolean }
+        options?: { screenshot?: boolean; measurePerformance?: boolean; skipSmartWait?: boolean }
     ): Promise<T> {
         const startTime = Date.now();
         CSReporter.info(`Executing ${actionName} on ${this.description}`);
 
+        // Get smart wait engine (lazy loaded, returns null if not available)
+        const smartWait = options?.skipSmartWait ? null : this.getSmartWaitEngine();
+        const actionType = this.getActionType(actionName);
+        const selector = this.getPrimarySelector();
+
         let lastError: Error | null = null;
-        
+
         for (let attempt = 1; attempt <= this.retryCount; attempt++) {
             try {
+                // ============================================
+                // SMART WAIT: Before Action
+                // ============================================
+                if (smartWait && smartWait.isEnabled()) {
+                    try {
+                        const locator = this.locator || (await this.getLocator());
+                        await smartWait.beforeAction({
+                            locator,
+                            selector,
+                            actionType,
+                            timeout: this.actionTimeout
+                        });
+                    } catch (waitError) {
+                        // Don't fail the action on wait errors - just log and proceed
+                        CSReporter.debug(`Smart wait before action: ${waitError}`);
+                    }
+                }
+
                 // Highlight element if configured
                 if (this.options.highlight) {
                     await this.highlight();
                 }
 
                 // Execute the action
+                const actionStartTime = Date.now();
                 const result = await action();
+                const actionDuration = Date.now() - actionStartTime;
+
+                // ============================================
+                // SMART WAIT: After Action
+                // ============================================
+                if (smartWait && smartWait.isEnabled()) {
+                    try {
+                        await smartWait.afterAction({
+                            actionType: actionName,
+                            actionDuration
+                        });
+                    } catch (waitError) {
+                        // Don't fail on after-action wait errors
+                        CSReporter.debug(`Smart wait after action: ${waitError}`);
+                    }
+                }
 
                 // Track performance
                 const duration = Date.now() - startTime;
@@ -503,11 +561,11 @@ export class CSWebElement {
                 CSReporter.addAction(`${actionName} on ${this.description}`, 'pass', duration);
 
                 CSReporter.pass(`${actionName} successful on ${this.description} (${duration}ms)`);
-                
+
                 // Take screenshot if configured
                 if (options?.screenshot || this.options.screenshot) {
-                    await this.screenshot({ 
-                        path: `screenshots/${actionName.replace(/\s+/g, '_')}_${Date.now()}.png` 
+                    await this.screenshot({
+                        path: `screenshots/${actionName.replace(/\s+/g, '_')}_${Date.now()}.png`
                     });
                 }
 
@@ -515,6 +573,18 @@ export class CSWebElement {
             } catch (error: any) {
                 lastError = error;
                 const duration = Date.now() - startTime;
+
+                // ============================================
+                // SMART WAIT: Stale Element Recovery
+                // ============================================
+                const isStaleError = error.message?.includes('stale') ||
+                                     error.message?.includes('detached') ||
+                                     error.message?.includes('Element is not attached');
+
+                if (isStaleError && smartWait?.getConfig()?.staleElementRetry) {
+                    CSReporter.debug(`Stale element detected, clearing locator cache for retry`);
+                    this.locator = null; // Clear cached locator to force re-query
+                }
 
                 // Track failed action for reporting (only on last attempt)
                 if (attempt === this.retryCount) {
@@ -538,6 +608,54 @@ export class CSWebElement {
             this.performanceMetrics.set(action, []);
         }
         this.performanceMetrics.get(action)!.push(duration);
+    }
+
+    /**
+     * Get or create smart wait engine instance (lazy loaded)
+     * Thread-safe for parallel execution
+     */
+    private getSmartWaitEngine(): any {
+        if (this.smartWaitEngine) {
+            return this.smartWaitEngine;
+        }
+
+        try {
+            // Lazy load the module
+            if (!CSSmartWaitEngine) {
+                CSSmartWaitEngine = require('../wait/CSSmartWaitEngine').CSSmartWaitEngine;
+            }
+            this.smartWaitEngine = CSSmartWaitEngine.create(this.page);
+            return this.smartWaitEngine;
+        } catch (error) {
+            // If smart wait engine fails to load, return null (graceful degradation)
+            CSReporter.debug(`Smart wait engine not available: ${error}`);
+            return null;
+        }
+    }
+
+    /**
+     * Determine action type from action name
+     */
+    private getActionType(actionName: string): 'click' | 'fill' | 'type' | 'select' | 'hover' | 'tap' | 'other' {
+        const name = actionName.toLowerCase();
+        if (name.includes('click') || name.includes('press')) return 'click';
+        if (name.includes('fill')) return 'fill';
+        if (name.includes('type')) return 'type';
+        if (name.includes('select')) return 'select';
+        if (name.includes('hover')) return 'hover';
+        if (name.includes('tap')) return 'tap';
+        return 'other';
+    }
+
+    /**
+     * Get primary selector for smart wait context
+     */
+    private getPrimarySelector(): string | undefined {
+        if (this.options.xpath) return this.options.xpath;
+        if (this.options.css) return this.options.css;
+        if (this.options.id) return `#${this.options.id}`;
+        if (this.options.testId) return `[data-testid="${this.options.testId}"]`;
+        return undefined;
     }
 
     // ============================================
