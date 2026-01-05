@@ -604,8 +604,10 @@
             <div class="nav-section">
                 <h3>Test Formats</h3>
                 <a href="#spec-format">Spec Format Tests</a>
+                <a href="#spec-step-by-step" style="padding-left:30px;font-size:0.85em">Step-by-Step Guide</a>
                 <a href="#bdd-format">BDD/Cucumber Tests</a>
                 <a href="#data-driven">Data-Driven Testing</a>
+                <a href="#env-interpolation" style="padding-left:30px;font-size:0.85em">{env} Interpolation</a>
                 <a href="#test-dependencies">Test Dependencies</a>
             </div>
 
@@ -4110,6 +4112,385 @@ async openNewTab(url: string) {
 
                 <p>The Spec format provides a Playwright-aligned testing API with automatic fixture injection, data-driven testing, execution modes, and comprehensive annotations. This is the recommended format for new test projects.</p>
 
+                <h3 id="spec-step-by-step">Step-by-Step Guide: Creating Spec Format Tests</h3>
+
+                <p>Follow these steps to create a complete spec format test from scratch.</p>
+
+                <h4>Step 1: Project Structure</h4>
+                <p>Create the following folder structure for your project:</p>
+                <pre><code>test/
+└── myproject/
+    ├── pages/                    # Page Objects
+    │   ├── LoginPage.ts
+    │   ├── DashboardPage.ts
+    │   └── ProfilePage.ts
+    ├── specs/                    # Spec Test Files
+    │   ├── login.spec.ts
+    │   └── dashboard.spec.ts
+    ├── data/                     # Test Data (optional)
+    │   └── users.csv
+    ├── fixtures.d.ts             # Auto-generated (Step 4)
+    └── myproject.env             # Environment config</code></pre>
+
+                <h4>Step 2: Create Page Objects with @CSPage Decorator</h4>
+                <p><strong>IMPORTANT:</strong> The <code>@CSPage('alias')</code> decorator defines the fixture name used in tests. The alias is converted to camelCase with "Page" suffix.</p>
+
+                <table>
+                    <thead><tr><th>@CSPage Alias</th><th>Fixture Name in Test</th><th>Usage</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>@CSPage('login')</code></td><td><code>loginPage</code></td><td><code>async ({ loginPage }) => { ... }</code></td></tr>
+                        <tr><td><code>@CSPage('dashboard')</code></td><td><code>dashboardPage</code></td><td><code>async ({ dashboardPage }) => { ... }</code></td></tr>
+                        <tr><td><code>@CSPage('user-profile')</code></td><td><code>userProfilePage</code></td><td><code>async ({ userProfilePage }) => { ... }</code></td></tr>
+                        <tr><td><code>@CSPage('admin-settings')</code></td><td><code>adminSettingsPage</code></td><td><code>async ({ adminSettingsPage }) => { ... }</code></td></tr>
+                    </tbody>
+                </table>
+
+                <p><strong>Example: LoginPage.ts</strong></p>
+                <pre><code>// test/myproject/pages/LoginPage.ts
+import { CSBasePage, CSPage, CSGetElement } from '@mdakhan.mak/cs-playwright-test-framework/core';
+import { CSWebElement } from '@mdakhan.mak/cs-playwright-test-framework/element';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
+
+@CSPage('login')  // This creates fixture: loginPage
+export class LoginPage extends CSBasePage {
+
+    @CSGetElement({
+        css: 'input[name="username"]',
+        description: 'Username input',
+        waitForVisible: true,
+        selfHeal: true
+    })
+    public usernameInput!: CSWebElement;
+
+    @CSGetElement({
+        css: 'input[name="password"]',
+        description: 'Password input',
+        waitForVisible: true
+    })
+    public passwordInput!: CSWebElement;
+
+    @CSGetElement({
+        css: 'button[type="submit"]',
+        description: 'Login button',
+        waitForVisible: true,
+        waitForEnabled: true
+    })
+    public loginButton!: CSWebElement;
+
+    @CSGetElement({
+        css: '.error-message',
+        description: 'Error message'
+    })
+    public errorMessage!: CSWebElement;
+
+    @CSGetElement({
+        css: '.dashboard-header',
+        description: 'Dashboard header',
+        waitForVisible: true
+    })
+    public dashboardHeader!: CSWebElement;
+
+    // Required: Initialize elements (called by CSBasePage constructor)
+    protected initializeElements(): void {
+        // Elements are auto-initialized by @CSGetElement decorators
+        CSReporter.debug('LoginPage elements initialized');
+    }
+
+    // Page methods
+    public async enterUsername(username: string): Promise&lt;void&gt; {
+        await this.usernameInput.fill(username);
+        CSReporter.info(`Entered username: ${username}`);
+    }
+
+    public async enterPassword(password: string): Promise&lt;void&gt; {
+        await this.passwordInput.fill(password);
+        CSReporter.info('Entered password');
+    }
+
+    public async clickLoginButton(): Promise&lt;void&gt; {
+        await this.loginButton.click();
+        CSReporter.info('Clicked login button');
+    }
+
+    public async login(username: string, password: string): Promise&lt;void&gt; {
+        await this.enterUsername(username);
+        await this.enterPassword(password);
+        await this.clickLoginButton();
+    }
+
+    public async verifyLoginSuccess(): Promise&lt;void&gt; {
+        await this.dashboardHeader.waitFor({ state: 'visible', timeout: 10000 });
+        CSReporter.pass('Login successful - dashboard visible');
+    }
+
+    public async verifyErrorMessage(expectedText: string): Promise&lt;void&gt; {
+        await this.errorMessage.waitFor({ state: 'visible', timeout: 5000 });
+        const actualText = await this.errorMessage.textContent();
+        if (!actualText?.includes(expectedText)) {
+            throw new Error(`Expected error "${expectedText}" but got "${actualText}"`);
+        }
+        CSReporter.pass(`Error message verified: ${expectedText}`);
+    }
+}</code></pre>
+
+                <p><strong>Example: DashboardPage.ts</strong></p>
+                <pre><code>// test/myproject/pages/DashboardPage.ts
+import { CSBasePage, CSPage, CSGetElement } from '@mdakhan.mak/cs-playwright-test-framework/core';
+import { CSWebElement, CSElementFactory } from '@mdakhan.mak/cs-playwright-test-framework/element';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
+
+@CSPage('dashboard')  // This creates fixture: dashboardPage
+export class DashboardPage extends CSBasePage {
+
+    @CSGetElement({
+        css: '.dashboard-header h1',
+        description: 'Dashboard title',
+        waitForVisible: true
+    })
+    public dashboardTitle!: CSWebElement;
+
+    @CSGetElement({
+        xpath: "//nav//a[text()='Profile']",
+        description: 'Profile menu link'
+    })
+    public profileLink!: CSWebElement;
+
+    @CSGetElement({
+        css: '.user-dropdown',
+        description: 'User dropdown'
+    })
+    public userDropdown!: CSWebElement;
+
+    @CSGetElement({
+        xpath: "//button[contains(text(),'Logout')]",
+        description: 'Logout button'
+    })
+    public logoutButton!: CSWebElement;
+
+    // Required: Initialize elements
+    protected initializeElements(): void {
+        CSReporter.debug('DashboardPage elements initialized');
+    }
+
+    public async verifyDashboardLoaded(): Promise&lt;void&gt; {
+        await this.dashboardTitle.waitFor({ state: 'visible', timeout: 10000 });
+        CSReporter.pass('Dashboard loaded successfully');
+    }
+
+    public async clickMenuItem(menuName: string): Promise&lt;void&gt; {
+        const menuItem = CSElementFactory.createByXPath(
+            `//nav//a[text()='${menuName}']`,
+            `Menu item: ${menuName}`,
+            this.page
+        );
+        await menuItem.click();
+        CSReporter.info(`Clicked menu: ${menuName}`);
+    }
+
+    public async verifyPageHeader(expectedHeader: string): Promise&lt;void&gt; {
+        const header = CSElementFactory.createByXPath(
+            `//h1[contains(text(),'${expectedHeader}')]`,
+            `Page header: ${expectedHeader}`,
+            this.page
+        );
+        await header.waitFor({ state: 'visible', timeout: 5000 });
+        CSReporter.pass(`Page header verified: ${expectedHeader}`);
+    }
+
+    public async clickLogoutOption(): Promise&lt;void&gt; {
+        await this.userDropdown.click();
+        await this.logoutButton.click();
+        CSReporter.info('Logged out');
+    }
+}</code></pre>
+
+                <h4>Step 3: Create Spec Test File with test.step()</h4>
+                <p>Use <code>test.step()</code> to organize actions within a test into logical, reportable steps.</p>
+
+                <pre><code>// test/myproject/specs/login.spec.ts
+import { describe, test, beforeEach, afterEach } from '@mdakhan.mak/cs-playwright-test-framework/spec';
+
+describe('Login Feature', {
+    tags: ['@login', '@smoke', '@TestPlanId:100']
+}, () => {
+
+    // Runs before each test
+    beforeEach(async ({ navigate, config }) => {
+        const baseUrl = config.get('BASE_URL');
+        await navigate(baseUrl);
+    });
+
+    // Runs after each test
+    afterEach(async ({ reporter }) => {
+        reporter.info('Test cleanup completed');
+    });
+
+    // Test with multiple steps using test.step()
+    test('TC001: Valid login with correct credentials', {
+        tags: ['@TC001', '@critical', '@TestCaseId:101']
+    }, async ({ loginPage, dashboardPage, reporter, config }) => {
+
+        // Step 1: Enter username
+        await test.step('Enter username', async () => {
+            await loginPage.enterUsername('Admin');
+        });
+
+        // Step 2: Enter password
+        await test.step('Enter password', async () => {
+            const password = config.get('APP_PASSWORD', 'admin123');
+            await loginPage.enterPassword(password);
+        });
+
+        // Step 3: Click login button
+        await test.step('Click login button', async () => {
+            await loginPage.clickLoginButton();
+        });
+
+        // Step 4: Verify login success
+        await test.step('Verify dashboard is displayed', async () => {
+            await dashboardPage.verifyDashboardLoaded();
+        });
+
+        reporter.pass('Login test completed successfully');
+    });
+
+    // Test with nested steps
+    test('TC002: Invalid login shows error message', {
+        tags: ['@TC002', '@negative', '@TestCaseId:102']
+    }, async ({ loginPage, reporter }) => {
+
+        await test.step('Attempt login with invalid credentials', async () => {
+
+            await test.step('Enter invalid username', async () => {
+                await loginPage.enterUsername('InvalidUser');
+            });
+
+            await test.step('Enter invalid password', async () => {
+                await loginPage.enterPassword('wrongpassword');
+            });
+
+            await test.step('Submit login form', async () => {
+                await loginPage.clickLoginButton();
+            });
+        });
+
+        await test.step('Verify error message is displayed', async () => {
+            await loginPage.verifyErrorMessage('Invalid credentials');
+        });
+
+        reporter.pass('Error message verified for invalid login');
+    });
+
+    // Test using page object's combined method
+    test('TC003: Login and navigate to profile', {
+        tags: ['@TC003', '@e2e', '@TestCaseId:103']
+    }, async ({ loginPage, dashboardPage, reporter, config }) => {
+
+        await test.step('Login to application', async () => {
+            const password = config.get('APP_PASSWORD', 'admin123');
+            await loginPage.login('Admin', password);
+            await loginPage.verifyLoginSuccess();
+        });
+
+        await test.step('Navigate to Profile page', async () => {
+            await dashboardPage.clickMenuItem('Profile');
+            await dashboardPage.verifyPageHeader('Profile');
+        });
+
+        await test.step('Logout from application', async () => {
+            await dashboardPage.clickLogoutOption();
+        });
+
+        reporter.pass('Full login-navigate-logout flow completed');
+    });
+});</code></pre>
+
+                <h4>Step 4: Generate Typed Fixtures (fixtures.d.ts)</h4>
+                <p>Run this command to generate TypeScript declarations for IntelliSense support:</p>
+                <pre><code># Generate fixtures.d.ts for your project
+npx cs-playwright-test generate-fixtures --project=myproject</code></pre>
+
+                <p>This scans your <code>pages/</code> folder, finds all <code>@CSPage</code> decorated classes, and creates <code>fixtures.d.ts</code>:</p>
+                <pre><code>// test/myproject/fixtures.d.ts (AUTO-GENERATED)
+/**
+ * CS Playwright Test Framework - Typed Fixtures Declaration
+ * Auto-generated by: npx cs-playwright-test generate-fixtures
+ *
+ * DO NOT EDIT MANUALLY - Regenerate when adding new pages:
+ *   npx cs-playwright-test generate-fixtures --project=myproject
+ */
+
+import { LoginPage } from './pages/LoginPage';
+import { DashboardPage } from './pages/DashboardPage';
+
+declare module '@mdakhan.mak/cs-playwright-test-framework/spec' {
+    interface SpecFixtures {
+        loginPage: LoginPage;           // from @CSPage('login')
+        dashboardPage: DashboardPage;   // from @CSPage('dashboard')
+    }
+}</code></pre>
+
+                <p><strong>When to regenerate:</strong></p>
+                <ul>
+                    <li>After creating a new page object</li>
+                    <li>After changing the @CSPage alias</li>
+                    <li>After renaming a page class</li>
+                </ul>
+
+                <h4>Step 5: Configure Environment (.env file)</h4>
+                <pre><code># test/myproject/myproject.env
+BASE_URL=https://myapp.example.com
+APP_PASSWORD=admin123
+BROWSER=chromium
+HEADLESS=true
+SMART_WAIT_LEVEL=minimal
+
+# ADO Integration (optional)
+ADO_ENABLED=true
+ADO_TEST_PLAN_ID=100</code></pre>
+
+                <h4>Step 6: Run Tests</h4>
+                <pre><code># Run all tests in the project
+npx cs-playwright-test --project=myproject --specs=test/myproject/specs/**/*.spec.ts
+
+# Run specific test file
+npx cs-playwright-test --project=myproject --specs=test/myproject/specs/login.spec.ts
+
+# Run by tags
+npx cs-playwright-test --project=myproject --specs=test/myproject/specs/**/*.spec.ts --tags="@smoke"
+
+# Run specific test by name
+npx cs-playwright-test --project=myproject --specs=test/myproject/specs/login.spec.ts --test="TC001"
+
+# Run in parallel
+npx cs-playwright-test --project=myproject --specs=test/myproject/specs/**/*.spec.ts --parallel --workers=4
+
+# Run headed (visible browser)
+npx cs-playwright-test --project=myproject --specs=test/myproject/specs/login.spec.ts --headed</code></pre>
+
+                <h4>Step 7: View Reports</h4>
+                <p>After execution, reports are generated in the <code>reports/</code> folder:</p>
+                <pre><code>reports/
+├── test-results-2025-01-05_14-30-00/
+│   ├── html-report/
+│   │   └── index.html          # Interactive HTML report
+│   ├── junit-report.xml        # JUnit format for CI/CD
+│   └── screenshots/            # Failure screenshots</code></pre>
+
+                <h4>Complete Workflow Summary</h4>
+                <div class="workflow-summary" style="background:#f8f9fa;padding:15px;border-radius:8px;border-left:4px solid #0066cc;margin:15px 0;">
+                    <ol style="margin:0;padding-left:20px;">
+                        <li><strong>Create Page Object</strong> → Add <code>@CSPage('alias')</code> decorator (alias → aliasPage fixture)</li>
+                        <li><strong>Define Elements</strong> → Use <code>@CSGetElement</code> decorators with CSS/XPath/text locators</li>
+                        <li><strong>Add Page Methods</strong> → Create reusable action methods that use element.waitFor(), element.click(), etc.</li>
+                        <li><strong>Generate Fixtures</strong> → Run <code>npx cs-playwright-test generate-fixtures --project=myproject</code></li>
+                        <li><strong>Create Spec Test</strong> → Import <code>describe, test</code> from <code>@mdakhan.mak/cs-playwright-test-framework/spec</code></li>
+                        <li><strong>Use test.step()</strong> → Organize actions into logical, reportable steps (supports nesting)</li>
+                        <li><strong>Run Tests</strong> → Execute with <code>npx cs-playwright-test --project=myproject --specs=...</code></li>
+                        <li><strong>View Reports</strong> → Check HTML report in <code>reports/test-results-{timestamp}/html-report/</code></li>
+                    </ol>
+                </div>
+
                 <h3>Quick Start</h3>
                 <pre><code>import { describe, test, beforeEach, afterEach, beforeAll, afterAll } from '@mdakhan.mak/cs-playwright-test-framework/spec';
 
@@ -5133,6 +5514,116 @@ Feature: Dynamic Data Tests
         await loginPage.login(data.username, data.password);
     });
 });</code></pre>
+
+                <h3 id="env-interpolation">Environment Path Interpolation ({env})</h3>
+                <p>The framework supports <code>{env}</code> placeholder interpolation in data source file paths. This allows you to organize environment-specific test data in separate folders and automatically load the correct data based on the current environment.</p>
+
+                <h4>Supported Placeholders</h4>
+                <table>
+                    <thead><tr><th>Placeholder</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>{env}</code></td><td>Replaced with ENVIRONMENT or ENV value (case-insensitive)</td></tr>
+                        <tr><td><code>{ENV}</code></td><td>Same as {env}</td></tr>
+                        <tr><td><code>{environment}</code></td><td>Same as {env}</td></tr>
+                        <tr><td><code>{ENVIRONMENT}</code></td><td>Same as {env}</td></tr>
+                    </tbody>
+                </table>
+
+                <h4>Environment Variable Priority</h4>
+                <p>The placeholder value is resolved from environment variables in this order:</p>
+                <ol>
+                    <li><code>ENVIRONMENT</code> - Primary environment variable</li>
+                    <li><code>ENV</code> - Fallback if ENVIRONMENT not set</li>
+                    <li><code>dev</code> - Default value if neither is set</li>
+                </ol>
+
+                <h4>Folder Structure Example</h4>
+                <pre><code>test/
+└── myproject/
+    └── data/
+        ├── dev/                    # Development environment data
+        │   ├── users.csv
+        │   ├── products.json
+        │   └── config.xlsx
+        ├── sit/                    # SIT environment data
+        │   ├── users.csv
+        │   ├── products.json
+        │   └── config.xlsx
+        ├── uat/                    # UAT environment data
+        │   ├── users.csv
+        │   ├── products.json
+        │   └── config.xlsx
+        └── prod/                   # Production environment data
+            ├── users.csv
+            ├── products.json
+            └── config.xlsx</code></pre>
+
+                <h4>Usage Examples</h4>
+                <pre><code>// CSV with environment path
+describe('User tests', {
+    dataSource: {
+        type: 'csv',
+        source: 'test/myproject/data/{env}/users.csv'
+    }
+}, () => { /* tests */ });
+
+// JSON with environment path
+describe('Product tests', {
+    dataSource: {
+        type: 'json',
+        source: 'test/myproject/data/{env}/products.json',
+        path: '$.products[*]'
+    }
+}, () => { /* tests */ });
+
+// Excel with environment path
+describe('Config tests', {
+    dataSource: {
+        type: 'excel',
+        source: 'test/myproject/data/{env}/config.xlsx',
+        sheet: 'Settings'
+    }
+}, () => { /* tests */ });
+
+// Multiple placeholders (all resolve to same value)
+describe('Mixed placeholder test', {
+    dataSource: {
+        type: 'csv',
+        source: 'test/{ENV}/data/{environment}/users.csv'  // Both replaced with same value
+    }
+}, () => { /* tests */ });</code></pre>
+
+                <h4>Running Tests with Different Environments</h4>
+                <pre><code># Run with development data (default)
+npm run test
+
+# Run with SIT environment data
+ENVIRONMENT=sit npm run test
+
+# Run with UAT environment data
+ENVIRONMENT=uat npm run test
+
+# Using ENV variable (fallback)
+ENV=prod npm run test
+
+# In .env file
+ENVIRONMENT=sit</code></pre>
+
+                <h4>Case-Insensitive Folder Matching</h4>
+                <p>The framework performs case-insensitive directory matching. If your folder is named <code>SIT</code>, <code>Sit</code>, or <code>sit</code>, setting <code>ENVIRONMENT=sit</code> will match any of them.</p>
+
+                <h4>BDD Format Usage</h4>
+                <pre><code># Feature file with environment data
+@data-driven
+Feature: Environment-specific login testing
+
+  @DataProvider(type=csv, source=test/myproject/data/{env}/users.csv)
+  Scenario Outline: Login with environment-specific users
+    Given I navigate to the login page
+    When I enter username "&lt;username&gt;"
+    And I enter password "&lt;password&gt;"
+    And I click the login button
+    Then I should see "&lt;expectedResult&gt;"</code></pre>
 
                 <h3>Data Filtering - Complete Reference</h3>
                 <p>Filter expressions allow you to select specific rows from data sources without modifying the source files. Filters work with all data source types (CSV, JSON, Excel, XML, Database, API).</p>
