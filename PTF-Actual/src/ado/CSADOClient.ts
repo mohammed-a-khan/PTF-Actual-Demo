@@ -121,6 +121,44 @@ export class CSADOClient {
         }
         return CSADOClient.instance;
     }
+
+    /**
+     * Reset the singleton instance to allow re-initialization with new config.
+     * Call this after all configuration files are loaded to ensure correct settings.
+     *
+     * Usage: CSADOClient.resetInstance();
+     *        const client = CSADOClient.getInstance(); // Creates fresh instance
+     */
+    public static resetInstance(): void {
+        CSADOClient.instance = undefined as any;
+        CSReporter.debug('ADO Client instance reset - will reinitialize on next getInstance()');
+    }
+
+    /**
+     * Reinitialize the client with current configuration.
+     * Useful when configuration changes after initial instantiation.
+     *
+     * Usage: CSADOClient.getInstance().reinitialize();
+     */
+    public reinitialize(): void {
+        this.adoConfig = this.loadADOConfig();
+        this.baseUrl = `https://dev.azure.com/${this.adoConfig.organization}/${this.adoConfig.project}/_apis`;
+        this.headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Basic ${Buffer.from(`:${this.adoConfig.pat}`).toString('base64')}`
+        };
+
+        // Reset and reconfigure proxy based on current config
+        this.proxyAgent = undefined;
+        if (this.adoConfig.proxy?.enabled) {
+            this.setupProxy(this.adoConfig.proxy);
+        }
+
+        // Clear test points cache as it may be stale
+        this.testPointsCache.clear();
+
+        CSReporter.debug('ADO Client reinitialized with current configuration');
+    }
     
     private loadADOConfig(): ADOConfig {
         return {

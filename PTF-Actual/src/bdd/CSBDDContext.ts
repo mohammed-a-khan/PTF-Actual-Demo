@@ -195,7 +195,8 @@ export class CSBDDContext {
         if (!this.page) {
             throw new Error('Page not initialized. Browser may not be available for API-only tests.');
         }
-        await this.page.waitForLoadState('networkidle');
+        const timeout = this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000);
+        await this.page.waitForLoadState('networkidle', { timeout });
     }
     
     // Assertion helpers

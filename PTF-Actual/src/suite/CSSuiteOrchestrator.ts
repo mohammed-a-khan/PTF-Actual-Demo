@@ -174,8 +174,9 @@ export class CSSuiteOrchestrator {
         options: SuiteOrchestrationOptions,
         startTime: Date
     ): Promise<SuiteResult> {
-        // Do NOT set CS_SUITE_MODE - this ensures normal execution behavior
-        // Reports will auto-open if configured, no suite directory structure
+        // Set CS_SUITE_MODE to prevent child process from auto-opening report
+        // The orchestrator will handle auto-open based on suite config
+        process.env.CS_SUITE_MODE = 'true';
 
         console.log(`  Project: ${project.name} (${project.type.toUpperCase()})`);
         // Display specs or features depending on which is configured
@@ -243,8 +244,10 @@ export class CSSuiteOrchestrator {
             environment: this.getEnvironmentInfo()
         };
 
-        // NOTE: Do NOT open report here - the individual project execution already handles
-        // auto-open since CS_SUITE_MODE is not set. Opening here would cause duplicate opens.
+        // Auto-open report if configured (orchestrator handles this, not child process)
+        if (this.config?.reporting.autoOpen && result.htmlReportPath) {
+            this.openReport(result.htmlReportPath);
+        }
 
         // Log summary
         console.log('\n');

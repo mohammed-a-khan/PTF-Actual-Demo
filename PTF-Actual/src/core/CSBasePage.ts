@@ -670,7 +670,8 @@ export abstract class CSBasePage {
      * Wait for network to be idle (no requests for 500ms)
      */
     public async waitForNetworkIdle(): Promise<void> {
-        await this.page.waitForLoadState('networkidle');
+        const timeout = this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000);
+        await this.page.waitForLoadState('networkidle', { timeout });
         CSReporter.debug('Network is idle');
     }
 
@@ -678,7 +679,8 @@ export abstract class CSBasePage {
      * Wait for DOM content to be loaded
      */
     public async waitForDomContentLoaded(): Promise<void> {
-        await this.page.waitForLoadState('domcontentloaded');
+        const timeout = this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000);
+        await this.page.waitForLoadState('domcontentloaded', { timeout });
         CSReporter.debug('DOM content loaded');
     }
 

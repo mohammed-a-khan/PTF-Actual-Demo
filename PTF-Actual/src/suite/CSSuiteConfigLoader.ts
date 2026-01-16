@@ -306,8 +306,9 @@ export class CSSuiteConfigLoader {
             if (!project.project) {
                 throw new Error(`Project "${project.name}" must have a project identifier`);
             }
-            if (!project.features) {
-                throw new Error(`Project "${project.name}" must have features defined`);
+            // Allow either features (BDD) OR specs (describe/it) - at least one must be defined
+            if (!project.features && !project.specs) {
+                throw new Error(`Project "${project.name}" must have either 'features' (BDD) or 'specs' (describe/it) defined`);
             }
 
             // Merge project artifacts with suite defaults
@@ -320,7 +321,12 @@ export class CSSuiteConfigLoader {
                 name: project.name,
                 type: project.type || 'ui',
                 project: project.project,
+                // BDD format (Given/When/Then)
                 features: project.features,
+                // Spec format (describe/it)
+                specs: project.specs,
+                grep: project.grep,
+                test: project.test,
                 tags: project.tags,
                 enabled: project.enabled !== false, // Default to true
                 environment: project.environment,
@@ -368,18 +374,19 @@ export class CSSuiteConfigLoader {
                 }
             }
 
-            // Headless override
-            if (cliOptions.headless !== undefined && project.headless === undefined) {
+            // Headless override - CLI always wins when specified
+            if (cliOptions.headless !== undefined) {
                 updated.headless = cliOptions.headless;
             }
 
-            // Parallel override
+            // Parallel override - CLI always wins when specified
             if (cliOptions.parallel !== undefined || cliOptions.workers !== undefined) {
                 const parallelValue = cliOptions.workers ||
                     (typeof cliOptions.parallel === 'number' ? cliOptions.parallel :
                      cliOptions.parallel === true ? 3 : undefined);
 
-                if (parallelValue !== undefined && project.parallel === undefined) {
+                if (parallelValue !== undefined) {
+                    // CLI parallel/workers overrides project setting
                     updated.parallel = parallelValue;
                 }
             }
@@ -468,9 +475,11 @@ export class CSSuiteConfigLoader {
                 throw new Error(`Invalid project type "${project.type}" for project "${project.name}". Must be: api, ui, or hybrid`);
             }
 
-            // Validate features
-            if (!project.features || (Array.isArray(project.features) && project.features.length === 0)) {
-                throw new Error(`Project "${project.name}" must have at least one feature file`);
+            // Validate features OR specs - at least one must have content
+            const hasFeatures = project.features && (!Array.isArray(project.features) || project.features.length > 0);
+            const hasSpecs = project.specs && (!Array.isArray(project.specs) || project.specs.length > 0);
+            if (!hasFeatures && !hasSpecs) {
+                throw new Error(`Project "${project.name}" must have at least one feature file (BDD) or spec file (describe/it)`);
             }
         }
 

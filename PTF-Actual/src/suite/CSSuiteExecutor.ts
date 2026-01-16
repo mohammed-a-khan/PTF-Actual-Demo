@@ -280,13 +280,17 @@ export class CSSuiteExecutor {
     ): Promise<number> {
         return new Promise((resolve, reject) => {
             // Set environment variables for the project
-            const env = {
+            const env: NodeJS.ProcessEnv = {
                 ...process.env,
                 PROJECT: project.project,
                 ENVIRONMENT: project.environment || options.defaults.environment,
-                MULTI_PROJECT_MODE: 'true',
                 SUITE_REPORT_PATH: options.suiteReportPath
             };
+
+            // Only set MULTI_PROJECT_MODE when actually in multi-project mode
+            if (options.isMultiProjectMode) {
+                env.MULTI_PROJECT_MODE = 'true';
+            }
 
             // Use npx to run the framework
             const command = process.platform === 'win32' ? 'npx.cmd' : 'npx';
@@ -359,6 +363,10 @@ export class CSSuiteExecutor {
                         if (failedStep) {
                             scenarioError = failedStep.error;
                         }
+                    }
+                    // Normalize error to string (spec errors are objects {message, stack})
+                    if (scenarioError && typeof scenarioError === 'object') {
+                        scenarioError = scenarioError.message || JSON.stringify(scenarioError);
                     }
                     scenarios.push({
                         name: scenario.name || 'Unknown Scenario',

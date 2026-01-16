@@ -86,6 +86,15 @@ export class CSConsolidatedReportGenerator {
         return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
     }
 
+    private static getErrorString(error: any): string {
+        if (!error) return '';
+        if (typeof error === 'string') return error;
+        if (typeof error === 'object') {
+            return error.message || error.toString() || JSON.stringify(error);
+        }
+        return String(error);
+    }
+
     private static generateHTML(data: ConsolidatedReportData): string {
         return `<!DOCTYPE html>
 <html lang="en">
@@ -585,7 +594,7 @@ body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Robo
                                 <td><span class="status-badge ${s.status}">${s.status}</span></td>
                                 <td>${s.durationFormatted}</td>
                                 <td>${(s.tags || []).slice(0, 3).map(t => `<span class="tag">${this.escapeHtml(t)}</span>`).join('')}</td>
-                                <td class="error-cell">${s.error ? `<span class="error-text" title="${this.escapeHtml(s.error)}">&#9888; ${this.escapeHtml(s.error.substring(0, 80))}${s.error.length > 80 ? '...' : ''}</span>` : ''}</td>
+                                <td class="error-cell">${s.error ? `<span class="error-text" title="${this.escapeHtml(this.getErrorString(s.error))}">&#9888; ${this.escapeHtml(this.getErrorString(s.error).substring(0, 80))}${this.getErrorString(s.error).length > 80 ? '...' : ''}</span>` : ''}</td>
                             </tr>
                         `).join('')}
                     </tbody>
