@@ -263,7 +263,7 @@ export class CSCrossDomainNavigationHandler {
             if (this.page.url() === 'about:blank') {
                 await this.page.waitForNavigation({
                     waitUntil: 'domcontentloaded',
-                    timeout: 5000
+                    timeout: this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000)
                 }).catch(() => {
                     // Ignore navigation timeout on blank page
                 });
@@ -271,7 +271,7 @@ export class CSCrossDomainNavigationHandler {
 
             // Wait for DOM to be loaded (faster than networkidle which can hang on analytics)
             // Use domcontentloaded as primary, with short timeout
-            await this.page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {
+            await this.page.waitForLoadState('domcontentloaded', { timeout: this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000) }).catch(() => {
                 CSReporter.debug('DOM content loaded timeout, continuing anyway');
             });
 
@@ -408,7 +408,7 @@ export class CSCrossDomainNavigationHandler {
 
             // Wait for page to be ready for interaction
             try {
-                await this.page.waitForLoadState('domcontentloaded', { timeout: 5000 });
+                await this.page.waitForLoadState('domcontentloaded', { timeout: this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000) });
             } catch {
                 // Ignore timeout, page might already be loaded
             }
@@ -450,7 +450,7 @@ export class CSCrossDomainNavigationHandler {
                 this.isNavigating = true;
 
                 try {
-                    await this.page.waitForLoadState('domcontentloaded', { timeout: 5000 });
+                    await this.page.waitForLoadState('domcontentloaded', { timeout: this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000) });
                 } catch {
                     // Ignore timeout
                 }

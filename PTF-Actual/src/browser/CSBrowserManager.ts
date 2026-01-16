@@ -1003,7 +1003,6 @@ export class CSBrowserManager {
         if (!this.page) {
             throw new Error('Page not initialized');
         }
-        CSReporter.debug(`[BrowserManager] getPage() called, page exists: ${!!this.page}`);
         return this.page;
     }
 

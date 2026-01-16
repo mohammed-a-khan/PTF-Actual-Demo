@@ -10,6 +10,7 @@ import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSHtmlReportGenerator } from './CSHtmlReportGeneration';
 import { CSTestResultsManager } from './CSTestResultsManager';
 import { CSADOIntegration } from '../ado/CSADOIntegration';
+import { CSSecretMasker } from '../utils/CSSecretMasker';
 
 export class CSReportAggregator {
     private static instance: CSReportAggregator;
@@ -150,7 +151,7 @@ export class CSReportAggregator {
                     startTime: scenario.startTime || new Date(),
                     endTime: scenario.endTime || new Date(),
                     workerId: scenario.workerId || 1,  // Add worker ID for timeline
-                    testData: scenario.testData  // Add test data for data-driven scenarios
+                    testData: this.maskTestData(scenario.testData)  // Add test data with secrets masked
                 })),
                 startTime: new Date(Date.now() - totalDuration),
                 endTime: new Date(),
@@ -160,14 +161,17 @@ export class CSReportAggregator {
                 failedScenarios: this.aggregatedResults.stats.failed
             };
 
-            // Create test data for JSON report
+            // Create test data for JSON report with masked secrets
             const testData = {
                 project: this.config.get('PROJECT', 'Unknown'),
                 environment: this.config.get('ENVIRONMENT', 'Unknown'),
                 executionTime: new Date().toISOString(),
                 duration: totalDuration,
                 stats: this.aggregatedResults.stats,
-                scenarios: this.aggregatedResults.scenarios,
+                scenarios: this.aggregatedResults.scenarios.map((s: any) => ({
+                    ...s,
+                    testData: this.maskTestData(s.testData)
+                })),
                 artifacts: this.aggregatedResults.artifacts,
                 parallel: true,
                 workers: parseInt(this.config.get('PARALLEL_WORKERS', '3'))
@@ -258,5 +262,28 @@ export class CSReportAggregator {
      */
     public getResults() {
         return this.aggregatedResults;
+    }
+
+    /**
+     * Mask sensitive values in test data for reports
+     * Applies secret masking to values based on field names and registered secrets
+     */
+    private maskTestData(testData: any): any {
+        if (!testData) return testData;
+
+        const secretMasker = CSSecretMasker.getInstance();
+
+        // Create a deep copy and mask the values
+        const masked = { ...testData };
+
+        // Mask the values array based on headers
+        if (masked.headers && masked.values && Array.isArray(masked.values)) {
+            masked.values = masked.values.map((value: string, idx: number) => {
+                const header = masked.headers[idx] || '';
+                return secretMasker.maskIfSecret(value, header);
+            });
+        }
+
+        return masked;
     }
 }

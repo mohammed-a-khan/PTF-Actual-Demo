@@ -648,6 +648,7 @@
             <div class="nav-section">
                 <h3>Data & Auth</h3>
                 <a href="#variable-interpolation">Variable Interpolation</a>
+                <a href="#secret-masking">Secret Masking</a>
                 <a href="#data-management">Data Management</a>
                 <a href="#authentication">Authentication</a>
                 <a href="#diagnostics">Page Diagnostics</a>
@@ -9858,6 +9859,149 @@ describe('Login Tests', {
                         <li>Store session data in context (<code>ctx</code>) for dependent tests</li>
                         <li>Use <code>{scenario:var}</code> in BDD for cross-step data sharing</li>
                     </ul>
+                </div>
+            </section>
+
+            <!-- SECRET MASKING -->
+            <section id="secret-masking">
+                <h2>Secret Masking</h2>
+
+                <p>The framework automatically masks sensitive values in reports, logs, and console output to prevent accidental exposure of passwords, tokens, API keys, and other secrets.</p>
+
+                <div class="info-box">
+                    <strong>Security Feature:</strong> When encrypted values (prefixed with <code>ENCRYPTED:</code>) are decrypted at runtime, they are automatically registered for masking. These values will appear as <code>********</code> in all HTML reports, JSON reports, and test data displays.
+                </div>
+
+                <h3>How It Works</h3>
+                <ol>
+                    <li><strong>Automatic Registration:</strong> When <code>CSValueResolver</code> decrypts an encrypted value, it automatically registers the decrypted value with <code>CSSecretMasker</code></li>
+                    <li><strong>Pattern Detection:</strong> Field names matching sensitive patterns (password, token, secret, apiKey, etc.) are automatically masked</li>
+                    <li><strong>Report Masking:</strong> All test data displayed in HTML/JSON reports is filtered through the secret masker</li>
+                    <li><strong>Value Pattern Detection:</strong> JWT tokens, Bearer tokens, and other secret-looking values are detected and masked</li>
+                </ol>
+
+                <h3>CSSecretMasker Methods</h3>
+                <table>
+                    <thead><tr><th>Method</th><th>Description</th><th>Returns</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>getInstance()</code></td><td>Get singleton instance</td><td>CSSecretMasker</td></tr>
+                        <tr><td><code>registerDecryptedValue(value)</code></td><td>Register a value to be masked everywhere</td><td>void</td></tr>
+                        <tr><td><code>registerSensitiveField(name, value)</code></td><td>Register a field name with its sensitive value</td><td>void</td></tr>
+                        <tr><td><code>maskIfSecret(value, fieldName?)</code></td><td>Mask value if it's a secret or field name is sensitive</td><td>string</td></tr>
+                        <tr><td><code>maskSecretsInText(text)</code></td><td>Mask all registered secrets in a string</td><td>string</td></tr>
+                        <tr><td><code>maskSecretsInObject(obj)</code></td><td>Deep mask secrets in an object</td><td>object</td></tr>
+                        <tr><td><code>isSensitiveFieldName(name)</code></td><td>Check if field name indicates sensitive data</td><td>boolean</td></tr>
+                        <tr><td><code>clear()</code></td><td>Clear all registered secrets (between test runs)</td><td>void</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Sensitive Field Name Patterns</h3>
+                <p>The following field name patterns are automatically detected as sensitive:</p>
+                <pre><code>password, passwd, secret, token, api_key, apikey, auth_key
+access_key, private_key, credentials, bearer, authorization
+pat, ssh_key, client_secret, encryption_key, signing_key
+connection_string, db_password, database_password</code></pre>
+
+                <h3>Configuration Options</h3>
+                <pre><code># .env file
+SECRET_MASKING_ENABLED=true   # Enable/disable masking (default: true)
+SECRET_MASK_CHAR=*            # Character to use for masking (default: *)
+SECRET_VISIBLE_START=0        # Characters visible at start (default: 0)
+SECRET_VISIBLE_END=0          # Characters visible at end (default: 0)</code></pre>
+
+                <h3>Usage Examples</h3>
+
+                <h4>Automatic Masking (No Code Required)</h4>
+                <p>When you use encrypted values in your .env file, they are automatically masked in reports:</p>
+                <pre><code># .env
+ADMIN_PASSWORD=ENCRYPTED:eyJlbmNyeXB0ZWQiOiJhZG1pbjEyMyJ9
+API_TOKEN=ENCRYPTED:eyJlbmNyeXB0ZWQiOiJteS1zZWNyZXQtdG9rZW4ifQ==
+
+# In your test, when you access these values:
+const password = config.get('ADMIN_PASSWORD');  // Decrypted value
+// The decrypted value is now registered for masking
+
+# In HTML/JSON reports, the password will appear as: ********</code></pre>
+
+                <h4>Data-Driven Tests with Sensitive Columns</h4>
+                <p>When your test data file has columns named "password", "token", etc., values are automatically masked:</p>
+                <pre><code>// test-data.csv
+username,password,apiToken
+admin,secretPass123,abc-xyz-token
+
+// In HTML report, the test data table will show:
+// | username | password | apiToken |
+// | admin    | ******** | ******** |</code></pre>
+
+                <h4>Manual Secret Registration</h4>
+                <p>For custom secrets that don't follow standard patterns:</p>
+                <pre><code>import { CSSecretMasker } from '@mdakhan.mak/cs-playwright-test-framework';
+
+const masker = CSSecretMasker.getInstance();
+
+// Register a custom secret
+masker.registerDecryptedValue('my-custom-secret-value');
+
+// Now this value will be masked everywhere it appears
+const logMessage = `Using token: my-custom-secret-value`;
+const masked = masker.maskSecretsInText(logMessage);
+// Result: "Using token: ********"</code></pre>
+
+                <h4>Convenience Functions</h4>
+                <pre><code>import {
+    maskSecret,
+    maskSecretsInText,
+    registerDecryptedSecret,
+    getSecretMasker
+} from '@mdakhan.mak/cs-playwright-test-framework';
+
+// Quick mask check
+const displayValue = maskSecret(sensitiveValue, 'password');  // ********
+
+// Mask secrets in a message
+const safeLog = maskSecretsInText(`Token: ${token}`);
+
+// Register a secret
+registerDecryptedSecret(mySecretValue);
+
+// Get masker instance for advanced usage
+const masker = getSecretMasker();
+masker.registerCustomPattern(/my-custom-pattern/i);</code></pre>
+
+                <h4>Masking in Page Objects</h4>
+                <pre><code>import { CSBasePage, CSGetElement, CSPage } from '@mdakhan.mak/cs-playwright-test-framework';
+import { CSSecretMasker } from '@mdakhan.mak/cs-playwright-test-framework';
+
+@CSPage('login')
+export class LoginPage extends CSBasePage {
+    @CSGetElement('[data-testid="password"]', 'Password field')
+    passwordInput!: CSWebElement;
+
+    async login(username: string, password: string): Promise&lt;void&gt; {
+        // Password is automatically masked in step tracker
+        // because element description contains "password"
+        await this.passwordInput.fill(password);
+
+        // For custom logging, use the masker
+        const masker = CSSecretMasker.getInstance();
+        this.reporter.info(`Logging in as ${username} with password ${masker.mask(password)}`);
+    }
+}</code></pre>
+
+                <h3>What Gets Masked</h3>
+                <table>
+                    <thead><tr><th>Location</th><th>Masking Applied</th></tr></thead>
+                    <tbody>
+                        <tr><td>HTML Report - Test Data Table</td><td>✓ Based on column names and registered secrets</td></tr>
+                        <tr><td>JSON Report (report-data.json)</td><td>✓ Test data values masked</td></tr>
+                        <tr><td>Step Tracker Actions</td><td>✓ Password fields masked in fill/type actions</td></tr>
+                        <tr><td>Console Logs (DEBUG)</td><td>✓ Decrypted value names logged, not values</td></tr>
+                        <tr><td>Error Messages</td><td>✓ Registered secrets masked in stack traces</td></tr>
+                    </tbody>
+                </table>
+
+                <div class="tip-box">
+                    <strong>Best Practice:</strong> Always use <code>ENCRYPTED:</code> prefix for sensitive values in your .env files. This ensures automatic masking in all reports without any additional code.
                 </div>
             </section>
 

@@ -4,7 +4,7 @@ export class CSEncryptionUtil {
     private static instance: CSEncryptionUtil;
     private readonly INTERNAL_KEY = 'CS-Framework-2024-Internal-Encryption-Key-V1';
     private readonly SALT = 'CS-Framework-Salt';
-    private readonly ITERATIONS = 10000;
+    private readonly ITERATIONS = 350000;
     private readonly ALGORITHM = 'aes-256-gcm';
 
     private constructor() {

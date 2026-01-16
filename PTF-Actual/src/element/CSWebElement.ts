@@ -347,8 +347,6 @@ export class CSWebElement {
             this.locatorPageRef = currentPage;
         }
 
-        CSReporter.debug(`Getting locator for ${this.description}`);
-
         // Build and try locator strategies
         const strategies = this.buildLocatorStrategies();
         const startTime = Date.now();
@@ -379,14 +377,12 @@ export class CSWebElement {
                             healedLocator: `${strategy.type}:${strategy.value}`,
                             attempts: strategyIndex + 1
                         });
-                    } else {
-                        CSReporter.debug(`Found element with ${strategy.type}: ${strategy.value}`);
                     }
 
                     return loc;
                 }
-            } catch (error) {
-                CSReporter.debug(`Failed with ${strategy.type}: ${error}`);
+            } catch {
+                // Strategy failed, try next one
             }
             strategyIndex++;
         }
@@ -490,6 +486,7 @@ export class CSWebElement {
     /**
      * Execute action with retry logic, reporting, performance tracking, and smart waits
      * Smart waits are optional and gracefully degrade if not available
+     * Smart waits are skipped for read-only operations (textContent, getAttribute, etc.)
      */
     private async executeAction<T>(
         actionName: string,
@@ -499,8 +496,12 @@ export class CSWebElement {
         const startTime = Date.now();
         CSReporter.info(`Executing ${actionName} on ${this.description}`);
 
+        // Skip smart wait for read-only actions (no DOM changes expected)
+        const isReadOnly = this.isReadOnlyAction(actionName);
+
         // Get smart wait engine (lazy loaded, returns null if not available)
-        const smartWait = options?.skipSmartWait ? null : this.getSmartWaitEngine();
+        // Skip for read-only operations - they don't need DOM stability checks
+        const smartWait = (options?.skipSmartWait || isReadOnly) ? null : this.getSmartWaitEngine();
         const actionType = this.getActionType(actionName);
         const selector = this.getPrimarySelector();
 
@@ -509,7 +510,7 @@ export class CSWebElement {
         for (let attempt = 1; attempt <= this.retryCount; attempt++) {
             try {
                 // ============================================
-                // SMART WAIT: Before Action
+                // SMART WAIT: Before Action (skip for read-only)
                 // ============================================
                 if (smartWait && smartWait.isEnabled()) {
                     try {
@@ -537,7 +538,7 @@ export class CSWebElement {
                 const actionDuration = Date.now() - actionStartTime;
 
                 // ============================================
-                // SMART WAIT: After Action
+                // SMART WAIT: After Action (skip for read-only)
                 // ============================================
                 if (smartWait && smartWait.isEnabled()) {
                     try {
@@ -645,6 +646,22 @@ export class CSWebElement {
         if (name.includes('hover')) return 'hover';
         if (name.includes('tap')) return 'tap';
         return 'other';
+    }
+
+    /**
+     * Check if action is read-only (doesn't need smart wait)
+     * Read operations don't need DOM stability checks
+     */
+    private isReadOnlyAction(actionName: string): boolean {
+        const name = actionName.toLowerCase();
+        return name.includes('get') ||
+               name.includes('text') ||
+               name.includes('inner') ||
+               name.includes('attribute') ||
+               name.includes('value') ||
+               name.includes('count') ||
+               name.includes('bounding') ||
+               name.includes('screenshot');
     }
 
     /**
@@ -1492,11 +1509,8 @@ export class CSWebElement {
     async isChecked(options?: IsCheckedOptions): Promise<boolean> {
         try {
             const locator = await this.getLocator();
-            const result = await locator.isChecked(options);
-            CSReporter.debug(`isChecked on ${this.description}: ${result}`);
-            return result;
-        } catch (error: any) {
-            CSReporter.debug(`isChecked returned false for ${this.description}: Element not found - ${error.message}`);
+            return await locator.isChecked(options);
+        } catch {
             return false;
         }
     }
@@ -1506,7 +1520,6 @@ export class CSWebElement {
      * Returns false if element is not found (does not throw error)
      */
     async isCheckedWithTimeout(timeout: number): Promise<boolean> {
-        CSReporter.info(`Checking if checked with ${timeout}ms timeout on ${this.description}`);
         return this.isChecked({ timeout });
     }
 
@@ -1517,11 +1530,8 @@ export class CSWebElement {
     async isDisabled(options?: IsDisabledOptions): Promise<boolean> {
         try {
             const locator = await this.getLocator();
-            const result = await locator.isDisabled(options);
-            CSReporter.debug(`isDisabled on ${this.description}: ${result}`);
-            return result;
-        } catch (error: any) {
-            CSReporter.debug(`isDisabled returned false for ${this.description}: Element not found - ${error.message}`);
+            return await locator.isDisabled(options);
+        } catch {
             return false;
         }
     }
@@ -1531,7 +1541,6 @@ export class CSWebElement {
      * Returns false if element is not found (does not throw error)
      */
     async isDisabledWithTimeout(timeout: number): Promise<boolean> {
-        CSReporter.info(`Checking if disabled with ${timeout}ms timeout on ${this.description}`);
         return this.isDisabled({ timeout });
     }
 
@@ -1542,11 +1551,8 @@ export class CSWebElement {
     async isEditable(options?: IsEditableOptions): Promise<boolean> {
         try {
             const locator = await this.getLocator();
-            const result = await locator.isEditable(options);
-            CSReporter.debug(`isEditable on ${this.description}: ${result}`);
-            return result;
-        } catch (error: any) {
-            CSReporter.debug(`isEditable returned false for ${this.description}: Element not found - ${error.message}`);
+            return await locator.isEditable(options);
+        } catch {
             return false;
         }
     }
@@ -1556,7 +1562,6 @@ export class CSWebElement {
      * Returns false if element is not found (does not throw error)
      */
     async isEditableWithTimeout(timeout: number): Promise<boolean> {
-        CSReporter.info(`Checking if editable with ${timeout}ms timeout on ${this.description}`);
         return this.isEditable({ timeout });
     }
 
@@ -1567,11 +1572,8 @@ export class CSWebElement {
     async isEnabled(options?: IsEnabledOptions): Promise<boolean> {
         try {
             const locator = await this.getLocator();
-            const result = await locator.isEnabled(options);
-            CSReporter.debug(`isEnabled on ${this.description}: ${result}`);
-            return result;
-        } catch (error: any) {
-            CSReporter.debug(`isEnabled returned false for ${this.description}: Element not found - ${error.message}`);
+            return await locator.isEnabled(options);
+        } catch {
             return false;
         }
     }
@@ -1581,7 +1583,6 @@ export class CSWebElement {
      * Returns false if element is not found (does not throw error)
      */
     async isEnabledWithTimeout(timeout: number): Promise<boolean> {
-        CSReporter.info(`Checking if enabled with ${timeout}ms timeout on ${this.description}`);
         return this.isEnabled({ timeout });
     }
 
@@ -1592,12 +1593,9 @@ export class CSWebElement {
     async isHidden(options?: IsHiddenOptions): Promise<boolean> {
         try {
             const locator = await this.getLocator();
-            const result = await locator.isHidden(options);
-            CSReporter.debug(`isHidden on ${this.description}: ${result}`);
-            return result;
-        } catch (error: any) {
+            return await locator.isHidden(options);
+        } catch {
             // Element not found = hidden (return true)
-            CSReporter.debug(`isHidden returned true for ${this.description}: Element not found - ${error.message}`);
             return true;
         }
     }
@@ -1607,7 +1605,6 @@ export class CSWebElement {
      * Returns true if element is not found (element not found = hidden)
      */
     async isHiddenWithTimeout(timeout: number): Promise<boolean> {
-        CSReporter.info(`Checking if hidden with ${timeout}ms timeout on ${this.description}`);
         return this.isHidden({ timeout });
     }
 
@@ -1618,11 +1615,8 @@ export class CSWebElement {
     async isVisible(options?: IsVisibleOptions): Promise<boolean> {
         try {
             const locator = await this.getLocator();
-            const result = await locator.isVisible(options);
-            CSReporter.debug(`isVisible on ${this.description}: ${result}`);
-            return result;
-        } catch (error: any) {
-            CSReporter.debug(`isVisible returned false for ${this.description}: Element not found - ${error.message}`);
+            return await locator.isVisible(options);
+        } catch {
             return false;
         }
     }
@@ -1632,7 +1626,6 @@ export class CSWebElement {
      * Returns false if element is not found (does not throw error)
      */
     async isVisibleWithTimeout(timeout: number): Promise<boolean> {
-        CSReporter.info(`Checking if visible with ${timeout}ms timeout on ${this.description}`);
         return this.isVisible({ timeout });
     }
 

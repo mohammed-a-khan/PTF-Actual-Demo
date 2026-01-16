@@ -203,6 +203,10 @@ export class CSBDDEngine {
         const pathsConfig = this.config.get('STEP_DEFINITIONS_PATH', 'test/common/steps;test/{project}/steps;src/steps');
         const project = this.config.get('PROJECT', 'common');
 
+        // Only prefer dist/ when explicitly enabled (default: false - use source paths as configured)
+        // This ensures STEP_DEFINITIONS_PATH from env files is respected by default
+        const preferDist = this.config.getBoolean('PREFER_DIST_STEPS', false);
+
         // Parse and expand paths
         const paths: string[] = [];
 
@@ -213,30 +217,32 @@ export class CSBDDEngine {
             // Resolve relative to CWD
             const resolvedPath = path.resolve(process.cwd(), p);
 
-            // PERFORMANCE: Prefer compiled JS (dist/) over TypeScript source
+            // If PREFER_DIST_STEPS=true, check for compiled dist/ version (performance optimization)
             // This avoids slow ts-node transpilation (1-2 seconds per file)
+            if (preferDist) {
+                // Case 1: src/ paths -> check dist/ (e.g., src/steps -> dist/steps)
+                if (p.includes('/src/') || p.includes('\\src\\') || p.startsWith('src/') || p.startsWith('src\\')) {
+                    const distPath = resolvedPath.replace(/[/\\]src[/\\]/, '/dist/').replace(/[/\\]src$/, '/dist');
+                    if (fs.existsSync(distPath)) {
+                        paths.push(distPath);
+                        CSReporter.debug(`Using compiled: ${distPath}`);
+                        continue;
+                    }
+                }
 
-            // Case 1: src/ paths -> check dist/ (e.g., src/steps -> dist/steps)
-            if (p.includes('/src/') || p.includes('\\src\\') || p.startsWith('src/') || p.startsWith('src\\')) {
-                const distPath = resolvedPath.replace(/[/\\]src[/\\]/, '/dist/').replace(/[/\\]src$/, '/dist');
-                if (fs.existsSync(distPath)) {
-                    paths.push(distPath);
-                    CSReporter.debug(`Using compiled: ${distPath}`);
-                    continue;
+                // Case 2: Consumer project pattern - test/{project}/steps -> dist/test/{project}/steps
+                // When tsconfig has outDir: "./dist" and rootDir: ".", compiled files go to dist/test/...
+                if (p.startsWith('test/') || p.startsWith('test\\')) {
+                    const distPath = path.resolve(process.cwd(), 'dist', p);
+                    if (fs.existsSync(distPath)) {
+                        paths.push(distPath);
+                        CSReporter.debug(`Using compiled: ${distPath}`);
+                        continue;
+                    }
                 }
             }
 
-            // Case 2: Consumer project pattern - test/{project}/steps -> dist/test/{project}/steps
-            // When tsconfig has outDir: "./dist" and rootDir: ".", compiled files go to dist/test/...
-            if (p.startsWith('test/') || p.startsWith('test\\')) {
-                const distPath = path.resolve(process.cwd(), 'dist', p);
-                if (fs.existsSync(distPath)) {
-                    paths.push(distPath);
-                    CSReporter.debug(`Using compiled: ${distPath}`);
-                    continue;
-                }
-            }
-
+            // Default: Use source path as specified in STEP_DEFINITIONS_PATH
             paths.push(resolvedPath);
         }
 
@@ -957,12 +963,14 @@ export class CSBDDEngine {
         try {
             let fileToLoad = filePath;
 
+            // Only prefer compiled dist/ files when PREFER_DIST_STEPS=true
+            const preferDist = this.config.getBoolean('PREFER_DIST_STEPS', false);
+
             // PERFORMANCE OPTIMIZATION: Prefer compiled JS files over TypeScript transpilation
             // ts-node transpilation is slow (can take 1-2 seconds per file)
             // Compiled JS files load in milliseconds
-            if (filePath.endsWith('.ts')) {
+            if (preferDist && filePath.endsWith('.ts')) {
                 const cwd = process.cwd();
-                const jsFileName = path.basename(filePath).replace('.ts', '.js');
 
                 // Case 1: src/ paths -> dist/ (e.g., src/steps/file.ts -> dist/steps/file.js)
                 if (filePath.includes(`${path.sep}src${path.sep}`) || filePath.includes('/src/')) {

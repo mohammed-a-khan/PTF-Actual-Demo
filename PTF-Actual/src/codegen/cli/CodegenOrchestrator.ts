@@ -348,9 +348,9 @@ export class CodegenOrchestrator {
             const protocol = urlObj.protocol.replace(':', '');
 
             // Extract project name from hostname
-            // e.g., "opensource-demo.orangehrmlive.com" -> "orangehrm"
             // e.g., "app.myproject.com" -> "myproject"
             // e.g., "myproject-dev.company.com" -> "myproject"
+            // e.g., "demo.example.com" -> "example"
             let projectName = 'myproject';
 
             // Try different extraction patterns
@@ -360,21 +360,17 @@ export class CodegenOrchestrator {
                 // Get the main domain part (not TLD)
                 const mainPart = hostParts[hostParts.length - 2];
 
-                // Check if it contains common patterns
-                if (hostname.includes('orangehrm')) {
-                    projectName = 'orangehrm';
-                } else if (hostname.includes('demo')) {
-                    // For demo sites, try to extract from subdomain
-                    projectName = hostParts[0].replace(/[-_]?(demo|test|dev|qa|staging|prod)[-_]?/gi, '') || mainPart;
-                } else if (hostParts[0] !== 'www' && hostParts[0] !== 'app') {
-                    // Use first subdomain if meaningful
-                    projectName = hostParts[0].replace(/[-_]?(dev|qa|staging|prod)[-_]?/gi, '') || mainPart;
+                // Extract meaningful name from subdomain or main domain
+                if (hostParts[0] !== 'www' && hostParts[0] !== 'app' && hostParts[0] !== 'demo') {
+                    // Use first subdomain if meaningful, strip common env suffixes
+                    projectName = hostParts[0].replace(/[-_]?(demo|test|dev|qa|staging|prod|live)[-_]?/gi, '') || mainPart;
                 } else {
-                    projectName = mainPart;
+                    // Use main domain part, strip common suffixes
+                    projectName = mainPart.replace(/[-_]?(demo|test|dev|qa|staging|prod|live)[-_]?/gi, '') || mainPart;
                 }
             }
 
-            // Clean up project name
+            // Clean up project name - keep only alphanumeric
             projectName = projectName.toLowerCase().replace(/[^a-z0-9]/g, '');
 
             // Build base URL (origin without path)

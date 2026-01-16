@@ -123,6 +123,7 @@ export { CSExpect } from '../assertions/CSExpect';
 // Utilities
 export { CSValueResolver } from '../utils/CSValueResolver';
 export { CSEncryptionUtil } from '../utils/CSEncryptionUtil';
+export { CSSecretMasker, getSecretMasker, maskSecret, maskSecretsInText, registerDecryptedSecret } from '../utils/CSSecretMasker';
 
 // Azure DevOps Integration
 export { CSADOClient } from '../ado/CSADOClient';

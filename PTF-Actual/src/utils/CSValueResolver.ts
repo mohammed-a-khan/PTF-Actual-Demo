@@ -1,6 +1,7 @@
 import { CSEncryptionUtil } from './CSEncryptionUtil';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
+import { CSSecretMasker } from './CSSecretMasker';
 
 /**
  * Utility class for resolving values with support for:
@@ -32,6 +33,8 @@ export class CSValueResolver {
             if (decrypted) {
                 CSReporter.debug(`Value decrypted successfully`);
                 resolvedValue = decrypted;
+                // Register decrypted value for masking in reports
+                CSSecretMasker.getInstance().registerDecryptedValue(decrypted);
             } else {
                 CSReporter.warn(`Failed to decrypt value, using original`);
             }
@@ -68,6 +71,8 @@ export class CSValueResolver {
                 const decrypted = this.encryptionUtil.decrypt(varValue);
                 if (decrypted) {
                     varValue = decrypted;
+                    // Register decrypted value for masking in reports
+                    CSSecretMasker.getInstance().registerDecryptedValue(decrypted);
                 }
             }
 
@@ -95,6 +100,8 @@ export class CSValueResolver {
                 const decrypted = this.encryptionUtil.decrypt(varValue);
                 if (decrypted) {
                     varValue = decrypted;
+                    // Register decrypted value for masking in reports
+                    CSSecretMasker.getInstance().registerDecryptedValue(decrypted);
                 }
             }
 
@@ -140,6 +147,8 @@ export class CSValueResolver {
                 const decrypted = this.encryptionUtil.decrypt(varValue);
                 if (decrypted) {
                     varValue = decrypted;
+                    // Register decrypted value for masking in reports
+                    CSSecretMasker.getInstance().registerDecryptedValue(decrypted);
                 }
             }
 

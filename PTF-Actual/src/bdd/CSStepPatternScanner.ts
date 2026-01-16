@@ -15,6 +15,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { CSReporter } from '../reporter/CSReporter';
+import { CSConfigurationManager } from '../core/CSConfigurationManager';
 
 interface ScannedStep {
     pattern: string;           // The step pattern (regex or cucumber expression)
@@ -216,9 +217,13 @@ export class CSStepPatternScanner {
         const startTime = Date.now();
 
         try {
-            // Check for compiled JS version first
+            // Only prefer compiled dist/ files when PREFER_DIST_STEPS=true
+            const config = CSConfigurationManager.getInstance();
+            const preferDist = config.getBoolean('PREFER_DIST_STEPS', false);
+
+            // Check for compiled JS version only if PREFER_DIST_STEPS=true
             let fileToLoad = filePath;
-            if (filePath.endsWith('.ts')) {
+            if (preferDist && filePath.endsWith('.ts')) {
                 const cwd = process.cwd();
                 const relativePath = path.relative(cwd, filePath);
 

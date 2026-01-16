@@ -3,6 +3,7 @@ import * as path from 'path';
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from './CSReporter';
 import { htmlEscape, attrEscape, jsEscape } from './utils/HtmlSanitizer';
+import { CSSecretMasker } from '../utils/CSSecretMasker';
 // Lazy load heavy report generators to improve startup performance (saves 35+ seconds)
 // CSExcelReportGenerator imports ExcelJS (22+ seconds)
 // CSPdfReportGenerator imports PDFKit (15+ seconds)
@@ -2060,9 +2061,14 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                             // Get indices of used columns
                             const usedIndices = usedColumns.map((col: string) => td.headers.indexOf(col));
 
-                            // Create filtered data for used columns only
+                            // Create filtered data for used columns only with secret masking
+                            const secretMasker = CSSecretMasker.getInstance();
                             const filteredHeaders = usedIndices.map((i: number) => td.headers[i]);
-                            const filteredValues = usedIndices.map((i: number) => td.values[i]);
+                            const filteredValues = usedIndices.map((i: number) => {
+                                const header = td.headers[i];
+                                const value = td.values[i];
+                                return secretMasker.maskIfSecret(value, header);
+                            });
 
                             return `
                             <div class="test-data-container" style="padding: 10px 15px; background: #f8f9fa; border-left: 3px solid #6c757d; margin: 10px 15px 15px 15px; font-size: 0.9em; border-radius: 4px;">
@@ -2148,13 +2154,15 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                                 <tr style="background: white;">
                                                     ${td.values.map((value: string, idx: number) => {
                                                         const isUsed = usedColumns.includes(td.headers[idx]);
+                                                        const header = td.headers[idx];
+                                                        const maskedValue = secretMasker.maskIfSecret(value, header);
                                                         return `
                                                             <td style="padding: 8px 12px; border: 1px solid #dee2e6;
                                                                        font-family: monospace; font-size: 0.9em;
                                                                        background: ${isUsed ? '#f6ffed' : 'white'};
                                                                        color: ${isUsed ? '#000' : '#6c757d'};
                                                                        white-space: nowrap;">
-                                                                ${htmlEscape(value || '-')}
+                                                                ${htmlEscape(maskedValue || '-')}
                                                             </td>
                                                         `;
                                                     }).join('')}

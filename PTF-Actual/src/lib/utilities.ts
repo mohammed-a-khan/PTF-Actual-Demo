@@ -15,6 +15,7 @@
 // Utils Core (lightweight - only these are loaded)
 export { CSValueResolver } from '../utils/CSValueResolver';
 export { CSEncryptionUtil } from '../utils/CSEncryptionUtil';
+export { CSSecretMasker, getSecretMasker, maskSecret, maskSecretsInText, registerDecryptedSecret } from '../utils/CSSecretMasker';
 export { CSStringUtility } from '../utils/CSStringUtility';
 export { CSDateTimeUtility } from '../utils/CSDateTimeUtility';
 export { CSJsonUtility } from '../utils/CSJsonUtility';

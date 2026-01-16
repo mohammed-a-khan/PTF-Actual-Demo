@@ -449,7 +449,7 @@ DATABASE_PASSWORD=ENCRYPTED:eyJlbmNyeXB0ZWQiOiJ4eXo5ODciLCJpdiI6InVpb3BhcyIsInRh
                 {
                     name: 'PBKDF2',
                     salt: encoder.encode('CS-Framework-Salt'),
-                    iterations: 10000, // Reduced iterations for performance
+                    iterations: 350000, // Security-compliant (>310,000 per Security Architecture team)
                     hash: 'SHA-256'
                 },
                 keyMaterial,
@@ -507,7 +507,7 @@ DATABASE_PASSWORD=ENCRYPTED:eyJlbmNyeXB0ZWQiOiJ4eXo5ODciLCJpdiI6InVpb3BhcyIsInRh
                 {
                     name: 'PBKDF2',
                     salt: encoder.encode('CS-Framework-Salt'),
-                    iterations: 10000,
+                    iterations: 350000, // Security-compliant (>310,000 per Security Architecture team)
                     hash: 'SHA-256'
                 },
                 keyMaterial,
