@@ -334,30 +334,42 @@ export class CSStepPatternScanner {
      */
     private findStepFiles(dirPath: string): string[] {
         const files: string[] = [];
-        const items = fs.readdirSync(dirPath);
-        const seenBasenames = new Set<string>();
 
-        for (const item of items) {
-            const fullPath = path.join(dirPath, item);
-            const stat = fs.statSync(fullPath);
+        try {
+            const items = fs.readdirSync(dirPath);
+            const seenBasenames = new Set<string>();
 
-            if (stat.isDirectory()) {
-                files.push(...this.findStepFiles(fullPath));
-            } else if (this.isStepFile(fullPath)) {
-                // Prefer .js files over .ts to avoid duplicates
-                const basename = item.replace(/\.(ts|js)$/, '');
-                if (!seenBasenames.has(basename)) {
-                    const jsVersion = path.join(dirPath, basename + '.js');
-                    const tsVersion = path.join(dirPath, basename + '.ts');
+            for (const item of items) {
+                try {
+                    const fullPath = path.join(dirPath, item);
+                    const stat = fs.statSync(fullPath);
 
-                    if (fs.existsSync(jsVersion)) {
-                        files.push(jsVersion);
-                    } else if (fs.existsSync(tsVersion)) {
-                        files.push(tsVersion);
+                    if (stat.isDirectory()) {
+                        // Recursively scan subdirectories
+                        const subFiles = this.findStepFiles(fullPath);
+                        files.push(...subFiles);
+                    } else if (this.isStepFile(fullPath)) {
+                        // Prefer .js files over .ts to avoid duplicates
+                        const basename = item.replace(/\.(ts|js)$/, '');
+                        if (!seenBasenames.has(basename)) {
+                            const jsVersion = path.join(dirPath, basename + '.js');
+                            const tsVersion = path.join(dirPath, basename + '.ts');
+
+                            if (fs.existsSync(jsVersion)) {
+                                files.push(jsVersion);
+                            } else if (fs.existsSync(tsVersion)) {
+                                files.push(tsVersion);
+                            }
+                            seenBasenames.add(basename);
+                        }
                     }
-                    seenBasenames.add(basename);
+                } catch (itemError: any) {
+                    // Skip problematic files/directories (permissions, symlinks, etc.)
+                    CSReporter.debug(`[StepScanner] Skipping ${item}: ${itemError.message}`);
                 }
             }
+        } catch (error: any) {
+            CSReporter.debug(`[StepScanner] Error reading directory ${dirPath}: ${error.message}`);
         }
 
         return files;

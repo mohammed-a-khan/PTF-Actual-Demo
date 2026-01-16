@@ -927,33 +927,45 @@ export class CSBDDEngine {
 
     private findStepFiles(dirPath: string): string[] {
         const files: string[] = [];
-        const items = fs.readdirSync(dirPath);
-        const seenBasenames = new Set<string>();
 
-        for (const item of items) {
-            const fullPath = path.join(dirPath, item);
-            const stat = fs.statSync(fullPath);
+        try {
+            const items = fs.readdirSync(dirPath);
+            const seenBasenames = new Set<string>();
 
-            if (stat.isDirectory()) {
-                files.push(...this.findStepFiles(fullPath));
-            } else if (item.endsWith('.js') || item.endsWith('.ts')) {
-                // PERFORMANCE: Prefer .js files over .ts files to avoid ts-node transpilation
-                // If both .ts and .js exist, only include .js
-                const basename = item.replace(/\.(ts|js)$/, '');
+            for (const item of items) {
+                try {
+                    const fullPath = path.join(dirPath, item);
+                    const stat = fs.statSync(fullPath);
 
-                if (!seenBasenames.has(basename)) {
-                    // Check if .js version exists (prefer it)
-                    const jsVersion = path.join(dirPath, basename + '.js');
-                    const tsVersion = path.join(dirPath, basename + '.ts');
+                    if (stat.isDirectory()) {
+                        // Recursively scan subdirectories
+                        files.push(...this.findStepFiles(fullPath));
+                    } else if (this.isStepFile(fullPath)) {
+                        // Only include files matching step file pattern
+                        // PERFORMANCE: Prefer .js files over .ts files to avoid ts-node transpilation
+                        // If both .ts and .js exist, only include .js
+                        const basename = item.replace(/\.(ts|js)$/, '');
 
-                    if (fs.existsSync(jsVersion)) {
-                        files.push(jsVersion);
-                    } else if (fs.existsSync(tsVersion)) {
-                        files.push(tsVersion);
+                        if (!seenBasenames.has(basename)) {
+                            // Check if .js version exists (prefer it)
+                            const jsVersion = path.join(dirPath, basename + '.js');
+                            const tsVersion = path.join(dirPath, basename + '.ts');
+
+                            if (fs.existsSync(jsVersion)) {
+                                files.push(jsVersion);
+                            } else if (fs.existsSync(tsVersion)) {
+                                files.push(tsVersion);
+                            }
+                            seenBasenames.add(basename);
+                        }
                     }
-                    seenBasenames.add(basename);
+                } catch (itemError: any) {
+                    // Skip problematic files/directories (permissions, symlinks, etc.)
+                    CSReporter.debug(`[StepLoader] Skipping ${item}: ${itemError.message}`);
                 }
             }
+        } catch (error: any) {
+            CSReporter.debug(`[StepLoader] Error reading directory ${dirPath}: ${error.message}`);
         }
 
         return files;
