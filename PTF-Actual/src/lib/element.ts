@@ -9,4 +9,5 @@
 
 // Element Core Classes
 export { CSWebElement, CSElementFactory } from '../element/CSWebElement';
+export type { FrameSelector, ElementOptions } from '../element/CSWebElement';
 export { CSElementResolver } from '../element/CSElementResolver';

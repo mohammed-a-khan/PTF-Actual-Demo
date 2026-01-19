@@ -57,6 +57,34 @@ export interface CSElementOptions {
     healingStrategies?: ('nearby' | 'text' | 'visual' | 'structure' | 'ai')[];
     
     // Frame and shadow DOM
+    /**
+     * Frame selector for elements inside iframes.
+     * Can be a string (auto-detects xpath/css) or object with explicit selector type.
+     * @example
+     * // String (auto-detected)
+     * frame: '//iframe[@title="Editor"]'
+     * frame: 'iframe#payment'
+     * frame: '#myFrame'
+     *
+     * // Object (explicit)
+     * frame: { xpath: '//iframe[@title="Editor"]' }
+     * frame: { id: 'payment-frame' }
+     * frame: { name: 'editorFrame' }
+     * frame: { title: 'Document Editor' }
+     * frame: { testId: 'editor-iframe' }
+     * frame: { index: 0 }
+     */
+    frame?: string | {
+        xpath?: string;
+        css?: string;
+        id?: string;
+        name?: string;
+        title?: string;
+        testId?: string;
+        src?: string;
+        index?: number;
+    };
+    /** @deprecated Use 'frame' instead */
     iframe?: string | number;
     shadowRoot?: string;
     shadowPath?: string[];
@@ -178,7 +206,16 @@ export function CSGetElement(options: CSElementOptions) {
                     if (options.child) elementOptions.child = options.child;
                     if (options.selfHeal !== undefined) elementOptions.selfHeal = options.selfHeal;
                     if (options.alternativeLocators) elementOptions.alternativeLocators = options.alternativeLocators;
-                    if (options.iframe !== undefined) elementOptions.iframe = options.iframe;
+                    // Frame support - new 'frame' option takes precedence over deprecated 'iframe'
+                    if (options.frame !== undefined) {
+                        elementOptions.frame = options.frame;
+                    } else if (options.iframe !== undefined) {
+                        // Backward compatibility: convert iframe to frame
+                        elementOptions.frame = options.iframe;
+                    } else if (this.frame !== undefined) {
+                        // Inherit frame from CSFramePage class if not specified on element
+                        elementOptions.frame = this.frame;
+                    }
                     if (options.shadowRoot) elementOptions.shadowRoot = options.shadowRoot;
                     if (options.dynamic !== undefined) elementOptions.dynamic = options.dynamic;
                     if (options.cache !== undefined) elementOptions.cache = options.cache;
@@ -283,6 +320,74 @@ export function CSInject(token: string) {
             enumerable: true,
             configurable: true
         });
+    };
+}
+
+/**
+ * Decorator to embed iframe page objects into parent pages.
+ * The iframe page is automatically initialized with the parent's page context.
+ *
+ * @example
+ * // Define iframe page
+ * @CSPage('payment-iframe')
+ * export class PaymentIframe extends CSFramePage {
+ *     protected frame = '//iframe[@title="Payment"]';
+ *
+ *     @CSGetElement({ xpath: '//input[@name="card"]' })
+ *     public cardInput!: CSWebElement;
+ * }
+ *
+ * // Embed in parent page
+ * @CSPage('checkout-page')
+ * export class CheckoutPage extends CSBasePage {
+ *     @CSIframe(PaymentIframe)
+ *     public paymentFrame!: PaymentIframe;
+ * }
+ *
+ * // Usage
+ * await checkoutPage.paymentFrame.cardInput.fillWithTimeout('4111...', 5000);
+ *
+ * @param framePageClass - The CSFramePage class to embed
+ */
+export function CSIframe(framePageClass: new (...args: any[]) => any) {
+    return function(target: any, propertyKey: string | symbol | any, descriptor?: PropertyDescriptor): any {
+        const actualPropertyKey = typeof propertyKey === 'string' ? propertyKey : propertyKey.name;
+
+        // Store iframe metadata
+        if (!target.csIframes) {
+            target.csIframes = {};
+        }
+        target.csIframes[actualPropertyKey] = framePageClass;
+
+        // Return a descriptor with getter/setter
+        return {
+            get: function() {
+                if (!this._iframes) {
+                    this._iframes = {};
+                }
+                if (!this._iframes[actualPropertyKey]) {
+                    // Get page from the current instance
+                    const currentPage = this.page || (this.browserManager && this.browserManager.getPage());
+
+                    // Create iframe page instance with the current page
+                    const iframeInstance = new framePageClass(currentPage);
+
+                    // Store for reuse
+                    this._iframes[actualPropertyKey] = iframeInstance;
+
+                    CSReporter.debug(`Initialized iframe page: ${framePageClass.name}`);
+                }
+                return this._iframes[actualPropertyKey];
+            },
+            set: function(value: any) {
+                if (!this._iframes) {
+                    this._iframes = {};
+                }
+                this._iframes[actualPropertyKey] = value;
+            },
+            enumerable: true,
+            configurable: true
+        };
     };
 }
 

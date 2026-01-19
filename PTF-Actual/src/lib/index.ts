@@ -11,7 +11,9 @@
 // Core Framework
 export { CSConfigurationManager } from '../core/CSConfigurationManager';
 export { CSBasePage } from '../core/CSBasePage';
-export { CSPageFactory, CSPage, CSGetElement, CSGetElements, CSElement, CSElements } from '../core/CSPageFactory';
+export { CSFramePage } from '../core/CSFramePage';
+export type { FrameSelector } from '../core/CSFramePage';
+export { CSPageFactory, CSPage, CSGetElement, CSGetElements, CSElement, CSElements, CSIframe } from '../core/CSPageFactory';
 export { CSStepLoader } from '../core/CSStepLoader';
 
 // BDD & Testing

@@ -124,7 +124,13 @@ export class CSADOClient {
 
     /**
      * Reset the singleton instance to allow re-initialization with new config.
-     * Call this after all configuration files are loaded to ensure correct settings.
+     *
+     * NOTE: This method is NOT needed for normal execution flow. The framework
+     * always initializes ADO AFTER all configuration files are loaded (global.env,
+     * common.env, environment.env, etc.). This method is provided for edge cases:
+     * - Manual testing scenarios where config needs to change mid-execution
+     * - Dynamic configuration changes at runtime
+     * - Recovery from misconfiguration without restarting the process
      *
      * Usage: CSADOClient.resetInstance();
      *        const client = CSADOClient.getInstance(); // Creates fresh instance
@@ -136,7 +142,13 @@ export class CSADOClient {
 
     /**
      * Reinitialize the client with current configuration.
-     * Useful when configuration changes after initial instantiation.
+     *
+     * NOTE: This method is NOT needed for normal execution flow. It's provided
+     * for edge cases where configuration changes after initial instantiation
+     * and you want to reload settings without destroying the singleton instance.
+     *
+     * Normal flow: Config files are fully loaded before ADO client is created,
+     * so the client always has the correct configuration from the start.
      *
      * Usage: CSADOClient.getInstance().reinitialize();
      */

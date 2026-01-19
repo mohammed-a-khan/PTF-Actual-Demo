@@ -9,8 +9,10 @@
 
 // Core Framework
 export { CSBasePage } from '../core/CSBasePage';
+export { CSFramePage } from '../core/CSFramePage';
+export type { FrameSelector } from '../core/CSFramePage';
 export { CSConfigurationManager } from '../core/CSConfigurationManager';
-export { CSPageFactory, CSPage, CSGetElement, CSGetElements, CSElement, CSElements } from '../core/CSPageFactory';
+export { CSPageFactory, CSPage, CSGetElement, CSGetElements, CSElement, CSElements, CSIframe } from '../core/CSPageFactory';
 export { CSPageRegistry } from '../core/CSPageRegistry';
 export { CSStepLoader } from '../core/CSStepLoader';
 export { CSModuleDetector } from '../core/CSModuleDetector';

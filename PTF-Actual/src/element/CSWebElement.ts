@@ -258,6 +258,28 @@ export interface LocatorOptions {
     hasText?: string | RegExp;
 }
 
+/**
+ * Frame selector options for elements inside iframes
+ */
+export interface FrameSelector {
+    /** XPath selector for iframe */
+    xpath?: string;
+    /** CSS selector for iframe */
+    css?: string;
+    /** ID of the iframe (resolves to #id) */
+    id?: string;
+    /** Name attribute of the iframe */
+    name?: string;
+    /** Title attribute of the iframe */
+    title?: string;
+    /** Test ID for the iframe (uses Playwright's getByTestId) */
+    testId?: string;
+    /** Partial src URL match */
+    src?: string;
+    /** Index of iframe on page (0-based) */
+    index?: number;
+}
+
 export interface ElementOptions {
     // Basic selectors
     css?: string;
@@ -267,17 +289,17 @@ export interface ElementOptions {
     name?: string;
     role?: string;
     testId?: string;
-    
+
     // Element metadata
     description?: string;
     tags?: string[];
-    
+
     // Wait options
     timeout?: number;
     waitForVisible?: boolean;
     waitForEnabled?: boolean;
     waitForStable?: boolean;
-    
+
     // Behavior options
     scrollIntoView?: boolean;
     retryCount?: number;
@@ -286,12 +308,32 @@ export interface ElementOptions {
     screenshot?: boolean;
     highlight?: boolean;
     force?: boolean;
-    
+
     // Performance
     measurePerformance?: boolean;
-    
+
     // Debugging
     debug?: boolean;
+
+    // Frame/Iframe support
+    /**
+     * Frame selector for elements inside iframes.
+     * Can be a string (auto-detects xpath/css) or FrameSelector object.
+     * @example
+     * // String (auto-detected)
+     * frame: '//iframe[@title="Payment"]'
+     * frame: 'iframe#editor'
+     * frame: '#myFrame'
+     *
+     * // Object (explicit)
+     * frame: { xpath: '//iframe[@title="Payment"]' }
+     * frame: { id: 'payment-frame' }
+     * frame: { name: 'editorFrame' }
+     * frame: { title: 'Payment Gateway' }
+     * frame: { testId: 'checkout-iframe' }
+     * frame: { index: 0 }
+     */
+    frame?: string | FrameSelector;
 }
 
 /**
@@ -463,24 +505,115 @@ export class CSWebElement {
     }
 
     private createLocatorFromStrategy(strategy: { type: string; value: string }): Locator {
+        // Get the locator context (page or frameLocator)
+        const context = this.getLocatorContext();
+
         switch (strategy.type) {
             case 'id':
             case 'css':
             case 'name':
-                return this.page.locator(strategy.value);
+                return context.locator(strategy.value);
             case 'xpath':
-                return this.page.locator(`xpath=${strategy.value}`);
+                return context.locator(`xpath=${strategy.value}`);
             case 'text':
+                // FrameLocator doesn't have getByText, use locator with text selector
+                if (this.options.frame) {
+                    return context.locator(`text=${strategy.value}`);
+                }
                 return this.page.getByText(strategy.value);
             case 'testId':
+                // FrameLocator doesn't have getByTestId, use locator with data-testid
+                if (this.options.frame) {
+                    return context.locator(`[data-testid="${strategy.value}"]`);
+                }
                 return this.page.getByTestId(strategy.value);
             case 'role':
+                // FrameLocator doesn't have getByRole, use locator with role selector
+                if (this.options.frame) {
+                    return context.locator(`[role="${strategy.value}"]`);
+                }
                 return this.page.getByRole(strategy.value as any);
             case 'placeholder':
+                // FrameLocator doesn't have getByPlaceholder, use locator with placeholder
+                if (this.options.frame) {
+                    return context.locator(`[placeholder="${strategy.value}"]`);
+                }
                 return this.page.getByPlaceholder(strategy.value);
             default:
-                return this.page.locator(strategy.value);
+                return context.locator(strategy.value);
         }
+    }
+
+    /**
+     * Get the locator context - either page or frameLocator if frame is specified
+     */
+    private getLocatorContext(): Page | FrameLocator {
+        if (!this.options.frame) {
+            return this.page;
+        }
+
+        const frameSelector = this.resolveFrameSelector(this.options.frame);
+        CSReporter.debug(`Using frame context: ${frameSelector}`);
+        return this.page.frameLocator(frameSelector);
+    }
+
+    /**
+     * Resolve frame selector from string or FrameSelector object
+     * Supports auto-detection of xpath vs css for string input
+     */
+    private resolveFrameSelector(frame: string | FrameSelector): string {
+        // String input - auto-detect type
+        if (typeof frame === 'string') {
+            return this.autoDetectFrameSelector(frame);
+        }
+
+        // Object input - explicit type
+        if (frame.xpath) {
+            return `xpath=${frame.xpath}`;
+        }
+        if (frame.css) {
+            return frame.css;
+        }
+        if (frame.id) {
+            return `#${frame.id}`;
+        }
+        if (frame.name) {
+            return `iframe[name="${frame.name}"]`;
+        }
+        if (frame.title) {
+            return `iframe[title="${frame.title}"]`;
+        }
+        if (frame.testId) {
+            return `[data-testid="${frame.testId}"]`;
+        }
+        if (frame.src) {
+            return `iframe[src*="${frame.src}"]`;
+        }
+        if (frame.index !== undefined) {
+            return `iframe >> nth=${frame.index}`;
+        }
+
+        throw new Error('Invalid frame selector: must specify xpath, css, id, name, title, testId, src, or index');
+    }
+
+    /**
+     * Auto-detect frame selector type from string
+     */
+    private autoDetectFrameSelector(selector: string): string {
+        // XPath detection
+        if (selector.startsWith('//') || selector.startsWith('/')) {
+            return `xpath=${selector}`;
+        }
+        // Already has xpath= or css= prefix
+        if (selector.startsWith('xpath=') || selector.startsWith('css=')) {
+            return selector;
+        }
+        // CSS ID selector
+        if (selector.startsWith('#')) {
+            return selector;
+        }
+        // Assume CSS for everything else
+        return selector;
     }
 
     /**

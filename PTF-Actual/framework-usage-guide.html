@@ -595,6 +595,7 @@
                 <h3>Core Concepts</h3>
                 <a href="#page-objects">Page Objects</a>
                 <a href="#generic-element-waits" style="padding-left:30px;font-size:0.85em">Generic Element Waits</a>
+                <a href="#iframe-support">Iframe Support</a>
                 <a href="#elements">Element Interactions</a>
                 <a href="#wait-strategies">Wait Strategies</a>
                 <a href="#smart-poller" style="padding-left:30px;font-size:0.85em">CSSmartPoller</a>
@@ -1953,6 +1954,7 @@ export class LoginPage extends CSBasePage {
                         <tr><td><code>selfHeal</code></td><td>boolean</td><td>Enable AI self-healing</td></tr>
                         <tr><td><code>alternativeLocators</code></td><td>string[]</td><td>Fallback locators</td></tr>
                         <tr><td><code>timeout</code></td><td>number</td><td>Element-specific timeout (ms)</td></tr>
+                        <tr><td><code>frame</code></td><td>string | FrameSelector</td><td>Frame selector for elements inside iframes (see Iframe Support section)</td></tr>
                     </tbody>
                 </table>
 
@@ -2615,6 +2617,314 @@ async clearCookies() {
 async switchToWidgetFrame() {
     await this.dashboardPage.switchToFrame('#iframe-widget');
 }</code></pre>
+            </section>
+
+            <!-- IFRAME SUPPORT -->
+            <section id="iframe-support">
+                <h2>Iframe Support</h2>
+                <p>The framework provides comprehensive support for working with elements inside iframes while maintaining all CSWebElement features (self-healing, auto-waits, reporting). There are three approaches depending on your use case.</p>
+
+                <h3>Option 1: Frame Parameter in @CSGetElement</h3>
+                <p>Use the <code>frame</code> option when only a few elements need iframe context:</p>
+                <pre><code>import { CSBasePage, CSPage, CSGetElement, CSWebElement } from '@mdakhan.mak/cs-playwright-test-framework';
+
+@CSPage('checkout')
+export class CheckoutPage extends CSBasePage {
+
+    // Element inside iframe using XPath string (auto-detected)
+    @CSGetElement({
+        xpath: '//input[@name="cardNumber"]',
+        frame: '//iframe[@title="Payment Gateway"]',  // XPath string
+        description: 'Card number input'
+    })
+    public cardNumberInput!: CSWebElement;
+
+    // Element inside iframe using CSS string
+    @CSGetElement({
+        css: '#expiry-date',
+        frame: 'iframe#payment-frame',  // CSS string
+        description: 'Expiry date input'
+    })
+    public expiryInput!: CSWebElement;
+
+    // Element inside iframe using FrameSelector object
+    @CSGetElement({
+        xpath: '//button[@type="submit"]',
+        frame: { id: 'payment-frame' },  // Object with explicit selector type
+        description: 'Submit payment button'
+    })
+    public submitPaymentBtn!: CSWebElement;
+
+    // Regular element (not in iframe)
+    @CSGetElement({
+        css: '.order-summary',
+        description: 'Order summary section'
+    })
+    public orderSummary!: CSWebElement;
+}
+
+// Usage - All CSWebElement methods work seamlessly
+test('Complete payment', async ({ checkoutPage }) => {
+    await checkoutPage.cardNumberInput.fillWithTimeout('4111111111111111', 5000);
+    await checkoutPage.expiryInput.fill('12/25');
+    await checkoutPage.submitPaymentBtn.click();
+});</code></pre>
+
+                <h3>FrameSelector Options</h3>
+                <p>The <code>frame</code> option accepts either a string (auto-detected) or a FrameSelector object:</p>
+                <table>
+                    <thead>
+                        <tr><th>Option</th><th>Type</th><th>Description</th><th>Example</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td><code>xpath</code></td><td>string</td><td>XPath selector for iframe</td><td><code>{ xpath: '//iframe[@title="Editor"]' }</code></td></tr>
+                        <tr><td><code>css</code></td><td>string</td><td>CSS selector for iframe</td><td><code>{ css: 'iframe.editor-frame' }</code></td></tr>
+                        <tr><td><code>id</code></td><td>string</td><td>Iframe ID attribute</td><td><code>{ id: 'payment-frame' }</code></td></tr>
+                        <tr><td><code>name</code></td><td>string</td><td>Iframe name attribute</td><td><code>{ name: 'editorFrame' }</code></td></tr>
+                        <tr><td><code>title</code></td><td>string</td><td>Iframe title attribute</td><td><code>{ title: 'Document Editor' }</code></td></tr>
+                        <tr><td><code>testId</code></td><td>string</td><td>data-testid attribute</td><td><code>{ testId: 'editor-iframe' }</code></td></tr>
+                        <tr><td><code>src</code></td><td>string</td><td>Partial src URL match</td><td><code>{ src: 'payment.example.com' }</code></td></tr>
+                        <tr><td><code>index</code></td><td>number</td><td>Index of iframe (0-based)</td><td><code>{ index: 0 }</code></td></tr>
+                    </tbody>
+                </table>
+
+                <h4>String Auto-Detection</h4>
+                <pre><code>// XPath (starts with // or /)
+frame: '//iframe[@title="Editor"]'     // Detected as XPath
+frame: '/html/body/iframe[1]'          // Detected as XPath
+
+// CSS (everything else)
+frame: 'iframe#payment'                // CSS ID selector
+frame: 'iframe.editor-class'           // CSS class selector
+frame: '#my-frame'                     // CSS ID shorthand
+frame: '[data-testid="editor"]'        // CSS attribute selector</code></pre>
+
+                <h3>Option 2: CSFramePage Base Class</h3>
+                <p>When all elements in a page object belong to the same iframe, extend <code>CSFramePage</code> instead of <code>CSBasePage</code>. Define the frame once and all elements automatically inherit it:</p>
+                <pre><code>import { CSFramePage, CSPage, CSGetElement, CSWebElement } from '@mdakhan.mak/cs-playwright-test-framework';
+
+@CSPage('payment-iframe')
+export class PaymentIframePage extends CSFramePage {
+    // Define frame once - all elements inherit this context
+    protected frame = '//iframe[@title="Payment Gateway"]';
+    // OR: protected frame = { id: 'payment-frame' };
+    // OR: protected frame = { title: 'Payment Gateway' };
+
+    // No need to specify frame on each element - automatically inherited
+    @CSGetElement({
+        xpath: '//input[@name="cardNumber"]',
+        description: 'Card number input'
+    })
+    public cardNumberInput!: CSWebElement;
+
+    @CSGetElement({
+        xpath: '//input[@name="expiryDate"]',
+        description: 'Expiry date input'
+    })
+    public expiryInput!: CSWebElement;
+
+    @CSGetElement({
+        css: 'input[name="cvv"]',
+        description: 'CVV input'
+    })
+    public cvvInput!: CSWebElement;
+
+    @CSGetElement({
+        xpath: '//button[@type="submit"]',
+        description: 'Submit payment button'
+    })
+    public submitBtn!: CSWebElement;
+
+    // Page method using inherited elements
+    public async fillPaymentDetails(card: string, expiry: string, cvv: string): Promise&lt;void&gt; {
+        await this.cardNumberInput.fill(card);
+        await this.expiryInput.fill(expiry);
+        await this.cvvInput.fill(cvv);
+    }
+}
+
+// Usage
+test('Payment in iframe', async ({ paymentPage }) => {
+    // Wait for iframe to be ready
+    await paymentPage.waitForFrameReady();
+
+    // Use elements normally - all CSWebElement features work
+    await paymentPage.fillPaymentDetails('4111111111111111', '12/25', '123');
+    await paymentPage.submitBtn.clickAndWaitForNavigation();
+});</code></pre>
+
+                <h4>CSFramePage Methods</h4>
+                <table>
+                    <thead><tr><th>Method</th><th>Description</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>waitForFrameReady(timeout?)</code></td><td>Wait for iframe to be present and loaded (default: 30s)</td></tr>
+                        <tr><td><code>isFrameReady(timeout?)</code></td><td>Check if iframe is visible and ready (returns boolean)</td></tr>
+                        <tr><td><code>waitForFrameHidden(timeout?)</code></td><td>Wait for iframe to be hidden/removed (default: 10s)</td></tr>
+                        <tr><td><code>getFrameSelector()</code></td><td>Get the resolved frame selector string</td></tr>
+                        <tr><td><code>getFrameLocator()</code></td><td>Get the Playwright FrameLocator object</td></tr>
+                        <tr><td><code>clearFrameCache()</code></td><td>Clear cached frame locator (after navigation)</td></tr>
+                    </tbody>
+                </table>
+
+                <h3>Option 3: @CSIframe Decorator for Embedded Pages</h3>
+                <p>Use the <code>@CSIframe</code> decorator to embed iframe page objects into parent pages. The iframe page is automatically initialized when accessed:</p>
+                <pre><code>import { CSBasePage, CSFramePage, CSPage, CSGetElement, CSIframe, CSWebElement } from '@mdakhan.mak/cs-playwright-test-framework';
+
+// Define the iframe page object
+@CSPage('payment-iframe')
+export class PaymentIframe extends CSFramePage {
+    protected frame = '//iframe[@title="Payment Gateway"]';
+
+    @CSGetElement({ xpath: '//input[@name="cardNumber"]' })
+    public cardInput!: CSWebElement;
+
+    @CSGetElement({ xpath: '//input[@name="cvv"]' })
+    public cvvInput!: CSWebElement;
+
+    @CSGetElement({ xpath: '//button[@type="submit"]' })
+    public submitBtn!: CSWebElement;
+}
+
+// Define the editor iframe page object
+@CSPage('editor-iframe')
+export class EditorIframe extends CSFramePage {
+    protected frame = { id: 'rich-text-editor' };
+
+    @CSGetElement({ css: '.editor-content' })
+    public editorContent!: CSWebElement;
+
+    @CSGetElement({ css: 'button.bold' })
+    public boldBtn!: CSWebElement;
+}
+
+// Parent page with embedded iframe pages
+@CSPage('checkout')
+export class CheckoutPage extends CSBasePage {
+    // Embed iframe pages using @CSIframe decorator
+    @CSIframe(PaymentIframe)
+    public paymentFrame!: PaymentIframe;
+
+    @CSIframe(EditorIframe)
+    public editorFrame!: EditorIframe;
+
+    // Regular elements on the main page
+    @CSGetElement({ css: '.order-total' })
+    public orderTotal!: CSWebElement;
+
+    @CSGetElement({ css: 'button.place-order' })
+    public placeOrderBtn!: CSWebElement;
+}
+
+// Usage - Clean and intuitive access
+test('Complete checkout with payment iframe', async ({ checkoutPage }) => {
+    // Access main page elements
+    const total = await checkoutPage.orderTotal.getText();
+
+    // Access iframe elements through embedded page - auto-initialized!
+    await checkoutPage.paymentFrame.waitForFrameReady();
+    await checkoutPage.paymentFrame.cardInput.fillWithTimeout('4111111111111111', 5000);
+    await checkoutPage.paymentFrame.cvvInput.fill('123');
+    await checkoutPage.paymentFrame.submitBtn.click();
+
+    // Access another iframe
+    await checkoutPage.editorFrame.editorContent.fill('Special instructions...');
+    await checkoutPage.editorFrame.boldBtn.click();
+
+    // Back to main page
+    await checkoutPage.placeOrderBtn.clickAndWaitForNavigation();
+});</code></pre>
+
+                <h3>Nested Iframes</h3>
+                <p>For nested iframes (iframe within iframe), use the frame option with chained selectors or create nested page objects:</p>
+                <pre><code>// Nested iframe approach using CSFramePage
+@CSPage('inner-iframe')
+export class InnerIframePage extends CSFramePage {
+    // Parent iframe >> Child iframe
+    protected frame = '//iframe[@id="outer"]//iframe[@id="inner"]';
+
+    @CSGetElement({ css: '.inner-content' })
+    public content!: CSWebElement;
+}
+
+// Or define frame chain explicitly
+@CSGetElement({
+    css: '.deep-element',
+    frame: 'iframe#outer >> iframe#inner',  // Playwright frame chain syntax
+    description: 'Element in nested iframe'
+})
+public deepElement!: CSWebElement;</code></pre>
+
+                <h3>BDD Format with Iframes</h3>
+                <pre><code>// Step definitions using iframe pages
+import { CSBDDStepDef } from '@mdakhan.mak/cs-playwright-test-framework';
+
+export class PaymentSteps {
+    constructor(
+        private checkoutPage: CheckoutPage
+    ) {}
+
+    @CSBDDStepDef('I wait for the payment iframe to load')
+    async waitForPaymentFrame() {
+        await this.checkoutPage.paymentFrame.waitForFrameReady();
+    }
+
+    @CSBDDStepDef('I enter card number {string}')
+    async enterCardNumber(cardNumber: string) {
+        await this.checkoutPage.paymentFrame.cardInput.fill(cardNumber);
+    }
+
+    @CSBDDStepDef('I enter CVV {string}')
+    async enterCVV(cvv: string) {
+        await this.checkoutPage.paymentFrame.cvvInput.fill(cvv);
+    }
+
+    @CSBDDStepDef('I submit the payment form')
+    async submitPayment() {
+        await this.checkoutPage.paymentFrame.submitBtn.click();
+    }
+}
+
+// Feature file
+// payment.feature
+Feature: Payment Processing
+
+  Scenario: Complete payment in iframe
+    Given I am on the checkout page
+    And I wait for the payment iframe to load
+    When I enter card number "4111111111111111"
+    And I enter CVV "123"
+    And I submit the payment form
+    Then the payment should be processed successfully</code></pre>
+
+                <h3>Migration from switchToFrame()</h3>
+                <p>If you're using the legacy <code>switchToFrame()</code> method, here's how to migrate to the new approach:</p>
+                <table>
+                    <thead><tr><th>Before (Legacy)</th><th>After (Recommended)</th></tr></thead>
+                    <tbody>
+                        <tr>
+                            <td><pre><code>await page.switchToFrame('#iframe');
+const locator = page.page.locator('input');
+await locator.fill('value');
+await page.switchToDefaultContent();</code></pre></td>
+                            <td><pre><code>// Using frame option
+@CSGetElement({
+    css: 'input',
+    frame: '#iframe'
+})
+public input!: CSWebElement;
+
+await page.input.fill('value');</code></pre></td>
+                        </tr>
+                    </tbody>
+                </table>
+                <p><strong>Benefits of the new approach:</strong></p>
+                <ul>
+                    <li>No manual frame switching required</li>
+                    <li>All CSWebElement features work (self-healing, reporting, waits)</li>
+                    <li>Cleaner, more maintainable code</li>
+                    <li>Better IDE support with decorators</li>
+                    <li>Frame context is automatically managed</li>
+                </ul>
             </section>
 
             <!-- ELEMENTS -->

@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import { CSRequestOptions, CSAuthConfig, CSAuthType, CSOAuth2Token } from '../types/CSApiTypes';
 import { CSReporter } from '../../reporter/CSReporter';
 import { CSConfigurationManager } from '../../core/CSConfigurationManager';
+import { CSPingAuthHandler } from '../auth/CSPingAuthHandler';
 
 export class CSAuthenticationHandler {
     private tokenCache: Map<string, CSOAuth2Token>;
@@ -54,6 +55,9 @@ export class CSAuthenticationHandler {
 
                 case 'certificate':
                     return this.applyCertificateAuth(authenticatedRequest, auth);
+
+                case 'ping':
+                    return await this.applyPingAuth(authenticatedRequest, auth);
 
                 default:
                     CSReporter.warn(`Unsupported authentication type: ${auth.type}`);
@@ -597,6 +601,58 @@ export class CSAuthenticationHandler {
     ): string {
         const normalized = `hawk.1.header\n${timestamp}\n${nonce}\n${method}\n${uri}\n${host.toLowerCase()}\n${port}\n\n\n`;
         return crypto.createHmac(algorithm, key).update(normalized).digest('base64');
+    }
+
+    private async applyPingAuth(request: CSRequestOptions, auth: CSAuthConfig): Promise<CSRequestOptions> {
+        const { clientId, clientSecret, username, password } = auth.credentials || {};
+        const options = auth.options || {};
+
+        if (!clientId) {
+            throw new Error('Ping auth requires clientId in credentials');
+        }
+
+        // Build Ping-specific config from CSAuthConfig
+        const pingConfig = {
+            baseUrl: options.pingIssuerUrl || options.tokenUrl?.replace(/\/oauth2\/token.*$/, '') || '',
+            clientId,
+            clientSecret,
+            username,
+            password,
+            productType: options.pingProvider,
+            environmentId: options.pingEnvironmentId,
+            grantType: this.mapGrantType(options.grantType),
+            tokenAuthMethod: options.pingClientAuthMethod,
+            scope: options.scope,
+            redirectUri: options.redirectUri,
+            pkce: options.pingUsePkce,
+            codeChallengeMethod: options.codeChallengeMethod,
+            tokenEndpoint: options.tokenUrl,
+            authorizationEndpoint: options.authorizationUrl,
+            introspectionEndpoint: options.pingIntrospectionEndpoint,
+            revocationEndpoint: options.pingRevocationEndpoint,
+            additionalParams: options.pingAdditionalParams,
+            skipSslVerification: !request.rejectUnauthorized
+        };
+
+        const pingHandler = new CSPingAuthHandler(pingConfig as any);
+        const authenticatedRequest = await pingHandler.authenticate(request, auth);
+
+        CSReporter.debug('Applied Ping Identity authentication');
+        return authenticatedRequest;
+    }
+
+    private mapGrantType(grantType?: string): string | undefined {
+        if (!grantType) return undefined;
+        // Map standard OAuth2 grant types to Ping grant types
+        const mapping: Record<string, string> = {
+            'authorization_code': 'authorization_code',
+            'client_credentials': 'client_credentials',
+            'password': 'password',
+            'refresh_token': 'refresh_token',
+            'urn:ietf:params:oauth:grant-type:jwt-bearer': 'jwt_bearer',
+            'urn:ietf:params:oauth:grant-type:saml2-bearer': 'saml2_bearer'
+        };
+        return mapping[grantType] || grantType;
     }
 
     private async applyCustomAuth(request: CSRequestOptions, auth: CSAuthConfig): Promise<CSRequestOptions> {

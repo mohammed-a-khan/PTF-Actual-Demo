@@ -108,6 +108,7 @@ export type CSAuthType =
     | 'hawk'
     | 'jwt'
     | 'certificate'
+    | 'ping'
     | 'custom';
 
 export interface CSAuthCredentials {
@@ -177,6 +178,16 @@ export interface CSAuthOptions {
     certificatePassword?: string;
     trustStore?: string | Buffer;
     validateCertificate?: boolean;
+    // Ping Identity options
+    pingProvider?: 'pingfederate' | 'pingone';
+    pingIssuerUrl?: string;
+    pingAutoDiscover?: boolean;
+    pingUsePkce?: boolean;
+    pingClientAuthMethod?: 'client_secret_basic' | 'client_secret_post' | 'private_key_jwt';
+    pingEnvironmentId?: string;
+    pingIntrospectionEndpoint?: string;
+    pingRevocationEndpoint?: string;
+    pingAdditionalParams?: Record<string, string>;
 }
 
 export type CSOAuth2GrantType =
@@ -494,6 +505,73 @@ export interface CSOAuth2Token {
     scope?: string;
     id_token?: string;
     expires_at?: number;
+}
+
+/**
+ * Ping Identity authentication configuration
+ * Supports PingFederate and PingOne OAuth 2.0 / OpenID Connect
+ */
+export interface CSPingConfig {
+    /** Ping Identity provider type: 'pingfederate' or 'pingone' */
+    provider?: 'pingfederate' | 'pingone';
+    /** Base URL of the Ping Identity server (e.g., https://auth.example.com) */
+    issuerUrl?: string;
+    /** Enable auto-discovery via .well-known/openid-configuration */
+    autoDiscover?: boolean;
+    /** OAuth 2.0 grant type */
+    grantType?: CSPingGrantType;
+    /** Enable PKCE for authorization code flow */
+    usePkce?: boolean;
+    /** Client authentication method: 'client_secret_basic', 'client_secret_post', 'private_key_jwt' */
+    clientAuthMethod?: 'client_secret_basic' | 'client_secret_post' | 'private_key_jwt';
+    /** Custom token endpoint (overrides auto-discovery) */
+    tokenEndpoint?: string;
+    /** Custom authorization endpoint (overrides auto-discovery) */
+    authorizationEndpoint?: string;
+    /** Custom introspection endpoint (overrides auto-discovery) */
+    introspectionEndpoint?: string;
+    /** Custom revocation endpoint (overrides auto-discovery) */
+    revocationEndpoint?: string;
+    /** Request-specific scopes */
+    scope?: string | string[];
+    /** Resource indicator for token request */
+    resource?: string;
+    /** Audience for token request */
+    audience?: string;
+    /** Additional custom parameters for token request */
+    additionalParams?: Record<string, string>;
+    /** PingOne environment ID (required for PingOne) */
+    environmentId?: string;
+    /** Connection timeout in milliseconds */
+    timeout?: number;
+}
+
+export type CSPingGrantType =
+    | 'client_credentials'
+    | 'authorization_code'
+    | 'password'
+    | 'refresh_token'
+    | 'device_code'
+    | 'urn:ietf:params:oauth:grant-type:jwt-bearer'
+    | 'urn:ietf:params:oauth:grant-type:saml2-bearer';
+
+export interface CSPingTokenResponse extends CSOAuth2Token {
+    /** Token subject (user or client ID) */
+    sub?: string;
+    /** Token issuer */
+    iss?: string;
+    /** Token audience */
+    aud?: string | string[];
+    /** Token issued at timestamp */
+    iat?: number;
+    /** Token expiration timestamp */
+    exp?: number;
+    /** Authorized party */
+    azp?: string;
+    /** Authentication context class reference */
+    acr?: string;
+    /** Authentication methods references */
+    amr?: string[];
 }
 
 export interface CSCertificateInfo {

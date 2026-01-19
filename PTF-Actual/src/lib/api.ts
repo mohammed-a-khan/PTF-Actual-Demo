@@ -32,6 +32,8 @@ export { CSApiChainContext, CSApiChainManager, chainManager } from '../api/conte
 export { CSOAuth2Handler } from '../api/auth/CSOAuth2Handler';
 export { CSAWSSignatureHandler } from '../api/auth/CSAWSSignatureHandler';
 export { CSCertificateManager } from '../api/auth/CSCertificateManager';
+export { CSPingAuthHandler, CSPingAuthManager, pingAuthManager } from '../api/auth/CSPingAuthHandler';
+export type { CSPingAuthConfig, CSPingToken, PingProductType, PingGrantType, PingTokenAuthMethod } from '../api/auth/CSPingAuthHandler';
 
 // API Templates & Placeholders
 export { CSPlaceholderResolver } from '../api/templates/CSPlaceholderResolver';
