@@ -993,6 +993,168 @@ export abstract class CSBasePage {
     }
 
     // =========================================================================
+    // MULTI-TAB/WINDOW METHODS - Handle multiple browser tabs/windows
+    // =========================================================================
+
+    /**
+     * Get all open pages/tabs in the current browser context
+     * @returns Array of all Page objects
+     */
+    public getPages(): any[] {
+        return this.browserManager.getPages();
+    }
+
+    /**
+     * Get the number of open pages/tabs
+     * @returns Number of open pages
+     */
+    public getPageCount(): number {
+        return this.browserManager.getPageCount();
+    }
+
+    /**
+     * Switch to a specific page/tab by index
+     * @param index - Page index (0 = first/main page)
+     *
+     * @example
+     * // Switch to second tab
+     * await this.switchToPage(1);
+     */
+    public async switchToPage(index: number): Promise<void> {
+        CSReporter.info(`Switching to page index: ${index}`);
+        await this.browserManager.switchToPage(index);
+    }
+
+    /**
+     * Switch to the most recently opened page/tab (last in the list)
+     * Use this after an action opens a new tab
+     *
+     * @example
+     * await this.openInNewTabButton.click();
+     * await this.switchToLatestPage();
+     * // Now on the new tab
+     */
+    public async switchToLatestPage(): Promise<void> {
+        CSReporter.info('Switching to latest page/tab');
+        await this.browserManager.switchToLatestPage();
+    }
+
+    /**
+     * Switch back to the main/first page/tab
+     *
+     * @example
+     * await this.switchToMainPage();
+     * // Now back on the original tab
+     */
+    public async switchToMainPage(): Promise<void> {
+        CSReporter.info('Switching to main page/tab');
+        await this.browserManager.switchToMainPage();
+    }
+
+    /**
+     * Wait for a new page/tab to open and automatically switch to it
+     * Use this when clicking a link that opens a new tab (target="_blank")
+     *
+     * @param action - The action that triggers the new page (e.g., click)
+     * @param timeout - Maximum wait time in milliseconds (default: 30000)
+     * @returns The new Page object
+     *
+     * @example
+     * await this.waitForNewPage(async () => {
+     *     await this.openInNewTabLink.click();
+     * });
+     * // Now automatically on the new page - all operations work on new page!
+     */
+    public async waitForNewPage(action: () => Promise<void>, timeout?: number): Promise<any> {
+        const context = this.browserManager.getContext();
+        const waitTimeout = timeout || this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000);
+
+        CSReporter.info('Waiting for new page/tab to open...');
+
+        const pagePromise = context.waitForEvent('page', { timeout: waitTimeout });
+        await action();
+        const newPage = await pagePromise;
+
+        await newPage.waitForLoadState('domcontentloaded');
+        this.browserManager.setCurrentPage(newPage);
+
+        try {
+            CSReporter.pass(`Switched to new page: ${newPage.url()}`);
+        } catch (e) {
+            CSReporter.pass('Switched to new page');
+        }
+        return newPage;
+    }
+
+    /**
+     * Wait for a popup window to open and switch to it
+     * Use this when clicking triggers a popup (window.open)
+     *
+     * @param action - The action that triggers the popup
+     * @param timeout - Maximum wait time in milliseconds (default: 30000)
+     * @returns The popup Page object
+     *
+     * @example
+     * await this.waitForPopup(async () => {
+     *     await this.openPopupButton.click();
+     * });
+     * // Now on the popup window
+     */
+    public async waitForPopup(action: () => Promise<void>, timeout?: number): Promise<any> {
+        const waitTimeout = timeout || this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000);
+
+        CSReporter.info('Waiting for popup to open...');
+
+        const popupPromise = this.page.waitForEvent('popup', { timeout: waitTimeout });
+        await action();
+        const popup = await popupPromise;
+
+        await popup.waitForLoadState('domcontentloaded');
+        this.browserManager.setCurrentPage(popup);
+
+        try {
+            CSReporter.pass(`Switched to popup: ${popup.url()}`);
+        } catch (e) {
+            CSReporter.pass('Switched to popup');
+        }
+        return popup;
+    }
+
+    /**
+     * Close the current page/tab and switch to another
+     *
+     * @param switchToIndex - Page index to switch to after closing (default: 0 = main page)
+     *
+     * @example
+     * // Close current tab and go back to main tab
+     * await this.closeCurrentPageAndSwitchTo(0);
+     */
+    public async closeCurrentPageAndSwitchTo(switchToIndex: number = 0): Promise<void> {
+        const pages = this.getPages();
+
+        if (pages.length <= 1) {
+            throw new Error('Cannot close the only remaining page');
+        }
+
+        const currentPage = this.page;
+        CSReporter.info(`Closing current page and switching to index ${switchToIndex}`);
+
+        // Switch first, then close
+        await this.switchToPage(switchToIndex);
+        await currentPage.close();
+
+        CSReporter.pass('Page closed and switched successfully');
+    }
+
+    /**
+     * Get the current page index among all open pages
+     * @returns Index of current page, or -1 if not found
+     */
+    public getCurrentPageIndex(): number {
+        return this.browserManager.getCurrentPageIndex();
+    }
+
+    // =========================================================================
     // FRAME METHODS - Work with iframes
     // =========================================================================
 

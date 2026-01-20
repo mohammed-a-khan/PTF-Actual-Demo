@@ -86,6 +86,7 @@ export class CSStepPatternScanner {
      * Does NOT execute the file - just reads and parses the source code
      */
     private async scanFile(filePath: string): Promise<number> {
+        CSReporter.debug(`[StepScanner] Scanning file: ${filePath}`);
         try {
             const content = fs.readFileSync(filePath, 'utf-8');
             const steps: ScannedStep[] = [];
@@ -148,7 +149,8 @@ export class CSStepPatternScanner {
 
             return steps.length;
         } catch (error: any) {
-            CSReporter.debug(`[StepScanner] Error scanning ${filePath}: ${error.message}`);
+            CSReporter.error(`[StepScanner] Error scanning file ${filePath}: ${error.message}`);
+            CSReporter.debug(`[StepScanner] Stack trace: ${error.stack}`);
             return 0;
         }
     }
@@ -178,7 +180,13 @@ export class CSStepPatternScanner {
     private patternToRegex(pattern: string): RegExp {
         // If already a regex pattern (starts with ^ or ends with $), use as-is
         if (pattern.startsWith('^') || pattern.endsWith('$')) {
-            return new RegExp(pattern);
+            try {
+                return new RegExp(pattern);
+            } catch (error: any) {
+                CSReporter.warn(`[StepScanner] Invalid regex pattern "${pattern}": ${error.message}`);
+                // Return a never-matching regex so we skip this invalid pattern gracefully
+                return /^(?!.*)$/;
+            }
         }
 
         // Escape special regex characters first
@@ -190,7 +198,12 @@ export class CSStepPatternScanner {
         regexPattern = regexPattern.replace(/\\{float\\}/g, '([\\d\\.]+)');
         regexPattern = regexPattern.replace(/\\{word\\}/g, '(\\w+)');
 
-        return new RegExp(`^${regexPattern}$`);
+        try {
+            return new RegExp(`^${regexPattern}$`);
+        } catch (error: any) {
+            CSReporter.warn(`[StepScanner] Failed to compile pattern "${pattern}" to regex: ${error.message}`);
+            return /^(?!.*)$/;
+        }
     }
 
     /**
@@ -253,7 +266,16 @@ export class CSStepPatternScanner {
             const duration = Date.now() - startTime;
             CSReporter.debug(`[StepScanner] Loaded ${path.basename(fileToLoad)} in ${duration}ms`);
         } catch (error: any) {
-            CSReporter.error(`[StepScanner] Failed to load ${filePath}: ${error.message}`);
+            CSReporter.error(`[StepScanner] ❌ Failed to load step file: ${filePath}`);
+            CSReporter.error(`[StepScanner] Error: ${error.message}`);
+            if (error.stack) {
+                CSReporter.debug(`[StepScanner] Stack trace:\n${error.stack}`);
+            }
+            // Provide helpful hint for common errors
+            if (error.message.includes('Unexpected token') || error.message.includes('invalid token')) {
+                CSReporter.error(`[StepScanner] HINT: This is usually caused by a syntax error in the file or an invalid import.`);
+                CSReporter.error(`[StepScanner] Please check: ${filePath}`);
+            }
             throw error;
         }
     }
@@ -335,8 +357,11 @@ export class CSStepPatternScanner {
     private findStepFiles(dirPath: string): string[] {
         const files: string[] = [];
 
+        CSReporter.debug(`[StepScanner] Scanning directory: ${dirPath}`);
+
         try {
             const items = fs.readdirSync(dirPath);
+            CSReporter.debug(`[StepScanner] Found ${items.length} items in ${dirPath}: [${items.join(', ')}]`);
             const seenBasenames = new Set<string>();
 
             for (const item of items) {
@@ -346,6 +371,7 @@ export class CSStepPatternScanner {
 
                     if (stat.isDirectory()) {
                         // Recursively scan subdirectories
+                        CSReporter.debug(`[StepScanner] Entering subdirectory: ${fullPath}`);
                         const subFiles = this.findStepFiles(fullPath);
                         files.push(...subFiles);
                     } else if (this.isStepFile(fullPath)) {
@@ -357,19 +383,24 @@ export class CSStepPatternScanner {
 
                             if (fs.existsSync(jsVersion)) {
                                 files.push(jsVersion);
+                                CSReporter.debug(`[StepScanner] Added step file: ${jsVersion}`);
                             } else if (fs.existsSync(tsVersion)) {
                                 files.push(tsVersion);
+                                CSReporter.debug(`[StepScanner] Added step file: ${tsVersion}`);
                             }
                             seenBasenames.add(basename);
                         }
+                    } else {
+                        // Log non-step files for debugging
+                        CSReporter.debug(`[StepScanner] Skipping non-step file: ${fullPath}`);
                     }
                 } catch (itemError: any) {
                     // Skip problematic files/directories (permissions, symlinks, etc.)
-                    CSReporter.debug(`[StepScanner] Skipping ${item}: ${itemError.message}`);
+                    CSReporter.warn(`[StepScanner] Error accessing ${item} in ${dirPath}: ${itemError.message}`);
                 }
             }
         } catch (error: any) {
-            CSReporter.debug(`[StepScanner] Error reading directory ${dirPath}: ${error.message}`);
+            CSReporter.error(`[StepScanner] Error reading directory ${dirPath}: ${error.message}`);
         }
 
         return files;

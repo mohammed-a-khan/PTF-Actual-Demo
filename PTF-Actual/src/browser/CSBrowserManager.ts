@@ -1006,6 +1006,95 @@ export class CSBrowserManager {
         return this.page;
     }
 
+    // =========================================================================
+    // MULTI-TAB/WINDOW MANAGEMENT METHODS
+    // =========================================================================
+
+    /**
+     * Get all pages/tabs in the current browser context
+     * @returns Array of all Page objects
+     */
+    public getPages(): any[] {
+        if (!this.context) {
+            return [];
+        }
+        return this.context.pages();
+    }
+
+    /**
+     * Get the number of open pages/tabs
+     * @returns Number of open pages
+     */
+    public getPageCount(): number {
+        return this.getPages().length;
+    }
+
+    /**
+     * Set the current page reference and notify all listeners
+     * This is the KEY method for multi-tab support - it updates which page is "active"
+     * @param page - The Page object to set as current
+     */
+    public setCurrentPage(page: any): void {
+        if (!page) {
+            throw new Error('Cannot set null page as current');
+        }
+        this.page = page;
+        this.notifyPageChange();
+        try {
+            CSReporter.info(`[BrowserManager] Switched to page: ${page.url()}`);
+        } catch (e) {
+            CSReporter.info('[BrowserManager] Switched to new page');
+        }
+    }
+
+    /**
+     * Switch to a specific page/tab by index
+     * @param index - Page index (0 = first/main page)
+     */
+    public async switchToPage(index: number): Promise<void> {
+        const pages = this.getPages();
+
+        if (pages.length === 0) {
+            throw new Error('No pages available in context');
+        }
+
+        if (index < 0 || index >= pages.length) {
+            throw new Error(`Invalid page index: ${index}. Available pages: 0-${pages.length - 1}`);
+        }
+
+        const targetPage = pages[index];
+        await targetPage.bringToFront();
+        this.setCurrentPage(targetPage);
+    }
+
+    /**
+     * Switch to the most recently opened page/tab (last in the list)
+     */
+    public async switchToLatestPage(): Promise<void> {
+        const pages = this.getPages();
+        if (pages.length <= 1) {
+            CSReporter.warn('[BrowserManager] No additional pages to switch to');
+            return;
+        }
+        await this.switchToPage(pages.length - 1);
+    }
+
+    /**
+     * Switch back to the main/first page/tab
+     */
+    public async switchToMainPage(): Promise<void> {
+        await this.switchToPage(0);
+    }
+
+    /**
+     * Get the current page index among all open pages
+     * @returns Index of current page, or -1 if not found
+     */
+    public getCurrentPageIndex(): number {
+        const pages = this.getPages();
+        return pages.findIndex(p => p === this.page);
+    }
+
     /**
      * Register a listener to be notified when page changes (e.g., after browser switch)
      * Useful for page objects that need to update their page reference
