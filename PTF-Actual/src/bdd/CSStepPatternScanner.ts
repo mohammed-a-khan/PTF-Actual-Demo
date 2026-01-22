@@ -219,6 +219,36 @@ export class CSStepPatternScanner {
         return null;
     }
 
+    private tsNodeRegistered: boolean = false;
+
+    /**
+     * Register ts-node for TypeScript file loading
+     */
+    private ensureTsNodeRegistered(): void {
+        if (this.tsNodeRegistered) return;
+
+        try {
+            require('ts-node').register({
+                transpileOnly: true,
+                compilerOptions: {
+                    module: 'commonjs',
+                    target: 'ES2020',
+                    esModuleInterop: true,
+                    experimentalDecorators: true,
+                    emitDecoratorMetadata: true
+                }
+            });
+            this.tsNodeRegistered = true;
+            CSReporter.debug('[StepScanner] ts-node registered for TypeScript step file loading');
+        } catch (error: any) {
+            // ts-node may already be registered or not available
+            if (error.code !== 'ERR_REQUIRE_ESM') {
+                CSReporter.debug(`[StepScanner] ts-node registration skipped: ${error.message}`);
+            }
+            this.tsNodeRegistered = true; // Mark as done to avoid repeated attempts
+        }
+    }
+
     /**
      * Load a specific step file (only when needed during execution)
      * This is where the actual require() happens
@@ -258,6 +288,11 @@ export class CSStepPatternScanner {
                         fileToLoad = jsPath;
                     }
                 }
+            }
+
+            // Ensure ts-node is registered before loading TypeScript files
+            if (fileToLoad.endsWith('.ts')) {
+                this.ensureTsNodeRegistered();
             }
 
             require(fileToLoad);
