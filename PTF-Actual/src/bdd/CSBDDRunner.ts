@@ -227,6 +227,9 @@ export class CSBDDRunner {
             const project = this.config.get('PROJECT', 'CS-Framework');
             this.resultsManager.initializeTestRun(project);
 
+            // Hook CSReporter for BDD action tracking (enables proper icons in HTML report)
+            CSScenarioContext.hookBDDReporterActions();
+
             // Parse features
             const features = await this.loadFeatures(options);
             
@@ -1120,7 +1123,13 @@ export class CSBDDRunner {
                     CSReporter.warn('Stopping execution due to failFast option');
                     break;
                 }
-                
+
+                // Check if scenario should be executed (handles @enabled:false tag)
+                if (!this.shouldExecuteScenario(scenario, feature, options)) {
+                    CSReporter.info(`Skipping disabled scenario: ${scenario.name}`);
+                    continue;
+                }
+
                 await this.executeScenario(scenario, feature, options);
             }
             
@@ -1889,11 +1898,16 @@ export class CSBDDRunner {
             // Set current step in scenario context for screenshot attachment
             this.scenarioContext.setCurrentStep(`${step.keyword} ${stepText}`);
 
+            // Clear actions before step execution for BDD action tracking
+            this.scenarioContext.clearCurrentStepActions();
+
             // Execute the step
             await executeStep(stepText, step.keyword.trim(), this.context, dataTable?.raw(), step.docString);
-            
+
             const duration = Date.now() - stepStartTime;
-            this.scenarioContext.addStepResult(`${step.keyword} ${stepText}`, 'passed', duration);
+            // Pass collected actions to step result for HTML report icons
+            const stepActions = this.scenarioContext.getCurrentStepActions();
+            this.scenarioContext.addStepResult(`${step.keyword} ${stepText}`, 'passed', duration, undefined, stepActions);
             
             // Capture screenshot on step success if enabled
             if (this.config.get('SCREENSHOT_CAPTURE_MODE', 'on-failure') === 'always' || 
@@ -1946,7 +1960,9 @@ export class CSBDDRunner {
                             await executeStep(stepText, step.keyword.trim(), this.context, undefined, step.docString);
 
                             const retryDuration = Date.now() - retryStartTime;
-                            this.scenarioContext.addStepResult(stepFullText, 'passed', retryDuration);
+                            // Pass collected actions (includes both original and retry actions)
+                            const retryStepActions = this.scenarioContext.getCurrentStepActions();
+                            this.scenarioContext.addStepResult(stepFullText, 'passed', retryDuration, undefined, retryStepActions);
                             CSReporter.passStep(retryDuration);
 
                             CSReporter.info(`[AI] Step passed after healing (retry duration: ${retryDuration}ms)`);
@@ -2039,7 +2055,9 @@ export class CSBDDRunner {
             }
 
             // Now add the step result after screenshot has been attached to currentStep
-            this.scenarioContext.addStepResult(`${step.keyword} ${stepText}`, 'failed', duration);
+            // Pass collected actions for HTML report icons (even for failed steps)
+            const failedStepActions = this.scenarioContext.getCurrentStepActions();
+            this.scenarioContext.addStepResult(`${step.keyword} ${stepText}`, 'failed', duration, undefined, failedStepActions);
 
             CSReporter.failStep(error.message, duration);
             throw error;

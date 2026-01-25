@@ -10,7 +10,16 @@ export class CSScenarioContext {
     private totalScenarios: number = 0;
     private executionStartTime?: number;
     private currentStep?: { step: string; status: 'passed' | 'failed' | 'skipped'; duration: number; screenshot?: string; diagnostics?: any };
-    
+
+    // BDD Action tracking for HTML report icons
+    private currentStepActions: Array<{
+        action: string;
+        status: 'pass' | 'fail';
+        timestamp: string;
+        duration: number;
+    }> = [];
+    private static bddReporterHooked: boolean = false;
+
     private constructor() {}
     
     public static getInstance(): CSScenarioContext {
@@ -255,5 +264,91 @@ export class CSScenarioContext {
     public resetStats(): void {
         this.totalScenarios = 0;
         this.executionStartTime = undefined;
+    }
+
+    // BDD Action tracking methods for HTML report icons
+    public addStepAction(message: string, status: 'pass' | 'fail'): void {
+        this.currentStepActions.push({
+            action: message,
+            status,
+            timestamp: new Date().toISOString(),
+            duration: 0
+        });
+    }
+
+    public getCurrentStepActions(): Array<{
+        action: string;
+        status: 'pass' | 'fail';
+        timestamp: string;
+        duration: number;
+    }> {
+        return [...this.currentStepActions];
+    }
+
+    public clearCurrentStepActions(): void {
+        this.currentStepActions = [];
+    }
+
+    /**
+     * Hook CSReporter to capture pass/fail/info statements for BDD action tracking
+     * This enables proper icons (✓, ✗, ℹ) in HTML report Actions tab
+     * Similar to hookReporterActions in CSSpecStepTracker
+     */
+    public static hookBDDReporterActions(): void {
+        if (CSScenarioContext.bddReporterHooked) {
+            return;
+        }
+
+        try {
+            const context = CSScenarioContext.getInstance();
+
+            // Store original methods
+            const originalPass = CSReporter.pass.bind(CSReporter);
+            const originalFail = CSReporter.fail.bind(CSReporter);
+            const originalInfo = CSReporter.info.bind(CSReporter);
+
+            // Wrap pass to also add to BDD action tracker
+            (CSReporter as any).pass = function(message: string): void {
+                originalPass(message);
+                // Skip framework internal "Passed" message
+                const trimmed = message.trim();
+                if (trimmed === '✓ Passed' || trimmed === 'Passed') {
+                    return;
+                }
+                // Add checkmark prefix if not already present
+                const displayMessage = trimmed.startsWith('✓') ? trimmed : `✓ ${message}`;
+                context.addStepAction(displayMessage, 'pass');
+            };
+
+            // Wrap fail to also add to BDD action tracker
+            (CSReporter as any).fail = function(message: string): void {
+                originalFail(message);
+                context.addStepAction(`✗ ${message}`, 'fail');
+            };
+
+            // Wrap info to also add to BDD action tracker
+            (CSReporter as any).info = function(message: string): void {
+                originalInfo(message);
+                // Skip framework internal messages
+                const passesFilter = !message.startsWith('[') &&
+                    !message.startsWith('╔') &&
+                    !message.startsWith('╚') &&
+                    !message.startsWith('║') &&
+                    !message.startsWith('▶') &&
+                    !message.startsWith('Step ') &&
+                    !message.startsWith('Feature:') &&
+                    !message.startsWith('  Scenario:') &&
+                    !message.startsWith('    ');
+
+                if (passesFilter) {
+                    context.addStepAction(`ℹ ${message}`, 'pass');
+                }
+            };
+
+            CSScenarioContext.bddReporterHooked = true;
+            CSReporter.debug('[BDD] Reporter action hooks installed');
+        } catch (error) {
+            CSReporter.debug('[BDD] Could not hook reporter actions: ' + (error instanceof Error ? error.message : String(error)));
+        }
     }
 }
