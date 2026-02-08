@@ -169,7 +169,7 @@ Examples:
   npx cs-playwright-test --suite=multi-project --suite-mode=api-only
 
   # Generate typed fixtures for IntelliSense support
-  npx cs-playwright-test generate-fixtures --project=orangehrm
+  npx cs-playwright-test generate-fixtures --project=myproject
 `);
             process.exit(0);
         }

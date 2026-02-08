@@ -64,9 +64,19 @@ export class CSBrowserManager {
             return CSBrowserManager.threadInstances.get(workerId)!;
         }
 
+        // Use global singleton to handle cross-module resolution (e.g., globally
+        // installed CLI + locally installed package resolve to different module files,
+        // but should share the same browser manager instance)
+        const globalKey = '__csBrowserManagerInstance';
+        if ((global as any)[globalKey]) {
+            CSBrowserManager.instance = (global as any)[globalKey];
+            return CSBrowserManager.instance;
+        }
+
         // For main thread, use singleton
         if (!CSBrowserManager.instance) {
             CSBrowserManager.instance = new CSBrowserManager();
+            (global as any)[globalKey] = CSBrowserManager.instance;
         }
         return CSBrowserManager.instance;
     }

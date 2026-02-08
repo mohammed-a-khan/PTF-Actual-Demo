@@ -2,7 +2,7 @@
  * CS Playwright MCP Generation Tools
  * Generate framework-compliant code using PTF-ADO patterns
  *
- * Generates code following the patterns from CRRU and OrangeHRM projects:
+ * Generates code following the PTF-ADO framework patterns:
  * - Page Objects with @CSPage and @CSGetElement decorators
  * - Step Definitions with @StepDefinitions and @CSBDDStepDef
  * - Feature files with data source integration
@@ -72,7 +72,7 @@ const generatePageObjectTool = defineTool()
     .description('Generate a Page Object class following PTF-ADO patterns with @CSPage and @CSGetElement decorators')
     .category('generation')
     .stringParam('pageName', 'Page name (e.g., "DealDetails", "ReferenceRates")', { required: true })
-    .stringParam('projectPrefix', 'Project prefix (e.g., "CRRU", "OrangeHRM")', { required: true })
+    .stringParam('projectPrefix', 'Project prefix (e.g., "CRRU", "MyApp")', { required: true })
     .arrayParam('elements', 'Element definitions array', 'object', { required: true })
     .stringParam('pageUrl', 'Page URL path')
     .stringParam('outputPath', 'Output file path')

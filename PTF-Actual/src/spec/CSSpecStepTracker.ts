@@ -519,6 +519,7 @@ export function hookReporterActions(): void {
         const originalPass = CSReporter.pass.bind(CSReporter);
         const originalFail = CSReporter.fail.bind(CSReporter);
         const originalInfo = CSReporter.info.bind(CSReporter);
+        const originalWarn = CSReporter.warn.bind(CSReporter);
 
         // Wrap pass to also add to step tracker
         (CSReporter as any).pass = function(message: string): void {
@@ -562,6 +563,26 @@ export function hookReporterActions(): void {
                 CSReporter.debug(`[StepTracker] Added info action: ${message.substring(0, 50)}... (step: ${currentStepTracker.getCurrentStepName() || 'none'})`);
             } else if (passesFilter) {
                 CSReporter.debug(`[StepTracker] No step tracker for info: ${message.substring(0, 50)}...`);
+            }
+        };
+
+        // Wrap warn to also add to step tracker
+        (CSReporter as any).warn = function(message: string): void {
+            originalWarn(message);
+            // Add all user-facing warn messages to step tracker
+            // Skip framework internal messages (those with special prefixes)
+            const passesFilter = !message.startsWith('[') &&
+                !message.startsWith('╔') &&
+                !message.startsWith('╚') &&
+                !message.startsWith('║') &&
+                !message.startsWith('▶') &&
+                !message.startsWith('Step ');
+
+            if (currentStepTracker && passesFilter) {
+                currentStepTracker.reporterAction(`⚠ ${message}`, 'passed');
+                CSReporter.debug(`[StepTracker] Added warn action: ${message.substring(0, 50)}... (step: ${currentStepTracker.getCurrentStepName() || 'none'})`);
+            } else if (passesFilter) {
+                CSReporter.debug(`[StepTracker] No step tracker for warn: ${message.substring(0, 50)}...`);
             }
         };
 

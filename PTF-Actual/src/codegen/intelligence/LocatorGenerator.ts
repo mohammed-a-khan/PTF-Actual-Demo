@@ -255,7 +255,7 @@ export class LocatorGenerator {
         if (selector.includes(':nth-child') || selector.includes(':nth-of-type')) score -= 30;
         if (selector.match(/\[\d+\]/)) score -= 25; // XPath index like [1]
         if (selector.split(' ').length > 3) score -= 10; // Long chain
-        if (selector.includes('.css-') || selector.includes('.oxd-')) score -= 15; // Framework classes
+        if (selector.includes('.css-')) score -= 15; // Generated/framework classes
 
         return Math.max(0, Math.min(100, score));
     }

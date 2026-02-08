@@ -187,7 +187,7 @@ export class NamingEngine {
                 .map(c => c.substring(1))
                 .find(c => !c.match(/^(btn|col|row|flex|grid|container|wrapper|css-)/));
             if (meaningfulClass) {
-                // For prefixed classes like oxd-select-text, extract the semantic part
+                // For prefixed classes like framework-select-text, extract the semantic part
                 return this.extractSemanticFromClassName(meaningfulClass);
             }
         }
@@ -230,7 +230,7 @@ export class NamingEngine {
         }
 
         // Icon patterns (standalone)
-        if (lowerSelector.includes('icon') || lowerSelector.includes('oxd-icon')) {
+        if (lowerSelector.includes('icon')) {
             return 'actionIcon';
         }
 
@@ -249,11 +249,11 @@ export class NamingEngine {
 
     /**
      * Extract semantic meaning from class name
-     * Handles prefixed classes like oxd-select-text -> selectText
+     * Handles prefixed classes like framework-select-text -> selectText
      */
     private static extractSemanticFromClassName(className: string): string {
         // Remove common prefixes
-        let cleaned = className.replace(/^(oxd-|btn-|form-|input-|css-|ng-|v-|el-)/, '');
+        let cleaned = className.replace(/^(btn-|form-|input-|css-|ng-|v-|el-)/, '');
 
         // If cleaned is still the same (no prefix removed), return as-is
         if (cleaned === className && cleaned.length > 3) {

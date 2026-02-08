@@ -25,8 +25,8 @@ class CSSimpleStepRegistry {
         // Convert Cucumber-style patterns to regex patterns
         let regexPattern = pattern;
         
-        // Replace {string} with regex for quoted strings
-        regexPattern = regexPattern.replace(/\{string\}/g, '"([^"]*)"');
+        // Replace {string} with regex for quoted strings (support both single and double quotes)
+        regexPattern = regexPattern.replace(/\{string\}/g, '["\']([^"\']*)["\']');
         
         // Replace {int} with regex for numbers
         regexPattern = regexPattern.replace(/\{int\}/g, '(\\d+)');

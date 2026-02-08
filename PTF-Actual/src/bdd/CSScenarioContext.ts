@@ -306,6 +306,7 @@ export class CSScenarioContext {
             const originalPass = CSReporter.pass.bind(CSReporter);
             const originalFail = CSReporter.fail.bind(CSReporter);
             const originalInfo = CSReporter.info.bind(CSReporter);
+            const originalWarn = CSReporter.warn.bind(CSReporter);
 
             // Wrap pass to also add to BDD action tracker
             (CSReporter as any).pass = function(message: string): void {
@@ -342,6 +343,25 @@ export class CSScenarioContext {
 
                 if (passesFilter) {
                     context.addStepAction(`ℹ ${message}`, 'pass');
+                }
+            };
+
+            // Wrap warn to also add to BDD action tracker
+            (CSReporter as any).warn = function(message: string): void {
+                originalWarn(message);
+                // Skip framework internal messages
+                const passesFilter = !message.startsWith('[') &&
+                    !message.startsWith('╔') &&
+                    !message.startsWith('╚') &&
+                    !message.startsWith('║') &&
+                    !message.startsWith('▶') &&
+                    !message.startsWith('Step ') &&
+                    !message.startsWith('Feature:') &&
+                    !message.startsWith('  Scenario:') &&
+                    !message.startsWith('    ');
+
+                if (passesFilter) {
+                    context.addStepAction(`⚠ ${message}`, 'pass');
                 }
             };
 

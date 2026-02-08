@@ -137,6 +137,14 @@ export { CSADOTagExtractor } from '../ado/CSADOTagExtractor';
 export { CSAIEngine } from '../ai/CSAIEngine';
 export { CSSelfHealingEngine } from '../self-healing/CSSelfHealingEngine';
 
+// AI Step Engine (Natural Language Test Steps)
+export { csAI, configureAIStepEngine, getAIStepConfig } from '../ai/step-engine/CSAIStepFunction';
+export { CSAIStepBDD, createAIStepHandler } from '../ai/step-engine/CSAIStepBDD';
+export { CSAIStepGrammar } from '../ai/step-engine/CSAIStepGrammar';
+export { CSAIStepParser } from '../ai/step-engine/CSAIStepParser';
+export { CSAccessibilityTreeMatcher } from '../ai/step-engine/CSAccessibilityTreeMatcher';
+export { CSAIActionExecutor } from '../ai/step-engine/CSAIActionExecutor';
+
 // Authentication & Security
 export { CSTokenManager } from '../auth/CSTokenManager';
 

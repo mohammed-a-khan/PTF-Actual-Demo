@@ -28,7 +28,7 @@ function shouldLog(level: LogLevel): boolean {
  * 1. Command line arguments (override everything)
  * 2. Environment variables (override config files)
  * 3. config/{project}/environments/{environment}.env (HIGHEST file priority)
- * 4. config/{project}/*.env files (e.g., orangehrm.env)
+ * 4. config/{project}/*.env files (e.g., myproject.env)
  * 5. config/{project}/common/common.env
  * 6. config/common/environments/{environment}.env
  * 7. config/common/common.env
@@ -45,8 +45,18 @@ export class CSConfigurationManager {
     }
 
     public static getInstance(): CSConfigurationManager {
+        // Use global singleton to handle cross-module resolution (e.g., globally
+        // installed CLI + locally installed package resolve to different module files,
+        // but should share the same configuration instance)
+        const globalKey = '__csConfigurationManagerInstance';
+        if ((global as any)[globalKey]) {
+            CSConfigurationManager.instance = (global as any)[globalKey];
+            return CSConfigurationManager.instance;
+        }
+
         if (!CSConfigurationManager.instance) {
             CSConfigurationManager.instance = new CSConfigurationManager();
+            (global as any)[globalKey] = CSConfigurationManager.instance;
         }
         return CSConfigurationManager.instance;
     }
@@ -238,7 +248,10 @@ export class CSConfigurationManager {
         });
 
         // Handle <placeholder> syntax for dynamic values
-        str = str.replace(/<([^>]+)>/g, (match, placeholder) => {
+        // IMPORTANT: Only match valid placeholder patterns like <random>, <uuid>, <date:FORMAT>, <env:VAR>, <generate:TYPE>
+        // NOT SQL relational operators like < 0.5 or >= which would be incorrectly captured by /<([^>]+)>/g
+        // Pattern: <word> or <word:value> where word starts with letter and contains only alphanumeric/underscore
+        str = str.replace(/<([a-zA-Z][a-zA-Z0-9_]*(?::[^>]+)?)>/g, (match, placeholder) => {
             return this.handleDynamicPlaceholder(placeholder) || match;
         });
 

@@ -432,8 +432,9 @@ export class ProjectScanner {
      */
     private stepMatches(step: ExistingStep, text: string): boolean {
         // Convert Cucumber expression to regex
+        // Support both single quotes ('...') and double quotes ("...") for {string}
         const regexPattern = step.pattern
-            .replace(/\{string\}/g, '"([^"]*)"')
+            .replace(/\{string\}/g, '["\']([^"\']*)["\']')
             .replace(/\{int\}/g, '(\\d+)')
             .replace(/\{float\}/g, '([\\d.]+)')
             .replace(/\{word\}/g, '(\\w+)');

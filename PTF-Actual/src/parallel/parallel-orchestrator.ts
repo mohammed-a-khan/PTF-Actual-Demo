@@ -124,6 +124,8 @@ export class ParallelOrchestrator {
             // Add type-specific options
             if (source.sheet) options.sheet = source.sheet;
             if (source.delimiter) options.delimiter = source.delimiter;
+            if (source.path) options.path = source.path;  // JSONPath for nested JSON structures
+            if (source.xpath) options.xpath = source.xpath;  // XPath for XML structures
             if (source.filter) {
                 // Parse and apply filter expression
                 options.filter = this.createFilterFunction(source.filter);

@@ -54,7 +54,7 @@ export interface PageObjectDefinition {
 }
 
 export interface ArchitectureOutput {
-    baseComponent?: ComponentDefinition; // OrangeHRMBasePage
+    baseComponent?: ComponentDefinition; // Base page object
     navigationComponent?: ComponentDefinition; // NavigationComponent
     pageObjects: PageObjectDefinition[];
     stepDefinitions: StepDefinitionFile[];

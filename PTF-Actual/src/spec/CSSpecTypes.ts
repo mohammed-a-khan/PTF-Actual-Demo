@@ -123,8 +123,8 @@ export interface DescribeConfigureOptions {
  */
 export interface SpecDescribeOptions {
     /** ADO and custom tags applied to all tests in this describe - array format preferred
-     * @example tags: ['@orangehrm', '@login', '@TestPlanId:417', '@TestSuiteId:418']
-     * @example tags: '@orangehrm @login @TestPlanId:417 @TestSuiteId:418' // legacy format
+     * @example tags: ['@myproject', '@login', '@TestPlanId:417', '@TestSuiteId:418']
+     * @example tags: '@myproject @login @TestPlanId:417 @TestSuiteId:418' // legacy format
      */
     tags?: string[] | string;
     /** Data source shared by all tests in this describe */

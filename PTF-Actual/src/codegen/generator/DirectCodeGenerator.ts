@@ -506,7 +506,7 @@ export class DirectCodeGenerator {
         const classMatches = selector.match(/\.([a-zA-Z][\w-]*)/g);
         if (classMatches && classMatches.length > 0) {
             // Filter out common utility/layout classes and extract semantic meaning
-            const utilityPrefixes = ['oxd-', 'btn-', 'form-', 'input-', 'flex-', 'grid-', 'col-', 'row-', 'container-', 'wrapper-', 'box-', 'css-'];
+            const utilityPrefixes = ['btn-', 'form-', 'input-', 'flex-', 'grid-', 'col-', 'row-', 'container-', 'wrapper-', 'box-', 'css-'];
             const meaningfulClasses = classMatches
                 .map(c => c.substring(1)) // Remove the dot
                 .filter(c => !utilityPrefixes.some(prefix => c.startsWith(prefix)))
@@ -571,7 +571,7 @@ export class DirectCodeGenerator {
      */
     private extractSemanticFromClassName(className: string): string | null {
         // Remove common prefixes
-        let cleaned = className.replace(/^(oxd-|btn-|form-|input-|css-)/, '');
+        let cleaned = className.replace(/^(btn-|form-|input-|css-)/, '');
 
         // Map common patterns to semantic names
         const patterns: { [key: string]: string } = {

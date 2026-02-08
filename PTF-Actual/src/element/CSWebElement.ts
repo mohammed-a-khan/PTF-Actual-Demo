@@ -309,6 +309,10 @@ export interface ElementOptions {
     highlight?: boolean;
     force?: boolean;
 
+    // Pre-existing Playwright Locator (for AI Step Engine bridge)
+    // When provided, getLocator() returns this directly instead of building from selectors
+    locator?: any;
+
     // Performance
     measurePerformance?: boolean;
 
@@ -377,6 +381,19 @@ export class CSWebElement {
      */
     private async getLocator(): Promise<Locator> {
         const currentPage = this.page;
+
+        // If a pre-existing locator was injected (via CSElementFactory.fromLocator bridge),
+        // use it directly instead of building from selector strategies.
+        // This allows the AI Step Engine to wrap accessibility-tree-matched locators
+        // with framework features (smart waits, retries, self-healing, logging).
+        if (this.options.locator) {
+            if (this.locator && this.locatorPageRef === currentPage) {
+                return this.locator;
+            }
+            this.locator = this.options.locator;
+            this.locatorPageRef = currentPage;
+            return this.locator;
+        }
 
         // If page has changed (e.g., after browser switch), recreate locator
         if (this.locator && this.locatorPageRef === currentPage) {
@@ -1807,23 +1824,71 @@ export class CSWebElement {
     }
 
     async waitForAttached(timeout?: number): Promise<void> {
-        CSReporter.info(`Waiting for ${this.description} to be attached`);
-        return this.waitFor({ state: 'attached', timeout });
+        const effectiveTimeout = timeout || this.actionTimeout;
+        CSReporter.info(`Waiting for ${this.description} to be attached (timeout: ${effectiveTimeout}ms)`);
+        // Use pre-existing locator if available (fromLocator bridge), otherwise build from strategies
+        const locator = this.options.locator || (() => {
+            const strategies = this.buildLocatorStrategies();
+            return this.createLocatorFromStrategy(strategies[0]);
+        })();
+        try {
+            await locator.waitFor({ state: 'attached', timeout: effectiveTimeout });
+            CSReporter.pass(`${this.description} is attached to DOM`);
+        } catch (error) {
+            CSReporter.fail(`${this.description} did not attach to DOM within ${effectiveTimeout}ms`);
+            throw new Error(`Wait for attached failed: ${this.description} did not appear in DOM after ${effectiveTimeout}ms`);
+        }
     }
 
     async waitForDetached(timeout?: number): Promise<void> {
-        CSReporter.info(`Waiting for ${this.description} to be detached`);
-        return this.waitFor({ state: 'detached', timeout });
+        const effectiveTimeout = timeout || this.actionTimeout;
+        CSReporter.info(`Waiting for ${this.description} to be detached (timeout: ${effectiveTimeout}ms)`);
+        // Use pre-existing locator if available (fromLocator bridge), otherwise build from strategies
+        const locator = this.options.locator || (() => {
+            const strategies = this.buildLocatorStrategies();
+            return this.createLocatorFromStrategy(strategies[0]);
+        })();
+        try {
+            await locator.waitFor({ state: 'detached', timeout: effectiveTimeout });
+            CSReporter.pass(`${this.description} is detached from DOM`);
+        } catch (error) {
+            CSReporter.fail(`${this.description} did not detach from DOM within ${effectiveTimeout}ms`);
+            throw new Error(`Wait for detached failed: ${this.description} is still present in DOM after ${effectiveTimeout}ms`);
+        }
     }
 
     async waitForVisible(timeout?: number): Promise<void> {
-        CSReporter.info(`Waiting for ${this.description} to be visible`);
-        return this.waitFor({ state: 'visible', timeout });
+        const effectiveTimeout = timeout || this.actionTimeout;
+        CSReporter.info(`Waiting for ${this.description} to be visible (timeout: ${effectiveTimeout}ms)`);
+        // Use pre-existing locator if available (fromLocator bridge), otherwise build from strategies
+        const locator = this.options.locator || (() => {
+            const strategies = this.buildLocatorStrategies();
+            return this.createLocatorFromStrategy(strategies[0]);
+        })();
+        try {
+            await locator.waitFor({ state: 'visible', timeout: effectiveTimeout });
+            CSReporter.pass(`${this.description} is visible`);
+        } catch (error) {
+            CSReporter.fail(`${this.description} did not become visible within ${effectiveTimeout}ms`);
+            throw new Error(`Wait for visible failed: ${this.description} did not become visible after ${effectiveTimeout}ms`);
+        }
     }
 
     async waitForHidden(timeout?: number): Promise<void> {
-        CSReporter.info(`Waiting for ${this.description} to be hidden`);
-        return this.waitFor({ state: 'hidden', timeout });
+        const effectiveTimeout = timeout || this.actionTimeout;
+        CSReporter.info(`Waiting for ${this.description} to be hidden (timeout: ${effectiveTimeout}ms)`);
+        // Use pre-existing locator if available (fromLocator bridge), otherwise build from strategies
+        const locator = this.options.locator || (() => {
+            const strategies = this.buildLocatorStrategies();
+            return this.createLocatorFromStrategy(strategies[0]);
+        })();
+        try {
+            await locator.waitFor({ state: 'hidden', timeout: effectiveTimeout });
+            CSReporter.pass(`${this.description} is hidden`);
+        } catch (error) {
+            CSReporter.fail(`${this.description} did not become hidden within ${effectiveTimeout}ms`);
+            throw new Error(`Wait for hidden failed: ${this.description} is still visible after ${effectiveTimeout}ms`);
+        }
     }
 
     // ============================================
@@ -2470,6 +2535,37 @@ export class CSElementFactory {
      */
     public static create(options: ElementOptions, page?: Page): CSWebElement {
         return new CSWebElement(options, page);
+    }
+
+    /**
+     * Create a CSWebElement from an existing Playwright Locator.
+     * Bridge for the AI Step Engine to wrap accessibility-tree-matched locators
+     * with framework features (smart waits, retries, self-healing, logging, performance tracking).
+     *
+     * @param locator - Pre-existing Playwright Locator instance
+     * @param description - Human-readable description for logging/reporting
+     * @param options - Optional ElementOptions overrides (timeout, retryCount, etc.)
+     * @returns CSWebElement that wraps the provided locator
+     *
+     * @example
+     * // Wrap a locator matched by the AI accessibility tree matcher
+     * const csElement = CSElementFactory.fromLocator(
+     *     matchedElement.locator,
+     *     matchedElement.description,
+     *     { timeout: 10000, retryCount: 1 }
+     * );
+     * await csElement.click();
+     */
+    public static fromLocator(
+        locator: any,
+        description?: string,
+        options?: Partial<ElementOptions>
+    ): CSWebElement {
+        return new CSWebElement({
+            locator,
+            description: description || 'AI-matched element',
+            ...options
+        });
     }
 
     /**

@@ -126,7 +126,7 @@ export class PatternRecognitionEngine {
 
     /**
      * Detect dropdown selection pattern
-     * Pattern: click(.oxd-select .oxd-icon) → click(getByText('option'))
+     * Pattern: click(dropdown-trigger) → click(getByText('option'))
      */
     private detectDropdownPattern(actions: Action[], startIndex: number): DropdownPattern | null {
         if (startIndex >= actions.length - 1) return null;
@@ -139,9 +139,10 @@ export class PatternRecognitionEngine {
 
         const selector1 = action1.target?.selector || '';
         const isDropdownTrigger =
-            selector1.includes('.oxd-select') ||
-            selector1.includes('.oxd-icon') ||
             (selector1.includes('select') && selector1.includes('icon')) ||
+            selector1.includes('dropdown') ||
+            selector1.includes('listbox') ||
+            selector1.includes('combobox') ||
             action1.target?.type === 'getByRole' && action1.target.selector === 'listbox';
 
         if (!isDropdownTrigger) return null;

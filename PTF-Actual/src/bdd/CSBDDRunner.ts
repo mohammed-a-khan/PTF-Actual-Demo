@@ -1680,7 +1680,8 @@ export class CSBDDRunner {
                     steps: lastResult.steps.map((step, index) => {
                         // Get screenshot from scenario context step results
                         const stepResults = this.scenarioContext.getStepResults();
-                        const matchingStep = stepResults.find(sr => sr.step === step.name);
+                        // Use index instead of find() to match correct step when same step appears multiple times
+                        const matchingStep = stepResults[index];
 
                         // Build attachments array with screenshots
                         const attachments: any[] = [];
@@ -1696,6 +1697,12 @@ export class CSBDDRunner {
                             });
                         }
 
+                        // Merge actions from scenarioContext (has ✓/✗/ℹ prefixes) with CSReporter actions
+                        const contextActions = matchingStep?.actions || [];
+                        const reporterActions = step.actions || [];
+                        // Use context actions if available, otherwise use reporter actions
+                        const stepActions = contextActions.length > 0 ? contextActions : reporterActions;
+
                         return {
                             id: `step-${Date.now()}-${index}`,
                             name: step.name,
@@ -1706,14 +1713,14 @@ export class CSBDDRunner {
                             endTime: new Date(Date.now()),
                             duration: step.duration,
                             error: step.error ? { message: step.error } : undefined,
-                            logs: step.actions.map((action: any) => ({
+                            logs: stepActions.map((action: any) => ({
                                 level: action.status === 'pass' ? 'info' : 'error',
                                 message: action.action,
                                 timestamp: new Date(action.timestamp),
                                 source: 'step-execution'
                             })),
                             attachments: attachments,
-                            actions: step.actions.map((action: any) => ({
+                            actions: stepActions.map((action: any) => ({
                                 name: action.action,
                                 status: action.status === 'pass' ? 'passed' : action.status === 'fail' ? 'failed' : 'skipped',
                                 duration: action.duration,
@@ -2259,8 +2266,13 @@ export class CSBDDRunner {
                 totalColumns: exampleHeaders.length
             } : undefined,
             steps: lastResult ? lastResult.steps.map((step, index) => {
-                // Find matching step result for screenshot
-                const matchingStep = stepResults.find(sr => sr.step === step.name);
+                // Use index instead of find() to match correct step when same step appears multiple times
+                const matchingStep = stepResults[index];
+                // Merge actions from scenarioContext (has ✓/✗/ℹ prefixes) with CSReporter actions
+                const contextActions = matchingStep?.actions || [];
+                const reporterActions = step.actions || [];
+                // Use context actions if available, otherwise use reporter actions
+                const stepActions = contextActions.length > 0 ? contextActions : reporterActions;
 
                 return {
                     name: step.name,
@@ -2268,13 +2280,13 @@ export class CSBDDRunner {
                     status: step.status === 'pass' ? 'passed' : step.status === 'fail' ? 'failed' : 'skipped',
                     duration: step.duration,
                     error: step.error ? { message: step.error } : undefined,
-                    logs: step.actions.map(action => ({
+                    logs: stepActions.map((action: any) => ({
                         level: action.status === 'pass' ? 'info' : 'error',
                         message: action.action,
                         timestamp: new Date(action.timestamp),
                         source: 'step-execution'
                     })),
-                    actions: step.actions.map(action => ({
+                    actions: stepActions.map((action: any) => ({
                         name: action.action,
                         status: action.status === 'pass' ? 'passed' : action.status === 'fail' ? 'failed' : 'skipped',
                         duration: action.duration,
@@ -2883,6 +2895,8 @@ export class CSBDDRunner {
             // Add type-specific options
             if (source.sheet) options.sheet = source.sheet;
             if (source.delimiter) options.delimiter = source.delimiter;
+            if (source.path) options.path = source.path;  // JSONPath for nested JSON structures
+            if (source.xpath) options.xpath = source.xpath;  // XPath for XML structures
             if (source.filter) {
                 // Parse and apply filter expression
                 options.filter = this.createFilterFunction(source.filter);

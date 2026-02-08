@@ -158,12 +158,19 @@ export class CSDateTimeUtility {
 
     /**
      * Format date with custom format
-     * Supported tokens: YYYY, MM, DD, HH, mm, ss, SSS
+     * Supported tokens: YYYY, YY, MMMM, MMM, MM, M, DD, D, HH, H, hh, h, mm, m, ss, s, SSS, A, a
+     * - MMMM: Full month name (January, February, etc.)
+     * - MMM: Short month name uppercase (JAN, FEB, etc.)
      */
     static format(date: Date, format: string): string {
+        const monthNamesShort = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+        const monthNamesFull = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
         const tokens: Record<string, string> = {
             'YYYY': String(date.getFullYear()),
             'YY': String(date.getFullYear()).slice(-2),
+            'MMMM': monthNamesFull[date.getMonth()],
+            'MMM': monthNamesShort[date.getMonth()],
             'MM': String(date.getMonth() + 1).padStart(2, '0'),
             'M': String(date.getMonth() + 1),
             'DD': String(date.getDate()).padStart(2, '0'),
@@ -182,9 +189,24 @@ export class CSDateTimeUtility {
         };
 
         let result = format;
-        for (const [token, value] of Object.entries(tokens)) {
-            result = result.replace(new RegExp(token, 'g'), value);
+        // Sort tokens by length descending to avoid partial replacements (e.g., 'MMMM' before 'MMM' before 'MM')
+        const sortedTokens = Object.keys(tokens).sort((a, b) => b.length - a.length);
+
+        // Two-phase replacement to avoid token collision (e.g., 'A' in 'JAN' matching AM/PM token)
+        // Phase 1: Replace tokens with unique placeholders
+        const placeholders: Record<string, string> = {};
+        for (let i = 0; i < sortedTokens.length; i++) {
+            const token = sortedTokens[i];
+            const placeholder = `\x00${i}\x00`; // Use null char as delimiter (won't appear in normal text)
+            placeholders[placeholder] = tokens[token];
+            result = result.replace(new RegExp(token, 'g'), placeholder);
         }
+
+        // Phase 2: Replace placeholders with actual values
+        for (const [placeholder, value] of Object.entries(placeholders)) {
+            result = result.replace(new RegExp(placeholder, 'g'), value);
+        }
+
         return result;
     }
 
@@ -789,17 +811,23 @@ export class CSDateTimeUtility {
 
     /**
      * Format date with custom format in the default timezone (Americas)
-     * Supported tokens: YYYY, MM, DD, HH, mm, ss, SSS
+     * Supported tokens: YYYY, YY, MMMM, MMM, MM, M, DD, D, HH, H, hh, h, mm, m, ss, s, SSS, A, a
+     * - MMMM: Full month name (January, February, etc.)
+     * - MMM: Short month name uppercase (JAN, FEB, etc.)
      * @param date - Date to format
      * @param format - Format string
      * @param timezone - IANA timezone string (defaults to defaultTimezone)
      */
     static formatInTimezone(date: Date, format: string, timezone?: string): string {
         const c = this.getDateComponentsInTimezone(date, timezone);
+        const monthNamesShort = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+        const monthNamesFull = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
         const tokens: Record<string, string> = {
             'YYYY': String(c.year),
             'YY': String(c.year).slice(-2),
+            'MMMM': monthNamesFull[c.month - 1],
+            'MMM': monthNamesShort[c.month - 1],
             'MM': String(c.month).padStart(2, '0'),
             'M': String(c.month),
             'DD': String(c.day).padStart(2, '0'),
@@ -818,11 +846,24 @@ export class CSDateTimeUtility {
         };
 
         let result = format;
-        // Sort tokens by length descending to avoid partial replacements (e.g., 'MM' before 'M')
+        // Sort tokens by length descending to avoid partial replacements (e.g., 'MMMM' before 'MMM' before 'MM')
         const sortedTokens = Object.keys(tokens).sort((a, b) => b.length - a.length);
-        for (const token of sortedTokens) {
-            result = result.replace(new RegExp(token, 'g'), tokens[token]);
+
+        // Two-phase replacement to avoid token collision (e.g., 'A' in 'JAN' matching AM/PM token)
+        // Phase 1: Replace tokens with unique placeholders
+        const placeholders: Record<string, string> = {};
+        for (let i = 0; i < sortedTokens.length; i++) {
+            const token = sortedTokens[i];
+            const placeholder = `\x00${i}\x00`; // Use null char as delimiter (won't appear in normal text)
+            placeholders[placeholder] = tokens[token];
+            result = result.replace(new RegExp(token, 'g'), placeholder);
         }
+
+        // Phase 2: Replace placeholders with actual values
+        for (const [placeholder, value] of Object.entries(placeholders)) {
+            result = result.replace(new RegExp(placeholder, 'g'), value);
+        }
+
         return result;
     }
 

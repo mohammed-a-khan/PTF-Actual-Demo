@@ -606,7 +606,6 @@ export class CSIntelligentAI {
                         if (classLower.includes('mui') || classLower.includes('material')) componentLibrary += 'material-ui ';
                         if (classLower.includes('ant-')) componentLibrary += 'ant-design ';
                         if (classLower.includes('btn') || classLower.includes('form-control') || classLower.includes('bootstrap')) componentLibrary += 'bootstrap ';
-                        if (classLower.includes('oxd-')) componentLibrary += 'oxd-library ';
                         if (classLower.includes('el-')) componentLibrary += 'element-ui ';
                         if (classLower.includes('v-')) componentLibrary += 'vuetify ';
                         } catch (e) {

@@ -193,7 +193,8 @@ export class CSStepPatternScanner {
         let regexPattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
         // Then replace Cucumber placeholders with regex groups
-        regexPattern = regexPattern.replace(/\\{string\\}/g, '"([^"]*)"');
+        // Support both single quotes ('...') and double quotes ("...") for {string}
+        regexPattern = regexPattern.replace(/\\{string\\}/g, '["\']([^"\']*)["\']');
         regexPattern = regexPattern.replace(/\\{int\\}/g, '(\\d+)');
         regexPattern = regexPattern.replace(/\\{float\\}/g, '([\\d\\.]+)');
         regexPattern = regexPattern.replace(/\\{word\\}/g, '(\\w+)');

@@ -88,13 +88,14 @@ export function CSAfterStep(options?: { tags?: string[], order?: number }) {
 
 function createRegexFromString(pattern: string): RegExp {
     // Convert Cucumber expressions to regex
+    // Support both single quotes ('...') and double quotes ("...") for {string}
     let regexPattern = pattern
-        .replace(/\{string\}/g, '"([^"]*)"')
+        .replace(/\{string\}/g, '["\']([^"\']*)["\']')
         .replace(/\{int\}/g, '(\\d+)')
         .replace(/\{float\}/g, '([+-]?\\d*\\.?\\d+)')
         .replace(/\{word\}/g, '(\\w+)')
         .replace(/\{.*?\}/g, '(.*?)');
-    
+
     return new RegExp(`^${regexPattern}$`);
 }
 
@@ -130,7 +131,8 @@ function patternToRegex(pattern: string | RegExp): RegExp {
         let regexPattern = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
         // Then replace Cucumber placeholders with regex groups
-        regexPattern = regexPattern.replace(/\\\{string\\\}/g, '"([^"]*)"');
+        // Support both single quotes ('...') and double quotes ("...") for {string}
+        regexPattern = regexPattern.replace(/\\\{string\\\}/g, '["\']([^"\']*)["\']');
         regexPattern = regexPattern.replace(/\\\{int\\\}/g, '(\\d+)');
         regexPattern = regexPattern.replace(/\\\{float\\\}/g, '([\\d\\.]+)');
         regexPattern = regexPattern.replace(/\\\{word\\\}/g, '(\\w+)');

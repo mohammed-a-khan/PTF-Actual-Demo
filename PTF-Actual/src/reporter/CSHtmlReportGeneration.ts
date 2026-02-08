@@ -593,6 +593,9 @@ export class CSHtmlReportGenerator {
         // Exclude @DataProvider tag
         if (tag === '@DataProvider') return true;
 
+        // Exclude @enabled tags (internal execution control)
+        if (tag.startsWith('@enabled:')) return true;
+
         return false;
     }
 
@@ -2442,7 +2445,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             const actionName = action.name || action.action || '';
             const lowerAction = actionName.toLowerCase();
 
-            // Check for reporter statement prefixes (✓, ✗, ℹ) first
+            // Check for reporter statement prefixes (✓, ✗, ℹ, ⚠) first
             // These are added by hookReporterActions in spec tests
             const trimmedAction = actionName.trim();
             let isReporterStatement = false;
@@ -2461,6 +2464,11 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 // Info statement from CSReporter.info()
                 icon = 'ℹ️';
                 actionType = 'info';
+                isReporterStatement = true;
+            } else if (trimmedAction.startsWith('⚠') || trimmedAction.startsWith('⚠️')) {
+                // Warn statement from CSReporter.warn()
+                icon = '⚠️';
+                actionType = 'warn';
                 isReporterStatement = true;
             } else if (lowerAction.includes('click')) {
                 icon = iconMap.click;
@@ -2492,9 +2500,9 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
             // Clean up the action text for better readability
             let displayText = actionName;
-            // Remove reporter statement prefix (✓, ✗, ℹ) since icon already shows status
+            // Remove reporter statement prefix (✓, ✗, ℹ, ⚠) since icon already shows status
             if (isReporterStatement) {
-                displayText = displayText.replace(/^[✓✔✗✘❌ℹℹ️]\s*/, '');
+                displayText = displayText.replace(/^[✓✔✗✘❌ℹℹ️⚠⚠️]\s*/, '');
             }
             // Remove ANSI color codes
             displayText = displayText.replace(/\x1b\[[0-9;]*m/g, '');
