@@ -49,7 +49,7 @@ const dbConnectTool = defineTool()
     .name('db_connect')
     .description('Connect to a database using alias from configuration. Database config should be set via DB_{ALIAS}_* environment variables.')
     .category('database')
-    .stringParam('alias', 'Database alias (e.g., CRRU_ORACLE, DEFAULT)', { required: true })
+    .stringParam('alias', 'Database alias (e.g., APP_ORACLE, DEFAULT)', { required: true })
     .handler(async (params, context) => {
         const alias = params.alias as string;
         context.log('info', `Connecting to database: ${alias}`);

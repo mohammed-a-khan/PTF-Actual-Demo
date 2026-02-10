@@ -148,19 +148,19 @@ General:
 
 Examples:
   # Run BDD tests (feature files)
-  npx cs-playwright-test --project=crru --features=test/crru/features/*.feature
+  npx cs-playwright-test --project=myproject --features=test/myproject/features/*.feature
 
-  # Run Spec tests (describe/it format)
-  npx cs-playwright-test --project=crru --specs=test/crru/specs/**/*.spec.ts
+  # Run Spec tests (describe/test format)
+  npx cs-playwright-test --project=myproject --specs=test/myproject/specs/**/*.spec.ts
 
   # Run specific test in spec file
-  npx cs-playwright-test --project=crru --specs=test/crru/specs/login.spec.ts --test="should login"
+  npx cs-playwright-test --project=myproject --specs=test/myproject/specs/login.spec.ts --test="should login"
 
   # Run multiple specific tests (comma-separated)
-  npx cs-playwright-test --project=crru --specs=test/crru/specs/**/*.spec.ts --test="should login,should logout,should register"
+  npx cs-playwright-test --project=myproject --specs=test/myproject/specs/**/*.spec.ts --test="should login,should logout,should register"
 
   # Run tests matching pattern (regex)
-  npx cs-playwright-test --project=crru --specs=test/crru/specs/**/*.spec.ts --grep="login|logout"
+  npx cs-playwright-test --project=myproject --specs=test/myproject/specs/**/*.spec.ts --grep="login|logout"
 
   # Run multi-project suite
   npx cs-playwright-test --suite=multi-project

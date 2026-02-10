@@ -30,7 +30,7 @@ export class CSMCPToolRegistry {
         const categories: ToolCategory[] = [
             'browser', 'bdd', 'database', 'api', 'network',
             'analytics', 'security', 'cicd', 'environment',
-            'generation', 'multiagent'
+            'generation', 'multiagent', 'exploration', 'testing'
         ];
         for (const category of categories) {
             this.toolsByCategory.set(category, []);

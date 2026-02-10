@@ -461,7 +461,8 @@ export type ToolCategory =
     | 'environment'
     | 'generation'
     | 'multiagent'
-    | 'exploration';
+    | 'exploration'
+    | 'testing';
 
 export interface MCPToolDefinition {
     tool: MCPTool;

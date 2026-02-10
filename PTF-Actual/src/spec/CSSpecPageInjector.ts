@@ -163,7 +163,7 @@ export class CSSpecPageInjector {
      * Handles various formats and normalizes to proper camelCase with "Page" suffix
      *
      * Examples:
-     *   "crru-deal-details" → "dealDetailsPage"
+     *   "app-deal-details" → "dealDetailsPage"
      *   "login" → "loginPage"
      *   "loginpage" → "loginPage" (normalizes lowercase 'page')
      *   "login.page" → "loginPage" (handles dots)
@@ -171,7 +171,7 @@ export class CSSpecPageInjector {
      *   "LOGINPAGE" → "loginPage" (handles all uppercase)
      */
     private pageNameToFixtureName(pageName: string): string {
-        // Remove project prefix if present (e.g., "crru-" → "")
+        // Remove project prefix if present (e.g., "myapp-" → "")
         const project = this.config.get('PROJECT', '');
         let cleanName = pageName;
         if (project && cleanName.startsWith(`${project}-`)) {

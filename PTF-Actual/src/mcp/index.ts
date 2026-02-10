@@ -26,6 +26,7 @@ export { environmentTools, registerEnvironmentTools } from './tools/environment/
 export { generationTools, registerGenerationTools } from './tools/generation/CSMCPGenerationTools';
 export { explorationTools, registerExplorationTools } from './tools/exploration/CSMCPExplorationTools';
 export { codegenTools, registerCodegenTools } from './tools/codegen/CSMCPCodegenTools';
+export { testingTools, registerTestingTools } from './tools/testing/CSMCPTestingTools';
 
 // Export resources and prompts
 export { resourceDefinitions, resourceTemplateDefinitions, registerResources } from './resources/CSMCPResources';
@@ -48,6 +49,7 @@ import { registerEnvironmentTools } from './tools/environment/CSMCPEnvironmentTo
 import { registerGenerationTools } from './tools/generation/CSMCPGenerationTools';
 import { registerExplorationTools } from './tools/exploration/CSMCPExplorationTools';
 import { registerCodegenTools } from './tools/codegen/CSMCPCodegenTools';
+import { registerTestingTools } from './tools/testing/CSMCPTestingTools';
 import { registerResources } from './resources/CSMCPResources';
 import { registerPrompts } from './prompts/CSMCPPrompts';
 
@@ -66,7 +68,8 @@ export type ToolCategory =
     | 'environment'
     | 'generation'
     | 'exploration'
-    | 'codegen';
+    | 'codegen'
+    | 'testing';
 
 /**
  * Create and configure a fully-loaded MCP server with all tools
@@ -88,6 +91,7 @@ export function createFullMCPServer(config?: CSMCPServerConfig): CSMCPServer {
     registerGenerationTools(registry);
     registerExplorationTools(registry);
     registerCodegenTools(registry);
+    registerTestingTools(registry);
 
     // Register resources and prompts
     registerResources(server);
@@ -119,6 +123,7 @@ export function createMCPServerWithTools(
         generation: () => registerGenerationTools(registry),
         exploration: () => registerExplorationTools(registry),
         codegen: () => registerCodegenTools(registry),
+        testing: () => registerTestingTools(registry),
     };
 
     for (const category of toolCategories) {
@@ -147,6 +152,7 @@ export function getTotalToolCount(): number {
         require('./tools/generation/CSMCPGenerationTools').generationTools,
         require('./tools/exploration/CSMCPExplorationTools').explorationTools,
         require('./tools/codegen/CSMCPCodegenTools').codegenTools,
+        require('./tools/testing/CSMCPTestingTools').testingTools,
     ];
     return allTools.reduce((sum, tools) => sum + tools.length, 0);
 }

@@ -63,6 +63,21 @@ function toKebabCase(str: string): string {
         .toLowerCase();
 }
 
+/**
+ * Escape a string for use inside double-quoted TypeScript strings.
+ * XPath locators commonly contain single quotes, so we use double quotes for locator values.
+ */
+function escapeForDoubleQuote(s: string): string {
+    return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+/**
+ * Escape a string for use inside single-quoted TypeScript strings.
+ */
+function escapeForSingleQuote(s: string): string {
+    return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
 // ============================================================================
 // Page Object Generation Tools
 // ============================================================================
@@ -71,8 +86,8 @@ const generatePageObjectTool = defineTool()
     .name('generate_page_object')
     .description('Generate a Page Object class following PTF-ADO patterns with @CSPage and @CSGetElement decorators')
     .category('generation')
-    .stringParam('pageName', 'Page name (e.g., "DealDetails", "ReferenceRates")', { required: true })
-    .stringParam('projectPrefix', 'Project prefix (e.g., "CRRU", "MyApp")', { required: true })
+    .stringParam('pageName', 'Page name (e.g., "Login", "Dashboard", "DealDetails")', { required: true })
+    .stringParam('projectPrefix', 'Project prefix (e.g., "MyApp", "App")', { required: true })
     .arrayParam('elements', 'Element definitions array', 'object', { required: true })
     .stringParam('pageUrl', 'Page URL path')
     .stringParam('outputPath', 'Output file path')
@@ -93,24 +108,26 @@ const generatePageObjectTool = defineTool()
         const pageUrl = params.pageUrl as string | undefined;
         const outputPath = params.outputPath as string | undefined;
 
-        context.log('info', `Generating page object: ${projectPrefix}${pageName}Page`);
-
-        const className = `${projectPrefix}${toPascalCase(pageName)}Page`;
-        const pageId = `${toKebabCase(projectPrefix)}-${toKebabCase(pageName)}`;
+        // Strip trailing "Page" from pageName to avoid double suffix, PascalCase the prefix
+        const cleanPageName = pageName.replace(/Page$/i, '');
+        const className = `${toPascalCase(projectPrefix)}${toPascalCase(cleanPageName)}Page`;
+        const pageId = `${toKebabCase(projectPrefix)}-${toKebabCase(cleanPageName)}`;
         const fileName = `${className}.ts`;
+
+        context.log('info', `Generating page object: ${className}`);
 
         // Generate element declarations
         const elementDeclarations = elements.map(el => {
             const decoratorName = el.isMultiple ? '@CSGetElements' : '@CSGetElement';
             const locatorKey = el.locatorType || 'xpath';
-            const options: string[] = [`${locatorKey}: '${el.locator}'`];
+            const options: string[] = [`${locatorKey}: "${escapeForDoubleQuote(el.locator)}"`];
 
-            if (el.description) options.push(`description: '${el.description}'`);
+            if (el.description) options.push(`description: '${escapeForSingleQuote(el.description)}'`);
             if (el.waitForVisible) options.push('waitForVisible: true');
             if (el.waitForEnabled) options.push('waitForEnabled: true');
             if (el.selfHeal) options.push('selfHeal: true');
             if (el.alternativeLocators?.length) {
-                options.push(`alternativeLocators: [${el.alternativeLocators.map(l => `'${l}'`).join(', ')}]`);
+                options.push(`alternativeLocators: [${el.alternativeLocators.map(l => `"${escapeForDoubleQuote(l)}"`).join(', ')}]`);
             }
 
             const elementType = el.isMultiple ? 'CSWebElement[]' : 'CSWebElement';
@@ -127,6 +144,7 @@ const generatePageObjectTool = defineTool()
             .map(el => {
                 const methodName = toCamelCase(el.name);
                 const pascalName = toPascalCase(el.name);
+                const desc = escapeForSingleQuote(el.description || el.name);
 
                 // Determine element type from locator or name
                 const isButton = /button|btn|submit|click/i.test(el.name) || /button/i.test(el.locator);
@@ -138,34 +156,34 @@ const generatePageObjectTool = defineTool()
 
                 if (isButton) {
                     methods.push(`    /**
-     * Click ${el.description || el.name}
+     * Click ${desc}
      */
     async click${pascalName}(): Promise<void> {
-        CSReporter.info('Clicking ${el.description || el.name}');
+        CSReporter.info('Clicking ${desc}');
         await this.${methodName}.click();
-        CSReporter.pass('Clicked ${el.description || el.name}');
+        CSReporter.pass('Clicked ${desc}');
     }`);
                 }
 
                 if (isInput) {
                     methods.push(`    /**
-     * Fill ${el.description || el.name} with value
+     * Fill ${desc} with value
      */
     async fill${pascalName}(value: string): Promise<void> {
-        CSReporter.info(\`Filling ${el.description || el.name} with: \${value}\`);
+        CSReporter.info(\`Filling ${desc} with: \${value}\`);
         await this.${methodName}.fill(value);
-        CSReporter.pass('Filled ${el.description || el.name}');
+        CSReporter.pass('Filled ${desc}');
     }
 
     /**
-     * Get value from ${el.description || el.name}
+     * Get value from ${desc}
      */
     async get${pascalName}Value(): Promise<string> {
         return await this.${methodName}.getInputValue();
     }
 
     /**
-     * Clear ${el.description || el.name}
+     * Clear ${desc}
      */
     async clear${pascalName}(): Promise<void> {
         await this.${methodName}.fill('');
@@ -174,18 +192,18 @@ const generatePageObjectTool = defineTool()
 
                 if (isDropdown) {
                     methods.push(`    /**
-     * Select option in ${el.description || el.name}
+     * Select option in ${desc}
      */
     async select${pascalName}(value: string): Promise<void> {
-        CSReporter.info(\`Selecting '\${value}' in ${el.description || el.name}\`);
+        CSReporter.info(\`Selecting '\${value}' in ${desc}\`);
         await this.${methodName}.selectOption(value);
-        CSReporter.pass(\`Selected '\${value}' in ${el.description || el.name}\`);
+        CSReporter.pass(\`Selected '\${value}' in ${desc}\`);
     }`);
                 }
 
                 if (isCheckbox) {
                     methods.push(`    /**
-     * Check/Uncheck ${el.description || el.name}
+     * Check/Uncheck ${desc}
      */
     async set${pascalName}Checked(checked: boolean): Promise<void> {
         if (checked) {
@@ -196,7 +214,7 @@ const generatePageObjectTool = defineTool()
     }
 
     /**
-     * Get checked state of ${el.description || el.name}
+     * Get checked state of ${desc}
      */
     async is${pascalName}Checked(): Promise<boolean> {
         return await this.${methodName}.isChecked();
@@ -205,14 +223,14 @@ const generatePageObjectTool = defineTool()
 
                 // Always add visibility check
                 methods.push(`    /**
-     * Verify ${el.description || el.name} is visible
+     * Verify ${desc} is visible
      */
     async verify${pascalName}IsVisible(): Promise<void> {
         const isVisible = await this.${methodName}.isVisible();
         if (!isVisible) {
-            throw new Error('${el.description || el.name} is not visible');
+            throw new Error('${desc} is not visible');
         }
-        CSReporter.pass('${el.description || el.name} is visible');
+        CSReporter.pass('${desc} is visible');
     }`);
 
                 return methods.join('\n\n');
@@ -252,7 +270,7 @@ ${elementDeclarations}
      * Navigate to this page
      */
     async navigate(): Promise<void> {
-        ${pageUrl ? `await super.navigate('${pageUrl}');` : '// Define navigation URL in config or override this method'}
+        ${pageUrl ? `await super.navigate('${escapeForSingleQuote(pageUrl)}');` : '// Define navigation URL in config or override this method'}
         await this.waitForPageLoad();
     }
 
@@ -313,7 +331,7 @@ const generateStepDefinitionsTool = defineTool()
     .description('Generate step definitions class following PTF-ADO patterns with @StepDefinitions and @CSBDDStepDef decorators')
     .category('generation')
     .stringParam('className', 'Step definitions class name', { required: true })
-    .stringParam('projectPrefix', 'Project prefix (e.g., "CRRU")', { required: true })
+    .stringParam('projectPrefix', 'Project prefix (e.g., "myapp")', { required: true })
     .arrayParam('pageObjects', 'Page objects to inject', 'string', { required: true })
     .arrayParam('steps', 'Step definitions', 'object', { required: true })
     .stringParam('outputPath', 'Output file path')
@@ -347,23 +365,78 @@ const generateStepDefinitionsTool = defineTool()
     private ${propName}!: ${pageClass};`;
         }).join('\n\n');
 
-        // Generate step definitions
+        // Build property name mapping for implementation auto-correction
+        // Maps short names (e.g., "loginPage") to full names (e.g., "orangehrmLoginPage")
+        const propertyNameMap: Record<string, string> = {};
+        const prefixPascal = toPascalCase(projectPrefix);
+        pageObjects.forEach(po => {
+            const pageClass = po.includes('Page') ? po : `${projectPrefix}${toPascalCase(po)}Page`;
+            const fullPropName = toCamelCase(po.replace(/Page$/, '')) + 'Page';
+            // If class has a prefix, map the short form to the full form
+            if (pageClass.startsWith(prefixPascal) && pageClass.length > prefixPascal.length + 4) {
+                const shortClass = pageClass.substring(prefixPascal.length);
+                const shortPropName = toCamelCase(shortClass.replace(/Page$/, '')) + 'Page';
+                if (shortPropName !== fullPropName) {
+                    propertyNameMap[shortPropName] = fullPropName;
+                }
+            }
+        });
+
+        // Generate step definitions with safe implementation
         const stepDefinitions = steps.map(step => {
-            const params = step.parameters || [];
+            const params = step.parameters ? [...step.parameters] : [];
+
+            // Auto-extract parameters from {string}/{int} in pattern if not provided
+            if (!params.length) {
+                const paramRegex = /(\w+)\s+\{(\w+)\}/g;
+                let paramMatch;
+                const usedNames = new Set<string>();
+                while ((paramMatch = paramRegex.exec(step.pattern)) !== null) {
+                    let pName = toCamelCase(paramMatch[1]);
+                    const rawType = paramMatch[2];
+                    const pType = (rawType === 'int' || rawType === 'float') ? 'number' : 'string';
+                    if (usedNames.has(pName)) { pName = `${pName}${usedNames.size + 1}`; }
+                    usedNames.add(pName);
+                    params.push({ name: pName, type: pType });
+                }
+            }
+
             const paramList = params.map(p => `${p.name}: ${p.type}`).join(', ');
             const methodName = step.pattern
+                .replace(/\{[^}]+\}/g, '') // Remove {string}, {int} placeholders
                 .replace(/[^a-zA-Z0-9\s]/g, '')
-                .split(' ')
+                .trim()
+                .split(/\s+/)
+                .filter(w => w.length > 0)
                 .map((w, i) => i === 0 ? w.toLowerCase() : toPascalCase(w))
                 .join('');
+
+            // Build safe implementation - never reference this.browserManager or this.config
+            let impl = step.implementation;
+            if (!impl || impl === 'undefined' || impl.trim() === '') {
+                impl = '// TODO: Implement using page object methods\n        // Available: page objects via this.<pageName>, this.context, this.scenarioContext, CSReporter';
+            }
+
+            // Auto-correct short property name references to full prefixed names
+            // e.g., this.loginPage → this.orangehrmLoginPage
+            for (const [shortName, fullName] of Object.entries(propertyNameMap)) {
+                impl = impl.replace(new RegExp(`this\\.${shortName}\\b`, 'g'), `this.${fullName}`);
+            }
+
+            // Remove references to this.browserManager and this.config (they don't exist on step class)
+            impl = impl.replace(/this\.browserManager\b[^;]*/g, '// browserManager not available in steps — use page object methods');
+            impl = impl.replace(/this\.config\b[^;]*/g, '// config not available in steps — use CSValueResolver.resolve()');
+
+            const escapedPattern = escapeForSingleQuote(step.pattern);
+            const escapedDesc = escapeForSingleQuote(step.description || step.pattern);
 
             return `    /**
      * ${step.description || step.pattern}
      */
-    @CSBDDStepDef('${step.pattern}')
+    @CSBDDStepDef('${escapedPattern}')
     async ${methodName}(${paramList}): Promise<void> {
-        CSReporter.info('${step.pattern}');
-        ${step.implementation || '// TODO: Implement this step'}
+        CSReporter.info('${escapedDesc}');
+        ${impl}
         CSReporter.pass('Step completed');
     }`;
         }).join('\n\n');
@@ -453,6 +526,10 @@ ${stepDefinitions}
             fileName,
             stepCount: steps.length,
             pageObjectCount: pageObjects.length,
+            pagePropertyNames: pageObjects.map(po => {
+                return toCamelCase(po.replace(/Page$/, '')) + 'Page';
+            }),
+            propertyNameCorrections: Object.keys(propertyNameMap).length > 0 ? propertyNameMap : undefined,
             code,
             outputPath: outputPath || null,
         });
@@ -465,30 +542,41 @@ ${stepDefinitions}
 
 const generateFeatureFileTool = defineTool()
     .name('generate_feature_file')
-    .description('Generate a Gherkin feature file following PTF-ADO patterns with data source integration')
+    .description('Generate a Gherkin feature file following PTF-ADO patterns with Background, comments, and JSON data source integration')
     .category('generation')
     .stringParam('featureName', 'Feature name', { required: true })
-    .stringParam('description', 'Feature description', { required: true })
+    .stringParam('description', 'Feature description (supports multi-line: "As a user\\nI want to...\\nSo that...")', { required: true })
     .arrayParam('tags', 'Feature-level tags', 'string')
+    .arrayParam('background', 'Background steps (run before every scenario)', 'object')
     .arrayParam('scenarios', 'Scenario definitions', 'object', { required: true })
-    .stringParam('dataSourcePath', 'Path to data source file for Examples')
+    .stringParam('dataSourcePath', 'Default data source path for Scenario Outlines (can be overridden per scenario)')
+    .stringParam('dataSourceFilter', 'Default filter expression (default: "runFlag=Yes")')
     .stringParam('outputPath', 'Output file path')
     .handler(async (params, context) => {
         const featureName = params.featureName as string;
         const description = params.description as string;
         const tags = params.tags as string[] || [];
+        const background = params.background as Array<{
+            keyword: 'Given' | 'When' | 'Then' | 'And' | 'But';
+            text: string;
+            comment?: string;
+        }> | undefined;
         const scenarios = params.scenarios as Array<{
             name: string;
             tags?: string[];
             steps: Array<{
                 keyword: 'Given' | 'When' | 'Then' | 'And' | 'But';
                 text: string;
+                comment?: string;
                 dataTable?: string[][];
             }>;
             isOutline?: boolean;
             examples?: Record<string, string>[];
+            dataSourcePath?: string;
+            dataSourceFilter?: string;
         }>;
-        const dataSourcePath = params.dataSourcePath as string | undefined;
+        const defaultDataSourcePath = params.dataSourcePath as string | undefined;
+        const defaultDataSourceFilter = params.dataSourceFilter as string || 'runFlag=Yes';
         const outputPath = params.outputPath as string | undefined;
 
         context.log('info', `Generating feature: ${featureName}`);
@@ -499,25 +587,48 @@ const generateFeatureFileTool = defineTool()
         const formatTags = (tagList: string[]) =>
             tagList.map(t => t.startsWith('@') ? t : `@${t}`).join(' ');
 
+        // Format a step line with optional comment
+        const formatStep = (step: { keyword: string; text: string; comment?: string; dataTable?: string[][] }) => {
+            const lines: string[] = [];
+            if (step.comment) {
+                // Support multi-line comments (split by \n)
+                const commentLines = step.comment.split('\n');
+                commentLines.forEach(c => lines.push(`    # ${c}`));
+            }
+            lines.push(`    ${step.keyword} ${step.text}`);
+            if (step.dataTable) {
+                const tableRows = step.dataTable.map(row =>
+                    `      | ${row.join(' | ')} |`
+                ).join('\n');
+                lines.push(tableRows);
+            }
+            return lines.join('\n');
+        };
+
+        // Format description — support multi-line with proper indentation
+        const descLines = description.split('\n').map(line => `  ${line}`).join('\n');
+
+        // Generate Background section
+        let backgroundSection = '';
+        if (background && background.length > 0) {
+            const bgSteps = background.map(step => formatStep(step)).join('\n');
+            backgroundSection = `\n  Background:\n${bgSteps}\n`;
+        }
+
         // Generate scenarios
         const scenarioTexts = scenarios.map(scenario => {
             const scenarioType = scenario.isOutline ? 'Scenario Outline' : 'Scenario';
             const scenarioTags = scenario.tags ? `  ${formatTags(scenario.tags)}\n` : '';
 
-            const steps = scenario.steps.map(step => {
-                let stepText = `    ${step.keyword} ${step.text}`;
-                if (step.dataTable) {
-                    const tableRows = step.dataTable.map(row =>
-                        `      | ${row.join(' | ')} |`
-                    ).join('\n');
-                    stepText += `\n${tableRows}`;
-                }
-                return stepText;
-            }).join('\n');
+            const steps = scenario.steps.map(step => formatStep(step)).join('\n');
 
+            // Build Examples section for Scenario Outline
             let examples = '';
-            if (scenario.isOutline && dataSourcePath) {
-                examples = `\n\n    Examples: {"type": "json", "source": "${dataSourcePath}", "path": "$", "filter": "runFlag=Yes"}`;
+            const scenarioDataPath = scenario.dataSourcePath || defaultDataSourcePath;
+            const scenarioFilter = scenario.dataSourceFilter || defaultDataSourceFilter;
+
+            if (scenario.isOutline && scenarioDataPath) {
+                examples = `\n\n    Examples: {"type": "json", "source": "${scenarioDataPath}", "path": "$", "filter": "${scenarioFilter}"}`;
             } else if (scenario.isOutline && scenario.examples?.length) {
                 const headers = Object.keys(scenario.examples[0]);
                 const headerRow = `      | ${headers.join(' | ')} |`;
@@ -525,6 +636,9 @@ const generateFeatureFileTool = defineTool()
                     `      | ${headers.map(h => ex[h]).join(' | ')} |`
                 ).join('\n');
                 examples = `\n\n    Examples:\n${headerRow}\n${dataRows}`;
+            } else if (scenario.isOutline) {
+                // Scenario Outline without Examples is invalid — add a warning comment
+                examples = '\n\n    # WARNING: Scenario Outline requires an Examples section — provide dataSourcePath or inline examples';
             }
 
             return `${scenarioTags}  ${scenarioType}: ${scenario.name}\n${steps}${examples}`;
@@ -532,8 +646,8 @@ const generateFeatureFileTool = defineTool()
 
         const code = `${formatTags(tags)}
 Feature: ${featureName}
-  ${description}
-
+${descLines}
+${backgroundSection}
 ${scenarioTexts}
 `;
 
@@ -565,12 +679,14 @@ ${scenarioTexts}
 
 const generateSpecTestTool = defineTool()
     .name('generate_spec_test')
-    .description('Generate a spec test file (describe/it format) following PTF-ADO patterns')
+    .description('Generate a spec test file (describe/test format) following CS Playwright framework patterns with auto-injected fixtures')
     .category('generation')
     .stringParam('suiteName', 'Test suite name', { required: true })
     .stringParam('projectPrefix', 'Project prefix', { required: true })
-    .arrayParam('pageObjects', 'Page objects to use', 'string')
-    .arrayParam('tests', 'Test case definitions', 'object', { required: true })
+    .arrayParam('pageObjects', 'Page objects to use (e.g., ["LoginPage", "DashboardPage"])', 'string')
+    .arrayParam('tests', 'Test case definitions with steps containing description and code', 'object', { required: true })
+    .arrayParam('tags', 'Suite-level tags (e.g., ["@smoke", "@login"])', 'string')
+    .stringParam('mode', 'Execution mode: serial, parallel, or default', { default: 'default' })
     .stringParam('outputPath', 'Output file path')
     .handler(async (params, context) => {
         const suiteName = params.suiteName as string;
@@ -580,59 +696,58 @@ const generateSpecTestTool = defineTool()
             name: string;
             tags?: string[];
             steps: Array<{ description: string; code: string }>;
-            dataProvider?: { name: string; data: Record<string, unknown>[] };
+            dataSource?: { type: string; source: string; filter?: string };
         }>;
+        const suiteTags = params.tags as string[] || [];
+        const mode = params.mode as string || 'default';
         const outputPath = params.outputPath as string | undefined;
 
         context.log('info', `Generating spec test: ${suiteName}`);
 
         const fileName = `${toKebabCase(suiteName)}.spec.ts`;
 
-        // Generate imports
-        const pageImports = pageObjects.map(po => {
-            const pageClass = po.includes('Page') ? po : `${projectPrefix}${toPascalCase(po)}Page`;
-            return `import { ${pageClass} } from '../pages/${pageClass}';`;
-        }).join('\n');
+        // Derive fixture names from page objects (LoginPage → loginPage, DashboardPage → dashboardPage)
+        const fixtureNames = pageObjects.map(po => {
+            const clean = po.replace(/Page$/, '');
+            return toCamelCase(clean) + 'Page';
+        });
 
-        // Generate page object declarations
-        const pageDeclarations = pageObjects.map(po => {
-            const pageClass = po.includes('Page') ? po : `${projectPrefix}${toPascalCase(po)}Page`;
-            const varName = toCamelCase(po.replace(/Page$/, '')) + 'Page';
-            return `    let ${varName}: ${pageClass};`;
-        }).join('\n');
+        // Build describe method based on mode
+        const describeMethod = mode === 'serial' ? 'describe.serial' : mode === 'parallel' ? 'describe.parallel' : 'describe';
 
-        // Generate page object initializations
-        const pageInits = pageObjects.map(po => {
-            const pageClass = po.includes('Page') ? po : `${projectPrefix}${toPascalCase(po)}Page`;
-            const varName = toCamelCase(po.replace(/Page$/, '')) + 'Page';
-            return `        ${varName} = new ${pageClass}();`;
-        }).join('\n');
+        // Build tags string for describe options
+        const tagsStr = suiteTags.length > 0
+            ? suiteTags.map(t => t.startsWith('@') ? `'${t}'` : `'@${t}'`).join(', ')
+            : '';
 
-        // Generate test cases
-        const testCases = tests.map(test => {
-            const tags = test.tags?.length ? ` ${test.tags.map(t => `@${t}`).join(' ')}` : '';
-            const steps = test.steps.map(step =>
-                `        // ${step.description}\n        ${step.code}`
-            ).join('\n\n');
+        // Generate test cases using CS framework pattern
+        const testCases = tests.map(tc => {
+            // Build test-level tags
+            const testTags = tc.tags?.length
+                ? tc.tags.map(t => t.startsWith('@') ? `'${t}'` : `'@${t}'`).join(', ')
+                : '';
 
-            if (test.dataProvider) {
-                return `    it.each(${JSON.stringify(test.dataProvider.data, null, 8)})('${test.name}${tags}', async (${test.dataProvider.name}, testInfo) => {
-        CSReporter.startTest(\`${test.name} - \${JSON.stringify(${test.dataProvider.name})}\`);
+            // Build test steps using test.step()
+            const steps = (tc.steps || []).map(step => {
+                const desc = step.description || 'Step';
+                const code = step.code || '// TODO: implement this step';
+                return `        await test.step('${desc.replace(/'/g, "\\'")}', async () => {\n            ${code}\n        });`;
+            }).join('\n\n');
 
-${steps}
+            // Common fixtures to destructure in test callback
+            const testFixtures = [...fixtureNames, 'reporter'].join(', ');
 
-        CSReporter.endTest('pass');
-    });`;
+            // Test with options (tags)
+            if (testTags) {
+                return `    test('${tc.name}', {\n        tags: [${testTags}],\n    }, async ({ ${testFixtures} }) => {\n${steps}\n    });`;
             }
 
-            return `    it('${test.name}${tags}', async (testInfo) => {
-        CSReporter.startTest('${test.name}');
-
-${steps}
-
-        CSReporter.endTest('pass');
-    });`;
+            // Test without options
+            return `    test('${tc.name}', async ({ ${testFixtures} }) => {\n${steps}\n    });`;
         }).join('\n\n');
+
+        // Build describe options
+        const describeOptions = tagsStr ? `{\n    tags: [${tagsStr}],\n}, ` : '';
 
         const code = `/**
  * ${suiteName}
@@ -642,27 +757,12 @@ ${steps}
  * @generated ${new Date().toISOString()}
  */
 
-import { describe, it, beforeEach, afterEach, expect } from '@playwright/test';
-import { CSBrowserManager } from '@mdakhan.mak/cs-playwright-test-framework/browser';
-import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
-import { CSConfigurationManager } from '@mdakhan.mak/cs-playwright-test-framework/core';
+import { describe, test, beforeEach, afterEach } from '@mdakhan.mak/cs-playwright-test-framework/spec';
 
-${pageImports}
+${describeMethod}('${suiteName}', ${describeOptions}() => {
 
-describe('${suiteName}', () => {
-    // ========================================================================
-    // Test Setup
-    // ========================================================================
-
-${pageDeclarations}
-
-    beforeEach(async () => {
-        // Initialize page objects
-${pageInits}
-    });
-
-    afterEach(async () => {
-        // Cleanup if needed
+    beforeEach('Setup', async ({ reporter }) => {
+        reporter.info('Starting test setup');
     });
 
     // ========================================================================
@@ -701,10 +801,10 @@ ${testCases}
 
 const generateDatabaseHelperTool = defineTool()
     .name('generate_database_helper')
-    .description('Generate a database helper class following PTF-ADO patterns like CRRUDatabaseHelper')
+    .description('Generate a database helper class following PTF-ADO patterns')
     .category('generation')
     .stringParam('className', 'Helper class name', { required: true })
-    .stringParam('dbAlias', 'Database alias (e.g., "CRRU_ORACLE")', { required: true })
+    .stringParam('dbAlias', 'Database alias (e.g., "APP_ORACLE", "DEFAULT")', { required: true })
     .arrayParam('methods', 'Method definitions', 'object', { required: true })
     .stringParam('outputPath', 'Output file path')
     .handler(async (params, context) => {

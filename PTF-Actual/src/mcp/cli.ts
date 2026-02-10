@@ -4,14 +4,16 @@
  * Command-line interface for starting the MCP server
  *
  * Usage:
- *   npx cs-playwright-mcp                    # Start with all tools
- *   npx cs-playwright-mcp --tools browser,bdd  # Start with specific tools
- *   npx cs-playwright-mcp --help             # Show help
+ *   npx cs-playwright-mcp                         # Start with all tools
+ *   npx cs-playwright-mcp --tools browser,bdd     # Start with specific tools
+ *   npx cs-playwright-mcp init-agents --loop=vscode  # Initialize agents
+ *   npx cs-playwright-mcp --help                  # Show help
  *
  * @module CSMCPCLI
  */
 
 import { createFullMCPServer, createMCPServerWithTools, CSMCPServerConfig, ToolCategory } from './index';
+import { generateAgents } from './agents/generateAgents';
 
 // ============================================================================
 // CLI Argument Parsing
@@ -19,7 +21,7 @@ import { createFullMCPServer, createMCPServerWithTools, CSMCPServerConfig, ToolC
 
 const VALID_TOOLS: ToolCategory[] = [
     'browser', 'bdd', 'database', 'cicd', 'network',
-    'analytics', 'security', 'multiagent', 'environment', 'generation', 'exploration'
+    'analytics', 'security', 'multiagent', 'environment', 'generation', 'exploration', 'testing'
 ];
 
 interface CLIOptions {
@@ -94,7 +96,13 @@ Zero-dependency implementation using only Node.js built-ins.
 140+ tools across 10 categories for comprehensive test automation.
 
 Usage:
-  cs-playwright-mcp [options]
+  cs-playwright-mcp [options]              # Start MCP server
+  cs-playwright-mcp init-agents [options]  # Initialize AI agents
+
+Commands:
+  init-agents     Initialize Playwright Test Agents (Planner, Generator, Healer)
+                  Use --loop=vscode|claude|opencode to specify IDE
+                  Example: cs-playwright-mcp init-agents --loop=vscode
 
 Options:
   -h, --help              Show this help message
@@ -102,7 +110,7 @@ Options:
   -t, --tools <list>      Tool categories to enable (comma-separated)
                           Options: browser, bdd, database, cicd, network,
                                    analytics, security, multiagent,
-                                   environment, generation, all
+                                   environment, generation, testing, all
                           Default: all
   -l, --log-level <level> Logging level: debug, info, warning, error
                           Default: info
@@ -141,6 +149,8 @@ Tool Categories:
                  19 tools for test environment control
   generation   - Code generation tools (page objects, tests, selectors)
                  10 tools for automation
+  testing      - Test execution tools (run, list, debug, heal)
+                 5 tools for Playwright agents (Planner, Generator, Healer)
 
 Protocol:
   This server implements the Model Context Protocol (MCP) specification.
@@ -161,11 +171,106 @@ Configuration:
 const VERSION = '1.0.0';
 
 // ============================================================================
+// Init Agents Command
+// ============================================================================
+
+function handleInitAgents(args: string[]): void {
+    let loop: 'vscode' | 'claude' | 'opencode' = 'vscode';
+    let force = false;
+    let targetDir = process.cwd();
+
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+
+        if (arg === '--loop' || arg === '-l') {
+            const loopArg = args[++i];
+            if (['vscode', 'claude', 'opencode'].includes(loopArg)) {
+                loop = loopArg as typeof loop;
+            }
+        } else if (arg.startsWith('--loop=')) {
+            const loopArg = arg.split('=')[1];
+            if (['vscode', 'claude', 'opencode'].includes(loopArg)) {
+                loop = loopArg as typeof loop;
+            }
+        } else if (arg === '--force' || arg === '-f') {
+            force = true;
+        } else if (arg === '--help' || arg === '-h') {
+            console.log(`
+CS Playwright Agent Generator
+==============================
+
+Initialize AI agent definitions for your test project.
+
+Usage:
+  cs-playwright-mcp init-agents [options]
+
+Options:
+  --loop, -l <type>   IDE/client type: vscode, claude, opencode (default: vscode)
+  --force, -f         Overwrite existing files
+  --help, -h          Show this help message
+
+Examples:
+  cs-playwright-mcp init-agents --loop=vscode
+  cs-playwright-mcp init-agents --loop=claude --force
+
+Generated Files:
+  .github/chatmodes/    Agent definition files for your IDE
+  .vscode/mcp.json      MCP server configuration (for VS Code)
+  specs/                Test plan directory for Planner agent
+  seed.spec.ts          Seed test file for agents
+
+Agents:
+  - Planner:   Explores apps and generates test plans
+  - Generator: Converts plans to Playwright tests
+  - Healer:    Debugs and fixes failing tests
+`);
+            process.exit(0);
+        } else if (!arg.startsWith('-')) {
+            targetDir = arg;
+        }
+    }
+
+    console.log(`
+CS Playwright Agent Generator
+==============================
+Loop type: ${loop}
+Target: ${targetDir}
+`);
+
+    const { files, errors } = generateAgents(targetDir, loop, { force });
+
+    if (errors.length > 0) {
+        console.error('\nErrors:');
+        for (const error of errors) {
+            console.error(`  - ${error}`);
+        }
+    }
+
+    console.log(`
+Done! Generated ${files.length} files.
+
+Next steps:
+1. Open your IDE (${loop === 'vscode' ? 'VS Code' : loop === 'claude' ? 'Claude Code' : 'OpenCode'})
+2. Start a chat with the Planner agent to create a test plan
+3. Use the Generator agent to create tests from the plan
+4. Use the Healer agent to fix any failing tests
+`);
+    process.exit(errors.length > 0 ? 1 : 0);
+}
+
+// ============================================================================
 // Main Entry Point
 // ============================================================================
 
 function main(): void {
     const args = process.argv.slice(2);
+
+    // Check for init-agents command
+    if (args[0] === 'init-agents') {
+        handleInitAgents(args.slice(1));
+        return;
+    }
+
     const options = parseArgs(args);
 
     // Handle help

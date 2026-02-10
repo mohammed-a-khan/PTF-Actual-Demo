@@ -708,8 +708,14 @@ export class TestSynthesizer {
         const elementDeclarations = elements.map(el => {
             const name = this.generateElementName(el);
             const locator = this.getLocatorString(el);
-            return `    @CSGetElement('${locator}')
-    ${name}!: CSWebElement;`;
+            const locatorType = this.getLocatorType(el);
+            const description = el.label || el.ariaLabel || el.text || el.type;
+            return `    @CSGetElement({
+        ${locatorType}: '${locator.replace(/'/g, "\\'")}',
+        description: '${(description || name).replace(/'/g, "\\'")}',
+        waitForVisible: true
+    })
+    public ${name}!: CSWebElement;`;
         }).join('\n\n');
 
         // Generate methods based on forms
@@ -746,11 +752,11 @@ ${submitLine}
  * Generated from exploration on ${new Date().toISOString()}
  */
 
-import { CSBasePage } from '../../core/CSBasePage';
-import { CSWebElement } from '../../core/CSWebElement';
-import { CSGetElement, CSPage } from '../../decorators';
+import { CSBasePage, CSPage, CSGetElement } from '@mdakhan.mak/cs-playwright-test-framework/core';
+import { CSWebElement } from '@mdakhan.mak/cs-playwright-test-framework/element';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
 
-@CSPage('${pageName}')
+@CSPage('${this.toKebabCase(pageName)}')
 export class ${pageName} extends CSBasePage {
 ${elementDeclarations}
 ${methods.join('\n')}
@@ -850,11 +856,27 @@ ${scenarios}
  * Auto-generated from exploration on ${new Date().toISOString()}
  */
 
-import { Given, When, Then } from '@cucumber/cucumber';
-import { expect } from '@playwright/test';
-import { CSScenarioContext } from '../../bdd/CSScenarioContext';
+import { StepDefinitions, Page, CSBDDStepDef, Given, When, Then } from '@mdakhan.mak/cs-playwright-test-framework/bdd';
+import { CSBDDContext, CSScenarioContext } from '@mdakhan.mak/cs-playwright-test-framework/bdd';
+import { CSElementFactory } from '@mdakhan.mak/cs-playwright-test-framework/element';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
+import { CSAssert } from '@mdakhan.mak/cs-playwright-test-framework/assertions';
+import { CSValueResolver } from '@mdakhan.mak/cs-playwright-test-framework/utilities';
+
+@StepDefinitions
+export class GeneratedSteps {
+    private context = CSBDDContext.getInstance();
+    private scenarioContext = CSScenarioContext.getInstance();
 
 ${stepImplementations.join('\n\n')}
+
+    /**
+     * Resolve variable from context
+     */
+    private resolve(value: string): string {
+        return CSValueResolver.resolve(value, this.context);
+    }
+}
 `;
 
         fs.writeFileSync(filePath, content);
@@ -864,39 +886,115 @@ ${stepImplementations.join('\n\n')}
     }
 
     /**
-     * Generate step implementation
+     * Generate step implementation as class method with decorator
      */
     private generateStepImplementation(keyword: string, pattern: string, step: WorkflowStep): string {
         const params = (pattern.match(/\{string\}/g) || []).map((_, i) => `param${i + 1}: string`).join(', ');
+        const methodName = this.patternToMethodName(pattern);
+        const escapedTarget = step.target?.replace(/'/g, "\\'") || '';
 
         let body = '';
         switch (step.action) {
             case 'click':
-                body = `await this.page.locator('${step.target}').click();`;
+                body = `const element = CSElementFactory.createByXPath('${escapedTarget}');\n        await element.click();`;
                 break;
             case 'fill':
-                body = `await this.page.locator('${step.target}').fill(param1);`;
+                body = `const element = CSElementFactory.createByXPath('${escapedTarget}');\n        await element.fill(param1);`;
                 break;
             case 'select':
-                body = `await this.page.locator('${step.target}').selectOption(param1);`;
+                body = `const element = CSElementFactory.createByXPath('${escapedTarget}');\n        await element.selectOption(param1);`;
                 break;
             case 'check':
-                body = `await this.page.locator('${step.target}').check();`;
+                body = `const element = CSElementFactory.createByXPath('${escapedTarget}');\n        await element.check();`;
                 break;
             case 'wait':
-                body = `await this.page.waitForLoadState('networkidle');`;
+                body = `await this.context.getBrowserManager().getCurrentPage()?.waitForLoadState('networkidle');`;
+                break;
+            case 'navigate':
+                body = `await this.context.getBrowserManager().navigateAndWaitReady('${escapedTarget}');`;
                 break;
             default:
-                body = `// TODO: Implement ${step.action} action`;
+                body = `throw new Error('Action ${step.action} not implemented');`;
         }
 
         if (step.assertion) {
-            body += `\n    ${step.assertion.playwrightCode}`;
+            body += `\n        ${this.generateAssertionCode(step.assertion)}`;
         }
 
-        return `${keyword}('${pattern}', async function(this: CSScenarioContext${params ? ', ' + params : ''}) {
-    ${body}
-});`;
+        return `    /**
+     * ${pattern}
+     */
+    @CSBDDStepDef('${pattern.replace(/'/g, "\\'")}')
+    async ${methodName}(${params}): Promise<void> {
+        CSReporter.info('${pattern.replace(/'/g, "\\'")}');
+        ${body}
+        CSReporter.pass('Step completed');
+    }`;
+    }
+
+    /**
+     * Convert step pattern to method name
+     */
+    private patternToMethodName(pattern: string): string {
+        return pattern
+            .replace(/[^a-zA-Z0-9\s]/g, '')
+            .split(' ')
+            .filter(w => w.length > 0)
+            .map((w, i) => i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+            .join('')
+            .substring(0, 50);
+    }
+
+    /**
+     * Generate assertion code from assertion definition
+     */
+    private generateAssertionCode(assertion: WorkflowStep['assertion']): string {
+        if (!assertion) return '';
+
+        const escapedTarget = assertion.target?.replace(/'/g, "\\'") || '';
+
+        switch (assertion.type) {
+            case 'visibility':
+                return `const assertElement = CSElementFactory.createByXPath('${escapedTarget}');\n        CSAssert.assertTrue(await assertElement.isVisible(), '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'text':
+                return `const assertElement = CSElementFactory.createByXPath('${escapedTarget}');\n        const actualText = await assertElement.textContent();\n        CSAssert.assertEqual(actualText, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'value':
+                return `const assertElement = CSElementFactory.createByXPath('${escapedTarget}');\n        const actualValue = await assertElement.getInputValue();\n        CSAssert.assertEqual(actualValue, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'url':
+                return `const currentUrl = this.context.getBrowserManager().getCurrentPage()?.url() || '';\n        CSAssert.assertContains(currentUrl, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'enabled':
+                return `const assertElement = CSElementFactory.createByXPath('${escapedTarget}');\n        CSAssert.assertTrue(await assertElement.isEnabled(), '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'checked':
+                return `const assertElement = CSElementFactory.createByXPath('${escapedTarget}');\n        CSAssert.assertTrue(await assertElement.isChecked(), '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            default:
+                return `// Assertion: ${assertion.gherkinStep}`;
+        }
+    }
+
+    /**
+     * Generate assertion code for spec files
+     */
+    private generateSpecAssertionCode(assertion: WorkflowStep['assertion']): string {
+        if (!assertion) return '';
+
+        const escapedTarget = assertion.target?.replace(/'/g, "\\'") || '';
+
+        switch (assertion.type) {
+            case 'visibility':
+                return `const assertEl = CSElementFactory.createByXPath('${escapedTarget}');\n        CSAssert.assertTrue(await assertEl.isVisible(), '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'text':
+                return `const assertEl = CSElementFactory.createByXPath('${escapedTarget}');\n        const text = await assertEl.textContent();\n        CSAssert.assertEqual(text, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'value':
+                return `const assertEl = CSElementFactory.createByXPath('${escapedTarget}');\n        const val = await assertEl.getInputValue();\n        CSAssert.assertEqual(val, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'url':
+                return `const url = browserManager.getCurrentPage()?.url() || '';\n        CSAssert.assertContains(url, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'enabled':
+                return `const assertEl = CSElementFactory.createByXPath('${escapedTarget}');\n        CSAssert.assertTrue(await assertEl.isEnabled(), '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            case 'selected':
+                return `const assertEl = CSElementFactory.createByXPath('${escapedTarget}');\n        CSAssert.assertTrue(await assertEl.isVisible(), '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+            default:
+                return `CSReporter.info('Assertion: ${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+        }
     }
 
     /**
@@ -923,34 +1021,39 @@ ${stepImplementations.join('\n\n')}
     private generateSpecContent(workflow: GeneratedWorkflow): string {
         const testSteps = workflow.steps.map(step => {
             let code = '';
+            const escapedTarget = step.target?.replace(/'/g, "\\'") || '';
+
             switch (step.action) {
                 case 'click':
-                    code = `await page.locator('${step.target}').click();`;
+                    code = `const clickElement = CSElementFactory.createByXPath('${escapedTarget}');\n        await clickElement.click();`;
                     break;
                 case 'fill':
                     const value = step.value?.startsWith('{')
                         ? `testData.${step.value.slice(1, -1)}`
-                        : `'${step.value}'`;
-                    code = `await page.locator('${step.target}').fill(${value});`;
+                        : `'${step.value?.replace(/'/g, "\\'") || ''}'`;
+                    code = `const fillElement = CSElementFactory.createByXPath('${escapedTarget}');\n        await fillElement.fill(${value});`;
                     break;
                 case 'select':
-                    code = `await page.locator('${step.target}').selectOption('${step.value}');`;
+                    code = `const selectElement = CSElementFactory.createByXPath('${escapedTarget}');\n        await selectElement.selectOption('${step.value?.replace(/'/g, "\\'") || ''}');`;
                     break;
                 case 'check':
-                    code = `await page.locator('${step.target}').check();`;
+                    code = `const checkElement = CSElementFactory.createByXPath('${escapedTarget}');\n        await checkElement.check();`;
                     break;
                 case 'wait':
-                    code = `await page.waitForLoadState('networkidle');`;
+                    code = `await browserManager.getCurrentPage()?.waitForLoadState('networkidle');`;
                     break;
                 case 'keyboard':
-                    code = `await page.keyboard.press('${step.target}');`;
+                    code = `await browserManager.getCurrentPage()?.keyboard.press('${escapedTarget}');`;
+                    break;
+                case 'navigate':
+                    code = `await browserManager.navigateAndWaitReady('${escapedTarget}');`;
                     break;
                 default:
-                    code = `// TODO: Implement ${step.action}`;
+                    code = `throw new Error('Action ${step.action} not implemented');`;
             }
 
             if (step.assertion) {
-                code += `\n        ${step.assertion.playwrightCode}`;
+                code += `\n        ${this.generateSpecAssertionCode(step.assertion)}`;
             }
 
             return `        // Step ${step.order}: ${step.gherkinStep}\n        ${code}`;
@@ -966,12 +1069,26 @@ ${stepImplementations.join('\n\n')}
  * Generated from exploration on ${new Date().toISOString()}
  */
 
-import { test, expect } from '@playwright/test';
+import { describe, test, beforeEach, afterEach } from '@mdakhan.mak/cs-playwright-test-framework/spec';
+import { CSElementFactory } from '@mdakhan.mak/cs-playwright-test-framework/element';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
+import { CSAssert } from '@mdakhan.mak/cs-playwright-test-framework/assertions';
 
-test.describe('${workflow.name}', () => {
+describe('${workflow.name}', {
+    tags: ['@generated', '@exploration']
+}, ({ page, browserManager, reporter }) => {
     ${testDataStr}
 
-    test('${workflow.description}', async ({ page }) => {
+    beforeEach(async () => {
+        CSReporter.info('Starting test: ${workflow.name}');
+    });
+
+    afterEach(async () => {
+        CSReporter.info('Test completed');
+    });
+
+    test('${workflow.description}', async () => {
+        // TODO: Replace raw locators with page object methods
 ${testSteps}
     });
 });
@@ -1019,19 +1136,19 @@ ${testSteps}
 
         const tests = Array.from(uniqueEndpoints.values()).map(api => {
             const testName = `${api.method} ${api.urlPattern}`;
-            const statusCheck = `expect(response.status()).toBe(${api.status});`;
 
             let bodyCheck = '';
             if (api.responseBody && typeof api.responseBody === 'object') {
                 bodyCheck = `
-        const body = await response.json();
-        expect(body).toBeDefined();`;
+        CSAssert.assertNotNull(response.body, 'Response body should not be null');`;
             }
 
             return `
-    test('${testName}', async ({ request }) => {
-        const response = await request.${api.method.toLowerCase()}('${api.url}');
-        ${statusCheck}${bodyCheck}
+    test('${testName}', async () => {
+        CSReporter.info('Testing ${api.method} ${api.urlPattern}');
+        const response = await apiClient.${api.method.toLowerCase()}('${api.url}');
+        CSAssert.assertEqual(response.status, ${api.status}, 'Expected status ${api.status}');${bodyCheck}
+        CSReporter.pass('API test passed');
     });`;
         }).join('\n');
 
@@ -1040,9 +1157,16 @@ ${testSteps}
  * Auto-generated from exploration on ${new Date().toISOString()}
  */
 
-import { test, expect } from '@playwright/test';
+import { describe, test } from '@mdakhan.mak/cs-playwright-test-framework/spec';
+import { CSAPIClient } from '@mdakhan.mak/cs-playwright-test-framework/api';
+import { CSAssert } from '@mdakhan.mak/cs-playwright-test-framework/assertions';
+import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
 
-test.describe('${resource.charAt(0).toUpperCase() + resource.slice(1)} API', () => {
+describe('${resource.charAt(0).toUpperCase() + resource.slice(1)} API', {
+    tags: ['@api', '@generated']
+}, () => {
+    const apiClient = CSAPIClient.getInstance();
+
 ${tests}
 });
 `;
@@ -1117,6 +1241,46 @@ ${tests}
         };
 
         return samples[fieldType] || 'test value';
+    }
+
+    /**
+     * Get the appropriate locator type for @CSGetElement decorator
+     */
+    private getLocatorType(element: InteractiveElement): string {
+        const bestLocator = element.locators[0];
+        if (!bestLocator) return 'xpath';
+
+        switch (bestLocator.type) {
+            case 'testid':
+                return 'testId';
+            case 'id':
+                return 'css';
+            case 'css':
+                return 'css';
+            case 'xpath':
+                return 'xpath';
+            case 'text':
+                return 'text';
+            case 'role':
+                return 'role';
+            case 'label':
+                return 'label';
+            case 'placeholder':
+                return 'placeholder';
+            default:
+                return 'xpath';
+        }
+    }
+
+    /**
+     * Convert string to kebab-case for page IDs
+     */
+    private toKebabCase(str: string): string {
+        return str
+            .replace(/([a-z])([A-Z])/g, '$1-$2')
+            .replace(/[\s_]+/g, '-')
+            .replace(/Page$/i, '')
+            .toLowerCase();
     }
 }
 
