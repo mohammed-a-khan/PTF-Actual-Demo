@@ -959,7 +959,7 @@ ${stepImplementations.join('\n\n')}
             case 'text':
                 return `const assertElement = CSElementFactory.createByXPath('${escapedTarget}');\n        const actualText = await assertElement.textContent();\n        CSAssert.assertEqual(actualText, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
             case 'value':
-                return `const assertElement = CSElementFactory.createByXPath('${escapedTarget}');\n        const actualValue = await assertElement.getInputValue();\n        CSAssert.assertEqual(actualValue, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+                return `const assertElement = CSElementFactory.createByXPath('${escapedTarget}');\n        const actualValue = await assertElement.inputValue();\n        CSAssert.assertEqual(actualValue, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
             case 'url':
                 return `const currentUrl = this.context.getBrowserManager().getCurrentPage()?.url() || '';\n        CSAssert.assertContains(currentUrl, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
             case 'enabled':
@@ -985,7 +985,7 @@ ${stepImplementations.join('\n\n')}
             case 'text':
                 return `const assertEl = CSElementFactory.createByXPath('${escapedTarget}');\n        const text = await assertEl.textContent();\n        CSAssert.assertEqual(text, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
             case 'value':
-                return `const assertEl = CSElementFactory.createByXPath('${escapedTarget}');\n        const val = await assertEl.getInputValue();\n        CSAssert.assertEqual(val, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
+                return `const assertEl = CSElementFactory.createByXPath('${escapedTarget}');\n        const val = await assertEl.inputValue();\n        CSAssert.assertEqual(val, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
             case 'url':
                 return `const url = browserManager.getCurrentPage()?.url() || '';\n        CSAssert.assertContains(url, '${String(assertion.expected).replace(/'/g, "\\'")}', '${assertion.gherkinStep?.replace(/'/g, "\\'")}');`;
             case 'enabled':

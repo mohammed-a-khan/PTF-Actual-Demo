@@ -244,8 +244,26 @@ export function generateAgents(
         return { files, errors };
     }
 
-    // Load agent definitions
+    // Delete only OUR existing agent files before creating new ones
+    // Other tools may have their own agent files — leave those untouched
     const agents = ['planner', 'generator', 'healer', 'assistant'];
+    const csAgentPrefix = 'CS Playwright '; // Our VS Code .agent.md title prefix
+
+    try {
+        const existingFiles = fs.readdirSync(agentsDir);
+        for (const file of existingFiles) {
+            const isOurAgentMd = file.endsWith('.agent.md') && file.startsWith(csAgentPrefix);
+            const isOurChatmode = file.endsWith('.chatmode.md') && agents.includes(file.replace('.chatmode.md', ''));
+            if (isOurAgentMd || isOurChatmode) {
+                const filePath = path.join(agentsDir, file);
+                fs.unlinkSync(filePath);
+                console.log(`  Deleted existing ${file}`);
+            }
+        }
+    } catch (err: any) {
+        // Non-fatal — directory might be empty or not readable
+        errors.push(`Warning: Could not clean existing agents: ${err.message}`);
+    }
 
     for (const agentName of agents) {
         const agentPath = path.join(agentSourceDir, `${agentName}.md`);

@@ -86,6 +86,8 @@ tools:
   - generate_spec_test
   - generate_database_helper
   - generate_test_data_file
+  - generate_config_scaffold
+  - generate_db_queries_config
   # Exploration
   - explore_application
   - explore_page
@@ -374,6 +376,74 @@ Feature: User Login
 | **CSMapUtility** | `fromObject`, `toObject`, `filter`, `merge`, `deepMerge`, `pick`, `omit` |
 | **CSCsvUtility** | `read`, `write`, `parse`, `filter`, `sort`, `toJSON` |
 | **CSExcelUtility** | `read`, `write`, `readSheet`, `getSheetNames`, `toCSV`, `toJSON` |
+
+## CSWebElement API Reference (Exact Method Names)
+
+### Actions
+`click()`, `dblclick()`, `rightClick()`, `fill(value)`, `clear()`, `type(text)`, `press(key)`, `pressSequentially(text)`, `selectOption(values)`, `selectOptionByValue(value)`, `selectOptionByLabel(label)`, `selectOptionByIndex(index)`, `check()`, `uncheck()`, `setChecked(bool)`, `hover()`, `focus()`, `blur()`, `setInputFiles(files)`, `uploadFile(path)`, `dragTo(target)`, `tap()`, `selectText()`, `dispatchEvent(type)`
+
+### Actions with Timeout
+`clickWithTimeout(ms)`, `clickWithForce()`, `dblclickWithTimeout(ms)`, `fillWithTimeout(value, ms)`, `fillWithForce(value)`, `clearWithTimeout(ms)`, `hoverWithTimeout(ms)`, `pressWithTimeout(key, ms)`, `typeWithTimeout(text, ms)`, `checkWithTimeout(ms)`, `uncheckWithTimeout(ms)`
+
+### Get Data (CRITICAL — Exact Names)
+| CORRECT | WRONG (does NOT exist) |
+|---------|------------------------|
+| `textContent()` / `textContentWithTimeout(ms)` | ~~`getTextContent()`~~, ~~`getText()`~~ |
+| `innerText()` / `innerTextWithTimeout(ms)` | ~~`getInnerText()`~~ |
+| `innerHTML()` / `innerHTMLWithTimeout(ms)` | ~~`getInnerHTML()`~~ |
+| `getAttribute(name)` / `getAttributeWithTimeout(name, ms)` | |
+| `inputValue()` / `inputValueWithTimeout(ms)` | ~~`getInputValue()`~~, ~~`getValue()`~~ |
+| `allTextContents()`, `allInnerTexts()`, `count()` | |
+
+### State & Waits
+**State:** `isVisible()`, `isHidden()`, `isEnabled()`, `isDisabled()`, `isChecked()`, `isEditable()`, `isPresent()`
+**Waits:** `waitFor()`, `waitForVisible(timeout?)`, `waitForHidden(timeout?)`, `waitForAttached(timeout?)`, `waitForDetached(timeout?)`
+**NOTE:** ~~`waitForEnabled()`~~, ~~`waitForDisabled()`~~, ~~`waitForStable()`~~ do NOT exist.
+
+### Element Query & Scroll
+`first()`, `last()`, `nth(index)`, `filter(options)`, `subLocator(selector)`, `getByText(text)`, `getByRole(role)`, `getByTestId(id)`, `getByLabel(text)`, `getByPlaceholder(text)`, `scrollIntoViewIfNeeded()`, `highlight()`, `screenshot()`, `boundingBox()`
+
+## CSElementFactory Static Methods
+
+`createByXPath(xpath, desc?, page?)`, `createByCSS(selector, desc?, page?)`, `createByText(text, exact?, desc?, page?)`, `createById(id, desc?, page?)`, `createByName(name, desc?, page?)`, `createByRole(role, desc?, page?)`, `createByTestId(testId, desc?, page?)`, `createByLabel(label, fieldType?, desc?, page?)`, `createNth(selector, index, desc?, page?)`, `createChained(selectors[], desc?, page?)`
+
+## CSBasePage Inherited Methods (NEVER Redeclare)
+
+**Properties:** `config`, `browserManager`, `page`, `url`, `elements`
+
+**Navigation:** `navigate(url?)`, `waitForPageLoad()`, `isAt()`, `refresh()`, `goBack()`, `goForward()`, `getTitle()`, `getUrl()`, `takeScreenshot(name?)`
+
+**Waits:** `wait(ms)`, `waitOneSecond()`, `waitTwoSeconds()`, `waitFiveSeconds()`, `waitForElement(name, timeout?)`, `waitForUrlContains(part, timeout?)`, `waitForNetworkIdle()`, `waitForCondition(fn, timeout?)`, `waitForElementToAppear(el, timeout?)`, `waitForElementToDisappear(el, timeout?)`, `waitForElementText(el, text, timeout?)`, `waitForTableData(tableEl, noDataText?, timeout?)`
+
+**Keyboard:** `pressKey(key)`, `pressEnterKey()`, `pressEscapeKey()`, `pressTabKey()`, `pressBackspaceKey()`, `pressSelectAll()`, `pressCopy()`, `pressPaste()`
+
+**Dialog:** `acceptNextDialog()`, `dismissNextDialog()`, `acceptNextDialogWithText(text)`
+
+**Scroll:** `scrollDown(px?)`, `scrollUp(px?)`, `scrollToTop()`, `scrollToBottom()`
+
+**Multi-Tab:** `switchToPage(index)`, `switchToLatestPage()`, `switchToMainPage()`, `waitForNewPage(action)`
+
+**Frame:** `switchToFrame(selector)`, `switchToMainFrame()`
+
+**Upload:** `uploadFileViaChooser(triggerEl, path)`, `uploadMultipleFilesViaChooser(triggerEl, paths[])`
+
+## CSReporter (ALL Static) & CSAssert (getInstance Required)
+
+**CSReporter:** `CSReporter.info(msg)`, `.pass(msg)`, `.fail(msg)`, `.warn(msg)`, `.error(msg)`, `.debug(msg)`
+
+**CSAssert:** `CSAssert.getInstance().assertTrue(cond, msg?)`, `.assertFalse(cond, msg?)`, `.assertEqual(actual, expected, msg?)`, `.assertNotEqual(actual, notExpected, msg?)`, `.assertContains(haystack, needle, msg?)`, `.assertVisible(locator, msg?)`, `.assertNotVisible(locator, msg?)`, `.assertText(locator, text, msg?)`, `.assertUrl(expected, msg?)`, `.softAssert(cond, msg?)`, `.assertAllSoft()`
+
+## CSDBUtils API Reference (ALL Static — Import from `/database-utils`)
+
+**Query:** `executeQuery(alias, sql|queryName, params?)`, `executeNamedQuery(alias, queryKey, params?)`, `executeSingleValue<T>(alias, sql, params?)`, `executeSingleRow(alias, sql, params?)`, `executeSingleRowOrNull(alias, sql, params?)`, `exists(alias, sql, params?)`, `count(alias, sql, params?)`, `extractColumn<T>(alias, sql, colName, params?)`, `getColumnList<T>(alias, sql, params?)`, `getMap<K,V>(alias, sql, keyCol, valCol, params?)`
+
+**Update:** `executeUpdate(alias, sql, params?)`, `executeInsertAndGetId(alias, sql, params?)`, `executeUpsert(alias, table, data, conflictCol)`, `batchExecute(alias, queries[])`
+
+**Transaction/SP:** `executeTransaction(alias, queries[])`, `executeStoredProcedure(alias, procName, params?)`
+
+**Connection:** `closeConnection(alias)`, `closeAllConnections()`
+
+**WRONG:** ~~`executeRows()`~~ → `executeQuery().rows`, ~~`execute()`~~ → `executeUpdate()`, ~~`query()`~~ → `executeQuery()`
 
 ## What You Can Help With
 

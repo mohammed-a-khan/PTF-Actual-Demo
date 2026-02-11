@@ -253,19 +253,81 @@ When fixes require significant changes, use generation tools:
 - `generate_step_definitions` — Regenerate step definitions when patterns change
 - Always use `browser_generate_locator` first to get real locators before regenerating
 
-## CSWebElement Methods Reference
+## CSWebElement API Reference (Use EXACTLY These — No Aliases)
 
-When fixing tests, use these CSWebElement wrapper methods — NEVER raw Playwright APIs:
+### Actions
+`click()`, `dblclick()`, `rightClick()`, `fill(value)`, `clear()`, `type(text)`, `press(key)`, `pressSequentially(text)`, `selectOption(values)`, `selectOptionByValue(value)`, `selectOptionByLabel(label)`, `selectOptionByIndex(index)`, `check()`, `uncheck()`, `setChecked(bool)`, `hover()`, `focus()`, `blur()`, `setInputFiles(files)`, `uploadFile(path)`, `dragTo(target)`, `tap()`, `selectText()`, `dispatchEvent(type)`
 
-**Actions**: `click()`, `dblclick()`, `fill(value)`, `clear()`, `type(text)`, `press(key)`, `selectOption(value)`, `check()`, `uncheck()`, `hover()`, `focus()`, `setInputFiles()`, `dragTo()`
+### Actions with Timeout
+`clickWithTimeout(ms)`, `clickWithForce()`, `dblclickWithTimeout(ms)`, `fillWithTimeout(value, ms)`, `fillWithForce(value)`, `clearWithTimeout(ms)`, `hoverWithTimeout(ms)`, `focusWithTimeout(ms)`, `pressWithTimeout(key, ms)`, `typeWithTimeout(text, ms)`, `checkWithTimeout(ms)`, `uncheckWithTimeout(ms)`
 
-**With Timeout**: `clickWithTimeout()`, `fillWithTimeout()`, `clearWithTimeout()`
+### Get Data (CRITICAL — Exact Names)
+| CORRECT | WRONG (does NOT exist) |
+|---------|------------------------|
+| `textContent()` | ~~`getTextContent()`~~, ~~`getText()`~~ |
+| `textContentWithTimeout(ms)` | |
+| `innerText()` | ~~`getInnerText()`~~ |
+| `innerTextWithTimeout(ms)` | |
+| `innerHTML()` | ~~`getInnerHTML()`~~ |
+| `innerHTMLWithTimeout(ms)` | |
+| `getAttribute(name)` | |
+| `getAttributeWithTimeout(name, ms)` | |
+| `inputValue()` | ~~`getInputValue()`~~, ~~`getValue()`~~ |
+| `inputValueWithTimeout(ms)` | |
+| `allTextContents()` | |
+| `allInnerTexts()` | |
+| `count()` | |
 
-**State**: `isVisible()`, `isEnabled()`, `isChecked()`, `isDisabled()`, `isHidden()`, `isEditable()`
+### State Checks
+`isVisible()`, `isHidden()`, `isEnabled()`, `isDisabled()`, `isChecked()`, `isEditable()`, `isPresent()`
 
-**Data**: `textContent()`, `innerText()`, `inputValue()`, `getAttribute()`, `innerHTML()`, `count()`, `allTextContents()`
+### Waits
+`waitFor(options?)`, `waitForVisible(timeout?)`, `waitForHidden(timeout?)`, `waitForAttached(timeout?)`, `waitForDetached(timeout?)`
 
-**Waits**: `waitForVisible()`, `waitForHidden()`, `waitForEnabled()`, `waitForDisabled()`, `waitForStable()`
+**NOTE:** ~~`waitForEnabled()`~~, ~~`waitForDisabled()`~~, ~~`waitForStable()`~~ do NOT exist. Use `isEnabled()`/`isDisabled()` with polling.
+
+### Element Query
+`first()`, `last()`, `nth(index)`, `filter(options)`, `subLocator(selector)`, `getByText(text)`, `getByRole(role)`, `getByTestId(id)`, `getByLabel(text)`, `getByPlaceholder(text)`, `scrollIntoViewIfNeeded()`, `highlight()`
+
+## CSElementFactory Static Methods
+
+`createByXPath(xpath, desc?, page?)`, `createByCSS(selector, desc?, page?)`, `createByText(text, exact?, desc?, page?)`, `createById(id, desc?, page?)`, `createByName(name, desc?, page?)`, `createByRole(role, desc?, page?)`, `createByTestId(testId, desc?, page?)`, `createByLabel(label, fieldType?, desc?, page?)`, `createNth(selector, index, desc?, page?)`, `createChained(selectors[], desc?, page?)`, `createWithFilter(selector, filters, desc?, page?)`
+
+## CSBasePage Inherited Methods (Available in All Page Classes)
+
+**Properties:** `config`, `browserManager`, `page`, `url`, `elements` — NEVER redeclare
+
+**Navigation:** `navigate(url?)`, `waitForPageLoad()`, `isAt()`, `refresh()`, `goBack()`, `goForward()`, `getTitle()`, `getUrl()`
+
+**Waits:** `wait(ms)`, `waitOneSecond()`, `waitTwoSeconds()`, `waitFiveSeconds()`, `waitForElement(name, timeout?)`, `waitForUrlContains(part, timeout?)`, `waitForNetworkIdle()`, `waitForCondition(fn, timeout?)`, `waitForElementToAppear(el, timeout?)`, `waitForElementToDisappear(el, timeout?)`, `waitForElementText(el, text, timeout?)`
+
+**Keyboard:** `pressKey(key)`, `pressEnterKey()`, `pressEscapeKey()`, `pressTabKey()`, `pressBackspaceKey()`, `pressSelectAll()`, `pressCopy()`, `pressPaste()`
+
+**Dialog:** `acceptNextDialog()`, `dismissNextDialog()`, `acceptNextDialogWithText(text)`
+
+**Scroll:** `scrollDown(px?)`, `scrollUp(px?)`, `scrollToTop()`, `scrollToBottom()`
+
+**Multi-Tab:** `switchToPage(index)`, `switchToLatestPage()`, `switchToMainPage()`, `waitForNewPage(action, timeout?)`
+
+**Frame:** `switchToFrame(selector)`, `switchToMainFrame()`
+
+**Upload:** `uploadFileViaChooser(triggerEl, path, timeout?)`, `uploadMultipleFilesViaChooser(triggerEl, paths[], timeout?)`
+
+## CSReporter (ALL Static) & CSAssert (getInstance Required)
+
+**CSReporter:** `CSReporter.info(msg)`, `CSReporter.pass(msg)`, `CSReporter.fail(msg)`, `CSReporter.warn(msg)`, `CSReporter.error(msg)`, `CSReporter.debug(msg)`
+
+**CSAssert:** `CSAssert.getInstance().assertTrue(cond, msg?)`, `.assertFalse(cond, msg?)`, `.assertEqual(actual, expected, msg?)`, `.assertNotEqual(actual, notExpected, msg?)`, `.assertContains(haystack, needle, msg?)`, `.assertVisible(locator, msg?)`, `.assertNotVisible(locator, msg?)`, `.assertText(locator, text, msg?)`, `.assertUrl(expected, msg?)`, `.softAssert(cond, msg?)`, `.assertAllSoft()`
+
+## CSDBUtils API (ALL Static — Import from `/database-utils`)
+
+**Query:** `executeQuery(alias, sql|queryName, params?)`, `executeNamedQuery(alias, queryKey, params?)`, `executeSingleValue<T>(alias, sql, params?)`, `executeSingleRow(alias, sql, params?)`, `exists(alias, sql, params?)`, `count(alias, sql, params?)`
+
+**Update:** `executeUpdate(alias, sql, params?)`, `batchExecute(alias, queries[])`
+
+**Transaction/SP:** `executeTransaction(alias, queries[])`, `executeStoredProcedure(alias, procName, params?)`
+
+**WRONG:** ~~`executeRows()`~~ → `executeQuery().rows`, ~~`execute()`~~ → `executeUpdate()`
 
 ## Correct Import Patterns
 

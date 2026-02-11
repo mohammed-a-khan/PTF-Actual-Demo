@@ -179,7 +179,7 @@ const generatePageObjectTool = defineTool()
      * Get value from ${desc}
      */
     async get${pascalName}Value(): Promise<string> {
-        return await this.${methodName}.getInputValue();
+        return await this.${methodName}.inputValue();
     }
 
     /**
@@ -441,6 +441,12 @@ const generateStepDefinitionsTool = defineTool()
     }`;
         }).join('\n\n');
 
+        // Detect if any step implementation uses CSAssert
+        const needsCSAssert = steps.some(s => s.implementation && s.implementation.includes('CSAssert'));
+        const assertImport = needsCSAssert
+            ? "import { CSAssert } from '@mdakhan.mak/cs-playwright-test-framework/assertions';\n"
+            : '';
+
         const code = `/**
  * ${className}
  * Step definitions for ${projectPrefix} tests
@@ -458,7 +464,7 @@ import {
 } from '@mdakhan.mak/cs-playwright-test-framework/bdd';
 import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
 import { CSValueResolver } from '@mdakhan.mak/cs-playwright-test-framework/utilities';
-
+${assertImport}
 ${pageImports}
 
 @StepDefinitions
@@ -801,11 +807,11 @@ ${testCases}
 
 const generateDatabaseHelperTool = defineTool()
     .name('generate_database_helper')
-    .description('Generate a database helper class following PTF-ADO patterns')
+    .description('Generate a database helper class following CS framework patterns. Uses named queries from .env config files via CSDBUtils.')
     .category('generation')
-    .stringParam('className', 'Helper class name', { required: true })
-    .stringParam('dbAlias', 'Database alias (e.g., "APP_ORACLE", "DEFAULT")', { required: true })
-    .arrayParam('methods', 'Method definitions', 'object', { required: true })
+    .stringParam('className', 'Helper class name (e.g., "MyAppDatabaseHelper")', { required: true })
+    .stringParam('dbAlias', 'Database alias (e.g., "APP_ORACLE", "AUDIT_SQLSERVER")', { required: true })
+    .arrayParam('methods', 'Method definitions with name, description, query (named query key), returnType, and optional parameters', 'object', { required: true })
     .stringParam('outputPath', 'Output file path')
     .handler(async (params, context) => {
         const className = params.className as string;
@@ -814,7 +820,7 @@ const generateDatabaseHelperTool = defineTool()
             name: string;
             description: string;
             query: string;
-            returnType: 'single' | 'row' | 'rows' | 'void';
+            returnType: 'single' | 'row' | 'rows' | 'void' | 'exists' | 'count';
             parameters?: Array<{ name: string; type: string }>;
         }>;
         const outputPath = params.outputPath as string | undefined;
@@ -825,9 +831,12 @@ const generateDatabaseHelperTool = defineTool()
 
         // Generate methods
         const methodDefinitions = methods.map(method => {
-            const params = method.parameters || [];
-            const paramList = params.map(p => `${p.name}: ${p.type}`).join(', ');
-            const paramValues = params.map(p => p.name).join(', ');
+            const mParams = method.parameters || [];
+            const paramList = mParams.map(p => `${p.name}: ${p.type}`).join(', ');
+            const paramValues = mParams.map(p => p.name).join(', ');
+            const paramsArg = paramValues ? `, [${paramValues}]` : '';
+            const desc = escapeForSingleQuote(method.description);
+            const queryKey = escapeForSingleQuote(method.query);
 
             let returnStatement = '';
             let returnTypeStr = 'Promise<void>';
@@ -835,26 +844,47 @@ const generateDatabaseHelperTool = defineTool()
             switch (method.returnType) {
                 case 'single':
                     returnTypeStr = 'Promise<string | number>';
-                    returnStatement = `return await CSDBUtils.executeSingleValue(this.DB_ALIAS, query${paramValues ? `, [${paramValues}]` : ''});`;
+                    returnStatement = `const result = await CSDBUtils.executeSingleValue(this.DB_ALIAS, '${queryKey}'${paramsArg});
+        CSReporter.pass('${desc} completed');
+        return result;`;
                     break;
                 case 'row':
-                    returnTypeStr = 'Promise<Record<string, unknown>>';
-                    returnStatement = `return await CSDBUtils.executeSingleRow(this.DB_ALIAS, query${paramValues ? `, [${paramValues}]` : ''});`;
+                    returnTypeStr = 'Promise<Record<string, any>>';
+                    returnStatement = `const result = await CSDBUtils.executeSingleRow(this.DB_ALIAS, '${queryKey}'${paramsArg});
+        CSReporter.pass('${desc} completed');
+        return result;`;
                     break;
                 case 'rows':
-                    returnTypeStr = 'Promise<Record<string, unknown>[]>';
-                    returnStatement = `return await CSDBUtils.executeRows(this.DB_ALIAS, query${paramValues ? `, [${paramValues}]` : ''});`;
+                    returnTypeStr = 'Promise<Record<string, any>[]>';
+                    returnStatement = `const result = await CSDBUtils.executeQuery(this.DB_ALIAS, '${queryKey}'${paramsArg});
+        CSReporter.pass(\`${desc} completed - \${result.rows.length} rows returned\`);
+        return result.rows;`;
                     break;
                 case 'void':
-                    returnStatement = `await CSDBUtils.getConnection(this.DB_ALIAS).then(db => db.execute(query${paramValues ? `, [${paramValues}]` : ''}));`;
+                    returnTypeStr = 'Promise<void>';
+                    returnStatement = `await CSDBUtils.executeUpdate(this.DB_ALIAS, '${queryKey}'${paramsArg});
+        CSReporter.pass('${desc} completed');`;
+                    break;
+                case 'exists':
+                    returnTypeStr = 'Promise<boolean>';
+                    returnStatement = `const result = await CSDBUtils.exists(this.DB_ALIAS, '${queryKey}'${paramsArg});
+        CSReporter.pass(\`${desc} completed - exists: \${result}\`);
+        return result;`;
+                    break;
+                case 'count':
+                    returnTypeStr = 'Promise<number>';
+                    returnStatement = `const result = await CSDBUtils.count(this.DB_ALIAS, '${queryKey}'${paramsArg});
+        CSReporter.pass(\`${desc} completed - count: \${result}\`);
+        return result;`;
                     break;
             }
 
             return `    /**
      * ${method.description}
+     * @query ${method.query} (named query from .env config)
      */
     public static async ${method.name}(${paramList}): ${returnTypeStr} {
-        const query = \`${method.query}\`;
+        CSReporter.info('${desc}');
         ${returnStatement}
     }`;
         }).join('\n\n');
@@ -863,11 +893,14 @@ const generateDatabaseHelperTool = defineTool()
  * ${className}
  * Database helper for ${dbAlias} operations
  *
+ * All queries use named query keys that resolve from DB_QUERY_ entries in .env config files.
+ * Example: 'GET_USER_BY_ID' resolves to DB_QUERY_GET_USER_BY_ID in config/{project}/common/{project}-db-queries.env
+ *
  * @module ${className}
  * @generated ${new Date().toISOString()}
  */
 
-import { CSDBUtils } from '@mdakhan.mak/cs-playwright-test-framework/database';
+import { CSDBUtils } from '@mdakhan.mak/cs-playwright-test-framework/database-utils';
 import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
 
 export class ${className} {
@@ -884,20 +917,31 @@ ${methodDefinitions}
     // ========================================================================
 
     /**
-     * Execute a custom query
+     * Execute a custom named query
+     * @param queryKey Named query key from .env config (e.g., 'GET_ACTIVE_USERS')
+     * @param params Query parameters
      */
-    public static async executeQuery(query: string, params?: unknown[]): Promise<Record<string, unknown>[]> {
-        return await CSDBUtils.executeRows(this.DB_ALIAS, query, params);
+    public static async executeNamedQuery(queryKey: string, params?: any[]): Promise<Record<string, any>[]> {
+        const result = await CSDBUtils.executeQuery(this.DB_ALIAS, queryKey, params);
+        return result.rows;
     }
 
     /**
-     * Verify row exists
+     * Verify a record exists using a named query
+     * @param queryKey Named query key that returns rows (record exists if rows > 0)
+     * @param params Query parameters
      */
-    public static async verifyRowExists(table: string, criteria: Record<string, unknown>): Promise<boolean> {
-        const whereClauses = Object.keys(criteria).map((col, i) => \`\${col} = $\${i + 1}\`);
-        const query = \`SELECT COUNT(*) as count FROM \${table} WHERE \${whereClauses.join(' AND ')}\`;
-        const result = await CSDBUtils.executeSingleValue<number>(this.DB_ALIAS, query, Object.values(criteria));
-        return result > 0;
+    public static async verifyRecordExists(queryKey: string, params?: any[]): Promise<boolean> {
+        return await CSDBUtils.exists(this.DB_ALIAS, queryKey, params);
+    }
+
+    /**
+     * Get count using a named query
+     * @param queryKey Named query key that returns a count
+     * @param params Query parameters
+     */
+    public static async getCount(queryKey: string, params?: any[]): Promise<number> {
+        return await CSDBUtils.count(this.DB_ALIAS, queryKey, params);
     }
 }
 `;
@@ -931,11 +975,12 @@ ${methodDefinitions}
 
 const generateTestDataFileTool = defineTool()
     .name('generate_test_data_file')
-    .description('Generate a JSON test data file following PTF-ADO data source patterns')
+    .description('Generate a JSON test data file following PTF-ADO data source patterns. Pass actual records observed during exploration for real test data, or field definitions for synthetic generation.')
     .category('generation')
     .stringParam('fileName', 'Data file name', { required: true })
-    .arrayParam('fields', 'Field definitions', 'object', { required: true })
-    .numberParam('recordCount', 'Number of records to generate', { default: 5 })
+    .arrayParam('fields', 'Field definitions (used for synthetic generation when records not provided)', 'object')
+    .numberParam('recordCount', 'Number of records to generate (only used with fields, not records)', { default: 5 })
+    .arrayParam('records', 'Actual test data records from exploration. Each record is an object with field names as keys. When provided, these are used as-is instead of synthetic generation.', 'object')
     .stringParam('outputPath', 'Output directory path')
     .handler(async (params, context) => {
         const fileName = params.fileName as string;
@@ -952,49 +997,62 @@ const generateTestDataFileTool = defineTool()
         context.log('info', `Generating test data: ${fileName}`);
 
         const fullFileName = fileName.endsWith('.json') ? fileName : `${fileName}.json`;
+        const actualRecords = params.records as Array<Record<string, unknown>> | undefined;
 
-        // Generate records
-        const records: Record<string, unknown>[] = [];
+        let finalRecords: Record<string, unknown>[];
 
-        for (let i = 0; i < recordCount; i++) {
-            const record: Record<string, unknown> = {
-                testCaseId: `TC_${String(i + 1).padStart(3, '0')}`,
-                runFlag: 'Yes',
-            };
+        if (actualRecords && actualRecords.length > 0) {
+            // Use actual records from agent exploration — add testCaseId/runFlag if missing
+            finalRecords = actualRecords.map((record, i) => {
+                const enriched: Record<string, unknown> = {};
+                if (!record.testCaseId) enriched.testCaseId = `TC_${String(i + 1).padStart(3, '0')}`;
+                if (!record.runFlag) enriched.runFlag = 'Yes';
+                return { ...enriched, ...record };
+            });
+        } else {
+            // Synthetic generation from field definitions
+            finalRecords = [];
 
-            for (const field of fields) {
-                switch (field.type) {
-                    case 'string':
-                        record[field.name] = `${field.prefix || 'test'}_${field.name}_${i + 1}`;
-                        break;
-                    case 'number':
-                        record[field.name] = (field.startValue || 1) + i;
-                        break;
-                    case 'boolean':
-                        record[field.name] = i % 2 === 0;
-                        break;
-                    case 'email':
-                        record[field.name] = `test${i + 1}@example.com`;
-                        break;
-                    case 'date':
-                        const date = new Date();
-                        date.setDate(date.getDate() + i);
-                        record[field.name] = date.toISOString().split('T')[0];
-                        break;
-                    case 'enum':
-                        const enumValues = field.enumValues || ['value1', 'value2'];
-                        record[field.name] = enumValues[i % enumValues.length];
-                        break;
-                    case 'sequential':
-                        record[field.name] = (field.startValue || 1) + i;
-                        break;
+            for (let i = 0; i < recordCount; i++) {
+                const record: Record<string, unknown> = {
+                    testCaseId: `TC_${String(i + 1).padStart(3, '0')}`,
+                    runFlag: 'Yes',
+                };
+
+                for (const field of fields) {
+                    switch (field.type) {
+                        case 'string':
+                            record[field.name] = `${field.prefix || 'test'}_${field.name}_${i + 1}`;
+                            break;
+                        case 'number':
+                            record[field.name] = (field.startValue || 1) + i;
+                            break;
+                        case 'boolean':
+                            record[field.name] = i % 2 === 0;
+                            break;
+                        case 'email':
+                            record[field.name] = `test${i + 1}@example.com`;
+                            break;
+                        case 'date':
+                            const date = new Date();
+                            date.setDate(date.getDate() + i);
+                            record[field.name] = date.toISOString().split('T')[0];
+                            break;
+                        case 'enum':
+                            const enumValues = field.enumValues || ['value1', 'value2'];
+                            record[field.name] = enumValues[i % enumValues.length];
+                            break;
+                        case 'sequential':
+                            record[field.name] = (field.startValue || 1) + i;
+                            break;
+                    }
                 }
-            }
 
-            records.push(record);
+                finalRecords.push(record);
+            }
         }
 
-        const code = JSON.stringify(records, null, 2);
+        const code = JSON.stringify(finalRecords, null, 2);
 
         // Write file if output path provided
         if (outputPath) {
@@ -1010,10 +1068,687 @@ const generateTestDataFileTool = defineTool()
         return createJsonResult({
             success: true,
             fileName: fullFileName,
-            recordCount: records.length,
-            fields: fields.map(f => f.name),
-            data: records,
+            recordCount: finalRecords.length,
+            fields: actualRecords ? Object.keys(finalRecords[0] || {}) : (fields || []).map((f: any) => f.name),
+            data: finalRecords,
             outputPath: outputPath || null,
+        });
+    })
+    .build();
+
+// ============================================================================
+// Config File Helper Functions
+// ============================================================================
+
+/**
+ * Parse .env file content and extract all keys (before first = on each line)
+ */
+function parseEnvKeys(content: string): Set<string> {
+    const keys = new Set<string>();
+    for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed && !trimmed.startsWith('#')) {
+            const eqIdx = trimmed.indexOf('=');
+            if (eqIdx > 0) {
+                keys.add(trimmed.substring(0, eqIdx).trim());
+            }
+        }
+    }
+    return keys;
+}
+
+/**
+ * Parse .env template content and extract key-value pairs with optional comments
+ */
+function parseEnvKeyValues(content: string): Array<{ key: string; value: string; comment?: string }> {
+    const entries: Array<{ key: string; value: string; comment?: string }> = [];
+    const lines = content.split('\n');
+    let lastComment: string | undefined;
+
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('#') && !trimmed.startsWith('# ====')) {
+            lastComment = trimmed.substring(1).trim();
+            continue;
+        }
+        if (trimmed && !trimmed.startsWith('#')) {
+            const eqIdx = trimmed.indexOf('=');
+            if (eqIdx > 0) {
+                entries.push({
+                    key: trimmed.substring(0, eqIdx).trim(),
+                    value: trimmed.substring(eqIdx + 1).trim(),
+                    comment: lastComment,
+                });
+                lastComment = undefined;
+            }
+        }
+        if (!trimmed) {
+            lastComment = undefined;
+        }
+    }
+    return entries;
+}
+
+/**
+ * Write a new .env file, or merge missing properties into an existing one.
+ * Preserves all existing content and comments.
+ */
+function writeOrMerge(
+    filePath: string,
+    templateContent: string,
+    filesGenerated: string[],
+    filesUpdated: string[]
+): void {
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+
+    if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(filePath, templateContent);
+        filesGenerated.push(filePath);
+        return;
+    }
+
+    // Existing file: find missing keys and append
+    const existingContent = fs.readFileSync(filePath, 'utf-8');
+    const existingKeys = parseEnvKeys(existingContent);
+    const templateEntries = parseEnvKeyValues(templateContent);
+
+    const missingEntries = templateEntries.filter(entry => !existingKeys.has(entry.key));
+
+    if (missingEntries.length === 0) {
+        return; // Nothing to add
+    }
+
+    let appendSection = '\n# ============================================================================\n';
+    appendSection += `# Properties added by config generator (${new Date().toISOString().split('T')[0]})\n`;
+    appendSection += '# ============================================================================\n';
+
+    for (const entry of missingEntries) {
+        if (entry.comment) {
+            appendSection += `# ${entry.comment}\n`;
+        }
+        appendSection += `${entry.key}=${entry.value}\n`;
+    }
+
+    fs.writeFileSync(filePath, existingContent.trimEnd() + '\n' + appendSection);
+    filesUpdated.push(filePath);
+}
+
+/**
+ * Build global.env override template for a project
+ */
+function buildGlobalOverrideTemplate(project: string): string {
+    return `# ============================================================================
+#                CS TEST AUTOMATION FRAMEWORK - GLOBAL CONFIGURATION
+#                      Generated by CS Config Generator
+# ============================================================================
+# This file contains all configuration properties used throughout the framework.
+# Properties support environment variable overrides and interpolation.
+# ============================================================================
+
+# ====================================================================================
+# CORE FRAMEWORK CONFIGURATION
+# ====================================================================================
+
+# Project and environment settings
+PROJECT=${project}
+ENVIRONMENT=dev
+# BASE_URL=https://${project}.example.com
+
+# ====================================================================================
+# BROWSER CONFIGURATION
+# ====================================================================================
+
+# Browser type: chrome | firefox | webkit | edge
+BROWSER=chrome
+
+# Run browser in headless mode
+HEADLESS=false
+
+# Browser viewport settings
+BROWSER_VIEWPORT_WIDTH=1920
+BROWSER_VIEWPORT_HEIGHT=1080
+
+# Browser launch settings
+BROWSER_LAUNCH_TIMEOUT=30000
+BROWSER_DEVTOOLS=false
+BROWSER_SLOWMO=0
+
+# Browser security settings
+BROWSER_IGNORE_HTTPS_ERRORS=true
+
+# Browser locale and timezone
+BROWSER_LOCALE=en-US
+BROWSER_TIMEZONE=America/New_York
+
+# ====================================================================================
+# TIMEOUTS
+# ====================================================================================
+
+# Default timeout for all operations in milliseconds
+TIMEOUT=30000
+
+# Specific timeout configurations
+BROWSER_ACTION_TIMEOUT=10000
+BROWSER_NAVIGATION_TIMEOUT=30000
+BROWSER_AUTO_WAIT_TIMEOUT=5000
+ELEMENT_TIMEOUT=10000
+
+# ====================================================================================
+# BROWSER INSTANCE MANAGEMENT
+# ====================================================================================
+
+# Browser reuse configuration
+BROWSER_REUSE_ENABLED=true
+BROWSER_REUSE_CLEAR_STATE=true
+
+# Browser health settings
+BROWSER_AUTO_RESTART_ON_CRASH=true
+BROWSER_MAX_RESTART_ATTEMPTS=3
+
+# ====================================================================================
+# MEDIA CAPTURE CONFIGURATION
+# ====================================================================================
+
+# Video recording: off | on | retain-on-failure | on-first-retry
+BROWSER_VIDEO=retain-on-failure
+VIDEO_DIR=./videos
+
+# Screenshot configuration
+SCREENSHOT_CAPTURE_MODE=on-failure
+SCREENSHOT_ON_FAILURE=true
+
+# Browser trace recording
+TRACE_CAPTURE_MODE=on-failure
+
+# Framework log level: DEBUG | INFO | WARN | ERROR
+LOG_LEVEL=INFO
+
+# ====================================================================================
+# PARALLEL EXECUTION
+# ====================================================================================
+
+# Enable parallel execution
+PARALLEL=false
+MAX_PARALLEL_WORKERS=4
+PARALLEL_WORKERS=3
+
+# ====================================================================================
+# TEST EXECUTION CONFIGURATION
+# ====================================================================================
+
+# Feature file paths
+FEATURES=test/${project}/features/*.feature
+FEATURE_PATH=test/${project}/features
+
+# Test retry configuration
+RETRY_COUNT=2
+
+# Step definition paths
+STEP_DEFINITIONS_PATH=test/${project}/steps;test/common/steps
+
+# ====================================================================================
+# ELEMENT INTERACTION
+# ====================================================================================
+
+# Number of retries for element operations
+ELEMENT_RETRY_COUNT=3
+ELEMENT_CLEAR_BEFORE_TYPE=true
+
+# Wait for spinners to disappear before actions
+WAIT_FOR_SPINNERS=true
+
+# ====================================================================================
+# CROSS-DOMAIN NAVIGATION
+# ====================================================================================
+
+# Enable cross-domain navigation support (for SSO, Netscaler, etc.)
+CROSS_DOMAIN_NAVIGATION_ENABLED=false
+CROSS_DOMAIN_NAVIGATION_TIMEOUT=60000
+
+# ====================================================================================
+# SELF-HEALING & AI
+# ====================================================================================
+
+# Enable self-healing for broken locators
+SELF_HEALING_ENABLED=true
+
+# Enable AI-powered features
+AI_ENABLED=false
+AI_CONFIDENCE_THRESHOLD=0.7
+
+# ====================================================================================
+# REPORTING CONFIGURATION
+# ====================================================================================
+
+# Report output directory
+REPORTS_BASE_DIR=./reports
+REPORTS_CREATE_TIMESTAMP_FOLDER=true
+
+# Report types to generate
+REPORT_TYPES=html
+
+# Generate Excel and PDF reports
+GENERATE_EXCEL_REPORT=true
+GENERATE_PDF_REPORT=true
+
+# ====================================================================================
+# INTELLIGENT STEP EXECUTION
+# ====================================================================================
+
+# Enable intelligent step execution (AI-powered)
+INTELLIGENT_STEP_EXECUTION_ENABLED=false
+`;
+}
+
+/**
+ * Build common.env template for a project
+ */
+function buildCommonTemplate(
+    project: string,
+    displayName: string,
+    projectType: string,
+    browser: string,
+    headless: boolean,
+    timeout: number,
+    dbAliases: string[],
+    apiTesting: boolean,
+    adoIntegration: boolean
+): string {
+    let content = `# ============================================================================
+# ${project.toUpperCase()} Project - Common Configuration
+# ============================================================================
+# Shared settings across all environments for the ${project} project.
+# Environment-specific overrides go in environments/{env}.env
+# ============================================================================
+
+# Project Identification
+PROJECT=${project}
+APPLICATION_NAME=${displayName}
+PROJECT_TYPE=${projectType}
+
+# ============================================================================
+# Browser Configuration
+# ============================================================================
+BROWSER=${browser}
+HEADLESS=${headless}
+TIMEOUT=${timeout}
+BROWSER_ACTION_TIMEOUT=10000
+BROWSER_VIEWPORT_WIDTH=1920
+BROWSER_VIEWPORT_HEIGHT=1080
+
+# Browser launch settings
+BROWSER_LAUNCH_TIMEOUT=30000
+BROWSER_DEVTOOLS=false
+BROWSER_SLOWMO=0
+
+# Browser security settings
+BROWSER_IGNORE_HTTPS_ERRORS=true
+
+# ============================================================================
+# Test File Paths
+# ============================================================================
+FEATURES=test/${project}/features/*.feature
+STEP_DEFINITIONS_PATH=test/${project}/steps;test/common/steps
+TEST_DATA_PATH=test/${project}/data
+
+# ============================================================================
+# Execution Settings
+# ============================================================================
+RETRY_COUNT=2
+PARALLEL=false
+MAX_PARALLEL_WORKERS=4
+
+# Cross-domain navigation (enable for SSO-based apps)
+CROSS_DOMAIN_NAVIGATION_ENABLED=false
+
+# ============================================================================
+# Credentials (encrypted)
+# ============================================================================
+DEFAULT_USERNAME=
+DEFAULT_PASSWORD=ENCRYPTED:
+
+# ============================================================================
+# Feature Flags
+# ============================================================================
+FEATURE_FLAGS=
+
+# ============================================================================
+# Element Interaction
+# ============================================================================
+ELEMENT_RETRY_COUNT=3
+ELEMENT_CLEAR_BEFORE_TYPE=true
+WAIT_FOR_SPINNERS=true
+
+# ============================================================================
+# Self-Healing
+# ============================================================================
+SELF_HEALING_ENABLED=true
+
+# ============================================================================
+# Media Capture
+# ============================================================================
+BROWSER_VIDEO=retain-on-failure
+TRACE_CAPTURE_MODE=on-failure
+
+# ============================================================================
+# Reporting & Evidence
+# ============================================================================
+REPORT_TYPES=html
+LOG_LEVEL=DEBUG
+EVIDENCE_COLLECTION_ENABLED=true
+SCREENSHOT_CAPTURE_MODE=on-failure
+`;
+
+    if (dbAliases.length > 0) {
+        content += `
+# ============================================================================
+# Database Configuration
+# ============================================================================
+DB_ENABLED=true
+DATABASE_CONNECTIONS=${dbAliases.join(',')}
+`;
+    }
+
+    if (apiTesting) {
+        content += `
+# ============================================================================
+# API Testing Configuration
+# ============================================================================
+API_TIMEOUT=30000
+API_REQUEST_TIMEOUT=30000
+API_RETRY_COUNT=3
+API_LOG_REQUESTS=true
+API_LOG_RESPONSES=true
+`;
+    }
+
+    if (adoIntegration) {
+        content += `
+# ============================================================================
+# Azure DevOps Integration
+# ============================================================================
+ADO_INTEGRATION_ENABLED=true
+# ADO_ORGANIZATION=your-org
+# ADO_PROJECT=your-project
+# ADO_PAT=ENCRYPTED:
+`;
+    }
+
+    return content;
+}
+
+/**
+ * Build environment-specific .env template
+ */
+function buildEnvironmentTemplate(
+    project: string,
+    env: string,
+    baseUrlTemplate: string,
+    dbAliases: string[],
+    apiTesting: boolean,
+    apiBaseUrl: string,
+    adoIntegration: boolean
+): string {
+    const envDisplay = env.toUpperCase();
+    const resolvedBaseUrl = baseUrlTemplate.replace(/\{env\}/g, env).replace(/\{environment\}/gi, env);
+    const resolvedApiUrl = apiBaseUrl ? apiBaseUrl.replace(/\{env\}/g, env).replace(/\{environment\}/gi, env) : '';
+
+    // Environment-specific defaults
+    const envDefaults: Record<string, { logLevel: string; headless: string; debugMode: string; devtools: string; timeout: number; actionTimeout: number; envName: string; testDataCleanup: string }> = {
+        dev:     { logLevel: 'DEBUG', headless: 'false', debugMode: 'true',  devtools: 'true',  timeout: 60000, actionTimeout: 15000, envName: 'Development', testDataCleanup: 'true' },
+        sit:     { logLevel: 'INFO',  headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 45000, actionTimeout: 10000, envName: 'SIT',         testDataCleanup: 'true' },
+        uat:     { logLevel: 'WARN',  headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 30000, actionTimeout: 8000,  envName: 'UAT',         testDataCleanup: 'false' },
+        qa:      { logLevel: 'INFO',  headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 45000, actionTimeout: 10000, envName: 'QA',          testDataCleanup: 'true' },
+        staging: { logLevel: 'INFO',  headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 30000, actionTimeout: 10000, envName: 'Staging',     testDataCleanup: 'false' },
+        prod:    { logLevel: 'ERROR', headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 30000, actionTimeout: 8000,  envName: 'Production',  testDataCleanup: 'false' },
+    };
+
+    const defaults = envDefaults[env] || envDefaults['dev'];
+
+    let content = `# ============================================================================
+#              ${project.toUpperCase()} - ${envDisplay} ENVIRONMENT CONFIGURATION
+#                      Generated by CS Config Generator
+# ============================================================================
+# Environment-specific settings for ${envDisplay} environment.
+# These override common and global settings.
+# ============================================================================
+
+# ====================================================================================
+# ENVIRONMENT IDENTIFICATION
+# ====================================================================================
+
+ENVIRONMENT_NAME=${defaults.envName}
+ENVIRONMENT_TYPE=${env}
+
+# ====================================================================================
+# ENVIRONMENT URLs
+# ====================================================================================
+
+# ${envDisplay} environment URLs
+BASE_URL=${resolvedBaseUrl}
+`;
+
+    if (apiTesting && resolvedApiUrl) {
+        content += `API_BASE_URL=${resolvedApiUrl}\n`;
+    }
+
+    content += `
+# ====================================================================================
+# ENVIRONMENT BROWSER SETTINGS
+# ====================================================================================
+
+# Browser configuration for ${envDisplay}
+HEADLESS=${defaults.headless}
+DEBUG_MODE=${defaults.debugMode}
+LOG_LEVEL=${defaults.logLevel}
+BROWSER_DEVTOOLS=${defaults.devtools}
+BROWSER_SLOWMO=0
+
+# ====================================================================================
+# ENVIRONMENT FEATURE FLAGS
+# ====================================================================================
+
+# ${envDisplay}-specific feature flags
+FEATURE_FLAGS=
+
+# ====================================================================================
+# ENVIRONMENT TEST DATA
+# ====================================================================================
+
+# Test data configuration for ${envDisplay}
+TEST_USER_PREFIX=${env}_test_
+TEST_DATA_CLEANUP=${defaults.testDataCleanup}
+
+# ====================================================================================
+# ENVIRONMENT TIMEOUTS
+# ====================================================================================
+
+# ${envDisplay}-specific timeouts${env === 'dev' ? ' (more lenient for debugging)' : ''}
+DEFAULT_TIMEOUT=${defaults.timeout}
+BROWSER_ACTION_TIMEOUT=${defaults.actionTimeout}
+`;
+
+    if (dbAliases.length > 0) {
+        content += '\n# ============================================================================\n';
+        content += '# Database Connections\n';
+        content += '# ============================================================================\n';
+
+        for (const alias of dbAliases) {
+            const aliasUpper = alias.toUpperCase();
+            content += `
+# Database: ${aliasUpper}
+DB_${aliasUpper}_TYPE=sqlserver
+DB_${aliasUpper}_HOST=${project}-${env}-db.example.com
+DB_${aliasUpper}_PORT=1433
+DB_${aliasUpper}_USERNAME=${project}_user
+DB_${aliasUpper}_PASSWORD=ENCRYPTED:
+DB_${aliasUpper}_DATABASE=${project}_${env}
+DB_${aliasUpper}_CONNECTION_TIMEOUT=60000
+DB_${aliasUpper}_REQUEST_TIMEOUT=15000
+DB_${aliasUpper}_POOL_MAX=10
+DB_${aliasUpper}_POOL_MIN=0
+DB_${aliasUpper}_POOL_IDLE_TIMEOUT=30000
+`;
+        }
+    }
+
+    if (adoIntegration) {
+        content += `
+# ============================================================================
+# Azure DevOps
+# ============================================================================
+# ADO_TEST_PLAN_ID=
+# ADO_TEST_SUITE_ID=
+`;
+    }
+
+    return content;
+}
+
+// ============================================================================
+// Config Scaffold Generation Tool
+// ============================================================================
+
+const generateConfigScaffoldTool = defineTool()
+    .name('generate_config_scaffold')
+    .description('Generate config directory structure with sensible defaults for a project. Creates global.env, common/common.env, and environments/{env}.env files. If files exist, only appends missing properties (safe to re-run).')
+    .category('generation')
+    .stringParam('project', 'Project name (lowercase, e.g., "myapp", "crm")', { required: true })
+    .stringParam('projectDisplayName', 'Human-readable project name (e.g., "My Application")')
+    .stringParam('projectType', 'Project type: "web", "api", or "hybrid"')
+    .stringParam('baseUrl', 'Base URL template (use {env} for environment placeholder, e.g., "https://myapp-{env}.company.com")')
+    .arrayParam('environments', 'Environment names (default: ["dev", "sit", "uat"])', 'string')
+    .arrayParam('dbAliases', 'Database connection aliases (e.g., ["APP_ORACLE", "AUDIT_SQLSERVER"])', 'string')
+    .stringParam('browser', 'Default browser: "chrome", "firefox", "webkit", "edge"')
+    .booleanParam('headless', 'Run headless by default')
+    .numberParam('timeout', 'Default timeout in milliseconds')
+    .booleanParam('adoIntegration', 'Include Azure DevOps integration properties')
+    .booleanParam('apiTesting', 'Include API testing properties')
+    .stringParam('apiBaseUrl', 'API base URL template (use {env} for environment placeholder)')
+    .handler(async (params, context) => {
+        const project = (params.project as string).toLowerCase();
+        const projectDisplay = (params.projectDisplayName as string) || toPascalCase(project);
+        const projectType = (params.projectType as string) || 'web';
+        const baseUrlTemplate = (params.baseUrl as string) || `https://${project}-{env}.example.com`;
+        const validEnvs = ['dev', 'sit', 'uat', 'qa', 'staging', 'prod', 'production'];
+        const rawEnvironments = (params.environments as string[]) || ['dev', 'sit', 'uat'];
+        const environments = rawEnvironments.map(e => e.toLowerCase()).filter(e => validEnvs.includes(e));
+        if (environments.length === 0) {
+            return createErrorResult(`Invalid environments: ${rawEnvironments.join(', ')}. Valid: ${validEnvs.join(', ')}`);
+        }
+        const dbAliases = (params.dbAliases as string[]) || [];
+        const browser = (params.browser as string) || 'chrome';
+        const headless = params.headless !== false;
+        const timeout = (params.timeout as number) || 30000;
+        const adoIntegration = (params.adoIntegration as boolean) || false;
+        const apiTesting = (params.apiTesting as boolean) || false;
+        const apiBaseUrl = (params.apiBaseUrl as string) || (apiTesting ? `https://api-${project}-{env}.example.com` : '');
+
+        const basePath = path.join(process.cwd(), 'config', project);
+        const filesGenerated: string[] = [];
+        const filesUpdated: string[] = [];
+
+        context.log('info', `Generating config scaffold for project: ${project}`);
+
+        // 1. Generate global.env override
+        const globalContent = buildGlobalOverrideTemplate(project);
+        writeOrMerge(path.join(basePath, 'global.env'), globalContent, filesGenerated, filesUpdated);
+
+        // 2. Generate common/common.env
+        const commonContent = buildCommonTemplate(
+            project, projectDisplay, projectType, browser, headless, timeout,
+            dbAliases, apiTesting, adoIntegration
+        );
+        writeOrMerge(path.join(basePath, 'common', 'common.env'), commonContent, filesGenerated, filesUpdated);
+
+        // 3. Generate environments/{env}.env for each environment
+        for (const env of environments) {
+            const envContent = buildEnvironmentTemplate(
+                project, env, baseUrlTemplate, dbAliases, apiTesting, apiBaseUrl, adoIntegration
+            );
+            writeOrMerge(path.join(basePath, 'environments', `${env}.env`), envContent, filesGenerated, filesUpdated);
+        }
+
+        CSReporter.pass(`Config scaffold generated for project: ${project}`);
+
+        return createJsonResult({
+            success: true,
+            project,
+            basePath,
+            filesGenerated,
+            filesUpdated,
+            environments,
+            dbAliases,
+            summary: {
+                totalFilesGenerated: filesGenerated.length,
+                totalFilesUpdated: filesUpdated.length,
+                configPath: basePath,
+            },
+        });
+    })
+    .build();
+
+// ============================================================================
+// DB Queries Config Generation Tool
+// ============================================================================
+
+const generateDbQueriesConfigTool = defineTool()
+    .name('generate_db_queries_config')
+    .description('Generate a database queries .env file with DB_QUERY_ prefixed named queries. Creates config/{project}/common/{project}-{module}-db-queries.env. If file exists, only appends missing queries.')
+    .category('generation')
+    .stringParam('project', 'Project name (lowercase)', { required: true })
+    .stringParam('module', 'Module name (e.g., "users", "deals", "orders")', { required: true })
+    .arrayParam('queries', 'Array of query definitions: [{name: "GET_USER_BY_ID", sql: "SELECT * FROM users WHERE id = ?", description: "Fetch user by ID"}]', 'object', { required: true })
+    .handler(async (params, context) => {
+        const project = (params.project as string).toLowerCase();
+        const module = (params.module as string).toLowerCase();
+        const queries = params.queries as Array<{
+            name: string;
+            sql: string;
+            description?: string;
+        }>;
+
+        const fileName = `${project}-${module}-db-queries.env`;
+        const filePath = path.join(process.cwd(), 'config', project, 'common', fileName);
+
+        context.log('info', `Generating DB queries config: ${fileName}`);
+
+        // Build content
+        let content = `# ============================================================================\n`;
+        content += `# ${project.toUpperCase()} - ${module.toUpperCase()} Database Queries\n`;
+        content += `# ============================================================================\n`;
+        content += `# Named queries loaded by CSConfigurationManager and resolved by CSDBUtils.\n`;
+        content += `# Usage: CSDBUtils.executeQuery('ALIAS', 'QUERY_NAME', [params])\n`;
+        content += `#   or:  CSDBUtils.executeNamedQuery('ALIAS', 'QUERY_NAME', [params])\n`;
+        content += `# ============================================================================\n\n`;
+
+        for (const q of queries) {
+            const queryName = q.name.toUpperCase().startsWith('DB_QUERY_')
+                ? q.name.toUpperCase()
+                : `DB_QUERY_${q.name.toUpperCase()}`;
+            if (q.description) {
+                content += `# ${q.description}\n`;
+            }
+            content += `${queryName}=${q.sql}\n\n`;
+        }
+
+        const filesGenerated: string[] = [];
+        const filesUpdated: string[] = [];
+        writeOrMerge(filePath, content, filesGenerated, filesUpdated);
+
+        CSReporter.pass(`DB queries config generated: ${filePath}`);
+
+        return createJsonResult({
+            success: true,
+            fileName,
+            filePath,
+            queryCount: queries.length,
+            queryNames: queries.map(q => q.name),
+            filesGenerated,
+            filesUpdated,
         });
     })
     .build();
@@ -1029,6 +1764,8 @@ export const generationTools: MCPToolDefinition[] = [
     generateSpecTestTool,
     generateDatabaseHelperTool,
     generateTestDataFileTool,
+    generateConfigScaffoldTool,
+    generateDbQueriesConfigTool,
 ];
 
 /**
