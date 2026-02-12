@@ -176,8 +176,35 @@ export class CSAIActionExecutor {
             case 'select': {
                 this.requireElement(element, 'select');
                 this.requireValue(parameters, 'select');
-                const el = this.createWrappedElement(element!, timeout);
-                await el.selectOption(parameters.value!, { timeout });
+                const selectValue = parameters.value!;
+                const selectLocator = element!.locator;
+
+                // Playwright's selectOption with a plain string matches by `value` attribute,
+                // `label` text, or `index`. Users typically specify the visible label text
+                // (e.g., "select '202501'"), so try label match first for reliability.
+                try {
+                    await selectLocator.selectOption({ label: selectValue }, { timeout });
+                } catch {
+                    // Label match failed — try by value attribute, then by plain string (which
+                    // tries value, label, and index in that order)
+                    try {
+                        await selectLocator.selectOption({ value: selectValue }, { timeout });
+                    } catch {
+                        // Last resort: pass plain string which tries all strategies
+                        const el = this.createWrappedElement(element!, timeout);
+                        await el.selectOption(selectValue, { timeout });
+                    }
+                }
+
+                // Brief wait for DOM to settle after select — many apps trigger onChange
+                // events that update dependent elements (e.g., cascading dropdowns).
+                // This prevents the next step from acting on stale DOM.
+                await page.waitForTimeout(300);
+                try {
+                    await page.waitForLoadState('networkidle', { timeout: 2000 });
+                } catch {
+                    // Network might not settle in 2s — non-critical
+                }
                 return this.success('select');
             }
 
@@ -268,9 +295,23 @@ export class CSAIActionExecutor {
                 this.requireElement(element, 'drag');
                 if (!parameters.dragTarget) throw new Error('No drag target specified');
                 const el = this.createWrappedElement(element!, timeout);
-                // Build locator for drag target using text search
-                const dragTargetLocator = page.getByText(parameters.dragTarget, { exact: false }).first();
-                await el.dragTo(dragTargetLocator, { timeout });
+
+                // Find drag target: try text search, then role-based search
+                let dragTargetLocator = page.getByText(parameters.dragTarget, { exact: false });
+                let dtCount = await dragTargetLocator.count();
+                if (dtCount === 0) {
+                    // Try getByRole with name
+                    dragTargetLocator = page.getByRole('region', { name: parameters.dragTarget });
+                    dtCount = await dragTargetLocator.count();
+                }
+                if (dtCount === 0) {
+                    throw new Error(`Drag target not found: "${parameters.dragTarget}"`);
+                }
+                // If multiple matches, use first but log a warning
+                if (dtCount > 1) {
+                    CSReporter.debug(`CSAIActionExecutor: Drag target "${parameters.dragTarget}" matched ${dtCount} elements — using first`);
+                }
+                await el.dragTo(dragTargetLocator.first(), { timeout });
                 return this.success('drag');
             }
 
@@ -290,7 +331,13 @@ export class CSAIActionExecutor {
             // ================================================================
 
             case 'wait-seconds': {
-                const waitMs = parameters.timeout || 1000;
+                const requestedMs = parameters.timeout || 1000;
+                // Cap wait time to 30 seconds to prevent exceeding test framework timeouts
+                const maxWaitMs = 30000;
+                const waitMs = Math.min(requestedMs, maxWaitMs);
+                if (requestedMs > maxWaitMs) {
+                    CSReporter.warn(`AI Step: Wait time ${requestedMs}ms exceeds maximum ${maxWaitMs}ms — capped to ${maxWaitMs}ms`);
+                }
                 CSReporter.debug(`AI Step: Waiting ${waitMs}ms`);
                 await page.waitForTimeout(waitMs);
                 return this.success('wait-seconds');
@@ -305,7 +352,7 @@ export class CSAIActionExecutor {
                     // Wait for any URL change
                     const currentUrl = page.url();
                     await page.waitForFunction(
-                        (prevUrl: string) => window.location.href !== prevUrl,
+                        (prevUrl) => window.location.href !== prevUrl,
                         currentUrl,
                         { timeout }
                     );
@@ -350,22 +397,22 @@ export class CSAIActionExecutor {
 
             case 'switch-tab': {
                 const browserManager = getBrowserManager();
+                const pages = browserManager.getContext().pages();
+                if (pages.length === 0) {
+                    throw new Error('No tabs available to switch to');
+                }
                 if (parameters.tabIndex !== undefined) {
                     if (parameters.tabIndex === -1) {
                         // Switch to latest tab
-                        const pages = browserManager.getContext().pages();
                         const latestPage = pages[pages.length - 1];
                         browserManager.setCurrentPage(latestPage);
                         await latestPage.bringToFront();
                     } else if (parameters.tabIndex === 0) {
                         // Switch to main/first tab
-                        const pages = browserManager.getContext().pages();
-                        const mainPage = pages[0];
-                        browserManager.setCurrentPage(mainPage);
-                        await mainPage.bringToFront();
+                        browserManager.setCurrentPage(pages[0]);
+                        await pages[0].bringToFront();
                     } else {
                         // Switch to specific tab by index (1-based from user, convert to 0-based)
-                        const pages = browserManager.getContext().pages();
                         const targetIdx = parameters.tabIndex - 1;
                         if (targetIdx >= 0 && targetIdx < pages.length) {
                             browserManager.setCurrentPage(pages[targetIdx]);
@@ -376,7 +423,6 @@ export class CSAIActionExecutor {
                     }
                 } else {
                     // Default: switch to latest tab
-                    const pages = browserManager.getContext().pages();
                     const latestPage = pages[pages.length - 1];
                     browserManager.setCurrentPage(latestPage);
                     await latestPage.bringToFront();
@@ -607,6 +653,7 @@ export class CSAIActionExecutor {
 
             case 'execute-js': {
                 if (!parameters.script) throw new Error('No JavaScript specified for execute-js');
+                CSReporter.debug(`AI Step: Executing JavaScript: ${parameters.script.substring(0, 200)}${parameters.script.length > 200 ? '...' : ''}`);
                 await page.evaluate(parameters.script);
                 return this.success('execute-js');
             }
@@ -631,20 +678,63 @@ export class CSAIActionExecutor {
         switch (intent) {
             case 'verify-visible': {
                 this.requireElement(element, 'verify-visible');
+                // Guard: reject low-confidence matches for assertions to avoid false positives
+                // (e.g., matching random text on a 404 page)
+                if (element!.confidence < this.config.confidenceThreshold) {
+                    throw new Error(
+                        `Element match confidence too low for assertion (${element!.confidence.toFixed(2)} < ${this.config.confidenceThreshold}). ` +
+                        `Matched: ${element!.description}. The element may not be the intended target.`
+                    );
+                }
                 const el = this.createWrappedElement(element!, timeout);
-                await el.waitForVisible(timeout);
+                // Use polling assertion instead of bare waitForVisible to ensure the element
+                // is actually visible AND attached to the live DOM (not just cached)
+                await this.assertWithRetryAndScreenshot(
+                    async () => {
+                        const isVisible = await el.isVisible();
+                        if (!isVisible) return false;
+                        // Additional check: verify the element is actually in the viewport or DOM
+                        // by confirming it has non-zero bounding box dimensions
+                        try {
+                            const box = await element!.locator.boundingBox({ timeout: 2000 });
+                            return box !== null && box.width > 0 && box.height > 0;
+                        } catch {
+                            // boundingBox can fail for off-screen elements; isVisible is sufficient
+                            return true;
+                        }
+                    },
+                    `Expected "${step.target.rawText}" to be visible on the page`,
+                    timeout
+                );
                 return this.success('verify-visible');
             }
 
             case 'verify-hidden': {
-                this.requireElement(element, 'verify-hidden');
+                if (!element || !element.locator) {
+                    // Element wasn't found at all — this counts as "hidden" (not visible on page)
+                    return this.success('verify-hidden');
+                }
                 const el = this.createWrappedElement(element!, timeout);
-                await el.waitForHidden(timeout);
+                // Use polling to check hidden state — handles both "exists but hidden"
+                // and "detached from DOM during check"
+                await this.assertWithRetryAndScreenshot(
+                    async () => {
+                        const count = await el.count();
+                        if (count === 0) return true; // Not in DOM = hidden
+                        const visible = await el.isVisible();
+                        return !visible;
+                    },
+                    `Expected "${step.target.rawText}" to be hidden but it is visible`,
+                    timeout
+                );
                 return this.success('verify-hidden');
             }
 
             case 'verify-not-present': {
-                this.requireElement(element, 'verify-not-present');
+                if (!element || !element.locator) {
+                    // Element not found at all — this IS the expected state
+                    return this.success('verify-not-present');
+                }
                 const el = this.createWrappedElement(element!, timeout);
                 await this.assertWithRetryAndScreenshot(
                     async () => (await el.count()) === 0,
@@ -658,22 +748,24 @@ export class CSAIActionExecutor {
                 this.requireElement(element, 'verify-text');
                 const el = this.createWrappedElement(element!, timeout);
                 if (parameters.expectedValue !== undefined) {
+                    const expected = parameters.expectedValue.trim();
                     if (modifiers.negated) {
                         await this.assertWithRetryAndScreenshot(
                             async () => {
-                                const text = (await el.textContent() || '').trim();
-                                return text !== parameters.expectedValue;
+                                const text = this.normalizeWhitespace(await el.textContent() || '');
+                                return text !== expected && !text.includes(expected);
                             },
-                            `Expected text to NOT be "${parameters.expectedValue}"`,
+                            `Expected text to NOT be "${expected}"`,
                             timeout
                         );
                     } else {
                         await this.assertWithRetryAndScreenshot(
                             async () => {
-                                const text = (await el.textContent() || '').trim();
-                                return text === parameters.expectedValue;
+                                const text = this.normalizeWhitespace(await el.textContent() || '');
+                                // Try exact match first, then containment for elements with extra whitespace/text
+                                return text === expected || text.includes(expected);
                             },
-                            `Expected text "${parameters.expectedValue}" but got different content`,
+                            `Expected text "${expected}" but got different content`,
                             timeout
                         );
                     }
@@ -767,9 +859,14 @@ export class CSAIActionExecutor {
             case 'verify-count': {
                 this.requireElement(element, 'verify-count');
                 if (parameters.count === undefined) throw new Error('No count specified for verify-count');
-                const el = this.createWrappedElement(element!, timeout);
+                // Use broadLocator (non-narrowed) for counting — the main locator may be
+                // narrowed to .first()/.nth() which would always count as 1
+                const countLocator = element!.broadLocator || element!.locator;
                 await this.assertWithRetryAndScreenshot(
-                    async () => (await el.count()) === parameters.count,
+                    async () => {
+                        const actualCount = await countLocator.count();
+                        return actualCount === parameters.count;
+                    },
                     `Expected count to be ${parameters.count}`,
                     timeout
                 );
@@ -778,17 +875,18 @@ export class CSAIActionExecutor {
 
             case 'verify-value': {
                 this.requireElement(element, 'verify-value');
-                const el = this.createWrappedElement(element!, timeout);
-                if (parameters.expectedValue !== undefined) {
-                    await this.assertWithRetryAndScreenshot(
-                        async () => {
-                            const val = await el.inputValue();
-                            return val === parameters.expectedValue;
-                        },
-                        `Expected input value "${parameters.expectedValue}"`,
-                        timeout
-                    );
+                if (parameters.expectedValue === undefined) {
+                    throw new Error('No expected value specified for verify-value. Use: verify the field value is "expected"');
                 }
+                const el = this.createWrappedElement(element!, timeout);
+                await this.assertWithRetryAndScreenshot(
+                    async () => {
+                        const val = await el.inputValue();
+                        return val === parameters.expectedValue;
+                    },
+                    `Expected input value to be "${parameters.expectedValue}"`,
+                    timeout
+                );
                 return this.success('verify-value');
             }
 
@@ -805,6 +903,16 @@ export class CSAIActionExecutor {
                         `Expected attribute "${parameters.attribute}" to be "${parameters.expectedValue}"`,
                         timeout
                     );
+                } else {
+                    // No expected value — verify the attribute exists (is not null)
+                    await this.assertWithRetryAndScreenshot(
+                        async () => {
+                            const val = await el.getAttribute(parameters.attribute!);
+                            return val !== null;
+                        },
+                        `Expected element to have attribute "${parameters.attribute}" but it was not found`,
+                        timeout
+                    );
                 }
                 return this.success('verify-attribute');
             }
@@ -816,16 +924,20 @@ export class CSAIActionExecutor {
             case 'verify-css': {
                 this.requireElement(element, 'verify-css');
                 if (!parameters.cssProperty) throw new Error('No CSS property specified for verify-css');
-                const el = this.createWrappedElement(element!, timeout);
-                const locator = element!.locator;
-                const actualCss = await locator.evaluate(
-                    (el: Element, prop: string) => window.getComputedStyle(el).getPropertyValue(prop),
-                    parameters.cssProperty
-                );
+                const locatorCss = element!.locator;
                 if (parameters.expectedValue) {
+                    const cssProp = parameters.cssProperty;
+                    const expectedCss = parameters.expectedValue;
                     await this.assertWithRetryAndScreenshot(
-                        async () => actualCss.trim() === parameters.expectedValue,
-                        `Expected CSS "${parameters.cssProperty}" to be "${parameters.expectedValue}" but got "${actualCss}"`,
+                        async () => {
+                            // Evaluate CSS value INSIDE the polling loop to handle transitions
+                            const actualCss = await locatorCss.evaluate(
+                                (el: Element, prop: string) => window.getComputedStyle(el).getPropertyValue(prop),
+                                cssProp
+                            );
+                            return actualCss.trim() === expectedCss;
+                        },
+                        `Expected CSS "${parameters.cssProperty}" to be "${parameters.expectedValue}"`,
                         timeout
                     );
                 }
@@ -1055,6 +1167,12 @@ export class CSAIActionExecutor {
                             timeout
                         );
                     }
+                } else {
+                    // No expected value — verify URL is not blank/about:blank
+                    const currentUrl = page.url();
+                    if (!currentUrl || currentUrl === 'about:blank') {
+                        throw new Error(`Expected a valid URL but page is at "${currentUrl}"`);
+                    }
                 }
                 return this.success('verify-url');
             }
@@ -1070,6 +1188,12 @@ export class CSAIActionExecutor {
                         `Expected page title to contain "${parameters.expectedValue}"`,
                         timeout
                     );
+                } else {
+                    // No expected value — verify page has a non-empty title
+                    const title = await page.title();
+                    if (!title || title.trim().length === 0) {
+                        throw new Error('Expected page to have a title but it was empty');
+                    }
                 }
                 return this.success('verify-title');
             }
@@ -1170,10 +1294,34 @@ export class CSAIActionExecutor {
                 this.requireElement(element, 'get-table-data');
                 const locator = element!.locator;
                 const tableData = await locator.evaluate((table: any) => {
-                    const headers = Array.from(table.querySelectorAll('thead th')).map((th: any) => th.textContent.trim());
-                    const rows = Array.from(table.querySelectorAll('tbody tr'));
-                    return rows.map((row: any) => {
-                        const cells = Array.from(row.querySelectorAll('td')).map((td: any) => td.textContent.trim());
+                    // Try thead th first, then fallback to first row th/td for headers
+                    let headers = Array.from(table.querySelectorAll('thead th')).map((th: any) => th.textContent.trim());
+                    let dataRows: Element[];
+                    if (headers.length === 0) {
+                        // No thead — check if first row has th elements
+                        const firstRow = table.querySelector('tr');
+                        if (firstRow) {
+                            const firstRowThs = firstRow.querySelectorAll('th');
+                            if (firstRowThs.length > 0) {
+                                headers = Array.from(firstRowThs).map((th: any) => th.textContent.trim());
+                                // Skip first row in data since it's headers
+                                const allRows = Array.from(table.querySelectorAll('tr'));
+                                dataRows = allRows.slice(1) as Element[];
+                            } else {
+                                // No th anywhere — use column indices
+                                dataRows = Array.from(table.querySelectorAll('tbody tr'));
+                                if (dataRows.length === 0) {
+                                    dataRows = Array.from(table.querySelectorAll('tr'));
+                                }
+                            }
+                        } else {
+                            dataRows = [];
+                        }
+                    } else {
+                        dataRows = Array.from(table.querySelectorAll('tbody tr'));
+                    }
+                    return (dataRows || []).map((row: any) => {
+                        const cells = Array.from(row.querySelectorAll('td, th')).map((td: any) => td.textContent.trim());
                         const rowData: Record<string, string> = {};
                         cells.forEach((cell: string, i: number) => {
                             rowData[headers[i] || `column${i + 1}`] = cell;
@@ -1595,5 +1743,10 @@ export class CSAIActionExecutor {
 
     private escapeRegex(str: string): string {
         return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    /** Normalize whitespace: collapse runs of whitespace to single space and trim */
+    private normalizeWhitespace(text: string): string {
+        return text.replace(/\s+/g, ' ').trim();
     }
 }

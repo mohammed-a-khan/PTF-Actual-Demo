@@ -139,22 +139,32 @@ export class CSAccessibilityTreeMatcher {
         // Strategy 4: Role-based search
         try {
             const roleResult = await this.matchViaRoleSearch(page, target, intent);
-            if (roleResult) {
+            if (roleResult && roleResult.confidence >= this.config.confidenceThreshold) {
                 roleResult.alternatives = alternatives;
                 const duration = Date.now() - startTime;
                 CSReporter.debug(`CSAccessibilityTreeMatcher: Role search match in ${duration}ms (confidence: ${roleResult.confidence.toFixed(2)})`);
                 return roleResult;
+            }
+            if (roleResult) {
+                alternatives.push({
+                    locator: roleResult.locator,
+                    confidence: roleResult.confidence,
+                    method: roleResult.method,
+                    description: roleResult.description
+                });
             }
         } catch (error: any) {
             CSReporter.debug(`CSAccessibilityTreeMatcher: Role search strategy failed: ${error.message}`);
         }
 
         // If we have alternatives but none met threshold, return the best one
-        // only if it's close enough (at least 50% of the threshold)
+        // Assertions require full confidence threshold to prevent false positives (e.g., wrong element on 404 page)
+        // Actions/queries use a relaxed threshold (75% of threshold) for better usability
         if (alternatives.length > 0) {
             alternatives.sort((a, b) => b.confidence - a.confidence);
             const best = alternatives[0];
-            const minAcceptable = this.config.confidenceThreshold * 0.5;
+            const isAssertion = intent.startsWith('verify-');
+            const minAcceptable = isAssertion ? this.config.confidenceThreshold : this.config.confidenceThreshold * 0.75;
             if (best.confidence >= minAcceptable) {
                 const duration = Date.now() - startTime;
                 CSReporter.debug(`CSAccessibilityTreeMatcher: Using best alternative in ${duration}ms (confidence: ${best.confidence.toFixed(2)}, method: ${best.method})`);
@@ -166,7 +176,7 @@ export class CSAccessibilityTreeMatcher {
                     alternatives: alternatives.slice(1)
                 };
             }
-            CSReporter.debug(`CSAccessibilityTreeMatcher: Best alternative confidence ${best.confidence.toFixed(2)} is below minimum ${minAcceptable.toFixed(2)} - rejecting`);
+            CSReporter.debug(`CSAccessibilityTreeMatcher: Best alternative confidence ${best.confidence.toFixed(2)} is below minimum ${minAcceptable.toFixed(2)} (assertion=${isAssertion}) - rejecting`);
         }
 
         const duration = Date.now() - startTime;
@@ -212,12 +222,19 @@ export class CSAccessibilityTreeMatcher {
 
         // Handle ordinal selection
         let selectedScore: AccessibilityMatchScore;
-        if (target.ordinal !== undefined && target.ordinal > 0 && scores.length >= target.ordinal) {
+        if (target.ordinal !== undefined && target.ordinal > 0) {
             // Filter to only high-confidence matches (within 80% of best score)
             const threshold = scores[0].total * 0.8;
             const topScores = scores.filter(s => s.total >= threshold);
-            const ordinalIdx = Math.min(target.ordinal - 1, topScores.length - 1);
-            selectedScore = topScores[ordinalIdx];
+
+            if (target.ordinal > topScores.length) {
+                // Requested ordinal exceeds available matches — fail clearly instead of clamping
+                CSReporter.debug(
+                    `CSAccessibilityTreeMatcher: Ordinal ${target.ordinal} requested but only ${topScores.length} high-confidence matches found`
+                );
+                return null;
+            }
+            selectedScore = topScores[target.ordinal - 1];
         } else if (target.ordinal === -1) {
             // "last" ordinal
             const threshold = scores[0].total * 0.8;
@@ -228,7 +245,7 @@ export class CSAccessibilityTreeMatcher {
         }
 
         // Build a Playwright locator for the matched node
-        const locator = this.buildLocatorFromNode(page, selectedScore.node, searchText);
+        const locator = await this.buildLocatorFromNode(page, selectedScore.node, searchText);
         if (!locator) return null;
 
         // Verify element exists
@@ -236,15 +253,36 @@ export class CSAccessibilityTreeMatcher {
         if (count === 0) return null;
 
         // Handle ordinal if locator matches multiple elements
-        const finalLocator = count > 1 && target.ordinal !== undefined ?
-            (target.ordinal === -1 ? locator.last() : locator.nth(Math.max(0, (target.ordinal || 1) - 1))) :
-            locator.first();
+        let finalLocator: Locator;
+        let confidenceAdjustment = 0;
+        if (count > 1 && target.ordinal !== undefined) {
+            // User specified an ordinal — pick that one
+            finalLocator = target.ordinal === -1 ? locator.last() : locator.nth(Math.max(0, (target.ordinal || 1) - 1));
+        } else if (count === 1) {
+            // Only one match — safe to use it
+            finalLocator = locator.first();
+        } else {
+            // Multiple matches with NO ordinal specified
+            // Try to disambiguate using relativeTo/position context before falling back to first()
+            const disambiguated = await this.disambiguateByContext(locator, count, target, page);
+            if (disambiguated) {
+                finalLocator = disambiguated;
+                confidenceAdjustment = -0.05; // Small penalty for disambiguation
+            } else {
+                // No disambiguation possible — use first() with confidence penalty
+                finalLocator = locator.first();
+                confidenceAdjustment = -0.15;
+            }
+            CSReporter.debug(`CSAccessibilityTreeMatcher: A11y tree matched ${count} elements for "${selectedScore.node.name}" — ${disambiguated ? 'disambiguated by context' : 'using first, reducing confidence'}`);
+        }
 
         return {
             locator: finalLocator,
-            confidence: selectedScore.total,
+            // Store the broad (non-narrowed) locator for use by verify-count
+            broadLocator: locator,
+            confidence: Math.max(0.1, selectedScore.total + confidenceAdjustment),
             method: 'accessibility-tree' as MatchMethod,
-            description: `${selectedScore.node.role}[name="${selectedScore.node.name}"]`,
+            description: `${selectedScore.node.role}[name="${selectedScore.node.name}"]${count > 1 ? ` (${count} matches)` : ''}`,
             alternatives: []
         };
     }
@@ -313,28 +351,60 @@ export class CSAccessibilityTreeMatcher {
         const level = Math.floor(indent / 2);
 
         // Parse: - role "name" [prop=value]
-        const match = trimmed.match(/^-\s+(\w+)(?:\s+"([^"]*)")?(?:\s+\[([^\]]*)\])?:?$/);
-        if (!match) {
-            // Try without quotes (for text nodes)
-            const simpleMatch = trimmed.match(/^-\s+(\w+)(?:\s+(.+?))?(?:\s+\[([^\]]*)\])?:?$/);
-            if (!simpleMatch) return null;
+        // Use a more robust approach: extract role first, then find quoted name
+        const roleMatch = trimmed.match(/^-\s+(\w+)\s*/);
+        if (!roleMatch) return null;
 
-            return {
-                role: simpleMatch[1],
-                name: (simpleMatch[2] || '').replace(/^"|"$/g, '').replace(/:$/, ''),
-                level,
-                properties: this.parseProperties(simpleMatch[3]),
-                children: [],
-                rawLine: line,
-                lineIndex
-            };
+        const role = roleMatch[1];
+        const afterRole = trimmed.substring(roleMatch[0].length);
+
+        // Extract name from quotes (handle nested quotes by finding first and last quote)
+        let name = '';
+        let remaining = afterRole;
+        if (remaining.startsWith('"')) {
+            // Find the closing quote — handle nested quotes by looking for " followed by
+            // end of string, or [ (properties), or : (children marker)
+            const nameEndPatterns = [/"\s*\[/, /"\s*:?\s*$/, /"\s+/];
+            let endIdx = -1;
+            for (const pattern of nameEndPatterns) {
+                const match = remaining.substring(1).search(pattern);
+                if (match >= 0 && (endIdx === -1 || match < endIdx)) {
+                    endIdx = match;
+                }
+            }
+            if (endIdx >= 0) {
+                name = remaining.substring(1, endIdx + 1);
+                remaining = remaining.substring(endIdx + 2).trim();
+            } else {
+                // Fallback: take everything between first and last quote
+                const lastQuote = remaining.lastIndexOf('"');
+                if (lastQuote > 0) {
+                    name = remaining.substring(1, lastQuote);
+                    remaining = remaining.substring(lastQuote + 1).trim();
+                }
+            }
+        }
+
+        // Extract properties from [...]
+        let properties: Record<string, string> = {};
+        const propsMatch = remaining.match(/\[([^\]]*)\]/);
+        if (propsMatch) {
+            properties = this.parseProperties(propsMatch[1]);
+        }
+
+        // Clean up remaining colon
+        remaining = remaining.replace(/\[([^\]]*)\]/, '').replace(/:?\s*$/, '').trim();
+
+        // If no quoted name was found, use remaining text as name (for text nodes)
+        if (!name && remaining) {
+            name = remaining.replace(/^"|"$/g, '').replace(/:$/, '');
         }
 
         return {
-            role: match[1],
-            name: match[2] || '',
+            role,
+            name,
             level,
-            properties: this.parseProperties(match[3]),
+            properties,
             children: [],
             rawLine: line,
             lineIndex
@@ -430,19 +500,25 @@ export class CSAccessibilityTreeMatcher {
     }
 
     /**
-     * Build a Playwright locator from an accessibility node
+     * Build a Playwright locator from an accessibility node.
+     * Tries exact matching first (fewer false positives), then falls back to inexact.
+     * This prevents "Submit" from matching "Submit Form" and "Submit Application".
      */
-    private buildLocatorFromNode(page: Page, node: AccessibilityNode, searchText: string): Locator | null {
+    private async buildLocatorFromNode(page: Page, node: AccessibilityNode, searchText: string): Promise<Locator | null> {
         try {
-            // Try getByRole with name
             if (node.name) {
+                // Try exact match first — avoids matching "Submit Form" when we want "Submit"
+                const exactLocator = page.getByRole(node.role as any, { name: node.name, exact: true });
+                const exactCount = await exactLocator.count().catch(() => 0);
+                if (exactCount > 0) {
+                    return exactLocator;
+                }
+                // Fall back to inexact if exact match found nothing
+                // (handles slight whitespace/casing differences)
                 return page.getByRole(node.role as any, { name: node.name, exact: false });
             }
-
-            // Try getByRole without name
             return page.getByRole(node.role as any);
         } catch {
-            // If role is not a valid Playwright role, try text-based locator
             if (searchText) {
                 return page.getByText(searchText, { exact: false });
             }
@@ -462,6 +538,45 @@ export class CSAccessibilityTreeMatcher {
         const searchText = this.buildSearchText(target);
         const expectedRoles = this.getExpectedRoles(target.elementType, intent);
 
+        // For select/dropdown intents, prioritize getByLabel FIRST
+        // This correctly disambiguates "Cycle Code" vs "Tranche ID" dropdowns
+        // because label matching uses the associated <label> element
+        const isSelectIntent = intent === 'select' ||
+            (target.elementType && ['dropdown', 'select', 'combobox', 'listbox'].includes(target.elementType.toLowerCase()));
+
+        if (isSelectIntent && searchText) {
+            try {
+                const labelLocator = page.getByLabel(searchText, { exact: false });
+                const labelCount = await labelLocator.count();
+                if (labelCount > 0) {
+                    // Verify at least one labeled element is a select/combobox
+                    for (let i = 0; i < Math.min(labelCount, 5); i++) {
+                        const tagName = await labelLocator.nth(i).evaluate(el => el.tagName.toLowerCase()).catch(() => '');
+                        const roleAttr = await labelLocator.nth(i).getAttribute('role').catch(() => null);
+                        if (tagName === 'select' || roleAttr === 'combobox' || roleAttr === 'listbox') {
+                            return {
+                                locator: labelLocator.nth(i),
+                                confidence: 0.85,
+                                method: 'semantic-locator',
+                                description: `getByLabel('${searchText}') -> <${tagName}>`,
+                                alternatives: []
+                            };
+                        }
+                    }
+                    // Even if it's not a <select>, the labeled element is likely the right target
+                    if (labelCount === 1) {
+                        return {
+                            locator: labelLocator.first(),
+                            confidence: 0.75,
+                            method: 'semantic-locator',
+                            description: `getByLabel('${searchText}')`,
+                            alternatives: []
+                        };
+                    }
+                }
+            } catch { /* continue to other strategies */ }
+        }
+
         // Try getByRole with name for each expected role
         for (const role of expectedRoles) {
             try {
@@ -471,12 +586,22 @@ export class CSAccessibilityTreeMatcher {
                 });
                 const count = await locator.count();
                 if (count > 0) {
-                    const finalLocator = this.selectByOrdinal(locator, count, target.ordinal);
+                    let finalLocator: Locator;
+                    let confidenceAdj = 0;
+                    if (count > 1 && target.ordinal === undefined) {
+                        // Multiple matches, no ordinal — try disambiguation
+                        const disambiguated = await this.disambiguateByContext(locator, count, target, page);
+                        finalLocator = disambiguated || locator.first();
+                        confidenceAdj = disambiguated ? -0.05 : -0.1;
+                    } else {
+                        finalLocator = this.selectByOrdinal(locator, count, target.ordinal);
+                    }
                     return {
                         locator: finalLocator,
-                        confidence: 0.75,
+                        broadLocator: locator,
+                        confidence: 0.75 + confidenceAdj,
                         method: 'semantic-locator',
-                        description: `getByRole('${role}', { name: '${searchText}' })`,
+                        description: `getByRole('${role}', { name: '${searchText}' })${count > 1 ? ` (${count} matches)` : ''}`,
                         alternatives: []
                     };
                 }
@@ -485,7 +610,7 @@ export class CSAccessibilityTreeMatcher {
             }
         }
 
-        // Try getByLabel
+        // Try getByLabel (for non-select intents, or if select label match above didn't work)
         if (searchText) {
             try {
                 const locator = page.getByLabel(searchText, { exact: false });
@@ -493,6 +618,7 @@ export class CSAccessibilityTreeMatcher {
                 if (count > 0) {
                     return {
                         locator: this.selectByOrdinal(locator, count, target.ordinal),
+                        broadLocator: locator,
                         confidence: 0.7,
                         method: 'semantic-locator',
                         description: `getByLabel('${searchText}')`,
@@ -510,6 +636,7 @@ export class CSAccessibilityTreeMatcher {
                 if (count > 0) {
                     return {
                         locator: this.selectByOrdinal(locator, count, target.ordinal),
+                        broadLocator: locator,
                         confidence: 0.65,
                         method: 'semantic-locator',
                         description: `getByPlaceholder('${searchText}')`,
@@ -537,28 +664,35 @@ export class CSAccessibilityTreeMatcher {
             const locator = page.getByText(searchText, { exact: false });
             const count = await locator.count();
             if (count > 0) {
+                // Reduce confidence when many elements match (broad/generic text)
+                // Single match = 0.6, multiple = progressively lower
+                const baseConfidence = count === 1 ? 0.6 : Math.max(0.35, 0.6 - count * 0.05);
                 return {
                     locator: this.selectByOrdinal(locator, count, target.ordinal),
-                    confidence: 0.6,
+                    broadLocator: locator,
+                    confidence: baseConfidence,
                     method: 'text-search',
-                    description: `getByText('${searchText}')`,
+                    description: `getByText('${searchText}')${count > 1 ? ` (${count} matches)` : ''}`,
                     alternatives: []
                 };
             }
         } catch { /* continue */ }
 
-        // Try with individual descriptor words
+        // Try with individual descriptor words — lower confidence since these are partial matches
         for (const desc of target.descriptors) {
             if (desc.length < 3) continue;
             try {
                 const locator = page.getByText(desc, { exact: false });
                 const count = await locator.count();
                 if (count > 0 && count <= 10) {
+                    // Individual word matches are less reliable
+                    const baseConfidence = count === 1 ? 0.45 : Math.max(0.25, 0.45 - count * 0.05);
                     return {
                         locator: this.selectByOrdinal(locator, count, target.ordinal),
-                        confidence: 0.5,
+                        broadLocator: locator,
+                        confidence: baseConfidence,
                         method: 'text-search',
-                        description: `getByText('${desc}')`,
+                        description: `getByText('${desc}')${count > 1 ? ` (${count} matches)` : ''}`,
                         alternatives: []
                     };
                 }
@@ -580,14 +714,47 @@ export class CSAccessibilityTreeMatcher {
         const expectedRoles = this.getExpectedRoles(target.elementType, intent);
         if (expectedRoles.length === 0) return null;
 
+        const searchText = this.buildSearchText(target);
+
+        // When we have search text and multiple elements of the same role exist,
+        // try getByLabel first — this disambiguates dropdowns like "Cycle Code" vs "Tranche ID"
+        // by matching the associated <label> element
+        if (searchText) {
+            for (const role of expectedRoles) {
+                try {
+                    const labelLocator = page.getByLabel(searchText, { exact: false });
+                    const labelCount = await labelLocator.count();
+                    if (labelCount > 0) {
+                        // Verify the labeled element matches the expected role
+                        for (let i = 0; i < Math.min(labelCount, 5); i++) {
+                            const roleAttr = await labelLocator.nth(i).getAttribute('role').catch(() => null);
+                            const tagName = await labelLocator.nth(i).evaluate(el => el.tagName.toLowerCase()).catch(() => '');
+                            // <select> has implicit combobox/listbox role
+                            const matchesRole = roleAttr === role ||
+                                (role === 'combobox' && (tagName === 'select' || tagName === 'input')) ||
+                                (role === 'listbox' && tagName === 'select');
+                            if (matchesRole) {
+                                return {
+                                    locator: labelLocator.nth(i),
+                                    confidence: 0.65,
+                                    method: 'role-search',
+                                    description: `getByLabel('${searchText}') -> ${role}`,
+                                    alternatives: []
+                                };
+                            }
+                        }
+                    }
+                } catch { /* continue */ }
+            }
+        }
+
         // Try each role without name filtering
         for (const role of expectedRoles) {
             try {
                 const locator = page.getByRole(role as any);
                 const count = await locator.count();
-                if (count > 0 && count <= 20) {
+                if (count > 0 && count <= 50) {
                     // Find the best match among results by checking text content
-                    const searchText = this.buildSearchText(target);
                     if (searchText) {
                         for (let i = 0; i < Math.min(count, 10); i++) {
                             const text = await locator.nth(i).textContent().catch(() => '');
@@ -601,16 +768,41 @@ export class CSAccessibilityTreeMatcher {
                                 };
                             }
                         }
+
+                        // Also try matching by accessible name (aria-label, aria-labelledby, associated label)
+                        for (let i = 0; i < Math.min(count, 10); i++) {
+                            const accName = await locator.nth(i).getAttribute('aria-label').catch(() => null)
+                                || await locator.nth(i).getAttribute('name').catch(() => null)
+                                || await locator.nth(i).getAttribute('id').catch(() => null) || '';
+                            if (accName && this.jaroWinkler(searchText.toLowerCase(), accName.toLowerCase()) > 0.6) {
+                                return {
+                                    locator: locator.nth(i),
+                                    confidence: 0.55,
+                                    method: 'role-search',
+                                    description: `getByRole('${role}').nth(${i}) - name match '${accName}'`,
+                                    alternatives: []
+                                };
+                            }
+                        }
                     }
 
-                    // If no text match, use ordinal or first
-                    return {
-                        locator: this.selectByOrdinal(locator, count, target.ordinal),
-                        confidence: 0.4,
-                        method: 'role-search',
-                        description: `getByRole('${role}')`,
-                        alternatives: []
-                    };
+                    // Only return generic first if there's a single element or explicit ordinal
+                    // When multiple elements exist and no text/name matched, don't blindly pick first
+                    if (count === 1 || target.ordinal !== undefined) {
+                        return {
+                            locator: this.selectByOrdinal(locator, count, target.ordinal),
+                            confidence: count === 1 ? 0.45 : 0.4,
+                            method: 'role-search',
+                            description: `getByRole('${role}')${count > 1 ? `.nth(${target.ordinal || 0})` : ''}`,
+                            alternatives: []
+                        };
+                    }
+
+                    // Multiple elements, no ordinal, no text match — reject entirely
+                    // Returning first() here is dangerous: it silently picks the wrong element
+                    // Instead, return null so the caller can try other strategies or fail clearly
+                    CSReporter.debug(`CSAccessibilityTreeMatcher: Role search found ${count} '${role}' elements but none matched '${searchText}' — rejecting ambiguous match`);
+                    return null;
                 }
             } catch { /* continue */ }
         }
@@ -659,12 +851,140 @@ export class CSAccessibilityTreeMatcher {
     }
 
     /**
-     * Select element by ordinal from a multi-element locator
+     * Disambiguate among multiple matched elements using context cues.
+     * Uses position (top/bottom), relativeTo (near X), and parent section text
+     * to pick the best element from a multi-match locator.
+     *
+     * @returns A narrowed locator if disambiguation succeeded, null otherwise
+     */
+    private async disambiguateByContext(
+        locator: Locator,
+        count: number,
+        target: ElementTarget,
+        page: Page
+    ): Promise<Locator | null> {
+        // Strategy A: Position cue (top/bottom/left/right)
+        if (target.position) {
+            try {
+                const boxes: { idx: number; y: number; x: number }[] = [];
+                for (let i = 0; i < Math.min(count, 10); i++) {
+                    const box = await locator.nth(i).boundingBox({ timeout: 2000 }).catch(() => null);
+                    if (box) {
+                        boxes.push({ idx: i, y: box.y, x: box.x });
+                    }
+                }
+                if (boxes.length >= 2) {
+                    switch (target.position) {
+                        case 'top':
+                        case 'upper':
+                            boxes.sort((a, b) => a.y - b.y);
+                            return locator.nth(boxes[0].idx);
+                        case 'bottom':
+                        case 'lower':
+                            boxes.sort((a, b) => b.y - a.y);
+                            return locator.nth(boxes[0].idx);
+                        case 'left':
+                            boxes.sort((a, b) => a.x - b.x);
+                            return locator.nth(boxes[0].idx);
+                        case 'right':
+                            boxes.sort((a, b) => b.x - a.x);
+                            return locator.nth(boxes[0].idx);
+                    }
+                }
+            } catch { /* continue to other strategies */ }
+        }
+
+        // Strategy B: relativeTo context (e.g., "near the Users table")
+        if (target.relativeTo) {
+            try {
+                // Find the reference element
+                const refLocator = page.getByText(target.relativeTo, { exact: false });
+                const refCount = await refLocator.count();
+                if (refCount > 0) {
+                    const refBox = await refLocator.first().boundingBox({ timeout: 2000 }).catch(() => null);
+                    if (refBox) {
+                        // Score each candidate by proximity to the reference element
+                        let bestIdx = 0;
+                        let bestDist = Infinity;
+                        for (let i = 0; i < Math.min(count, 10); i++) {
+                            const box = await locator.nth(i).boundingBox({ timeout: 2000 }).catch(() => null);
+                            if (box) {
+                                const dist = Math.sqrt(
+                                    Math.pow(box.x - refBox.x, 2) + Math.pow(box.y - refBox.y, 2)
+                                );
+                                if (dist < bestDist) {
+                                    bestDist = dist;
+                                    bestIdx = i;
+                                }
+                            }
+                        }
+                        if (bestDist < Infinity) {
+                            CSReporter.debug(`CSAccessibilityTreeMatcher: Disambiguated by proximity to "${target.relativeTo}" — element ${bestIdx} (distance: ${bestDist.toFixed(0)}px)`);
+                            return locator.nth(bestIdx);
+                        }
+                    }
+                }
+            } catch { /* continue */ }
+        }
+
+        // Strategy C: Section/parent text context
+        // If descriptors contain section-like words that aren't part of the element name,
+        // check each candidate's surrounding text for those keywords
+        // (This handles cases like "Edit button in Users table" where "Users" disambiguates)
+        if (target.descriptors.length > 1) {
+            try {
+                for (let i = 0; i < Math.min(count, 10); i++) {
+                    const parentText = await locator.nth(i).evaluate(
+                        (el: Element) => {
+                            // Walk up DOM to find section/parent with meaningful text
+                            let parent: Element | null = el.parentElement;
+                            for (let depth = 0; parent && depth < 5; depth++) {
+                                const tag = parent.tagName.toLowerCase();
+                                if (['section', 'article', 'form', 'table', 'div', 'fieldset', 'nav', 'header', 'footer', 'aside'].includes(tag)) {
+                                    // Get a meaningful label: aria-label, heading text, or first 200 chars
+                                    const ariaLabel = parent.getAttribute('aria-label');
+                                    if (ariaLabel) return ariaLabel;
+                                    const heading = parent.querySelector('h1,h2,h3,h4,h5,h6,legend,caption');
+                                    if (heading) return heading.textContent?.trim() || '';
+                                    return (parent.textContent?.trim() || '').substring(0, 200);
+                                }
+                                parent = parent.parentElement;
+                            }
+                            return '';
+                        }
+                    ).catch(() => '');
+
+                    if (parentText) {
+                        const parentLower = parentText.toLowerCase();
+                        // Check if any descriptor words match the parent context
+                        const contextMatch = target.descriptors.some(d =>
+                            d.length >= 3 && parentLower.includes(d.toLowerCase())
+                        );
+                        if (contextMatch) {
+                            CSReporter.debug(`CSAccessibilityTreeMatcher: Disambiguated by parent context — element ${i} matches descriptors in section "${parentText.substring(0, 80)}"`);
+                            return locator.nth(i);
+                        }
+                    }
+                }
+            } catch { /* continue */ }
+        }
+
+        return null;
+    }
+
+    /**
+     * Select element by ordinal from a multi-element locator.
+     * Throws clearly when ordinal exceeds available count.
      */
     private selectByOrdinal(locator: Locator, count: number, ordinal: number | undefined): Locator {
         if (ordinal === undefined || count <= 1) return locator.first();
         if (ordinal === -1) return locator.last();
-        return locator.nth(Math.min(Math.max(0, ordinal - 1), count - 1));
+        const idx = ordinal - 1;
+        if (idx >= count) {
+            // Fail clearly instead of silently clamping — clamping picks the wrong element
+            throw new Error(`Ordinal ${ordinal} exceeds available match count ${count}`);
+        }
+        return locator.nth(Math.max(0, idx));
     }
 
     /**
@@ -710,14 +1030,17 @@ export class CSAccessibilityTreeMatcher {
         const jaro = (matches / s1.length + matches / s2.length +
                      (matches - transpositions / 2) / matches) / 3;
 
-        // Winkler prefix bonus
+        // Winkler prefix bonus — only apply when strings are already similar (jaro >= 0.7)
+        // to avoid inflating scores for dissimilar strings that share a prefix
+        if (jaro < 0.7) return jaro;
+
         let prefixLength = 0;
         for (let i = 0; i < Math.min(s1.length, s2.length, 4); i++) {
             if (s1[i] === s2[i]) prefixLength++;
             else break;
         }
 
-        return jaro + prefixLength * 0.1 * (1 - jaro);
+        return Math.min(jaro + prefixLength * 0.1 * (1 - jaro), 1.0);
     }
 
     /** Invalidate the snapshot cache */

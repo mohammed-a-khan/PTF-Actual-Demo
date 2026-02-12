@@ -170,7 +170,8 @@ export const ACTION_GRAMMAR_RULES: GrammarRule[] = [
     },
     {
         id: 'action-clear-field',
-        pattern: /^(?:clear|empty|erase)\s+(?:the\s+)?(.+?)$/i,
+        // Exclude clear session/storage/cookies patterns so they match browser grammars instead
+        pattern: /^(?:clear|empty|erase)\s+(?:the\s+)?(?!(?:browser\s+)?(?:session|context|cookies?|local\s+storage|session\s+storage|all\s+storage|storage)\b)(.+?)$/i,
         category: 'action',
         intent: 'clear',
         priority: 25,

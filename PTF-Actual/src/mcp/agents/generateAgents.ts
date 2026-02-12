@@ -164,12 +164,12 @@ ${agent.instructions}
 function generateMCPConfig(serverName: string, loop: LoopType): object {
     if (loop === 'vscode') {
         // VS Code format uses "servers" not "mcpServers"
+        // -y flag prevents npx from prompting (which blocks stdio communication)
         return {
             servers: {
                 [serverName]: {
-                    type: 'stdio',
                     command: 'npx',
-                    args: ['cs-playwright-mcp'],
+                    args: ['-y', 'cs-playwright-mcp'],
                 },
             },
         };
@@ -179,7 +179,7 @@ function generateMCPConfig(serverName: string, loop: LoopType): object {
             mcpServers: {
                 [serverName]: {
                     command: 'npx',
-                    args: ['cs-playwright-mcp'],
+                    args: ['-y', 'cs-playwright-mcp'],
                 },
             },
         };

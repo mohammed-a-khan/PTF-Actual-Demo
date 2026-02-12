@@ -160,9 +160,9 @@ Configuration:
   VS Code/GitHub Copilot: Add to .vscode/mcp.json:
   {
     "servers": {
-      "cs-playwright": {
+      "cs-playwright-mcp": {
         "command": "npx",
-        "args": ["cs-playwright-mcp"]
+        "args": ["-y", "cs-playwright-mcp"]
       }
     }
   }

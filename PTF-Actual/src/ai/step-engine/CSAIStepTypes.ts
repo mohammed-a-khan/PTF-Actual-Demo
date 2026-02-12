@@ -240,8 +240,10 @@ export interface StepModifiers {
 
 /** Result of matching a target to a page element */
 export interface MatchedElement {
-    /** Playwright locator for the matched element */
+    /** Playwright locator for the matched element (may be narrowed to .first()/.nth()) */
     locator: Locator;
+    /** Broad locator before narrowing (for verify-count). Falls back to locator if not set. */
+    broadLocator?: Locator;
     /** Match confidence (0-1) */
     confidence: number;
     /** Which matching strategy succeeded */
@@ -400,7 +402,9 @@ export const DEFAULT_AI_STEP_CONFIG: CSAIStepConfig = {
     retries: 1,
     screenshotOnFailure: true,
     debug: false,
-    accessibilityTreeCacheTTL: 2000,
+    // Reduced from 2000ms to 500ms — SPA pages can update content without URL change,
+    // and a 2s cache causes stale element matching after select/click actions
+    accessibilityTreeCacheTTL: 500,
     parseCacheTTL: 300000
 };
 
@@ -467,7 +471,19 @@ export const ELEMENT_TYPE_TO_ROLES: Record<string, string[]> = {
     'navigation': ['navigation'],
     'region': ['region'],
     'banner': ['banner'],
-    'form': ['form']
+    'form': ['form'],
+    'option': ['option'],
+    'list': ['list'],
+    'listitem': ['listitem'],
+    'list item': ['listitem'],
+    'header': ['heading'],
+    'popup': ['dialog'],
+    'toggle button': ['button'],
+    'submit': ['button'],
+    'submit button': ['button'],
+    'section': ['region'],
+    'article': ['article'],
+    'main': ['main']
 };
 
 /** Maps action intents to likely target element roles (used when no element type specified) */
@@ -501,7 +517,60 @@ export const INTENT_TO_LIKELY_ROLES: Record<string, string[]> = {
     'switch-frame': [],
     'switch-main-frame': [],
     'set-variable': [],
-    'take-screenshot': []
+    'take-screenshot': [],
+    // Assertion intents
+    'verify-visible': [],
+    'verify-hidden': [],
+    'verify-not-present': [],
+    'verify-text': [],
+    'verify-contains': [],
+    'verify-not-contains': [],
+    'verify-value': ['textbox', 'combobox', 'searchbox'],
+    'verify-enabled': ['button', 'link', 'textbox', 'combobox', 'checkbox', 'radio'],
+    'verify-disabled': ['button', 'link', 'textbox', 'combobox', 'checkbox', 'radio'],
+    'verify-checked': ['checkbox', 'radio', 'switch'],
+    'verify-unchecked': ['checkbox', 'radio', 'switch'],
+    'verify-count': [],
+    'verify-attribute': [],
+    'verify-url': [],
+    'verify-title': [],
+    'verify-css': [],
+    'verify-matches': [],
+    'verify-selected-option': ['combobox', 'listbox'],
+    'verify-dropdown-options': ['combobox', 'listbox'],
+    'verify-url-param': [],
+    'verify-table-cell': ['cell', 'gridcell'],
+    'verify-download': [],
+    'verify-download-content': [],
+    'verify-api-response': [],
+    // Query intents
+    'get-text': [],
+    'get-value': ['textbox', 'combobox', 'searchbox'],
+    'get-attribute': [],
+    'get-count': [],
+    'get-list': ['list', 'listbox'],
+    'get-url': [],
+    'get-title': [],
+    'check-exists': [],
+    'wait-for': [],
+    'get-url-param': [],
+    'get-table-data': ['table', 'grid'],
+    'get-table-cell': ['cell', 'gridcell'],
+    'get-table-column': [],
+    'get-table-row-count': ['table', 'grid'],
+    'generate-data': [],
+    'get-cookie': [],
+    'get-storage-item': [],
+    'get-download-path': [],
+    'get-api-response': [],
+    'evaluate-js': [],
+    // Remaining action intents
+    'clear-cookies': [],
+    'set-cookie': [],
+    'clear-storage': [],
+    'set-storage-item': [],
+    'api-call': [],
+    'execute-js': []
 };
 
 // ============================================================================

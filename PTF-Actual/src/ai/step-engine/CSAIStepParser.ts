@@ -130,7 +130,9 @@ export class CSAIStepParser {
         const lower = instruction.toLowerCase();
 
         // Check for assertion keywords first
-        if (/^(?:verify|assert|check|confirm|ensure|should|must|expect)\b/i.test(lower)) {
+        // Exclude "check" when followed by checkbox-related words (action, not assertion)
+        if (/^(?:verify|assert|confirm|ensure|should|must|expect)\b/i.test(lower) ||
+            (/^check\b/i.test(lower) && /\b(?:if|that|whether|is\s|are\s|should|visible|displayed|enabled|disabled|present|hidden|available|checked|unchecked|contains?|equals?)\b/i.test(lower))) {
             return this.inferAssertionIntent(lower);
         }
 
@@ -189,7 +191,7 @@ export class CSAIStepParser {
      * Infer specific assertion intent from instruction text
      */
     private inferAssertionIntent(lower: string): { category: StepCategory; intent: AssertionIntent } {
-        if (/(?:visible|displayed|shown|present|appearing)/.test(lower)) {
+        if (/(?:visible|displayed|shown|present|appearing|available)/.test(lower)) {
             return { category: 'assertion', intent: 'verify-visible' };
         }
         if (/(?:hidden|invisible|not\s+displayed|not\s+visible|not\s+shown|disappeared)/.test(lower)) {
@@ -201,11 +203,12 @@ export class CSAIStepParser {
         if (/(?:disabled|not\s+enabled|greyed?\s+out)/.test(lower)) {
             return { category: 'assertion', intent: 'verify-disabled' };
         }
-        if (/\bchecked\b/.test(lower) && !/\bunchecked\b/.test(lower)) {
-            return { category: 'assertion', intent: 'verify-checked' };
-        }
-        if (/\bunchecked\b/.test(lower) || /\bnot\s+checked\b/.test(lower)) {
+        // Check unchecked/not-checked FIRST to avoid "checked" matching on "not checked"
+        if (/\bunchecked\b/.test(lower) || /\bnot\s+checked\b/.test(lower) || /\bisn'?t\s+checked\b/.test(lower)) {
             return { category: 'assertion', intent: 'verify-unchecked' };
+        }
+        if (/\bchecked\b/.test(lower)) {
+            return { category: 'assertion', intent: 'verify-checked' };
         }
         if (/(?:contains?|includes?)/.test(lower)) {
             return { category: 'assertion', intent: 'verify-contains' };

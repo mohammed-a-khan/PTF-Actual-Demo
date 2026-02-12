@@ -57,7 +57,7 @@ export class CSAIStepGrammar {
             ...BROWSER_GRAMMAR_RULES,
             ...TABLE_GRAMMAR_RULES,
             ...DATA_GRAMMAR_RULES
-        ].sort((a, b) => a.priority - b.priority);
+        ].sort((a, b) => a.priority !== b.priority ? a.priority - b.priority : a.id.localeCompare(b.id));
 
         CSReporter.debug(`CSAIStepGrammar: Loaded ${this.rules.length} grammar rules`);
     }
@@ -288,7 +288,9 @@ export class CSAIStepGrammar {
         }
 
         // Build descriptors: split remaining text into meaningful parts
-        const descriptors = text.split(/\s+/).filter(w => w.length > 0);
+        // Filter out common articles and filler words that don't help element identification
+        const stopWords = new Set(['the', 'a', 'an', 'of', 'for', 'on', 'in', 'to', 'is', 'are', 'and', 'or', 'with']);
+        const descriptors = text.split(/\s+/).filter(w => w.length > 0 && !stopWords.has(w.toLowerCase()));
 
         return {
             elementType,
@@ -372,7 +374,7 @@ export class CSAIStepGrammar {
     /** Register a custom grammar rule (for extensibility) */
     public registerRule(rule: GrammarRule): void {
         this.rules.push(rule);
-        this.rules.sort((a, b) => a.priority - b.priority);
+        this.rules.sort((a, b) => a.priority !== b.priority ? a.priority - b.priority : a.id.localeCompare(b.id));
         this.cache.clear();
         CSReporter.debug(`CSAIStepGrammar: Registered custom rule "${rule.id}" (total: ${this.rules.length})`);
     }

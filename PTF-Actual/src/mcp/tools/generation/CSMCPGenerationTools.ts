@@ -1213,7 +1213,6 @@ BROWSER_VIEWPORT_HEIGHT=1080
 
 # Browser launch settings
 BROWSER_LAUNCH_TIMEOUT=30000
-BROWSER_DEVTOOLS=false
 BROWSER_SLOWMO=0
 
 # Browser security settings
@@ -1381,7 +1380,6 @@ BROWSER_VIEWPORT_HEIGHT=1080
 
 # Browser launch settings
 BROWSER_LAUNCH_TIMEOUT=30000
-BROWSER_DEVTOOLS=false
 BROWSER_SLOWMO=0
 
 # Browser security settings
@@ -1497,13 +1495,13 @@ function buildEnvironmentTemplate(
     const resolvedApiUrl = apiBaseUrl ? apiBaseUrl.replace(/\{env\}/g, env).replace(/\{environment\}/gi, env) : '';
 
     // Environment-specific defaults
-    const envDefaults: Record<string, { logLevel: string; headless: string; debugMode: string; devtools: string; timeout: number; actionTimeout: number; envName: string; testDataCleanup: string }> = {
-        dev:     { logLevel: 'DEBUG', headless: 'false', debugMode: 'true',  devtools: 'true',  timeout: 60000, actionTimeout: 15000, envName: 'Development', testDataCleanup: 'true' },
-        sit:     { logLevel: 'INFO',  headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 45000, actionTimeout: 10000, envName: 'SIT',         testDataCleanup: 'true' },
-        uat:     { logLevel: 'WARN',  headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 30000, actionTimeout: 8000,  envName: 'UAT',         testDataCleanup: 'false' },
-        qa:      { logLevel: 'INFO',  headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 45000, actionTimeout: 10000, envName: 'QA',          testDataCleanup: 'true' },
-        staging: { logLevel: 'INFO',  headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 30000, actionTimeout: 10000, envName: 'Staging',     testDataCleanup: 'false' },
-        prod:    { logLevel: 'ERROR', headless: 'true',  debugMode: 'false', devtools: 'false', timeout: 30000, actionTimeout: 8000,  envName: 'Production',  testDataCleanup: 'false' },
+    const envDefaults: Record<string, { logLevel: string; headless: string; debugMode: string; timeout: number; actionTimeout: number; envName: string; testDataCleanup: string }> = {
+        dev:     { logLevel: 'DEBUG', headless: 'false', debugMode: 'true',  timeout: 60000, actionTimeout: 15000, envName: 'Development', testDataCleanup: 'true' },
+        sit:     { logLevel: 'INFO',  headless: 'true',  debugMode: 'false', timeout: 45000, actionTimeout: 10000, envName: 'SIT',         testDataCleanup: 'true' },
+        uat:     { logLevel: 'WARN',  headless: 'true',  debugMode: 'false', timeout: 30000, actionTimeout: 8000,  envName: 'UAT',         testDataCleanup: 'false' },
+        qa:      { logLevel: 'INFO',  headless: 'true',  debugMode: 'false', timeout: 45000, actionTimeout: 10000, envName: 'QA',          testDataCleanup: 'true' },
+        staging: { logLevel: 'INFO',  headless: 'true',  debugMode: 'false', timeout: 30000, actionTimeout: 10000, envName: 'Staging',     testDataCleanup: 'false' },
+        prod:    { logLevel: 'ERROR', headless: 'true',  debugMode: 'false', timeout: 30000, actionTimeout: 8000,  envName: 'Production',  testDataCleanup: 'false' },
     };
 
     const defaults = envDefaults[env] || envDefaults['dev'];
@@ -1544,7 +1542,6 @@ BASE_URL=${resolvedBaseUrl}
 HEADLESS=${defaults.headless}
 DEBUG_MODE=${defaults.debugMode}
 LOG_LEVEL=${defaults.logLevel}
-BROWSER_DEVTOOLS=${defaults.devtools}
 BROWSER_SLOWMO=0
 
 # ====================================================================================

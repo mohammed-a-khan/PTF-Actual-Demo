@@ -150,18 +150,25 @@ export class CSBrowserManager {
     private async launchBrowser(browserType: string): Promise<any> {
         const isHeadless = this.config.getBoolean('HEADLESS', false);
         
+        const defaultArgs = isHeadless ? [] : [
+            '--start-maximized',
+            '--no-default-browser-check',
+            '--disable-web-security',
+            '--disable-features=VizDisplayCompositor',
+            '--force-device-scale-factor=1'
+        ];
+
+        // devtools launch option was removed in Playwright 1.58+
+        // Use --auto-open-devtools-for-tabs browser arg instead
+        if (this.config.getBoolean('BROWSER_DEVTOOLS', false)) {
+            defaultArgs.push('--auto-open-devtools-for-tabs');
+        }
+
         const browserOptions: any = {
             headless: isHeadless,
             timeout: this.config.getNumber('BROWSER_LAUNCH_TIMEOUT', 30000),
             slowMo: this.config.getNumber('BROWSER_SLOWMO', 0),
-            devtools: this.config.getBoolean('BROWSER_DEVTOOLS', false),
-            args: isHeadless ? [] : [
-                '--start-maximized',
-                '--no-default-browser-check',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor',
-                '--force-device-scale-factor=1'
-            ]
+            args: defaultArgs
         };
 
         // Add proxy if configured

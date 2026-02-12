@@ -101,6 +101,12 @@ export async function csAI(
         const needsElement = !isPageLevelOperation(parsedStep);
 
         if (needsElement) {
+            // For assertions, validate that the page is in a healthy state first
+            // This catches cases where an assertion passes on a 404/error page
+            if (parsedStep.category === 'assertion') {
+                await validatePageHealth(options.page, parsedStep);
+            }
+
             // Retry element search with progressive waits to handle page transitions
             // Assertions get more retries since they often follow actions that trigger navigation
             const maxAttempts = parsedStep.category === 'assertion' ? 4 : 3;
@@ -131,6 +137,19 @@ export async function csAI(
             }
 
             if (!matchedElement && parsedStep.target.descriptors.length > 0) {
+                // For verify-not-present and verify-hidden, NOT finding the element is actually SUCCESS
+                if (parsedStep.intent === 'verify-not-present') {
+                    CSReporter.pass(`AI Step: Element "${parsedStep.target.rawText}" not found — verify-not-present passed`);
+                    const duration = Date.now() - startTime;
+                    CSReporter.addAction(`AI: ${instruction}`, 'pass', duration);
+                    return true;
+                }
+                if (parsedStep.intent === 'verify-hidden') {
+                    CSReporter.pass(`AI Step: Element "${parsedStep.target.rawText}" not found — verify-hidden passed (not in DOM)`);
+                    const duration = Date.now() - startTime;
+                    CSReporter.addAction(`AI: ${instruction}`, 'pass', duration);
+                    return true;
+                }
                 CSReporter.warn(`AI Step: Could not find element matching "${parsedStep.target.rawText}"`);
                 throw new Error(`Element not found: "${parsedStep.target.rawText}". Ensure the element is visible on the page.`);
             }
@@ -142,6 +161,14 @@ export async function csAI(
 
         // Step 3: Execute
         const result = await executor.execute(options.page, parsedStep, matchedElement);
+
+        // After DOM-modifying actions, invalidate the accessibility tree cache
+        // so subsequent steps get a fresh snapshot. This is critical for sequences like:
+        //   select from dropdown A -> select from dropdown B
+        // where selecting A might change the DOM state (e.g., trigger onChange events)
+        if (parsedStep.category === 'action' && isDOMModifyingAction(parsedStep.intent)) {
+            matcher.invalidateCache();
+        }
 
         // Step 4: Report
         const duration = Date.now() - startTime;
@@ -185,6 +212,64 @@ export async function csAI(
         }
 
         throw error;
+    }
+}
+
+/**
+ * Check if an action intent modifies the DOM and should trigger cache invalidation.
+ * This ensures subsequent element searches get a fresh accessibility snapshot.
+ */
+function isDOMModifyingAction(intent: string): boolean {
+    const domModifyingIntents = [
+        'click', 'double-click', 'right-click',
+        'fill', 'type', 'clear',
+        'select', 'check', 'uncheck', 'toggle',
+        'press-key', 'navigate',
+        'upload', 'drag',
+        'execute-js'
+    ];
+    return domModifyingIntents.includes(intent);
+}
+
+/**
+ * Validate page health before assertions to catch 404/error pages early.
+ * Warns (and optionally fails) if the page appears to be in an error state,
+ * preventing assertions from falsely passing against wrong page content.
+ */
+async function validatePageHealth(page: import('playwright').Page, step: ParsedStep): Promise<void> {
+    try {
+        const title = await page.title();
+        const url = page.url();
+
+        // Detect common error page patterns
+        const errorTitlePatterns = [
+            /404/i, /not\s*found/i, /error/i, /500/i, /server\s*error/i,
+            /403/i, /forbidden/i, /401/i, /unauthorized/i,
+            /502/i, /bad\s*gateway/i, /503/i, /service\s*unavailable/i
+        ];
+
+        const isLikelyErrorPage = errorTitlePatterns.some(p => p.test(title));
+
+        if (isLikelyErrorPage) {
+            CSReporter.warn(
+                `AI Step: Page may be in error state (title: "${title}", url: "${url}"). ` +
+                `Assertion "${step.rawText}" may produce false results.`
+            );
+        }
+
+        // Also check for about:blank or empty pages
+        if (url === 'about:blank' || url === '') {
+            throw new Error(
+                `Cannot run assertion "${step.rawText}" — page is blank (about:blank). ` +
+                `Ensure navigation completed before asserting.`
+            );
+        }
+    } catch (error: any) {
+        // Only re-throw if it's our own error, not a Playwright internal error
+        if (error.message.includes('Cannot run assertion')) {
+            throw error;
+        }
+        CSReporter.debug(`AI Step: Page health check failed (non-critical): ${error.message}`);
     }
 }
 

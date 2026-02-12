@@ -431,7 +431,6 @@ BROWSER_VIEWPORT_HEIGHT=1080
 
 # Browser launch settings
 BROWSER_LAUNCH_TIMEOUT=30000
-BROWSER_DEVTOOLS=false
 BROWSER_SLOWMO=0
 
 # Browser security settings
@@ -658,10 +657,10 @@ FEATURE_FLAGS=
         const timestamp = new Date().toISOString().split('T')[0];
 
         // Environment-specific settings
-        const envSettings: Record<string, { headless: string; debug: string; logLevel: string; devtools: string; slowmo: string }> = {
-            dev: { headless: 'false', debug: 'true', logLevel: 'DEBUG', devtools: 'true', slowmo: '0' },
-            qa: { headless: 'true', debug: 'false', logLevel: 'INFO', devtools: 'false', slowmo: '0' },
-            uat: { headless: 'true', debug: 'false', logLevel: 'INFO', devtools: 'false', slowmo: '0' }
+        const envSettings: Record<string, { headless: string; debug: string; logLevel: string; slowmo: string }> = {
+            dev: { headless: 'false', debug: 'true', logLevel: 'DEBUG', slowmo: '0' },
+            qa: { headless: 'true', debug: 'false', logLevel: 'INFO', slowmo: '0' },
+            uat: { headless: 'true', debug: 'false', logLevel: 'INFO', slowmo: '0' }
         };
 
         const settings = envSettings[envLower] || envSettings.dev;
@@ -719,7 +718,6 @@ API_BASE_URL=${urlInfo.protocol}://api-${envLower}.${urlInfo.domain}
 HEADLESS=${settings.headless}
 DEBUG_MODE=${settings.debug}
 LOG_LEVEL=${settings.logLevel}
-BROWSER_DEVTOOLS=${settings.devtools}
 BROWSER_SLOWMO=${settings.slowmo}
 
 # ====================================================================================
@@ -784,10 +782,11 @@ BROWSER_ACTION_TIMEOUT=${envLower === 'dev' ? '15000' : '10000'}
 
         const outputFile = path.join(this.options.watchDir!, 'test.spec.ts');
 
+        // Build args: --target is omitted since 'playwright-test' is already the default
+        // This avoids compatibility issues with newer Playwright versions
         const args = [
             'codegen',
-            '--target', 'playwright-test',
-            '-o', outputFile
+            '--output', outputFile
         ];
 
         if (this.options.url) {
@@ -796,17 +795,39 @@ BROWSER_ACTION_TIMEOUT=${envLower === 'dev' ? '15000' : '10000'}
 
         console.log(chalk.gray(`   Command: npx playwright ${args.join(' ')}\n`));
 
-        this.playwrightProcess = spawn('npx', ['playwright', ...args], {
-            stdio: 'inherit',
-            shell: true
+        // Resolve npx path for cross-platform compatibility
+        // On Windows, shell: true can cause argument splitting issues with backslash paths
+        const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+
+        this.playwrightProcess = spawn(npxCmd, ['playwright', ...args], {
+            stdio: 'inherit'
         });
 
         this.playwrightProcess.on('error', (error) => {
-            console.error(chalk.red('❌ Failed to start Playwright codegen:'), error);
-            process.exit(1);
+            // If direct spawn fails (e.g., npx.cmd not found), retry with shell: true
+            console.error(chalk.yellow('⚠️  Direct spawn failed, retrying with shell...'));
+            this.playwrightProcess = spawn('npx', ['playwright', ...args], {
+                stdio: 'inherit',
+                shell: true
+            });
+
+            this.playwrightProcess.on('error', (retryError) => {
+                console.error(chalk.red('❌ Failed to start Playwright codegen:'), retryError);
+                process.exit(1);
+            });
+
+            this.attachExitHandler();
         });
 
-        // Handle when Playwright process exits naturally (user closes browser)
+        this.attachExitHandler();
+    }
+
+    /**
+     * Attach exit handler to the Playwright process
+     */
+    private attachExitHandler(): void {
+        if (!this.playwrightProcess) return;
+
         this.playwrightProcess.on('exit', async (code) => {
             if (this.options.verbose) {
                 console.log(chalk.gray(`\n   Playwright exited with code: ${code}`));

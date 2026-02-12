@@ -48,7 +48,7 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
     // ========================================================================
     {
         id: 'assert-visible',
-        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:is\s+)?(?:visible|displayed|shown|present|appearing)$/i,
+        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:is\s+)?(?:visible|displayed|shown|present|appearing|available)$/i,
         category: 'assertion',
         intent: 'verify-visible',
         priority: 100,
@@ -62,7 +62,27 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
         examples: [
             'Verify the Dashboard heading is displayed',
             'Assert that the Submit button is visible',
-            'Check the error message is shown'
+            'Check the error message is shown',
+            'Verify Cycle Code header is available'
+        ]
+    },
+    {
+        id: 'assert-should-be-available',
+        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+should\s+be\s+(?:visible|displayed|shown|present|available)$/i,
+        category: 'assertion',
+        intent: 'verify-visible',
+        priority: 99,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw)
+            };
+        },
+        examples: [
+            'Verify Cycle Code header should be available',
+            'Check that the Submit button should be visible',
+            'Ensure the error message should be displayed'
         ]
     },
     {
@@ -150,7 +170,7 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
         pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:does\s+not\s+contain|doesn't\s+contain|does\s+not\s+include|doesn't\s+include)\s+(?:the\s+)?(?:text\s+)?__QUOTED_(\d+)__$/i,
         category: 'assertion',
         intent: 'verify-not-contains',
-        priority: 110,
+        priority: 112,
         extract: (match, quotedStrings) => {
             const raw = resolveQuoted(match[1], quotedStrings).trim();
             const expectedValue = quotedStrings[parseInt(match[2])] || '';
@@ -481,6 +501,68 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
         examples: [
             "Verify the URL parameter 'id' is '12345'",
             "Assert URL parameter 'tab' equals 'details'"
+        ]
+    },
+
+    // ========================================================================
+    // FLEXIBLE "SHOULD BE" ASSERTIONS (Priority 136-138)
+    // Catch patterns where user omits the leading verb (e.g., "the header should be visible")
+    // ========================================================================
+    {
+        id: 'assert-should-visible-no-verb',
+        pattern: /^(?:the\s+)?(.+?)\s+should\s+(?:be\s+)?(?:visible|displayed|shown|present|available)$/i,
+        category: 'assertion',
+        intent: 'verify-visible',
+        priority: 136,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw)
+            };
+        },
+        examples: [
+            'The Dashboard header should be visible',
+            'Cycle Code header should be available',
+            'Submit button should be displayed'
+        ]
+    },
+    {
+        id: 'assert-should-hidden-no-verb',
+        pattern: /^(?:the\s+)?(.+?)\s+should\s+(?:be\s+)?(?:hidden|not\s+visible|not\s+displayed|not\s+present|gone)$/i,
+        category: 'assertion',
+        intent: 'verify-hidden',
+        priority: 137,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw)
+            };
+        },
+        examples: [
+            'The loading spinner should be hidden',
+            'Error message should not be visible'
+        ]
+    },
+    {
+        id: 'assert-should-contain-no-verb',
+        pattern: /^(?:the\s+)?(.+?)\s+should\s+(?:contain|include|have\s+text)\s+__QUOTED_(\d+)__$/i,
+        category: 'assertion',
+        intent: 'verify-contains',
+        priority: 138,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            const expectedValue = quotedStrings[parseInt(match[2])] || '';
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw),
+                expectedValue
+            };
+        },
+        examples: [
+            "The heading should contain 'Welcome'",
+            "Status message should include 'success'"
         ]
     }
 ];
