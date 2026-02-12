@@ -795,28 +795,16 @@ BROWSER_ACTION_TIMEOUT=${envLower === 'dev' ? '15000' : '10000'}
 
         console.log(chalk.gray(`   Command: npx playwright ${args.join(' ')}\n`));
 
-        // Resolve npx path for cross-platform compatibility
-        // On Windows, shell: true can cause argument splitting issues with backslash paths
-        const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-
-        this.playwrightProcess = spawn(npxCmd, ['playwright', ...args], {
-            stdio: 'inherit'
+        // shell: true is required on Windows to execute npx (.cmd batch file)
+        // The original "too many arguments" error was caused by --target flag, not shell: true
+        this.playwrightProcess = spawn('npx', ['playwright', ...args], {
+            stdio: 'inherit',
+            shell: true
         });
 
         this.playwrightProcess.on('error', (error) => {
-            // If direct spawn fails (e.g., npx.cmd not found), retry with shell: true
-            console.error(chalk.yellow('⚠️  Direct spawn failed, retrying with shell...'));
-            this.playwrightProcess = spawn('npx', ['playwright', ...args], {
-                stdio: 'inherit',
-                shell: true
-            });
-
-            this.playwrightProcess.on('error', (retryError) => {
-                console.error(chalk.red('❌ Failed to start Playwright codegen:'), retryError);
-                process.exit(1);
-            });
-
-            this.attachExitHandler();
+            console.error(chalk.red('❌ Failed to start Playwright codegen:'), error);
+            process.exit(1);
         });
 
         this.attachExitHandler();
