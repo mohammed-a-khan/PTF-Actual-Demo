@@ -194,7 +194,9 @@ export class CSStepPatternScanner {
 
         // Then replace Cucumber placeholders with regex groups
         // Support both single quotes ('...') and double quotes ("...") for {string}
-        regexPattern = regexPattern.replace(/\\{string\\}/g, '["\']([^"\']*)["\']');
+        // Use alternation so opening " matches closing " (allowing ' inside), and vice versa
+        regexPattern = regexPattern.replace(/\\{string\\}/g, '(?:"([^"]*)"|\'([^\']*)\')');
+
         regexPattern = regexPattern.replace(/\\{int\\}/g, '(\\d+)');
         regexPattern = regexPattern.replace(/\\{float\\}/g, '([\\d\\.]+)');
         regexPattern = regexPattern.replace(/\\{word\\}/g, '(\\w+)');

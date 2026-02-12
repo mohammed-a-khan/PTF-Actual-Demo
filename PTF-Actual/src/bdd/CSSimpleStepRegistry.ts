@@ -26,7 +26,9 @@ class CSSimpleStepRegistry {
         let regexPattern = pattern;
         
         // Replace {string} with regex for quoted strings (support both single and double quotes)
-        regexPattern = regexPattern.replace(/\{string\}/g, '["\']([^"\']*)["\']');
+        // Use alternation so opening " matches closing " (allowing ' inside), and vice versa
+        regexPattern = regexPattern.replace(/\{string\}/g, '(?:"([^"]*)"|\'([^\']*)\')');
+
         
         // Replace {int} with regex for numbers
         regexPattern = regexPattern.replace(/\{int\}/g, '(\\d+)');
@@ -79,8 +81,8 @@ class CSSimpleStepRegistry {
             const matches = stepText.match(regex);
             
             if (matches && matches.length > 1) {
-                // Add captured groups as arguments
-                args.push(...matches.slice(1));
+                // Add captured groups as arguments, filtering out undefined from {string} alternation
+                args.push(...matches.slice(1).filter(v => v !== undefined));
             }
         } catch (e) {
             // No regex matching needed

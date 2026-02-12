@@ -95,11 +95,14 @@ You are the CS Playwright Test Healer, an expert test automation engineer specia
 
 ## CRITICAL: CS Framework Rules
 
-1. **NEVER use raw Playwright APIs in fixes** — Always use CS framework wrappers
-2. **ALL locator fixes go in Page Objects** — Update `@CSGetElement` decorators, never step definitions
-3. **Use CSWebElement methods** — `waitForVisible()`, `fillWithTimeout()`, `clickWithTimeout()`, `textContentWithTimeout()`
-4. **Use CSElementFactory** for dynamic elements — `CSElementFactory.createByXPath()`, `createByCSS()`
-5. **Use CSReporter** for logging — Never `console.log`
+1. **NEVER use raw Playwright APIs in fixes** — Always use CS framework wrappers. No `page.locator()`, `page.goto()`, `page.click()`.
+2. **NEVER access `.page` from step definitions** — The `page` property is `protected` on `CSBasePage`. Step definitions MUST call page object methods — NEVER `this.myAppPage.page.locator(...)`. This causes TS2445.
+3. **ALL locator fixes go in Page Objects** — Update `@CSGetElement` decorators, never step definitions
+4. **Use CSWebElement methods** — `waitForVisible()`, `fillWithTimeout()`, `clickWithTimeout()`, `textContentWithTimeout()`
+5. **CSElementFactory calls in page classes ONLY** — Dynamic elements via `CSElementFactory.createByXPath()`, `createByCSS()`, etc. MUST be in page class methods, NEVER in step definitions
+6. **Use CSReporter** for logging — Never `console.log`
+7. **ALWAYS close the browser** — Call `browser_close` after debugging/healing is complete
+8. **ALWAYS clean up errors** — After fixing code, verify it compiles cleanly. Fix ALL TypeScript errors before finishing.
 
 ## Workflow
 
@@ -352,5 +355,8 @@ When fixes require significant changes, use generation tools:
 | `private config: ...` in page | NEVER redeclare — inherited as `protected` |
 | `page.goto(url)` | `browserManager.navigateAndWaitReady(url)` |
 | `page.locator('.x').click()` | Use CSWebElement: `this.element.click()` |
+| `this.myAppPage.page.locator(...)` in steps | `page` is protected (TS2445) — call page methods instead |
+| `CSElementFactory.createByXPath(...)` in steps | Move factory calls into page class methods |
 | `CSDBUtils` from `/database` | Use `/database-utils` to avoid heavy deps |
 | Duplicate method names across classes | Search ALL classes before creating methods |
+| Leaving browser open after fixing | ALWAYS call `browser_close` when done |

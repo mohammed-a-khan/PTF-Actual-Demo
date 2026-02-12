@@ -14,6 +14,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { AGENT_CONTENT } from './embeddedAgentContent';
 
 // ============================================================================
 // Types
@@ -93,12 +94,17 @@ function parseSimpleYaml(yamlContent: string): Record<string, any> {
 function loadAgentDefinition(agentPath: string): AgentDefinition {
     // Read file and normalize line endings (handle Windows CRLF)
     const rawContent = fs.readFileSync(agentPath, 'utf-8');
+    return loadAgentDefinitionFromContent(rawContent, agentPath);
+}
+
+function loadAgentDefinitionFromContent(rawContent: string, sourceName: string): AgentDefinition {
+    // Normalize line endings (handle Windows CRLF)
     const content = rawContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
     // Parse YAML frontmatter
     const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
     if (!frontmatterMatch) {
-        throw new Error(`Invalid agent file format: ${agentPath}`);
+        throw new Error(`Invalid agent file format: ${sourceName}`);
     }
 
     const frontmatter = parseSimpleYaml(frontmatterMatch[1]);
@@ -266,15 +272,22 @@ export function generateAgents(
     }
 
     for (const agentName of agents) {
-        const agentPath = path.join(agentSourceDir, `${agentName}.md`);
-
-        if (!fs.existsSync(agentPath)) {
-            errors.push(`Agent definition not found: ${agentPath}`);
-            continue;
-        }
-
         try {
-            const agent = loadAgentDefinition(agentPath);
+            // Try embedded content first (works in published npm package)
+            // Fall back to .md file on disk (works in development mode)
+            let agent: AgentDefinition;
+            const embeddedContent = AGENT_CONTENT[agentName];
+
+            if (embeddedContent && embeddedContent.length > 0) {
+                agent = loadAgentDefinitionFromContent(embeddedContent, `embedded:${agentName}`);
+            } else {
+                const agentPath = path.join(agentSourceDir, `${agentName}.md`);
+                if (!fs.existsSync(agentPath)) {
+                    errors.push(`Agent definition not found: ${agentName} (neither embedded nor on disk at ${agentPath})`);
+                    continue;
+                }
+                agent = loadAgentDefinition(agentPath);
+            }
 
             // Generate agent file based on loop type
             // VS Code uses .agent.md extension, Claude/OpenCode use .chatmode.md

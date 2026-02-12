@@ -15,7 +15,7 @@ import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from './CSConfigurationManager';
 import type { ParsedFeature } from '../bdd/CSBDDTypes'
 
-export type StepGroup = 'common' | 'api' | 'database' | 'soap' | 'browser';
+export type StepGroup = 'common' | 'api' | 'database' | 'soap' | 'browser' | 'ai';
 
 export class CSStepLoader {
     private static instance: CSStepLoader;
@@ -117,6 +117,19 @@ export class CSStepLoader {
      */
     public async loadRequiredSteps(requirements: ModuleRequirements, features?: ParsedFeature[]): Promise<void> {
         const startTime = Date.now();
+
+        // AI steps are ALWAYS loaded unconditionally - available to every consumer
+        // regardless of STEP_DEFINITIONS_PATH or module detection settings
+        if (!this.loadedGroups.has('ai')) {
+            try {
+                const aiLoaded = await this.loadStepGroup('ai');
+                if (aiLoaded.length > 0) {
+                    CSReporter.debug(`[StepLoader] AI steps loaded: ${aiLoaded.length} file(s)`);
+                }
+            } catch (error: any) {
+                CSReporter.debug(`[StepLoader] AI steps not available: ${error.message}`);
+            }
+        }
 
         // Check if framework steps should be loaded based on STEP_DEFINITIONS_PATH
         const stepPaths = this.config.get('STEP_DEFINITIONS_PATH', '');

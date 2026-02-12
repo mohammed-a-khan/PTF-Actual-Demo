@@ -111,13 +111,17 @@ What you must NEVER do:
 1. **BDD is the DEFAULT and ONLY output** — Generate feature files + step definitions + page objects. **NEVER generate spec tests unless the user EXPLICITLY says "spec style" or "spec test"**. If the user says "generate tests", that means BDD. Do NOT call `generate_spec_test` alongside BDD generation.
 2. **NEVER pass undefined or empty locators** — Every element MUST have a real xpath/css/role locator discovered from the browser.
 3. **ALL locators go in Page Objects ONLY** — Never put locators in step definitions or spec files.
-4. **NEVER use raw Playwright APIs** — Always use CSWebElement wrapper methods (e.g., `fillWithTimeout`, `clickWithTimeout`, `waitForVisible`).
-5. **NEVER reference `this.browserManager` or `this.config` in step definitions** — Use page object methods and CSValueResolver instead.
-6. **Use CSReporter for ALL logging** — `CSReporter.info()`, `CSReporter.pass()`, `CSReporter.fail()`.
-7. **One user flow = ONE scenario** — Do NOT split a single sequential flow into multiple scenarios. Login → verify dashboard is ONE scenario, not two. Use multiple scenarios only for genuinely independent test cases.
-8. **Screenshots = APPLICATION ONLY** — Use `browser_take_screenshot` to capture the application UI. NEVER take screenshots of file explorers, generated code, or IDE windows.
-9. **Examples MUST use JSON data source** — ALWAYS use `Scenario Outline` with external JSON data source: `Examples: {"type": "json", "source": "test/{project}/data/{feature}-data.json", "path": "$", "filter": "runFlag=Yes"}`. NEVER use inline Gherkin table examples. ALWAYS generate the corresponding JSON data file using `generate_test_data_file`.
-10. **ALWAYS generate test data file** — Every `Scenario Outline` MUST have a corresponding JSON data file generated via `generate_test_data_file`. The data file must contain ALL placeholder fields used in the feature file (e.g., `<userName>`, `<password>`, `<expectedWelcome>` → fields `userName`, `password`, `expectedWelcome`).
+4. **NEVER use raw Playwright APIs** — Always use CSWebElement wrapper methods (e.g., `fillWithTimeout`, `clickWithTimeout`, `waitForVisible`). NEVER use `page.locator()`, `page.goto()`, `page.click()`, `page.fill()`, or any raw Playwright `Page` API.
+5. **NEVER access `.page` property from step definitions** — The `page` property is `protected` on `CSBasePage` and can ONLY be accessed within page classes. Step definitions MUST call page object methods — NEVER `this.myAppLoginPage.page.locator(...)` or any `.page` reference. If you need dynamic element creation, create a method in the page class that uses `CSElementFactory` with `this.page`, and call that method from the step definition.
+6. **NEVER reference `this.browserManager` or `this.config` in step definitions** — Use page object methods and CSValueResolver instead.
+7. **Use CSReporter for ALL logging** — `CSReporter.info()`, `CSReporter.pass()`, `CSReporter.fail()`.
+8. **One user flow = ONE scenario** — Do NOT split a single sequential flow into multiple scenarios. Login → verify dashboard is ONE scenario, not two. Use multiple scenarios only for genuinely independent test cases.
+9. **Screenshots = APPLICATION ONLY** — Use `browser_take_screenshot` to capture the application UI. NEVER take screenshots of file explorers, generated code, or IDE windows.
+10. **Examples MUST use JSON data source** — ALWAYS use `Scenario Outline` with external JSON data source: `Examples: {"type": "json", "source": "test/{project}/data/{feature}-data.json", "path": "$", "filter": "runFlag=Yes"}`. NEVER use inline Gherkin table examples. ALWAYS generate the corresponding JSON data file using `generate_test_data_file`.
+11. **ALWAYS generate test data file** — Every `Scenario Outline` MUST have a corresponding JSON data file generated via `generate_test_data_file`. The data file must contain ALL placeholder fields used in the feature file (e.g., `<userName>`, `<password>`, `<expectedWelcome>` → fields `userName`, `password`, `expectedWelcome`).
+12. **CSElementFactory calls belong in page classes ONLY** — Dynamic elements created via `CSElementFactory.createByXPath()`, `createByCSS()`, etc. MUST be created inside page class methods, NEVER in step definitions. Step definitions should call page object methods that internally use the factory.
+13. **ALWAYS close the browser** — After ALL code generation is complete, ALWAYS call `browser_close` as the FINAL action. Never leave the browser open.
+14. **ALWAYS clean up errors** — After generating all files, verify the generated code compiles cleanly. If there are TypeScript errors, fix them before finishing. The generated code MUST be error-free.
 
 ## PROHIBITED ACTIONS — NEVER DO THESE
 
@@ -132,6 +136,9 @@ What you must NEVER do:
 - **NEVER create a Scenario Outline without a corresponding JSON data file** — always call `generate_test_data_file`
 - **NEVER close and reopen the browser** during a single generation task — reuse the same browser session throughout
 - **NEVER repeat navigation or login** if you already performed it as part of the user's request — use the locators you already captured
+- **NEVER access `.page` from step definitions** — `page` is a protected property of CSBasePage. Step definitions MUST ONLY call page object methods. `this.myAppLoginPage.page` is a compilation error (TS2445).
+- **NEVER create CSElementFactory elements in step definitions** — Dynamic elements belong in page class methods. Step definitions should call page methods that internally use the factory.
+- **NEVER leave the browser open** — Always call `browser_close` as the last action after all generation is complete.
 
 ## MANDATORY: Locator Discovery Before Generation
 
@@ -199,7 +206,12 @@ Call `generate_page_object` for each page with:
 ### Step 4: Generate Feature File
 Call `generate_feature_file` with:
 - `featureName`: e.g., "User Login"
-- `description`: User story format — `"As a user\nI want to login\nSo that I can access the dashboard"`
+- `description`: User story format on separate lines (NEVER use literal `\n` — use actual line breaks):
+  ```
+  As a user
+  I want to login with valid credentials
+  So that I can access the dashboard
+  ```
 - `tags`: e.g., ["smoke", "login"]
 - `background`: (optional) Steps that run before every scenario:
   ```json
@@ -267,9 +279,15 @@ Call `generate_test_data_file` with JSON structure including:
 - `runFlag`: "Yes" to enable execution
 - Test-specific fields (usernames, expected values, etc.)
 
-### Step 7: Verify
+### Step 7: Close Browser
+**MANDATORY** — Call `browser_close` to close the browser. Never leave the browser open after generation.
+
+### Step 8: Verify and Clean Up Errors
 1. `bdd_validate_feature` — Check step coverage
-2. `test_run` — Execute and verify tests pass
+2. Review ALL generated files for TypeScript compilation errors — if any exist, fix them immediately
+3. Verify: no `.page` access from step definitions, no raw Playwright API usage, no CSElementFactory calls in step definitions
+4. `test_run` — Execute and verify tests pass
+5. If errors remain, fix them before completing. **You are NOT done until the generated code is error-free.**
 
 ## Framework Patterns
 
@@ -312,6 +330,18 @@ export class AppLoginPage extends CSBasePage {
         await this.loginButton.click();
         CSReporter.pass('Login completed');
     }
+
+    // Dynamic elements MUST be created in page classes, NEVER in step definitions
+    async clickMenuItemByText(menuText: string): Promise<void> {
+        const menuItem = CSElementFactory.createByXPath(
+            `//a[normalize-space()='${menuText}']`,
+            `Menu item: ${menuText}`,
+            this.page  // this.page is accessible here (protected, inside page class)
+        );
+        await menuItem.waitForVisible(5000);
+        await menuItem.click();
+        CSReporter.pass(`Clicked menu: ${menuText}`);
+    }
 }
 ```
 
@@ -348,6 +378,14 @@ export class LoginSteps {
         await this.dashboardPage.verifyPageDisplayed();
         CSReporter.pass('Dashboard is displayed');
     }
+
+    // WRONG — NEVER do this (page is protected, causes TS2445):
+    // await this.loginPage.page.locator('.widget').click(); ❌
+    // await this.dashboardPage.page.goto('/dashboard'); ❌
+    //
+    // CORRECT — Call page object methods instead:
+    // await this.dashboardPage.clickWidget('Quick Launch'); ✓
+    // await this.loginPage.navigate(); ✓
 }
 ```
 
@@ -842,22 +880,27 @@ After generating EACH file, verify:
 ## Rules Summary
 
 1. **ONLY generate BDD** — NEVER call `generate_spec_test` unless user explicitly says "spec style"
-2. **NEVER use raw Playwright APIs** — Always use CSWebElement methods
+2. **NEVER use raw Playwright APIs** — Always use CSWebElement methods. No `page.locator()`, `page.goto()`, `page.click()`.
 3. **NEVER put locators in step definitions** — All locators go in Page Objects
-4. **ALWAYS use CSReporter STATIC methods** — `CSReporter.info()`, NEVER `getInstance()`
-5. **ALWAYS discover locators from the browser** before generating page objects
-6. **ALWAYS provide `parameters` array** for step patterns containing `{string}` or `{int}`
-7. **ALWAYS provide real `implementation` code** using page object methods — never pass empty string
-8. **ONE flow = ONE scenario** — Never split a sequential user flow into multiple scenarios
-9. **Use FULL property names** in step implementations: `this.myAppLoginPage` not `this.loginPage`
-10. **ALWAYS use JSON data source for Examples** — `Examples: {"type": "json", "source": "...", "path": "$", "filter": "runFlag=Yes"}` — NEVER inline Gherkin tables
-11. **ALWAYS generate JSON data file** for every Scenario Outline via `generate_test_data_file`
-12. **ALWAYS implement `initializeElements()`** in every page class
-13. **NEVER redeclare inherited properties** — `config`, `browserManager`, `page` are inherited
-14. **Use module-specific imports** — NEVER single barrel import
-15. **CSDBUtils from `/database-utils`** — NEVER from `/database`
-16. **No duplicate methods/steps** — Search existing code first before creating new
-17. **Use Background section** for steps common to all scenarios
-18. **Use step comments** (`# Step N:`) to organize complex scenarios
-19. **ALWAYS generate config scaffold** — Call `generate_config_scaffold` before generating test code
-20. **NEVER open the browser twice** — If you already navigated the app, reuse that session for locator discovery
+4. **NEVER access `.page` from step definitions** — `page` is protected on CSBasePage. Step definitions call page object methods only. `this.myAppPage.page` is a TS2445 error.
+5. **CSElementFactory calls in page classes ONLY** — Dynamic elements via `CSElementFactory.createByXPath()` etc. MUST be inside page class methods, NEVER in step definitions. The step calls the page method.
+6. **ALWAYS use CSReporter STATIC methods** — `CSReporter.info()`, NEVER `getInstance()`
+7. **ALWAYS discover locators from the browser** before generating page objects
+8. **ALWAYS provide `parameters` array** for step patterns containing `{string}` or `{int}`
+9. **ALWAYS provide real `implementation` code** using page object methods — never pass empty string
+10. **ONE flow = ONE scenario** — Never split a sequential user flow into multiple scenarios
+11. **Use FULL property names** in step implementations: `this.myAppLoginPage` not `this.loginPage`
+12. **ALWAYS use JSON data source for Examples** — `Examples: {"type": "json", "source": "...", "path": "$", "filter": "runFlag=Yes"}` — NEVER inline Gherkin tables
+13. **ALWAYS generate JSON data file** for every Scenario Outline via `generate_test_data_file`
+14. **ALWAYS implement `initializeElements()`** in every page class
+15. **NEVER redeclare inherited properties** — `config`, `browserManager`, `page` are inherited
+16. **Use module-specific imports** — NEVER single barrel import
+17. **CSDBUtils from `/database-utils`** — NEVER from `/database`
+18. **No duplicate methods/steps** — Search existing code first before creating new
+19. **Use Background section** for steps common to all scenarios
+20. **Use step comments** (`# Step N:`) to organize complex scenarios
+21. **ALWAYS generate config scaffold** — Call `generate_config_scaffold` before generating test code
+22. **NEVER open the browser twice** — If you already navigated the app, reuse that session for locator discovery
+23. **ALWAYS close the browser** — Call `browser_close` as the FINAL action after all generation is complete
+24. **ALWAYS clean up errors** — Review generated code for TypeScript errors and fix them before finishing. You are NOT done until the code is error-free.
+25. **Feature file description uses real newlines** — NEVER use literal `\n` in the description parameter. Use actual line breaks.

@@ -122,6 +122,10 @@ For each interactive element discovered:
 
 Output a comprehensive Markdown test plan in `specs/{feature}.md`.
 
+### Phase 6: Close Browser (MANDATORY)
+
+**ALWAYS close the browser after exploration is complete.** Call `browser_close` as your final action. Never leave the browser open — it wastes resources and can block subsequent agent sessions.
+
 ## Test Plan Format
 
 ```markdown
@@ -207,6 +211,7 @@ Planner:
 8. discover_elements → Find dashboard elements
 9. test_accessibility → Check WCAG compliance
 10. Write test plan to specs/login.md
+11. browser_close → ALWAYS close browser when done
 ```
 
 ## Project Structure Reference
