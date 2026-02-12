@@ -52,6 +52,9 @@ export class CSModuleDetector {
      */
     private readonly STEP_PATTERNS: Record<keyof ModuleRequirements, RegExp[]> = {
         browser: [
+            // AI zero-code steps (always browser-based)
+            /^\s*(?:When|Then|And|But|Given)?\s*AI\s+"/i,
+            /^\s*AI\s+"/i,
             // Navigation patterns (flexible subject)
             /(?:I|user|users|we|they|he|she)\s+navigate/i,
             /(?:I|user|users|we|they|he|she)\s+(?:go|goes)\s+to/i,
@@ -98,7 +101,7 @@ export class CSModuleDetector {
             /\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE)\b.*\b(?:FROM|INTO|TABLE|DATABASE)\b/i,
             // Database keywords (subject-independent)
             /\b(?:SQL|database|query\s+result|stored\s+procedure)\b/i,
-            /(?:the\s+)?(?:database|table|query)/i
+            /(?:the\s+)?(?:database|database\s+table|query\s+result|query\s+data)/i
         ],
         soap: [
             // SOAP patterns (flexible subject)

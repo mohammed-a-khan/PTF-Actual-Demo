@@ -36,7 +36,25 @@ export type ActionIntent =
     | 'upload'
     | 'drag'
     | 'focus'
-    | 'wait-for';
+    | 'wait-for'
+    | 'wait-seconds'
+    | 'wait-url-change'
+    | 'wait-text-change'
+    | 'switch-tab'
+    | 'open-new-tab'
+    | 'close-tab'
+    | 'switch-browser'
+    | 'clear-session'
+    | 'switch-frame'
+    | 'switch-main-frame'
+    | 'set-variable'
+    | 'take-screenshot'
+    | 'clear-cookies'
+    | 'set-cookie'
+    | 'clear-storage'
+    | 'set-storage-item'
+    | 'api-call'
+    | 'execute-js';
 
 /** Assertion intents - user wants to verify something */
 export type AssertionIntent =
@@ -54,7 +72,16 @@ export type AssertionIntent =
     | 'verify-not-present'
     | 'verify-url'
     | 'verify-title'
-    | 'verify-attribute';
+    | 'verify-attribute'
+    | 'verify-css'
+    | 'verify-matches'
+    | 'verify-selected-option'
+    | 'verify-dropdown-options'
+    | 'verify-url-param'
+    | 'verify-table-cell'
+    | 'verify-download'
+    | 'verify-download-content'
+    | 'verify-api-response';
 
 /** Query intents - user wants to extract data */
 export type QueryIntent =
@@ -65,7 +92,18 @@ export type QueryIntent =
     | 'get-list'
     | 'get-url'
     | 'get-title'
-    | 'check-exists';
+    | 'check-exists'
+    | 'get-url-param'
+    | 'get-table-data'
+    | 'get-table-cell'
+    | 'get-table-column'
+    | 'get-table-row-count'
+    | 'generate-data'
+    | 'get-cookie'
+    | 'get-storage-item'
+    | 'get-download-path'
+    | 'get-api-response'
+    | 'evaluate-js';
 
 /** Union of all intent types */
 export type StepIntent = ActionIntent | AssertionIntent | QueryIntent;
@@ -132,6 +170,56 @@ export interface StepParameters {
     filePath?: string;
     /** Drag target element description */
     dragTarget?: string;
+    /** Tab index for switch-tab (0-based) */
+    tabIndex?: number;
+    /** Browser type for switch-browser (chrome, firefox, edge, webkit) */
+    browserType?: string;
+    /** URL to navigate after context clear */
+    loginUrl?: string;
+    /** CSS property name for verify-css */
+    cssProperty?: string;
+    /** Regex pattern string for verify-matches */
+    regexPattern?: string;
+    /** URL parameter name for get-url-param / verify-url-param */
+    urlParam?: string;
+    /** 1-based row index for table operations */
+    rowIndex?: number;
+    /** Column header name or 1-based index for table operations */
+    columnRef?: string;
+    /** Data type for generate-data (uuid, timestamp, random-string, etc.) */
+    dataType?: string;
+    /** Variable name for set-variable */
+    variableName?: string;
+    /** Screenshot file name */
+    screenshotName?: string;
+    /** Frame CSS selector, name, or index for switch-frame */
+    frameSelector?: string;
+    /** Cookie name for get-cookie */
+    cookieName?: string;
+    /** Storage type: 'local' or 'session' */
+    storageType?: 'local' | 'session';
+    /** Storage key for get/set storage item */
+    storageKey?: string;
+    /** Expected file name for download verification */
+    fileName?: string;
+    /** Expected content substring for download content verification */
+    fileContent?: string;
+    /** HTTP method for API calls (GET, POST, PUT, DELETE, PATCH) */
+    httpMethod?: string;
+    /** API endpoint URL */
+    apiUrl?: string;
+    /** Request body (JSON string) */
+    requestBody?: string;
+    /** JSONPath for response extraction */
+    jsonPath?: string;
+    /** JavaScript code to execute */
+    script?: string;
+    /** Random data generation length */
+    length?: number;
+    /** Random number range minimum */
+    rangeMin?: number;
+    /** Random number range maximum */
+    rangeMax?: number;
 }
 
 /** Modifiers that affect execution behavior */
@@ -401,7 +489,19 @@ export const INTENT_TO_LIKELY_ROLES: Record<string, string[]> = {
     'drag': [],
     'focus': ['textbox', 'button', 'link'],
     'scroll': [],
-    'scroll-to': []
+    'scroll-to': [],
+    'wait-seconds': [],
+    'wait-url-change': [],
+    'wait-text-change': [],
+    'switch-tab': [],
+    'open-new-tab': [],
+    'close-tab': [],
+    'switch-browser': [],
+    'clear-session': [],
+    'switch-frame': [],
+    'switch-main-frame': [],
+    'set-variable': [],
+    'take-screenshot': []
 };
 
 // ============================================================================

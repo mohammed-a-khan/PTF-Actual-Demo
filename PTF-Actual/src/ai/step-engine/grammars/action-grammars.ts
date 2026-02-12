@@ -450,5 +450,198 @@ export const ACTION_GRAMMAR_RULES: GrammarRule[] = [
             };
         },
         examples: ['Wait for the spinner to disappear', 'Wait for the loading to be hidden']
+    },
+
+    // ========================================================================
+    // ENHANCED WAIT ACTIONS (Priority 82-87) - Phase 1
+    // ========================================================================
+    {
+        id: 'action-wait-seconds',
+        pattern: /^(?:wait|pause)\s+(?:for\s+)?(\d+)\s*(seconds?|secs?|milliseconds?|ms)$/i,
+        category: 'action',
+        intent: 'wait-seconds',
+        priority: 82,
+        extract: (match) => {
+            const amount = parseInt(match[1]);
+            const unit = match[2].toLowerCase();
+            const ms = unit.startsWith('ms') || unit.startsWith('millis') ? amount : amount * 1000;
+            return {
+                targetText: '',
+                params: { timeout: ms }
+            };
+        },
+        examples: [
+            'Wait 5 seconds',
+            'Pause for 3 seconds',
+            'Wait 500 milliseconds',
+            'Wait 2 secs'
+        ]
+    },
+    {
+        id: 'action-wait-url-contain',
+        pattern: /^wait\s+(?:for\s+)?(?:the\s+)?url\s+to\s+(?:contain|include|have)\s+__QUOTED_(\d+)__$/i,
+        category: 'action',
+        intent: 'wait-url-change',
+        priority: 83,
+        extract: (match, quotedStrings) => {
+            const urlPattern = quotedStrings[parseInt(match[1])] || '';
+            return {
+                targetText: '',
+                params: { url: urlPattern }
+            };
+        },
+        examples: [
+            "Wait for URL to contain '/dashboard'",
+            "Wait for the URL to include '/home'"
+        ]
+    },
+    {
+        id: 'action-wait-url-change',
+        pattern: /^wait\s+(?:for\s+)?(?:the\s+)?url\s+to\s+change$/i,
+        category: 'action',
+        intent: 'wait-url-change',
+        priority: 84,
+        extract: () => {
+            return {
+                targetText: '',
+                params: {}
+            };
+        },
+        examples: ['Wait for the URL to change', 'Wait for URL to change']
+    },
+    {
+        id: 'action-wait-text-to-be',
+        pattern: /^wait\s+(?:for\s+)?(?:the\s+)?(.+?)\s+(?:text\s+)?to\s+(?:be|equal|show|read)\s+__QUOTED_(\d+)__$/i,
+        category: 'action',
+        intent: 'wait-text-change',
+        priority: 85,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            const expectedText = quotedStrings[parseInt(match[2])] || '';
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw),
+                expectedValue: expectedText
+            };
+        },
+        examples: [
+            "Wait for the heading text to be 'Welcome'",
+            "Wait for the status to show 'Complete'"
+        ]
+    },
+    {
+        id: 'action-wait-text-change',
+        pattern: /^wait\s+(?:for\s+)?(?:the\s+)?(.+?)\s+(?:text\s+)?to\s+change$/i,
+        category: 'action',
+        intent: 'wait-text-change',
+        priority: 86,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw)
+            };
+        },
+        examples: [
+            'Wait for the status text to change',
+            'Wait for the counter to change'
+        ]
+    },
+
+    // ========================================================================
+    // KEY COMBINATIONS (Priority 62-67) - Phase 3
+    // ========================================================================
+    {
+        id: 'action-press-key-combo',
+        pattern: /^press\s+((?:ctrl|control|alt|shift|meta|cmd|command)(?:\s*\+\s*(?:ctrl|control|alt|shift|meta|cmd|command|[a-z0-9]))+)(?:\s+(?:on|in)\s+(?:the\s+)?(.+?))?$/i,
+        category: 'action',
+        intent: 'press-key',
+        priority: 62,
+        extract: (match, quotedStrings) => {
+            const combo = match[1].trim();
+            const raw = match[2] ? resolveQuoted(match[2], quotedStrings).trim() : '';
+            return {
+                targetText: raw ? stripElementType(raw) : '',
+                elementType: raw ? inferElementType(raw) : undefined,
+                params: { key: combo }
+            };
+        },
+        examples: [
+            'Press Ctrl+A',
+            'Press Control+Shift+Delete',
+            "Press Ctrl+C on the text field"
+        ]
+    },
+    {
+        id: 'action-select-all-text',
+        pattern: /^select\s+all\s+(?:text|content)$/i,
+        category: 'action',
+        intent: 'press-key',
+        priority: 63,
+        extract: () => ({
+            targetText: '',
+            params: { key: 'Control+a' }
+        }),
+        examples: ['Select all text', 'Select all content']
+    },
+    {
+        id: 'action-copy-text',
+        pattern: /^copy(?:\s+(?:the\s+)?(?:text|content|selection))?$/i,
+        category: 'action',
+        intent: 'press-key',
+        priority: 64,
+        extract: () => ({
+            targetText: '',
+            params: { key: 'Control+c' }
+        }),
+        examples: ['Copy', 'Copy the text', 'Copy the selection']
+    },
+    {
+        id: 'action-paste',
+        pattern: /^paste(?:\s+(?:the\s+)?(?:text|content|clipboard))?$/i,
+        category: 'action',
+        intent: 'press-key',
+        priority: 65,
+        extract: () => ({
+            targetText: '',
+            params: { key: 'Control+v' }
+        }),
+        examples: ['Paste', 'Paste the text', 'Paste the clipboard']
+    },
+    {
+        id: 'action-cut',
+        pattern: /^cut(?:\s+(?:the\s+)?(?:text|content|selection))?$/i,
+        category: 'action',
+        intent: 'press-key',
+        priority: 66,
+        extract: () => ({
+            targetText: '',
+            params: { key: 'Control+x' }
+        }),
+        examples: ['Cut', 'Cut the text', 'Cut the selection']
+    },
+    {
+        id: 'action-undo',
+        pattern: /^undo$/i,
+        category: 'action',
+        intent: 'press-key',
+        priority: 67,
+        extract: () => ({
+            targetText: '',
+            params: { key: 'Control+z' }
+        }),
+        examples: ['Undo']
+    },
+    {
+        id: 'action-redo',
+        pattern: /^redo$/i,
+        category: 'action',
+        intent: 'press-key',
+        priority: 68,
+        extract: () => ({
+            targetText: '',
+            params: { key: 'Control+y' }
+        }),
+        examples: ['Redo']
     }
 ];

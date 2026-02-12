@@ -43,7 +43,7 @@ export class CSAISteps {
      */
     @CSBDDStepDef('AI {string}')
     async aiStep(instruction: string): Promise<void> {
-        CSReporter.info(`AI Step: "${instruction}"`);
+        CSReporter.debug(`AI Step: Dispatching instruction to handler`);
         const handler = await this.getAIHandler();
         await handler.executeAIStep(instruction);
     }
@@ -54,7 +54,7 @@ export class CSAISteps {
      */
     @CSBDDStepDef('AI {string} and store as {string}')
     async aiStepAndStore(instruction: string, variableName: string): Promise<void> {
-        CSReporter.info(`AI Step (store as "${variableName}"): "${instruction}"`);
+        CSReporter.debug(`AI Step: Dispatching store-as instruction to handler`);
         const handler = await this.getAIHandler();
         await handler.executeAIStepAndStore(instruction, variableName);
     }
@@ -65,7 +65,7 @@ export class CSAISteps {
      */
     @CSBDDStepDef('AI {string} with value {string}')
     async aiStepWithValue(instruction: string, value: string): Promise<void> {
-        CSReporter.info(`AI Step (with value): "${instruction}" -> "${value}"`);
+        CSReporter.debug(`AI Step: Dispatching with-value instruction to handler`);
         const handler = await this.getAIHandler();
         await handler.executeAIStepWithValue(instruction, value);
     }
@@ -76,7 +76,7 @@ export class CSAISteps {
      */
     @CSBDDStepDef('AI {string} if {string} is {string}')
     async aiStepConditional(instruction: string, flagName: string, flagValue: string): Promise<void> {
-        CSReporter.info(`AI Step (conditional: ${flagName}=${flagValue}): "${instruction}"`);
+        CSReporter.debug(`AI Step: Dispatching conditional instruction to handler`);
         const handler = await this.getAIHandler();
         await handler.executeAIStepConditional(instruction, flagName, flagValue);
     }

@@ -79,7 +79,7 @@ export async function csAI(
         throw new Error('csAI() requires a non-empty instruction.');
     }
 
-    CSReporter.info(`AI Step: "${instruction}"`);
+    CSReporter.info(`Executing AI: "${instruction}"`);
 
     try {
         // Lazy-load modules
@@ -206,6 +206,52 @@ function isPageLevelOperation(step: ParsedStep): boolean {
 
     // Scroll without target
     if (step.intent === 'scroll' && step.target.rawText === 'page') return true;
+
+    // Phase 1: Enhanced wait strategies (page-level)
+    if (step.intent === 'wait-seconds') return true;
+    if (step.intent === 'wait-url-change') return true;
+
+    // Phase 2: Browser & tab management (all page-level)
+    if (step.intent === 'switch-tab') return true;
+    if (step.intent === 'open-new-tab') return true;
+    if (step.intent === 'close-tab') return true;
+    if (step.intent === 'switch-browser') return true;
+    if (step.intent === 'clear-session') return true;
+
+    // Phase 5: URL parameter operations (page-level)
+    if (step.intent === 'get-url-param') return true;
+    if (step.intent === 'verify-url-param') return true;
+
+    // Phase 7: Data generation & context (page-level)
+    if (step.intent === 'generate-data') return true;
+    if (step.intent === 'set-variable') return true;
+    if (step.intent === 'take-screenshot') return true;
+
+    // Phase 8: Frame switching (page-level)
+    if (step.intent === 'switch-frame') return true;
+    if (step.intent === 'switch-main-frame') return true;
+
+    // Phase 9: Cookie & storage operations (page-level)
+    if (step.intent === 'clear-cookies') return true;
+    if (step.intent === 'get-cookie') return true;
+    if (step.intent === 'set-cookie') return true;
+    if (step.intent === 'clear-storage') return true;
+    if (step.intent === 'set-storage-item') return true;
+    if (step.intent === 'get-storage-item') return true;
+
+    // Phase 10: Download operations (page-level)
+    if (step.intent === 'verify-download') return true;
+    if (step.intent === 'get-download-path') return true;
+    if (step.intent === 'verify-download-content') return true;
+
+    // Phase 11: API calls (page-level)
+    if (step.intent === 'api-call') return true;
+    if (step.intent === 'verify-api-response') return true;
+    if (step.intent === 'get-api-response') return true;
+
+    // Phase 12: JavaScript execution (page-level)
+    if (step.intent === 'execute-js') return true;
+    if (step.intent === 'evaluate-js') return true;
 
     return false;
 }

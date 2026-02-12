@@ -139,6 +139,31 @@ export class CSAIStepParser {
             return this.inferQueryIntent(lower);
         }
 
+        // Check for wait patterns (more specific than generic 'wait')
+        if (/^(?:wait|pause)\s+(?:for\s+)?\d+\s*(?:seconds?|secs?|ms|milliseconds?)/i.test(lower)) {
+            return { category: 'action', intent: 'wait-seconds' };
+        }
+        if (/^wait\s+(?:for\s+)?(?:the\s+)?url/i.test(lower)) {
+            return { category: 'action', intent: 'wait-url-change' };
+        }
+
+        // Check for tab/browser management patterns
+        if (/^switch\s+(?:to\s+)?(?:tab|the\s+(?:latest|main|first)\s+tab)/i.test(lower)) {
+            return { category: 'action', intent: 'switch-tab' };
+        }
+        if (/^open\s+(?:a\s+)?new\s+tab/i.test(lower)) {
+            return { category: 'action', intent: 'open-new-tab' };
+        }
+        if (/^close\s+(?:the\s+)?(?:current\s+)?tab/i.test(lower)) {
+            return { category: 'action', intent: 'close-tab' };
+        }
+        if (/^clear\s+(?:browser\s+)?(?:session|context)/i.test(lower)) {
+            return { category: 'action', intent: 'clear-session' };
+        }
+        if (/^take\s+(?:a\s+)?screenshot/i.test(lower)) {
+            return { category: 'action', intent: 'take-screenshot' };
+        }
+
         // Map NLP intent to action
         const intentMap: Record<IntentType, StepIntent> = {
             'click': 'click',

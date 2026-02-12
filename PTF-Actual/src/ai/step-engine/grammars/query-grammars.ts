@@ -250,5 +250,45 @@ export const QUERY_GRAMMAR_RULES: GrammarRule[] = [
             targetText: ''
         }),
         examples: ['Get the page title', 'Read the title']
+    },
+
+    // ========================================================================
+    // URL PARAMETER QUERIES (Priority 242-243) — Phase 5
+    // ========================================================================
+    {
+        id: 'query-get-url-param',
+        pattern: /^(?:get|read|extract)\s+(?:the\s+)?url\s+parameter\s+__QUOTED_(\d+)__$/i,
+        category: 'query',
+        intent: 'get-url-param',
+        priority: 242,
+        extract: (match, quotedStrings) => {
+            const urlParam = quotedStrings[parseInt(match[1])] || '';
+            return {
+                targetText: '',
+                params: { urlParam }
+            };
+        },
+        examples: [
+            "Get the URL parameter 'id'",
+            "Read the URL parameter 'token'"
+        ]
+    },
+    {
+        id: 'query-get-url-param-alt',
+        pattern: /^(?:get|read|extract)\s+(?:the\s+)?(?:value\s+of\s+)?(?:url|URL)\s+(?:param|parameter|query\s+param)\s+__QUOTED_(\d+)__$/i,
+        category: 'query',
+        intent: 'get-url-param',
+        priority: 243,
+        extract: (match, quotedStrings) => {
+            const urlParam = quotedStrings[parseInt(match[1])] || '';
+            return {
+                targetText: '',
+                params: { urlParam }
+            };
+        },
+        examples: [
+            "Get the value of URL param 'session'",
+            "Extract URL query param 'page'"
+        ]
     }
 ];

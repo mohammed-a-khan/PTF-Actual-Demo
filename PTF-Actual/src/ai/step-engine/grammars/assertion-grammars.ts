@@ -333,5 +333,154 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
             "Verify the page title is 'Home - My App'",
             "Assert title contains 'Dashboard'"
         ]
+    },
+
+    // ========================================================================
+    // ENHANCED ASSERTIONS (Priority 131-138) — Phase 4
+    // ========================================================================
+    {
+        id: 'assert-css-property',
+        pattern: /^(?:verify|assert|check)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:css|CSS|style)\s+__QUOTED_(\d+)__\s+(?:is|equals?)\s+__QUOTED_(\d+)__$/i,
+        category: 'assertion',
+        intent: 'verify-css',
+        priority: 131,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            const cssProperty = quotedStrings[parseInt(match[2])] || '';
+            const expectedValue = quotedStrings[parseInt(match[3])] || '';
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw),
+                expectedValue,
+                params: { cssProperty }
+            };
+        },
+        examples: [
+            "Verify the button CSS 'background-color' is 'red'",
+            "Assert the heading style 'color' equals 'rgb(0, 0, 0)'"
+        ]
+    },
+    {
+        id: 'assert-matches-pattern',
+        pattern: /^(?:verify|assert|check)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:matches?|fits)\s+(?:the\s+)?(?:pattern|regex|format)\s+__QUOTED_(\d+)__$/i,
+        category: 'assertion',
+        intent: 'verify-matches',
+        priority: 132,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            const regexPattern = quotedStrings[parseInt(match[2])] || '';
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw),
+                params: { regexPattern }
+            };
+        },
+        examples: [
+            "Verify the phone field matches pattern '\\d{3}-\\d{4}'",
+            "Check the email field matches regex '^[a-z]+@[a-z]+\\.[a-z]+$'"
+        ]
+    },
+    {
+        id: 'assert-selected-option',
+        pattern: /^(?:verify|assert|check)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:selected\s+option|selected\s+value|current\s+selection)\s+(?:is|equals?)\s+__QUOTED_(\d+)__$/i,
+        category: 'assertion',
+        intent: 'verify-selected-option',
+        priority: 133,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            const expectedValue = quotedStrings[parseInt(match[2])] || '';
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw) || 'dropdown',
+                expectedValue
+            };
+        },
+        examples: [
+            "Verify the dropdown selected option is 'USD'",
+            "Assert the Currency dropdown selected value is 'EUR'"
+        ]
+    },
+    {
+        id: 'assert-dropdown-options',
+        pattern: /^(?:verify|assert|check)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:contains?\s+options?|has\s+options?|options?\s+(?:include|contain))\s+__QUOTED_(\d+)__$/i,
+        category: 'assertion',
+        intent: 'verify-dropdown-options',
+        priority: 134,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            const expectedValue = quotedStrings[parseInt(match[2])] || '';
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw) || 'dropdown',
+                expectedValue
+            };
+        },
+        examples: [
+            "Verify the dropdown contains options 'USD, EUR, GBP'",
+            "Check the Currency dropdown has options 'USD, EUR'"
+        ]
+    },
+    {
+        id: 'assert-text-not-equals',
+        pattern: /^(?:verify|assert|check)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:text\s+)?(?:is\s+not|does\s+not\s+equal)\s+__QUOTED_(\d+)__$/i,
+        category: 'assertion',
+        intent: 'verify-text',
+        priority: 135,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            const expectedValue = quotedStrings[parseInt(match[2])] || '';
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw),
+                expectedValue,
+                modifiers: { negated: true }
+            };
+        },
+        examples: [
+            "Verify the heading text is not 'Error'",
+            "Assert the status does not equal 'Failed'"
+        ]
+    },
+
+    // ========================================================================
+    // URL PARAMETER ASSERTIONS (Priority 104-105) — Phase 5
+    // ========================================================================
+    {
+        id: 'assert-url-param-exists',
+        pattern: /^(?:verify|assert|check)\s+(?:that\s+)?(?:the\s+)?url\s+contains?\s+parameter\s+__QUOTED_(\d+)__$/i,
+        category: 'assertion',
+        intent: 'verify-url-param',
+        priority: 104,
+        extract: (match, quotedStrings) => {
+            const urlParam = quotedStrings[parseInt(match[1])] || '';
+            return {
+                targetText: '',
+                params: { urlParam }
+            };
+        },
+        examples: [
+            "Verify the URL contains parameter 'tab'",
+            "Check the URL contains parameter 'id'"
+        ]
+    },
+    {
+        id: 'assert-url-param-value',
+        pattern: /^(?:verify|assert|check)\s+(?:that\s+)?(?:the\s+)?url\s+parameter\s+__QUOTED_(\d+)__\s+(?:is|equals?)\s+__QUOTED_(\d+)__$/i,
+        category: 'assertion',
+        intent: 'verify-url-param',
+        priority: 105,
+        extract: (match, quotedStrings) => {
+            const urlParam = quotedStrings[parseInt(match[1])] || '';
+            const expectedValue = quotedStrings[parseInt(match[2])] || '';
+            return {
+                targetText: '',
+                expectedValue,
+                params: { urlParam }
+            };
+        },
+        examples: [
+            "Verify the URL parameter 'id' is '12345'",
+            "Assert URL parameter 'tab' equals 'details'"
+        ]
     }
 ];

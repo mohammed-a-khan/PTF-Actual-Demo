@@ -28,6 +28,9 @@ import { ACTION_GRAMMAR_RULES } from './grammars/action-grammars';
 import { ASSERTION_GRAMMAR_RULES } from './grammars/assertion-grammars';
 import { QUERY_GRAMMAR_RULES } from './grammars/query-grammars';
 import { NAVIGATION_GRAMMAR_RULES } from './grammars/navigation-grammars';
+import { BROWSER_GRAMMAR_RULES } from './grammars/browser-grammars';
+import { TABLE_GRAMMAR_RULES } from './grammars/table-grammars';
+import { DATA_GRAMMAR_RULES } from './grammars/data-grammars';
 
 export class CSAIStepGrammar {
     private static instance: CSAIStepGrammar;
@@ -50,7 +53,10 @@ export class CSAIStepGrammar {
             ...ACTION_GRAMMAR_RULES,
             ...ASSERTION_GRAMMAR_RULES,
             ...QUERY_GRAMMAR_RULES,
-            ...NAVIGATION_GRAMMAR_RULES
+            ...NAVIGATION_GRAMMAR_RULES,
+            ...BROWSER_GRAMMAR_RULES,
+            ...TABLE_GRAMMAR_RULES,
+            ...DATA_GRAMMAR_RULES
         ].sort((a, b) => a.priority - b.priority);
 
         CSReporter.debug(`CSAIStepGrammar: Loaded ${this.rules.length} grammar rules`);

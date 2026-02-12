@@ -54,7 +54,9 @@ export class CSAIStepBDD {
         // Resolve variables before processing
         const resolved = this.resolveInstruction(instruction);
 
-        CSReporter.info(`AI Step: "${resolved}"`);
+        if (resolved !== instruction) {
+            CSReporter.info(`AI Step resolved: "${resolved}"`);
+        }
 
         await csAI(resolved, {
             page: this.page,
@@ -73,7 +75,9 @@ export class CSAIStepBDD {
         // Resolve variables in instruction
         const resolved = this.resolveInstruction(instruction);
 
-        CSReporter.info(`AI Step (store as "${variableName}"): "${resolved}"`);
+        if (resolved !== instruction) {
+            CSReporter.info(`AI Step resolved (store as "${variableName}"): "${resolved}"`);
+        }
 
         const result = await csAI(resolved, {
             page: this.page,
@@ -108,7 +112,9 @@ export class CSAIStepBDD {
             finalInstruction = this.injectValue(resolvedInstruction, resolvedValue);
         }
 
-        CSReporter.info(`AI Step (with value "${resolvedValue}"): "${finalInstruction}"`);
+        if (finalInstruction !== instruction || resolvedValue !== value) {
+            CSReporter.info(`AI Step resolved (with value "${resolvedValue}"): "${finalInstruction}"`);
+        }
 
         await csAI(finalInstruction, {
             page: this.page,
@@ -137,7 +143,7 @@ export class CSAIStepBDD {
 
         // Condition met - execute
         const resolved = this.resolveInstruction(instruction);
-        CSReporter.info(`AI Step (condition met: ${flagName}="${actualValue}"): "${resolved}"`);
+        CSReporter.info(`AI Step condition met (${flagName}="${actualValue}"): "${resolved}"`);
 
         await csAI(resolved, {
             page: this.page,
