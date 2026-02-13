@@ -179,6 +179,19 @@ export class CSAccessibilityTreeMatcher {
             CSReporter.debug(`CSAccessibilityTreeMatcher: Best alternative confidence ${best.confidence.toFixed(2)} is below minimum ${minAcceptable.toFixed(2)} (assertion=${isAssertion}) - rejecting`);
         }
 
+        // Strategy 5: Search inside frames (handles legacy IE-era apps with iframes/framesets)
+        try {
+            const frameResult = await this.searchFrames(page, target, intent, searchText);
+            if (frameResult) {
+                frameResult.alternatives = alternatives;
+                const duration = Date.now() - startTime;
+                CSReporter.debug(`CSAccessibilityTreeMatcher: Frame search match in ${duration}ms (confidence: ${frameResult.confidence.toFixed(2)})`);
+                return frameResult;
+            }
+        } catch (error: any) {
+            CSReporter.debug(`CSAccessibilityTreeMatcher: Frame search strategy failed: ${error.message}`);
+        }
+
         const duration = Date.now() - startTime;
         CSReporter.debug(`CSAccessibilityTreeMatcher: No element found in ${duration}ms for "${searchText}"`);
         return null;
@@ -805,6 +818,119 @@ export class CSAccessibilityTreeMatcher {
                     return null;
                 }
             } catch { /* continue */ }
+        }
+
+        return null;
+    }
+
+    // ========================================================================
+    // Strategy 5: Frame/Iframe Search (legacy IE apps)
+    // ========================================================================
+
+    /**
+     * Search inside iframes for elements not found on the main page.
+     * Legacy IE-era applications heavily use iframes/framesets to embed content.
+     * Playwright's main page locators only search the top frame by default.
+     *
+     * Uses Frame API (getByText, getByRole) which is duck-type compatible with Page.
+     */
+    private async searchFrames(
+        page: Page,
+        target: ElementTarget,
+        intent: StepIntent,
+        searchText: string
+    ): Promise<MatchedElement | null> {
+        const frames = page.frames();
+        if (frames.length <= 1) return null; // Only main frame, no iframes
+
+        CSReporter.debug(`CSAccessibilityTreeMatcher: Searching ${frames.length - 1} iframe(s) for "${searchText}"`);
+
+        const expectedRoles = this.getExpectedRoles(target.elementType, intent);
+
+        for (const frame of frames) {
+            if (frame === page.mainFrame()) continue;
+            if (!frame.url() || frame.url() === 'about:blank') continue;
+
+            try {
+                // Try getByRole with name first (most precise)
+                for (const role of expectedRoles) {
+                    try {
+                        const roleLocator = frame.getByRole(role as any, { name: searchText, exact: false });
+                        const count = await roleLocator.count();
+                        if (count > 0) {
+                            CSReporter.debug(`CSAccessibilityTreeMatcher: Found in frame via getByRole('${role}', '${searchText}')`);
+                            return {
+                                locator: this.selectByOrdinal(roleLocator, count, target.ordinal),
+                                broadLocator: roleLocator,
+                                confidence: 0.75,
+                                method: 'semantic-locator',
+                                description: `frame[${frame.name() || 'iframe'}] > getByRole('${role}', '${searchText}')`,
+                                alternatives: []
+                            };
+                        }
+                    } catch { continue; }
+                }
+
+                // Try text search in frame
+                if (searchText) {
+                    try {
+                        const textLocator = frame.getByText(searchText, { exact: false });
+                        const count = await textLocator.count();
+                        if (count > 0) {
+                            const baseConfidence = count === 1 ? 0.65 : Math.max(0.4, 0.65 - count * 0.05);
+                            CSReporter.debug(`CSAccessibilityTreeMatcher: Found in frame via getByText('${searchText}') — ${count} match(es)`);
+                            return {
+                                locator: this.selectByOrdinal(textLocator, count, target.ordinal),
+                                broadLocator: textLocator,
+                                confidence: baseConfidence,
+                                method: 'text-search',
+                                description: `frame[${frame.name() || 'iframe'}] > getByText('${searchText}')${count > 1 ? ` (${count} matches)` : ''}`,
+                                alternatives: []
+                            };
+                        }
+                    } catch { /* continue to next frame */ }
+                }
+
+                // Try getByLabel in frame (for input fields)
+                if (searchText) {
+                    try {
+                        const labelLocator = frame.getByLabel(searchText, { exact: false });
+                        const count = await labelLocator.count();
+                        if (count > 0) {
+                            return {
+                                locator: this.selectByOrdinal(labelLocator, count, target.ordinal),
+                                broadLocator: labelLocator,
+                                confidence: 0.65,
+                                method: 'semantic-locator',
+                                description: `frame[${frame.name() || 'iframe'}] > getByLabel('${searchText}')`,
+                                alternatives: []
+                            };
+                        }
+                    } catch { /* continue */ }
+                }
+
+                // Try individual descriptor words in frame
+                for (const desc of target.descriptors) {
+                    if (desc.length < 3) continue;
+                    try {
+                        const descLocator = frame.getByText(desc, { exact: false });
+                        const count = await descLocator.count();
+                        if (count > 0 && count <= 10) {
+                            return {
+                                locator: this.selectByOrdinal(descLocator, count, target.ordinal),
+                                broadLocator: descLocator,
+                                confidence: count === 1 ? 0.5 : Math.max(0.3, 0.5 - count * 0.05),
+                                method: 'text-search',
+                                description: `frame[${frame.name() || 'iframe'}] > getByText('${desc}')`,
+                                alternatives: []
+                            };
+                        }
+                    } catch { /* continue */ }
+                }
+            } catch {
+                // Frame may be detached or cross-origin — skip it
+                continue;
+            }
         }
 
         return null;
