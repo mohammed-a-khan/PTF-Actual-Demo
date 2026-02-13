@@ -161,15 +161,51 @@ export class CSAIActionExecutor {
             case 'type': {
                 this.requireElement(element, 'fill');
                 this.requireValue(parameters, 'fill');
-                const el = this.createWrappedElement(element!, timeout);
-                await el.fill(parameters.value!, { timeout });
+                try {
+                    const el = this.createWrappedElement(element!, timeout);
+                    await el.fill(parameters.value!, { timeout });
+                } catch (fillError: any) {
+                    // If the matched element is a container (tr, div, td, span, etc.),
+                    // the fill will fail because it's not an input. Drill down to find
+                    // the actual fillable child element inside the container.
+                    if (fillError.message?.includes('not an <input>')) {
+                        CSReporter.debug('CSAIActionExecutor: Matched element is a container — searching for fillable child');
+                        const fillableChild = element!.locator
+                            .locator('input:visible, textarea:visible, [contenteditable="true"]:visible, [contenteditable=""]:visible')
+                            .first();
+                        const childCount = await fillableChild.count();
+                        if (childCount > 0) {
+                            CSReporter.debug('CSAIActionExecutor: Found fillable child inside container — filling');
+                            await fillableChild.fill(parameters.value!, { timeout });
+                        } else {
+                            throw fillError;
+                        }
+                    } else {
+                        throw fillError;
+                    }
+                }
                 return this.success('fill');
             }
 
             case 'clear': {
                 this.requireElement(element, 'clear');
-                const el = this.createWrappedElement(element!, timeout);
-                await el.clear({ timeout });
+                try {
+                    const el = this.createWrappedElement(element!, timeout);
+                    await el.clear({ timeout });
+                } catch (clearError: any) {
+                    if (clearError.message?.includes('not an <input>')) {
+                        const fillableChild = element!.locator
+                            .locator('input:visible, textarea:visible, [contenteditable="true"]:visible, [contenteditable=""]:visible')
+                            .first();
+                        if (await fillableChild.count() > 0) {
+                            await fillableChild.clear({ timeout });
+                        } else {
+                            throw clearError;
+                        }
+                    } else {
+                        throw clearError;
+                    }
+                }
                 return this.success('clear');
             }
 
@@ -177,7 +213,22 @@ export class CSAIActionExecutor {
                 this.requireElement(element, 'select');
                 this.requireValue(parameters, 'select');
                 const selectValue = parameters.value!;
-                const selectLocator = element!.locator;
+
+                // Resolve the actual <select> element — if the matched element is a container
+                // (tr, div, td), drill down to find the <select> inside it
+                let selectLocator = element!.locator;
+                try {
+                    // Quick check: can we selectOption on this element?
+                    const tagName = await selectLocator.evaluate((el: Element) => el.tagName.toLowerCase()).catch(() => '');
+                    if (tagName !== 'select') {
+                        const childSelect = selectLocator.locator('select:visible').first();
+                        if (await childSelect.count() > 0) {
+                            selectLocator = childSelect;
+                        }
+                    }
+                } catch {
+                    // Proceed with original locator
+                }
 
                 // Playwright's selectOption with a plain string matches by `value` attribute,
                 // `label` text, or `index`. Users typically specify the visible label text
@@ -1574,7 +1625,32 @@ export class CSAIActionExecutor {
                 }
             }
 
-            // Recovery 2: Try with alternative locators
+            // Recovery 2: For fill/type/clear on container elements, find fillable child
+            // This handles cases where the accessibility tree matcher resolves to a <tr>, <div>,
+            // <td>, etc. instead of the <input> or <textarea> inside it
+            if (element && (step.intent === 'fill' || step.intent === 'type' || step.intent === 'clear') &&
+                error.message?.includes('not an <input>')) {
+                try {
+                    CSReporter.debug('CSAIActionExecutor: Recovery — searching for fillable child in container');
+                    const fillableChild = element.locator
+                        .locator('input:visible, textarea:visible, [contenteditable="true"]:visible, [contenteditable=""]:visible')
+                        .first();
+                    if (await fillableChild.count() > 0) {
+                        const childElement: MatchedElement = {
+                            locator: fillableChild,
+                            confidence: element.confidence,
+                            description: `${element.description} > input`,
+                            method: element.method,
+                            alternatives: []
+                        };
+                        return await this.execute(page, step, childElement);
+                    }
+                } catch {
+                    // Recovery 2 failed — continue to next
+                }
+            }
+
+            // Recovery 3: Try with alternative locators
             // Each alternative gets wrapped in CSWebElement automatically
             // when this.execute() re-enters executeAction/Query/Assertion
             if (element?.alternatives && element.alternatives.length > 0) {

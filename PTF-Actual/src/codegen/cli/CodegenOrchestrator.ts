@@ -782,22 +782,17 @@ BROWSER_ACTION_TIMEOUT=${envLower === 'dev' ? '15000' : '10000'}
 
         const outputFile = path.join(this.options.watchDir!, 'test.spec.ts');
 
-        // Build args: --target is omitted since 'playwright-test' is already the default
-        // This avoids compatibility issues with newer Playwright versions
-        const args = [
-            'codegen',
-            '--output', outputFile
-        ];
+        // Build the command string directly for shell execution.
+        // We must quote paths that may contain spaces (e.g., "CDO Fusion").
+        // With shell: true, Node joins args with spaces — unquoted paths break.
+        const quotedOutput = `"${outputFile}"`;
+        const urlArg = this.options.url ? ` ${this.options.url}` : '';
+        const fullCommand = `npx playwright codegen --output ${quotedOutput}${urlArg}`;
 
-        if (this.options.url) {
-            args.push(this.options.url);
-        }
-
-        console.log(chalk.gray(`   Command: npx playwright ${args.join(' ')}\n`));
+        console.log(chalk.gray(`   Command: ${fullCommand}\n`));
 
         // shell: true is required on Windows to execute npx (.cmd batch file)
-        // The original "too many arguments" error was caused by --target flag, not shell: true
-        this.playwrightProcess = spawn('npx', ['playwright', ...args], {
+        this.playwrightProcess = spawn(fullCommand, [], {
             stdio: 'inherit',
             shell: true
         });
