@@ -53,10 +53,110 @@ function inferElementType(text: string): string | undefined {
 
 /** Strip trailing element type words from target text for cleaner descriptors */
 function stripElementType(text: string): string {
-    return text.replace(/\s+(button|btn|link|field|input|textbox|checkbox|radio|dropdown|tab|menu\s*item|heading|header|icon|image|switch|toggle|slider)$/i, '').trim();
+    // Iteratively strip — handles "input field", "data table", etc.
+    let result = text;
+    const typeWords = /\s+(?:button|btn|link|field|input|textbox|checkbox|radio|dropdown|tab|menu\s*item|heading|header|icon|image|switch|toggle|slider|table|grid)$/i;
+    for (let i = 0; i < 3; i++) {
+        const stripped = result.replace(typeWords, '').trim();
+        if (stripped === result) break;
+        result = stripped;
+    }
+    return result;
 }
 
 export const ACTION_GRAMMAR_RULES: GrammarRule[] = [
+    // ========================================================================
+    // TABLE ROW-SCOPED ACTIONS (Priority 5-9)
+    // Must be checked BEFORE basic actions to capture the row/table context
+    // ========================================================================
+    {
+        id: 'action-table-type',
+        pattern: /^(?:type|enter|fill|input|write)\s+__QUOTED_(\d+)__\s+(?:in|into)\s+(?:the\s+)?(.+?)\s+(?:at|in|on)\s+row\s+(?:number\s+)?(\d+)\s+(?:in|of)\s+(?:the\s+)?(.+?)$/i,
+        category: 'action',
+        intent: 'fill',
+        priority: 5,
+        extract: (match, quotedStrings) => {
+            const value = quotedStrings[parseInt(match[1])] || '';
+            const raw = resolveQuoted(match[2], quotedStrings).trim();
+            const rowIndex = parseInt(match[3]);
+            const tableRef = resolveQuoted(match[4], quotedStrings).trim();
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw) || 'input',
+                value,
+                params: { rowIndex, tableRef: stripElementType(tableRef) }
+            };
+        },
+        examples: [
+            "Type '1000' in the 'Amount' input field at row number 1 in the Balances table",
+            "Enter '500' in the 'Quantity' field at row 2 in the Orders table"
+        ]
+    },
+    {
+        id: 'action-table-clear',
+        pattern: /^(?:clear|empty|erase)\s+(?:the\s+)?(?:text\s+in\s+)?(?:the\s+)?(.+?)\s+(?:at|in|on)\s+row\s+(?:number\s+)?(\d+)\s+(?:in|of)\s+(?:the\s+)?(.+?)$/i,
+        category: 'action',
+        intent: 'clear',
+        priority: 6,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            const rowIndex = parseInt(match[2]);
+            const tableRef = resolveQuoted(match[3], quotedStrings).trim();
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw) || 'input',
+                params: { rowIndex, tableRef: stripElementType(tableRef) }
+            };
+        },
+        examples: [
+            "Clear the text in the 'Amount' input field at row number 1 in the Balances table",
+            "Clear the 'Quantity' field at row 2 in the Orders table"
+        ]
+    },
+    {
+        id: 'action-table-click',
+        pattern: /^click\s+(?:on\s+)?(?:the\s+)?(.+?)\s+(?:at|in|on)\s+row\s+(?:number\s+)?(\d+)\s+(?:in|of)\s+(?:the\s+)?(.+?)$/i,
+        category: 'action',
+        intent: 'click',
+        priority: 7,
+        extract: (match, quotedStrings) => {
+            const raw = resolveQuoted(match[1], quotedStrings).trim();
+            const rowIndex = parseInt(match[2]);
+            const tableRef = resolveQuoted(match[3], quotedStrings).trim();
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw),
+                params: { rowIndex, tableRef: stripElementType(tableRef) }
+            };
+        },
+        examples: [
+            "Click the 'Update' button at row number 1 in the Balances table",
+            "Click the 'Delete' link at row 3 in the Orders table"
+        ]
+    },
+    {
+        id: 'action-table-select',
+        pattern: /^(?:select|pick|choose)\s+(?:the\s+)?(?:option\s+)?__QUOTED_(\d+)__\s+(?:option\s+)?(?:from|in)\s+(?:the\s+)?(.+?)\s+(?:at|in|on)\s+row\s+(?:number\s+)?(\d+)\s+(?:in|of)\s+(?:the\s+)?(.+?)$/i,
+        category: 'action',
+        intent: 'select',
+        priority: 8,
+        extract: (match, quotedStrings) => {
+            const value = quotedStrings[parseInt(match[1])] || '';
+            const raw = resolveQuoted(match[2], quotedStrings).trim();
+            const rowIndex = parseInt(match[3]);
+            const tableRef = resolveQuoted(match[4], quotedStrings).trim();
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw) || 'dropdown',
+                value,
+                params: { rowIndex, tableRef: stripElementType(tableRef) }
+            };
+        },
+        examples: [
+            "Select 'USD' from the 'Currency' dropdown at row 1 in the Payments table"
+        ]
+    },
+
     // ========================================================================
     // CLICK ACTIONS (Priority 10-19)
     // ========================================================================
@@ -190,7 +290,7 @@ export const ACTION_GRAMMAR_RULES: GrammarRule[] = [
     // ========================================================================
     {
         id: 'action-select-option-from',
-        pattern: /^(?:select|pick|choose)\s+__QUOTED_(\d+)__\s+(?:from|in)\s+(?:the\s+)?(.+?)$/i,
+        pattern: /^(?:select|pick|choose)\s+(?:the\s+)?(?:option\s+)?__QUOTED_(\d+)__\s+(?:option\s+)?(?:from|in)\s+(?:the\s+)?(.+?)$/i,
         category: 'action',
         intent: 'select',
         priority: 30,
@@ -206,12 +306,13 @@ export const ACTION_GRAMMAR_RULES: GrammarRule[] = [
         examples: [
             "Select 'Admin' from the Role dropdown",
             "Choose 'USD' from the Currency select",
-            "Pick 'Option 1' from the dropdown"
+            "Pick 'Option 1' from the dropdown",
+            "Select 'Q1-2025' option from the Period dropdown"
         ]
     },
     {
         id: 'action-select-option-in',
-        pattern: /^(?:select|pick|choose)\s+(?:the\s+)?(?:option\s+)?__QUOTED_(\d+)__\s+(?:in|on)\s+(?:the\s+)?(.+?)$/i,
+        pattern: /^(?:select|pick|choose)\s+(?:the\s+)?(?:option\s+)?__QUOTED_(\d+)__\s+(?:option\s+)?(?:in|on)\s+(?:the\s+)?(.+?)$/i,
         category: 'action',
         intent: 'select',
         priority: 31,
@@ -232,9 +333,11 @@ export const ACTION_GRAMMAR_RULES: GrammarRule[] = [
     // ========================================================================
     {
         id: 'action-check',
-        // Negative lookahead prevents matching "Check if...", "Check that...", "Check whether..."
-        // Priority 125 ensures assertion rules (100-124) are tried first for "Check ... is visible"
-        pattern: /^(?:check|mark|tick)\s+(?:the\s+)?(?!(?:if|that|whether)\b)(.+?)(?:\s+checkbox)?$/i,
+        // Negative lookahead prevents matching assertion patterns:
+        //   "Check if/that/whether..." (explicit assertion keywords)
+        //   "Check 'X' is displayed/shown/visible..." (value-in-field assertions)
+        // Priority 125 ensures assertion rules (100-124) are tried first
+        pattern: /^(?:check|mark|tick)\s+(?:the\s+)?(?!(?:if|that|whether)\b)(?!__QUOTED_\d+__\s+(?:is\s+)?(?:displayed|shown|visible|present|available)\b)(.+?)(?:\s+checkbox)?$/i,
         category: 'action',
         intent: 'check',
         priority: 125,
@@ -401,11 +504,31 @@ export const ACTION_GRAMMAR_RULES: GrammarRule[] = [
         examples: ["Upload the file 'test.pdf' to the file input"]
     },
     {
+        id: 'action-upload-multiple',
+        pattern: /^upload\s+files?\s+__QUOTED_(\d+)__\s+(?:to|in|on)\s+(?:the\s+)?(.+?)$/i,
+        category: 'action',
+        intent: 'upload',
+        priority: 71,
+        extract: (match, quotedStrings) => {
+            const filePaths = quotedStrings[parseInt(match[1])] || '';
+            const raw = resolveQuoted(match[2], quotedStrings).trim();
+            return {
+                targetText: stripElementType(raw),
+                elementType: inferElementType(raw) || 'button',
+                params: { filePath: filePaths }
+            };
+        },
+        examples: [
+            "Upload files 'doc1.pdf, doc2.pdf, doc3.pdf' to the file input",
+            "Upload files 'report.xlsx, data.csv' to the upload area"
+        ]
+    },
+    {
         id: 'action-drag-to',
         pattern: /^drag\s+(?:the\s+)?(.+?)\s+(?:to|onto|into)\s+(?:the\s+)?(.+?)$/i,
         category: 'action',
         intent: 'drag',
-        priority: 71,
+        priority: 72,
         extract: (match, quotedStrings) => {
             const source = resolveQuoted(match[1], quotedStrings).trim();
             const target = resolveQuoted(match[2], quotedStrings).trim();
@@ -546,6 +669,61 @@ export const ACTION_GRAMMAR_RULES: GrammarRule[] = [
         examples: [
             'Wait for the status text to change',
             'Wait for the counter to change'
+        ]
+    },
+
+    // ========================================================================
+    // PAGE LOAD STATE WAITS (Priority 87-89)
+    // ========================================================================
+    {
+        id: 'action-wait-domcontentloaded',
+        pattern: /^wait\s+(?:for\s+)?(?:the\s+)?(?:dom\s+content\s+loaded|domcontentloaded|dom\s+(?:to\s+)?(?:be\s+)?(?:loaded|ready))$/i,
+        category: 'action',
+        intent: 'wait-page-load',
+        priority: 87,
+        extract: () => ({
+            targetText: '',
+            params: { loadState: 'domcontentloaded' }
+        }),
+        examples: [
+            'Wait for DOM content loaded',
+            'Wait for domcontentloaded',
+            'Wait for DOM to be loaded',
+            'Wait for DOM ready'
+        ]
+    },
+    {
+        id: 'action-wait-page-load',
+        pattern: /^wait\s+(?:for\s+)?(?:the\s+)?(?:page\s+(?:to\s+)?(?:be\s+)?(?:loaded|load|complete|ready)|full\s+page\s+load|page\s+load\s+complete)$/i,
+        category: 'action',
+        intent: 'wait-page-load',
+        priority: 88,
+        extract: () => ({
+            targetText: '',
+            params: { loadState: 'load' }
+        }),
+        examples: [
+            'Wait for page to load',
+            'Wait for the page to be loaded',
+            'Wait for page load complete',
+            'Wait for page to be ready'
+        ]
+    },
+    {
+        id: 'action-wait-network-idle',
+        pattern: /^wait\s+(?:for\s+)?(?:the\s+)?(?:network\s+(?:to\s+)?(?:be\s+)?idle|network\s*idle|no\s+(?:more\s+)?network\s+(?:activity|requests))$/i,
+        category: 'action',
+        intent: 'wait-page-load',
+        priority: 89,
+        extract: () => ({
+            targetText: '',
+            params: { loadState: 'networkidle' }
+        }),
+        examples: [
+            'Wait for network idle',
+            'Wait for network to be idle',
+            'Wait for no more network activity',
+            'Wait for no network requests'
         ]
     },
 

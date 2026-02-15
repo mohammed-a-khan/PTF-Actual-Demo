@@ -60,7 +60,8 @@ export class CSAssert {
             }
 
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const filename = `assert-fail-${testName.replace(/[^a-zA-Z0-9]/g, '-')}-${timestamp}.png`;
+            const sanitizedName = testName.replace(/[^a-zA-Z0-9]/g, '-').replace(/-{2,}/g, '-').substring(0, 80);
+            const filename = `assert-fail-${sanitizedName}-${timestamp}.png`;
             const screenshotPath = path.join(screenshotDir, filename);
 
             // Take screenshot immediately

@@ -2219,7 +2219,8 @@ export class CSSpecRunner {
 
             const dirs = this.resultsManager.getDirectories();
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const filename = `${testName.replace(/[^a-zA-Z0-9]/g, '-')}-${timestamp}.png`;
+            const sanitizedName = testName.replace(/[^a-zA-Z0-9]/g, '-').replace(/-{2,}/g, '-').substring(0, 80);
+            const filename = `${sanitizedName}-${timestamp}.png`;
             const fullPath = path.join(dirs.screenshots, filename);
 
             await page.screenshot({ path: fullPath, fullPage: false });

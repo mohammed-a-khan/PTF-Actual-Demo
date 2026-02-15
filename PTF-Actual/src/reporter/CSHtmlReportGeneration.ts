@@ -3062,8 +3062,8 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         <script>
             // Initialize timeline Gantt chart when the view is shown
             setTimeout(() => {
-                const timelineData = ${JSON.stringify(threads)};
-                const workerIds = ${JSON.stringify(workerIds)};
+                const timelineData = ${CSHtmlReportGenerator.safeJSON(threads)};
+                const workerIds = ${CSHtmlReportGenerator.safeJSON(workerIds)};
                 if (typeof initializeTimelineGantt === 'function') {
                     initializeTimelineGantt(timelineData, workerIds);
                 }
@@ -3111,8 +3111,8 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 if (timelineTab) {
                     timelineTab.addEventListener('click', () => {
                         setTimeout(() => {
-                            const timelineData = ${JSON.stringify(threads)};
-                            const workerIds = ${JSON.stringify(workerIds)};
+                            const timelineData = ${CSHtmlReportGenerator.safeJSON(threads)};
+                            const workerIds = ${CSHtmlReportGenerator.safeJSON(workerIds)};
                             if (typeof initializeTimelineGantt === 'function') {
                                 initializeTimelineGantt(timelineData, workerIds);
                             }
@@ -3507,6 +3507,12 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate enhanced JavaScript with all functionality
      */
+    /** Safely embed JSON inside an HTML <script> block — prevents </script> from breaking HTML */
+    private static safeJSON(data: any): string {
+        return JSON.stringify(data ?? null)
+            .replace(/<\//g, '<\\/');
+    }
+
     private static generateEnhancedJavaScript(suite: TestSuite, stats: any, artifacts: Artifacts, history: ExecutionHistory[], terms?: TestTerminology): string {
         // Generate timeline data here for use in JavaScript
         const scenarios = suite.scenarios || [];
@@ -3577,28 +3583,28 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         // Initialize charts based on active view
         function initializeChartsForView(viewName) {
-            // Clear existing charts when switching views
-            Object.keys(charts).forEach(key => {
-                if (charts[key] && charts[key].destroy) {
-                    charts[key].destroy();
-                }
-            });
-            charts = {};
+            try {
+                // Clear existing charts when switching views
+                Object.keys(charts).forEach(key => {
+                    try { if (charts[key] && charts[key].destroy) charts[key].destroy(); } catch(e) {}
+                });
+                charts = {};
 
-            if (viewName === 'dashboard') {
-                initializeDashboardCharts();
-            } else if (viewName === 'timeline') {
-                // Initialize timeline Gantt chart
-                const timelineData = ${JSON.stringify(threads)};
-                const workerIds = ${JSON.stringify(workerIds)};
-                setTimeout(() => {
-                    initializeTimelineGantt(timelineData, workerIds);
-                }, 200);
-            } else if (viewName === 'failure-analysis') {
-                initializeFailureAnalysisCharts();
-            } else if (viewName === 'categories') {
-                initializeCategoryCharts();
-            }
+                if (viewName === 'dashboard') {
+                    initializeDashboardCharts();
+                } else if (viewName === 'timeline') {
+                    // Initialize timeline Gantt chart
+                    const timelineData = ${CSHtmlReportGenerator.safeJSON(threads)};
+                    const workerIds = ${CSHtmlReportGenerator.safeJSON(workerIds)};
+                    setTimeout(() => {
+                        try { initializeTimelineGantt(timelineData, workerIds); } catch(e) { console.error('Timeline init error:', e); }
+                    }, 200);
+                } else if (viewName === 'failure-analysis') {
+                    initializeFailureAnalysisCharts();
+                } else if (viewName === 'categories') {
+                    initializeCategoryCharts();
+                }
+            } catch(e) { console.error('Chart view init error:', e); }
         }
 
         // Dashboard charts initialization
@@ -3776,11 +3782,12 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         function initializeDashboardCharts() {
+          try {
             // Test Duration Distribution Chart
             const statusCtx = document.getElementById('status-chart');
             if (statusCtx && !charts.status) {
                 // Categorize tests by duration
-                const scenarios = ${JSON.stringify(suite.scenarios.map(s => ({
+                const scenarios = ${CSHtmlReportGenerator.safeJSON(suite.scenarios.map(s => ({
                     duration: s.duration || 0,
                     name: s.name
                 })))};
@@ -3891,7 +3898,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             const summaryCtx = document.getElementById('heatmap-chart');
             if (summaryCtx && !charts.summary) {
                 // Group scenarios for comprehensive summary
-                const scenarios = ${JSON.stringify(suite.scenarios.map(s => ({
+                const scenarios = ${CSHtmlReportGenerator.safeJSON(suite.scenarios.map(s => ({
                     name: s.name,
                     duration: s.duration || 0,
                     status: s.status,
@@ -3972,7 +3979,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             // Feature Performance Chart
             const featureCtx = document.getElementById('feature-chart');
             if (featureCtx && !charts.feature) {
-                const featureData = ${JSON.stringify((stats.featureStats || []).slice(0, 10))};
+                const featureData = ${CSHtmlReportGenerator.safeJSON((stats.featureStats || []).slice(0, 10))};
                 charts.feature = new CSChart(featureCtx, {
                     type: 'bar',
                     data: {
@@ -4014,11 +4021,11 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             const trendCtx = document.getElementById('trend-chart');
             console.log('[Trend Chart] Canvas element:', trendCtx);
             console.log('[Trend Chart] CSChart available:', typeof CSChart);
-            console.log('[Trend Chart] History data:', ${JSON.stringify(history)});
+            console.log('[Trend Chart] History data:', ${CSHtmlReportGenerator.safeJSON(history)});
 
             if (trendCtx && !charts.trend) {
                 // Use the LATEST history entry's date as reference to avoid timezone issues
-                const historyData = ${JSON.stringify(history)};
+                const historyData = ${CSHtmlReportGenerator.safeJSON(history)};
                 const latestEntry = historyData[historyData.length - 1];
 
                 // If no history, use current date, otherwise use latest entry's date
@@ -4091,7 +4098,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             // Tag Distribution Chart - Only for dashboard view
             const tagCtx = document.getElementById('tag-chart');
             if (tagCtx && !charts.tag && document.getElementById('dashboard-view').classList.contains('active')) {
-                const tagData = ${JSON.stringify((stats.tagStats || []).slice(0, 10))};
+                const tagData = ${CSHtmlReportGenerator.safeJSON((stats.tagStats || []).slice(0, 10))};
                 charts.tag = new CSChart(tagCtx, {
                     type: 'bar',
                     data: {
@@ -4119,13 +4126,14 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     }
                 });
             }
+          } catch(e) { console.error('Dashboard charts init error:', e); }
         }
 
         // Failure Analysis charts
-        function initializeFailureAnalysisCharts() {
+        function initializeFailureAnalysisCharts() { try {
             const failureCategoriesCtx = document.getElementById('failure-categories-chart');
             if (failureCategoriesCtx && !charts.failureCategories) {
-                const failureData = ${JSON.stringify(stats.failureReasons || [])};
+                const failureData = ${CSHtmlReportGenerator.safeJSON(stats.failureReasons || [])};
                 if (failureData && failureData.length > 0) {
                     charts.failureCategories = new CSChart(failureCategoriesCtx, {
                     type: 'pie',
@@ -4155,13 +4163,13 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 });
                 }
             }
-        }
+        } catch(e) { console.error('Failure analysis charts init error:', e); } }
 
         // Category charts
-        function initializeCategoryCharts() {
+        function initializeCategoryCharts() { try {
             const featureDistCtx = document.getElementById('feature-distribution-chart');
             if (featureDistCtx && !charts.featureDistribution) {
-                const featureData = ${JSON.stringify((stats.featureStats || []).slice(0, 8))};
+                const featureData = ${CSHtmlReportGenerator.safeJSON((stats.featureStats || []).slice(0, 8))};
                 charts.featureDistribution = new CSChart(featureDistCtx, {
                     type: 'doughnut',
                     data: {
@@ -4189,7 +4197,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     }
                 });
             }
-        }
+        } catch(e) { console.error('Category charts init error:', e); } }
 
         // Hierarchical view toggle functions
         function toggleFeature(element) {

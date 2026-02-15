@@ -673,13 +673,32 @@ export class CSAccessibilityTreeMatcher {
         const searchText = this.buildSearchText(target);
         if (!searchText) return null;
 
+        // Try exact match first — higher confidence, fewer false positives
+        // In heavily nested DOMs (legacy apps), inexact search matches ancestor elements too
+        try {
+            const exactLocator = page.getByText(searchText, { exact: true });
+            const exactCount = await exactLocator.count();
+            if (exactCount > 0) {
+                const baseConfidence = exactCount === 1 ? 0.75 : Math.max(0.5, 0.75 - exactCount * 0.05);
+                return {
+                    locator: this.selectByOrdinal(exactLocator, exactCount, target.ordinal),
+                    broadLocator: exactLocator,
+                    confidence: baseConfidence,
+                    method: 'text-search',
+                    description: `getByText('${searchText}', exact)${exactCount > 1 ? ` (${exactCount} matches)` : ''}`,
+                    alternatives: []
+                };
+            }
+        } catch { /* continue */ }
+
+        // Fall back to inexact match
         try {
             const locator = page.getByText(searchText, { exact: false });
             const count = await locator.count();
             if (count > 0) {
                 // Reduce confidence when many elements match (broad/generic text)
-                // Single match = 0.6, multiple = progressively lower
-                const baseConfidence = count === 1 ? 0.6 : Math.max(0.35, 0.6 - count * 0.05);
+                // Single match = 0.65, multiple = progressively lower
+                const baseConfidence = count === 1 ? 0.65 : Math.max(0.4, 0.65 - count * 0.05);
                 return {
                     locator: this.selectByOrdinal(locator, count, target.ordinal),
                     broadLocator: locator,

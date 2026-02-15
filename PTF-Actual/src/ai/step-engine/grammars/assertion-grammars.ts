@@ -48,7 +48,7 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
     // ========================================================================
     {
         id: 'assert-visible',
-        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:is\s+)?(?:visible|displayed|shown|present|appearing|available)$/i,
+        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:is\s+)?(?:visible|displayed|shown|present|appearing|available)(?:\s+(?:on|in|at|within)\s+(?:the\s+)?.+)?$/i,
         category: 'assertion',
         intent: 'verify-visible',
         priority: 100,
@@ -63,12 +63,13 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
             'Verify the Dashboard heading is displayed',
             'Assert that the Submit button is visible',
             'Check the error message is shown',
-            'Verify Cycle Code header is available'
+            'Verify Cycle Code header is available',
+            'Verify the Report header is displayed on the Summary page'
         ]
     },
     {
         id: 'assert-should-be-available',
-        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+should\s+be\s+(?:visible|displayed|shown|present|available)$/i,
+        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+should\s+be\s+(?:visible|displayed|shown|present|available)(?:\s+(?:on|in|at|within)\s+(?:the\s+)?.+)?$/i,
         category: 'assertion',
         intent: 'verify-visible',
         priority: 99,
@@ -82,12 +83,13 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
         examples: [
             'Verify Cycle Code header should be available',
             'Check that the Submit button should be visible',
-            'Ensure the error message should be displayed'
+            'Ensure the error message should be displayed',
+            'Verify the Report header should be available on the Summary page'
         ]
     },
     {
         id: 'assert-not-visible',
-        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:is\s+)?(?:not\s+)?(?:hidden|invisible|not\s+displayed|not\s+visible|not\s+shown|not\s+present)$/i,
+        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:is\s+)?(?:not\s+)?(?:hidden|invisible|not\s+displayed|not\s+visible|not\s+shown|not\s+present)(?:\s+(?:on|in|at|within)\s+(?:the\s+)?.+)?$/i,
         category: 'assertion',
         intent: 'verify-hidden',
         priority: 101,
@@ -106,7 +108,7 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
     },
     {
         id: 'assert-not-present',
-        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:does\s+not\s+exist|is\s+not\s+present|is\s+gone|has\s+disappeared)$/i,
+        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?(?:the\s+)?(.+?)\s+(?:does\s+not\s+exist|is\s+not\s+present|is\s+gone|has\s+disappeared)(?:\s+(?:on|in|at|within)\s+(?:the\s+)?.+)?$/i,
         category: 'assertion',
         intent: 'verify-not-present',
         priority: 102,
@@ -118,6 +120,33 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
             };
         },
         examples: ['Verify the modal does not exist', 'Check that the alert is gone']
+    },
+
+    // ========================================================================
+    // VALUE-IN-FIELD ASSERTIONS (Priority 98)
+    // Handles: Verify 'X' is displayed in the Y field [in the Z section]
+    // Must be higher priority than assert-visible to avoid being stolen by it
+    // ========================================================================
+    {
+        id: 'assert-value-displayed-in',
+        pattern: /^(?:verify|assert|check|confirm|ensure)\s+(?:that\s+)?__QUOTED_(\d+)__\s+(?:is\s+)?(?:displayed|shown|visible|present|appearing|available)\s+(?:in|on|at|under|within)\s+(?:the\s+)?(.+)$/i,
+        category: 'assertion',
+        intent: 'verify-text',
+        priority: 98,
+        extract: (match, quotedStrings) => {
+            const expectedValue = quotedStrings[parseInt(match[1])] || '';
+            const rawTarget = match[2].trim();
+            return {
+                targetText: rawTarget,
+                elementType: inferElementType(rawTarget),
+                expectedValue
+            };
+        },
+        examples: [
+            "Verify 'John Smith' is displayed in the Full Name field in the User Details section",
+            "Assert 'USD' is shown in the Currency dropdown",
+            "Check 'Active' is visible in the Status field on the Details page"
+        ]
     },
 
     // ========================================================================
@@ -510,7 +539,7 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
     // ========================================================================
     {
         id: 'assert-should-visible-no-verb',
-        pattern: /^(?:the\s+)?(.+?)\s+should\s+(?:be\s+)?(?:visible|displayed|shown|present|available)$/i,
+        pattern: /^(?:the\s+)?(.+?)\s+should\s+(?:be\s+)?(?:visible|displayed|shown|present|available)(?:\s+(?:on|in|at|within)\s+(?:the\s+)?.+)?$/i,
         category: 'assertion',
         intent: 'verify-visible',
         priority: 136,
@@ -529,7 +558,7 @@ export const ASSERTION_GRAMMAR_RULES: GrammarRule[] = [
     },
     {
         id: 'assert-should-hidden-no-verb',
-        pattern: /^(?:the\s+)?(.+?)\s+should\s+(?:be\s+)?(?:hidden|not\s+visible|not\s+displayed|not\s+present|gone)$/i,
+        pattern: /^(?:the\s+)?(.+?)\s+should\s+(?:be\s+)?(?:hidden|not\s+visible|not\s+displayed|not\s+present|gone)(?:\s+(?:on|in|at|within)\s+(?:the\s+)?.+)?$/i,
         category: 'assertion',
         intent: 'verify-hidden',
         priority: 137,

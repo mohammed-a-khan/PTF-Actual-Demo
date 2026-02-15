@@ -116,7 +116,8 @@ export class CSExpect {
             }
 
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const filename = `assertion-${description.replace(/[^a-zA-Z0-9]/g, '-')}-${timestamp}.png`;
+            const sanitizedDesc = description.replace(/[^a-zA-Z0-9]/g, '-').replace(/-{2,}/g, '-').substring(0, 80);
+            const filename = `assertion-${sanitizedDesc}-${timestamp}.png`;
             const screenshotPath = path.join(screenshotDir, filename);
 
             // Take screenshot with error handling

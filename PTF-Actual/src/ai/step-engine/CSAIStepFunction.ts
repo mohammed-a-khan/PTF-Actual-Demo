@@ -63,7 +63,7 @@ let executor: CSAIActionExecutor | null = null;
 export async function csAI(
     instruction: string,
     options: CSAIOptions
-): Promise<string | number | boolean | string[] | void> {
+): Promise<string | number | boolean | string[] | Record<string, any> | Record<string, any>[] | any | void> {
     const startTime = Date.now();
     const config = { ...globalConfig, ...options.config };
 
@@ -337,6 +337,72 @@ function isPageLevelOperation(step: ParsedStep): boolean {
     // Phase 12: JavaScript execution (page-level)
     if (step.intent === 'execute-js') return true;
     if (step.intent === 'evaluate-js') return true;
+
+    // Database operations (all page-level — use DB client, not page elements)
+    if (step.intent === 'db-query') return true;
+    if (step.intent === 'db-query-file') return true;
+    if (step.intent === 'db-update') return true;
+    if (step.intent === 'db-resolve-or-use') return true;
+    if (step.intent === 'verify-db-exists') return true;
+    if (step.intent === 'verify-db-not-exists') return true;
+    if (step.intent === 'verify-db-field') return true;
+    if (step.intent === 'verify-db-count') return true;
+    if (step.intent === 'get-db-value') return true;
+    if (step.intent === 'get-db-row') return true;
+    if (step.intent === 'get-db-rows') return true;
+    if (step.intent === 'get-db-count') return true;
+
+    // File operations (page-level)
+    if (step.intent === 'parse-csv') return true;
+    if (step.intent === 'parse-xlsx') return true;
+    if (step.intent === 'parse-file') return true;
+    if (step.intent === 'verify-file-name-pattern') return true;
+    if (step.intent === 'verify-file-row-count') return true;
+    if (step.intent === 'get-file-row-count') return true;
+    if (step.intent === 'get-file-headers') return true;
+    if (step.intent === 'verify-data-match') return true;
+
+    // Context operations (page-level)
+    if (step.intent === 'set-context-field') return true;
+    if (step.intent === 'copy-context-var') return true;
+    if (step.intent === 'clear-context-var') return true;
+    if (step.intent === 'get-context-field') return true;
+    if (step.intent === 'get-context-count') return true;
+    if (step.intent === 'get-context-keys') return true;
+
+    // Comparison operations (page-level)
+    if (step.intent === 'verify-tolerance') return true;
+    if (step.intent === 'verify-context-field') return true;
+    if (step.intent === 'verify-context-match') return true;
+    if (step.intent === 'verify-count-match') return true;
+    if (step.intent === 'verify-accumulated') return true;
+
+    // Mapping operations (page-level)
+    if (step.intent === 'load-mapping') return true;
+    if (step.intent === 'transform-data') return true;
+    if (step.intent === 'prepare-test-data') return true;
+    if (step.intent === 'get-mapped-value') return true;
+
+    // Helper/Orchestration (page-level)
+    if (step.intent === 'call-helper') return true;
+    if (step.intent === 'get-helper-value') return true;
+
+    // API extensions (all page-level — use HTTP client, not page elements)
+    if (step.intent === 'api-call-file') return true;
+    if (step.intent === 'api-upload') return true;
+    if (step.intent === 'api-download') return true;
+    if (step.intent === 'api-set-context') return true;
+    if (step.intent === 'api-set-header') return true;
+    if (step.intent === 'api-set-auth') return true;
+    if (step.intent === 'api-clear-context') return true;
+    if (step.intent === 'api-poll') return true;
+    if (step.intent === 'api-save-response') return true;
+    if (step.intent === 'api-save-request') return true;
+    if (step.intent === 'api-print') return true;
+    if (step.intent === 'api-chain') return true;
+    if (step.intent === 'api-execute-chain') return true;
+    if (step.intent === 'api-soap') return true;
+    if (step.intent === 'verify-api-schema') return true;
 
     return false;
 }

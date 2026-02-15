@@ -40,6 +40,7 @@ export type ActionIntent =
     | 'wait-seconds'
     | 'wait-url-change'
     | 'wait-text-change'
+    | 'wait-page-load'
     | 'switch-tab'
     | 'open-new-tab'
     | 'close-tab'
@@ -54,7 +55,47 @@ export type ActionIntent =
     | 'clear-storage'
     | 'set-storage-item'
     | 'api-call'
-    | 'execute-js';
+    | 'execute-js'
+    // Database operations (Phase 2)
+    | 'db-query'
+    | 'db-query-file'
+    | 'db-update'
+    | 'db-resolve-or-use'
+    // File operations (Phase 3)
+    | 'parse-csv'
+    | 'parse-xlsx'
+    | 'parse-file'
+    // Context operations (Phase 4)
+    | 'set-context-field'
+    | 'copy-context-var'
+    | 'clear-context-var'
+    // Mapping operations (Phase 6)
+    | 'load-mapping'
+    | 'transform-data'
+    | 'prepare-test-data'
+    // Helper/Orchestration (Phase 7)
+    | 'call-helper'
+    // Table extensions (Phase 8)
+    | 'expand-row'
+    | 'collapse-row'
+    | 'sort-column'
+    // Form capture (Phase 9)
+    | 'capture-form-data'
+    // API extensions (Phase 11)
+    | 'api-call-file'
+    | 'api-upload'
+    | 'api-download'
+    | 'api-set-context'
+    | 'api-set-header'
+    | 'api-set-auth'
+    | 'api-clear-context'
+    | 'api-poll'
+    | 'api-save-response'
+    | 'api-save-request'
+    | 'api-print'
+    | 'api-chain'
+    | 'api-execute-chain'
+    | 'api-soap';
 
 /** Assertion intents - user wants to verify something */
 export type AssertionIntent =
@@ -81,7 +122,27 @@ export type AssertionIntent =
     | 'verify-table-cell'
     | 'verify-download'
     | 'verify-download-content'
-    | 'verify-api-response';
+    | 'verify-api-response'
+    // Database assertions (Phase 2)
+    | 'verify-db-exists'
+    | 'verify-db-not-exists'
+    | 'verify-db-field'
+    | 'verify-db-count'
+    // File assertions (Phase 3)
+    | 'verify-file-name-pattern'
+    | 'verify-file-row-count'
+    | 'verify-data-match'
+    // Comparison assertions (Phase 5)
+    | 'verify-tolerance'
+    | 'verify-context-field'
+    | 'verify-context-match'
+    | 'verify-count-match'
+    | 'verify-accumulated'
+    // Table extensions (Phase 8)
+    | 'verify-column-sorted'
+    | 'verify-column-exists'
+    // API extensions (Phase 11)
+    | 'verify-api-schema';
 
 /** Query intents - user wants to extract data */
 export type QueryIntent =
@@ -103,7 +164,23 @@ export type QueryIntent =
     | 'get-storage-item'
     | 'get-download-path'
     | 'get-api-response'
-    | 'evaluate-js';
+    | 'evaluate-js'
+    // Database queries (Phase 2)
+    | 'get-db-value'
+    | 'get-db-row'
+    | 'get-db-rows'
+    | 'get-db-count'
+    // File queries (Phase 3)
+    | 'get-file-row-count'
+    | 'get-file-headers'
+    // Context queries (Phase 4)
+    | 'get-context-field'
+    | 'get-context-count'
+    | 'get-context-keys'
+    // Mapping queries (Phase 6)
+    | 'get-mapped-value'
+    // Helper queries (Phase 7)
+    | 'get-helper-value';
 
 /** Union of all intent types */
 export type StepIntent = ActionIntent | AssertionIntent | QueryIntent;
@@ -186,6 +263,8 @@ export interface StepParameters {
     rowIndex?: number;
     /** Column header name or 1-based index for table operations */
     columnRef?: string;
+    /** Table description for row-scoped actions (e.g., "Tranche Balances") */
+    tableRef?: string;
     /** Data type for generate-data (uuid, timestamp, random-string, etc.) */
     dataType?: string;
     /** Variable name for set-variable */
@@ -220,6 +299,144 @@ export interface StepParameters {
     rangeMin?: number;
     /** Random number range maximum */
     rangeMax?: number;
+    /** Page load state for wait-page-load (domcontentloaded, load, networkidle) */
+    loadState?: string;
+
+    // ========================================================================
+    // Database operations (Phase 2)
+    // ========================================================================
+    /** Database connection alias (e.g., 'PRIMARY_DB', 'STAGING_DB') */
+    dbAlias?: string;
+    /** Named query key or direct SQL */
+    dbQuery?: string;
+    /** JSON array of query parameters */
+    dbParams?: string;
+    /** Column/field name to extract or verify */
+    dbField?: string;
+    /** Path to .sql file */
+    dbFile?: string;
+
+    // ========================================================================
+    // Comparison (Phase 5)
+    // ========================================================================
+    /** Numeric tolerance for comparison (e.g., 0.0001) */
+    tolerance?: number;
+    /** Comparison operator: 'equals'|'contains'|'not-equals'|'greater-than'|'less-than'|'matches' */
+    comparisonOp?: string;
+
+    // ========================================================================
+    // Context operations (Phase 4)
+    // ========================================================================
+    /** Source context variable name */
+    sourceContextVar?: string;
+    /** Target context variable name */
+    targetContextVar?: string;
+    /** Field name within a context variable */
+    contextField?: string;
+    /** Row index within an array context variable */
+    contextRowIndex?: number;
+    /** Fields to exclude from comparison (comma-separated) */
+    exceptFields?: string;
+    /** Fields to compare order-independently (comma-separated) */
+    orderIndependentFields?: string;
+    /** Key fields for row matching in array comparison (comma-separated) */
+    keyFields?: string;
+
+    // ========================================================================
+    // Mapping operations (Phase 6)
+    // ========================================================================
+    /** Path to mapping file (YAML/JSON/Excel/CSV) */
+    mappingFile?: string;
+    /** Sheet name in Excel mapping file */
+    mappingSheet?: string;
+
+    // ========================================================================
+    // Data generation extensions (Phase 4)
+    // ========================================================================
+    /** Number of decimal places for random decimal */
+    decimalPlaces?: number;
+    /** Number format pattern (e.g., 'x.0yy') */
+    numberFormat?: string;
+    /** TOTP secret for MFA code generation */
+    totpSecret?: string;
+    /** Date format pattern (e.g., 'MM/DD/YYYY') */
+    dateFormat?: string;
+    /** Offset in business days (positive = future, negative = past) */
+    businessDaysOffset?: number;
+    /** Separator for concatenation operations */
+    separator?: string;
+
+    // ========================================================================
+    // Helper/Orchestration (Phase 7)
+    // ========================================================================
+    /** Helper class name */
+    helperClass?: string;
+    /** Helper method name */
+    helperMethod?: string;
+    /** JSON arguments for helper call */
+    helperArgs?: string;
+
+    // ========================================================================
+    // Table extensions (Phase 8)
+    // ========================================================================
+    /** Expand or collapse action for table rows */
+    expandAction?: 'expand' | 'collapse';
+    /** Element type within a table cell: link, checkbox, dropdown, radio */
+    cellElementType?: 'link' | 'checkbox' | 'dropdown' | 'radio';
+
+    // ========================================================================
+    // Form capture (Phase 9)
+    // ========================================================================
+    /** Comma-separated list of field names to capture */
+    captureFields?: string;
+    /** Scope for form capture (section name, dialog name) */
+    captureScope?: string;
+
+    // ========================================================================
+    // Sort verification (Phase 8)
+    // ========================================================================
+    /** Sort direction: ascending or descending */
+    sortDirection?: 'ascending' | 'descending';
+    /** Data type for sort comparison: string, number, or date */
+    sortDataType?: 'string' | 'number' | 'date';
+
+    // ========================================================================
+    // API extensions (Phase 11)
+    // ========================================================================
+    /** Named API context */
+    apiContext?: string;
+    /** Auth type identifier */
+    apiAuthType?: string;
+    /** JSON auth parameters */
+    apiAuthParams?: string;
+    /** Path to request body file */
+    apiPayloadFile?: string;
+    /** Path to save response */
+    apiResponseSavePath?: string;
+    /** Print target: 'request'|'response'|'headers'|'body' */
+    apiPrintTarget?: string;
+    /** JSONPath field to poll */
+    apiPollField?: string;
+    /** Expected value for polling */
+    apiPollExpected?: string;
+    /** Polling interval in ms */
+    apiPollInterval?: number;
+    /** Max polling time in ms */
+    apiPollMaxTime?: number;
+    /** JSON schema file path */
+    apiSchemaFile?: string;
+    /** SOAP operation name */
+    soapOperation?: string;
+    /** JSON SOAP parameters */
+    soapParams?: string;
+    /** XPath expression for XML responses */
+    xpathExpression?: string;
+    /** API chain definition file */
+    apiChainFile?: string;
+    /** Query parameters string (key=value&key=value) */
+    apiQueryParams?: string;
+    /** Form data string (key=value&key=value) */
+    apiFormData?: string;
 }
 
 /** Modifiers that affect execution behavior */
@@ -269,7 +486,8 @@ export type MatchMethod =
     | 'semantic-locator'
     | 'pattern-matcher'
     | 'text-search'
-    | 'role-search';
+    | 'role-search'
+    | 'table-row-resolution';
 
 // ============================================================================
 // ACTION EXECUTION
@@ -279,8 +497,8 @@ export type MatchMethod =
 export interface ActionResult {
     /** Whether execution succeeded */
     success: boolean;
-    /** Return value for queries */
-    returnValue?: string | number | boolean | string[];
+    /** Return value for queries (primitives, arrays, or complex objects for DB/file/context operations) */
+    returnValue?: string | number | boolean | string[] | Record<string, any> | Record<string, any>[] | any;
     /** Error details if failed */
     error?: string;
     /** Execution duration in ms */
@@ -452,7 +670,7 @@ export const ELEMENT_TYPE_TO_ROLES: Record<string, string[]> = {
     'menu': ['menu'],
     'menu item': ['menuitem'],
     'menuitem': ['menuitem'],
-    'heading': ['heading'],
+    'heading': ['heading', 'columnheader', 'rowheader', 'banner'],
     'dialog': ['dialog', 'alertdialog'],
     'modal': ['dialog'],
     'switch': ['switch'],
@@ -476,7 +694,7 @@ export const ELEMENT_TYPE_TO_ROLES: Record<string, string[]> = {
     'list': ['list'],
     'listitem': ['listitem'],
     'list item': ['listitem'],
-    'header': ['heading'],
+    'header': ['heading', 'columnheader', 'rowheader', 'banner'],
     'popup': ['dialog'],
     'toggle button': ['button'],
     'submit': ['button'],
@@ -509,6 +727,7 @@ export const INTENT_TO_LIKELY_ROLES: Record<string, string[]> = {
     'wait-seconds': [],
     'wait-url-change': [],
     'wait-text-change': [],
+    'wait-page-load': [],
     'switch-tab': [],
     'open-new-tab': [],
     'close-tab': [],
@@ -570,7 +789,74 @@ export const INTENT_TO_LIKELY_ROLES: Record<string, string[]> = {
     'clear-storage': [],
     'set-storage-item': [],
     'api-call': [],
-    'execute-js': []
+    'execute-js': [],
+    // Database operations (Phase 2)
+    'db-query': [],
+    'db-query-file': [],
+    'db-update': [],
+    'db-resolve-or-use': [],
+    'verify-db-exists': [],
+    'verify-db-not-exists': [],
+    'verify-db-field': [],
+    'verify-db-count': [],
+    'get-db-value': [],
+    'get-db-row': [],
+    'get-db-rows': [],
+    'get-db-count': [],
+    // File operations (Phase 3)
+    'parse-csv': [],
+    'parse-xlsx': [],
+    'parse-file': [],
+    'verify-file-name-pattern': [],
+    'verify-file-row-count': [],
+    'get-file-row-count': [],
+    'get-file-headers': [],
+    'verify-data-match': [],
+    // Context operations (Phase 4)
+    'set-context-field': [],
+    'copy-context-var': [],
+    'clear-context-var': [],
+    'get-context-field': [],
+    'get-context-count': [],
+    'get-context-keys': [],
+    // Comparison (Phase 5)
+    'verify-tolerance': [],
+    'verify-context-field': [],
+    'verify-context-match': [],
+    'verify-count-match': [],
+    'verify-accumulated': [],
+    // Mapping (Phase 6)
+    'load-mapping': [],
+    'transform-data': [],
+    'prepare-test-data': [],
+    'get-mapped-value': [],
+    // Helper/Orchestration (Phase 7)
+    'call-helper': [],
+    'get-helper-value': [],
+    // Table extensions (Phase 8)
+    'expand-row': ['button'],
+    'collapse-row': ['button'],
+    'sort-column': ['columnheader'],
+    'verify-column-sorted': ['columnheader'],
+    'verify-column-exists': ['columnheader'],
+    // Form capture (Phase 9)
+    'capture-form-data': [],
+    // API extensions (Phase 11)
+    'api-call-file': [],
+    'api-upload': [],
+    'api-download': [],
+    'api-set-context': [],
+    'api-set-header': [],
+    'api-set-auth': [],
+    'api-clear-context': [],
+    'api-poll': [],
+    'api-save-response': [],
+    'api-save-request': [],
+    'api-print': [],
+    'api-chain': [],
+    'api-execute-chain': [],
+    'api-soap': [],
+    'verify-api-schema': []
 };
 
 // ============================================================================

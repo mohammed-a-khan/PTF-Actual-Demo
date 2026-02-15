@@ -79,12 +79,45 @@ export class CSValueResolver {
             return varValue !== undefined ? String(varValue) : value;
         }
 
-        // Handle {scenario:variableName} and {config:KEY} format (single curly braces)
+        // Handle {scenario:variableName}, {config:KEY}, {env:KEY}, {context:var.field} format (single curly braces)
         // This format is commonly used in Gherkin feature files
-        let resolvedValue = value.replace(/\{(scenario|config|env):([^}]+)\}/g, (match, prefix, varName) => {
+        let resolvedValue = value.replace(/\{(scenario|config|env|context):([^}]+)\}/g, (match, prefix, varName) => {
             let varValue: any;
 
-            if (prefix === 'scenario') {
+            if (prefix === 'context') {
+                // {context:varName.fieldName} - Nested property access with normalized column lookup
+                // {context:varName} (no dot) - Same as {scenario:varName}
+                const dotIndex = varName.indexOf('.');
+                if (dotIndex === -1) {
+                    // No dot → same as scenario variable
+                    varValue = context.getVariable(varName.trim());
+                } else {
+                    // Dot notation → nested property access
+                    const contextVarName = varName.substring(0, dotIndex).trim();
+                    const fieldPath = varName.substring(dotIndex + 1).trim();
+                    const contextObj = context.getVariable(contextVarName);
+
+                    if (contextObj && typeof contextObj === 'object') {
+                        // Lazy-require to avoid circular dependencies at module load time
+                        const { CSAIColumnNormalizer } = require('../ai/step-engine/CSAIColumnNormalizer');
+
+                        if (Array.isArray(contextObj)) {
+                            // Array of rows → get field from first row
+                            varValue = contextObj.length > 0
+                                ? CSAIColumnNormalizer.getField(contextObj[0], fieldPath)
+                                : undefined;
+                        } else if (contextObj.rows && Array.isArray(contextObj.rows)) {
+                            // ResultSet-like object → get field from first row
+                            varValue = contextObj.rows.length > 0
+                                ? CSAIColumnNormalizer.getField(contextObj.rows[0], fieldPath)
+                                : undefined;
+                        } else {
+                            // Plain object → direct field lookup with normalized matching
+                            varValue = CSAIColumnNormalizer.getField(contextObj, fieldPath);
+                        }
+                    }
+                }
+            } else if (prefix === 'scenario') {
                 // {scenario:KEY} - Get from scenario context (same as regular variable)
                 varValue = context.getVariable(varName.trim());
             } else if (prefix === 'config') {
@@ -204,8 +237,8 @@ export class CSValueResolver {
             return true;
         }
 
-        // Check for {scenario:...}, {config:...}, {env:...} formats
-        if (/\{(scenario|config|env):[^}]+\}/.test(value)) {
+        // Check for {scenario:...}, {config:...}, {env:...}, {context:...} formats
+        if (/\{(scenario|config|env|context):[^}]+\}/.test(value)) {
             return true;
         }
 

@@ -40,7 +40,6 @@ export class CSBrowserManager {
         screenshots: []
     };
     private traceStarted: boolean = false;
-
     // Page change listeners - called when page changes (e.g., after browser switch)
     private pageChangeListeners: Array<(newPage: any) => void> = [];
 
@@ -199,6 +198,28 @@ export class CSBrowserManager {
             return await pw.webkit.launch(browserOptions);
         } else if (browserType === 'edge') {
             browserOptions.channel = 'msedge';
+            // IE Compatibility Mode support for Edge
+            // Prerequisites: IE mode must be configured via Group Policy or Edge settings
+            // on the machine (Enterprise Site List with target URLs set to open in IE11).
+            // This is typically pre-configured on corporate VDI/enterprise machines.
+            // The framework enables IE mode integration flags so Playwright's CDP
+            // remote debugging coexists with the IE/Trident rendering engine.
+            if (this.config.getBoolean('BROWSER_EDGE_IE_MODE', false)) {
+                if (!browserOptions.args) browserOptions.args = [];
+                // Enable IE mode engine integration in Edge
+                browserOptions.args.push('--internet-explorer-integration=iemode');
+                // Allow IE mode to coexist with Playwright's CDP remote debugging
+                browserOptions.args.push('--ie-mode-test');
+                // Suppress IE mode info bars and first-run dialogs
+                browserOptions.args.push('--disable-infobars');
+                browserOptions.args.push('--disable-features=msEdgeIEModeSiteListManagerInfoBar,msEdgeIEModeInfoBar');
+                browserOptions.args.push('--no-first-run');
+                // IE mode typically needs longer timeouts for page rendering
+                if (!browserOptions.timeout || browserOptions.timeout < 60000) {
+                    browserOptions.timeout = 60000;
+                }
+                CSReporter.info('Edge IE Compatibility Mode enabled (relies on Group Policy / Enterprise Site List for IE rendering)');
+            }
             const pw = this.ensurePlaywright();
             return await pw.chromium.launch(browserOptions);
         } else {

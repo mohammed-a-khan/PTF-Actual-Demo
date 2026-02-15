@@ -783,7 +783,7 @@ BROWSER_ACTION_TIMEOUT=${envLower === 'dev' ? '15000' : '10000'}
         const outputFile = path.join(this.options.watchDir!, 'test.spec.ts');
 
         // Build the command string directly for shell execution.
-        // We must quote paths that may contain spaces (e.g., "CDO Fusion").
+        // We must quote paths that may contain spaces (e.g., "My Project").
         // With shell: true, Node joins args with spaces — unquoted paths break.
         const quotedOutput = `"${outputFile}"`;
         const urlArg = this.options.url ? ` ${this.options.url}` : '';

@@ -31,6 +31,14 @@ import { NAVIGATION_GRAMMAR_RULES } from './grammars/navigation-grammars';
 import { BROWSER_GRAMMAR_RULES } from './grammars/browser-grammars';
 import { TABLE_GRAMMAR_RULES } from './grammars/table-grammars';
 import { DATA_GRAMMAR_RULES } from './grammars/data-grammars';
+import { DATABASE_GRAMMAR_RULES } from './grammars/database-grammars';
+import { FILE_GRAMMAR_RULES } from './grammars/file-grammars';
+import { COMPARISON_GRAMMAR_RULES } from './grammars/comparison-grammars';
+import { CONTEXT_GRAMMAR_RULES } from './grammars/context-grammars';
+import { MAPPING_GRAMMAR_RULES } from './grammars/mapping-grammars';
+import { ORCHESTRATION_GRAMMAR_RULES } from './grammars/orchestration-grammars';
+import { FORM_CAPTURE_GRAMMAR_RULES } from './grammars/form-capture-grammars';
+import { API_GRAMMAR_RULES } from './grammars/api-grammars';
 
 export class CSAIStepGrammar {
     private static instance: CSAIStepGrammar;
@@ -56,7 +64,15 @@ export class CSAIStepGrammar {
             ...NAVIGATION_GRAMMAR_RULES,
             ...BROWSER_GRAMMAR_RULES,
             ...TABLE_GRAMMAR_RULES,
-            ...DATA_GRAMMAR_RULES
+            ...DATA_GRAMMAR_RULES,
+            ...DATABASE_GRAMMAR_RULES,
+            ...FILE_GRAMMAR_RULES,
+            ...COMPARISON_GRAMMAR_RULES,
+            ...CONTEXT_GRAMMAR_RULES,
+            ...MAPPING_GRAMMAR_RULES,
+            ...ORCHESTRATION_GRAMMAR_RULES,
+            ...FORM_CAPTURE_GRAMMAR_RULES,
+            ...API_GRAMMAR_RULES
         ].sort((a, b) => a.priority !== b.priority ? a.priority - b.priority : a.id.localeCompare(b.id));
 
         CSReporter.debug(`CSAIStepGrammar: Loaded ${this.rules.length} grammar rules`);
@@ -288,8 +304,14 @@ export class CSAIStepGrammar {
         }
 
         // Build descriptors: split remaining text into meaningful parts
-        // Filter out common articles and filler words that don't help element identification
-        const stopWords = new Set(['the', 'a', 'an', 'of', 'for', 'on', 'in', 'to', 'is', 'are', 'and', 'or', 'with']);
+        // Filter out articles, filler words, AND element type words that don't help identification
+        // Element type words (field, button, etc.) are already captured by elementType inference
+        const stopWords = new Set([
+            'the', 'a', 'an', 'of', 'for', 'on', 'in', 'to', 'is', 'are', 'and', 'or', 'with',
+            'field', 'button', 'btn', 'link', 'input', 'textbox', 'checkbox', 'radio',
+            'dropdown', 'tab', 'heading', 'header', 'icon', 'image', 'switch', 'toggle',
+            'element', 'message', 'label', 'section', 'area', 'box', 'item', 'column', 'row'
+        ]);
         const descriptors = text.split(/\s+/).filter(w => w.length > 0 && !stopWords.has(w.toLowerCase()));
 
         return {
@@ -299,7 +321,7 @@ export class CSAIStepGrammar {
             position,
             relativeTo,
             relation,
-            rawText: targetText
+            rawText: text  // Use resolved text (not raw with __QUOTED_N__ placeholders)
         };
     }
 
