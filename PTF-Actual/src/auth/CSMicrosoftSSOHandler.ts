@@ -391,77 +391,72 @@ export class CSMicrosoftSSOHandler {
      * Enter email address on the Microsoft login page.
      *
      * When login_hint is injected via OAuth interception, Microsoft may:
-     *   a) Pre-fill the email and still show the email page → we click Next
-     *   b) Skip the email page entirely and show the password page directly
-     *   c) Show "Pick an account" page → we click "Use another account" or select the right one
-     *
-     * This method handles all three cases gracefully.
+     *   a) Show the email page (normal) → fill email, click Next
+     *   b) Skip the email page and show password directly → return immediately
+     *   c) Show "Pick an account" page → click "Use another account", then fill email
      */
     private async enterEmail(page: any, email: string, timeout: number): Promise<void> {
-        // Race: wait for either the email input OR the password input to become visible.
-        // With login_hint + prompt=login, Microsoft may skip straight to password.
-        try {
-            const result = await Promise.race([
-                page.waitForSelector('input[type="email"]:visible, input[name="loginfmt"]:visible, #i0116:visible', { timeout: 15000 })
-                    .then((el: any) => ({ type: 'email', element: el })),
-                page.waitForSelector('input[type="password"]:visible, input[name="passwd"]:visible, #i0118:visible, #passwordInput:visible', { timeout: 15000 })
-                    .then((el: any) => ({ type: 'password', element: el })),
-                page.waitForSelector('#otherTileText, text="Use another account"', { timeout: 15000 })
-                    .then((el: any) => ({ type: 'pickAccount', element: el })),
-            ]);
+        // Wait a moment for the page to settle after redirect
+        await page.waitForTimeout(2000);
 
-            if (result.type === 'password') {
-                // login_hint worked — Microsoft skipped email and went straight to password
-                CSReporter.debug('Email page skipped (login_hint accepted) — password page shown directly');
-                return;
-            }
+        // Check what state the page is in
+        const pageState = await page.evaluate(() => {
+            // Password field visible? (login_hint skipped email page)
+            const pwdInput = document.querySelector('input[type="password"]') as HTMLElement | null;
+            if (pwdInput && pwdInput.offsetParent !== null) return 'password';
 
-            if (result.type === 'pickAccount') {
-                // "Pick an account" page — click "Use another account"
-                CSReporter.debug('"Pick an account" page detected — clicking "Use another account"');
-                await result.element.click();
-                await page.waitForTimeout(1000);
-                // Now wait for the email input
-                await page.waitForSelector('input[type="email"]:visible, input[name="loginfmt"]:visible, #i0116:visible', { timeout: 10000 });
-            }
+            // "Pick an account" page? (Microsoft shows previously used accounts)
+            const otherTile = document.querySelector('#otherTileText');
+            if (otherTile) return 'pickAccount';
 
-            // Email input is visible — fill it
-            const emailSelector = 'input[type="email"], input[name="loginfmt"], #i0116';
-            const emailInput = await page.waitForSelector(emailSelector, {
-                state: 'visible',
-                timeout: 10000
-            });
+            // Email input visible? (standard login page)
+            const emailInput = document.querySelector('input[type="email"], input[name="loginfmt"], #i0116') as HTMLElement | null;
+            if (emailInput && emailInput.offsetParent !== null) return 'email';
 
-            if (!emailInput) {
-                throw new Error('Email input field not found on Microsoft login page');
-            }
+            // Email input exists but hidden? (might still be loading)
+            if (emailInput) return 'emailHidden';
 
-            // Clear any pre-filled value and type the email
-            await emailInput.fill('');
-            await emailInput.fill(email);
+            return 'unknown';
+        });
 
-            // Click "Next" button
-            const nextButton = await page.waitForSelector(
-                'input[type="submit"][value="Next"], #idSIButton9, button[type="submit"]',
-                { state: 'visible', timeout: 10000 }
-            );
-            await nextButton.click();
+        CSReporter.debug(`Microsoft login page state: ${pageState}`);
 
-            // Wait for the page transition (password page or error)
-            await page.waitForTimeout(1000);
-            CSReporter.debug('Email entered and Next clicked');
-        } catch (error: any) {
-            // Check if we ended up on the password page despite the race timeout
-            try {
-                const passwordVisible = await page.isVisible('input[type="password"], input[name="passwd"], #i0118, #passwordInput');
-                if (passwordVisible) {
-                    CSReporter.debug('Password page detected after email step — continuing');
-                    return;
-                }
-            } catch { /* ignore */ }
-
-            throw new Error(`Email entry failed: ${error.message}`);
+        if (pageState === 'password') {
+            CSReporter.debug('Email page skipped (login_hint accepted) — password page shown directly');
+            return;
         }
+
+        if (pageState === 'pickAccount') {
+            CSReporter.debug('"Pick an account" page detected — clicking "Use another account"');
+            await page.click('#otherTileText');
+            await page.waitForTimeout(1500);
+        }
+
+        // Wait for the email input to be visible
+        const emailSelector = 'input[type="email"], input[name="loginfmt"], #i0116';
+        const emailInput = await page.waitForSelector(emailSelector, {
+            state: 'visible',
+            timeout: timeout
+        });
+
+        if (!emailInput) {
+            throw new Error('Email input field not found on Microsoft login page');
+        }
+
+        // Clear any pre-filled value and type the email
+        await emailInput.fill('');
+        await emailInput.fill(email);
+
+        // Click "Next" button
+        const nextButton = await page.waitForSelector(
+            'input[type="submit"][value="Next"], #idSIButton9, button[type="submit"]',
+            { state: 'visible', timeout: 10000 }
+        );
+        await nextButton.click();
+
+        // Wait for the page transition (password page or org redirect)
+        await page.waitForTimeout(2000);
+        CSReporter.debug('Email entered and Next clicked');
     }
 
     /**
