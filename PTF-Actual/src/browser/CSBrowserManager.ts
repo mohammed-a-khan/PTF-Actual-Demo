@@ -198,27 +198,16 @@ export class CSBrowserManager {
             return await pw.webkit.launch(browserOptions);
         } else if (browserType === 'edge') {
             browserOptions.channel = 'msedge';
-            // IE Compatibility Mode support for Edge
-            // Prerequisites: IE mode must be configured via Group Policy or Edge settings
-            // on the machine (Enterprise Site List with target URLs set to open in IE11).
-            // This is typically pre-configured on corporate VDI/enterprise machines.
-            // The framework enables IE mode integration flags so Playwright's CDP
-            // remote debugging coexists with the IE/Trident rendering engine.
+            // IE Compatibility Mode — requires Enterprise Site List configured via Group Policy
             if (this.config.getBoolean('BROWSER_EDGE_IE_MODE', false)) {
                 if (!browserOptions.args) browserOptions.args = [];
-                // Enable IE mode engine integration in Edge
                 browserOptions.args.push('--internet-explorer-integration=iemode');
-                // Allow IE mode to coexist with Playwright's CDP remote debugging
                 browserOptions.args.push('--ie-mode-test');
-                // Suppress IE mode info bars and first-run dialogs
-                browserOptions.args.push('--disable-infobars');
-                browserOptions.args.push('--disable-features=msEdgeIEModeSiteListManagerInfoBar,msEdgeIEModeInfoBar');
                 browserOptions.args.push('--no-first-run');
-                // IE mode typically needs longer timeouts for page rendering
                 if (!browserOptions.timeout || browserOptions.timeout < 60000) {
                     browserOptions.timeout = 60000;
                 }
-                CSReporter.info('Edge IE Compatibility Mode enabled (relies on Group Policy / Enterprise Site List for IE rendering)');
+                CSReporter.info('Edge IE Compatibility Mode enabled');
             }
             const pw = this.ensurePlaywright();
             return await pw.chromium.launch(browserOptions);
@@ -253,6 +242,16 @@ export class CSBrowserManager {
             args.push('--ignore-certificate-errors');
             args.push('--ignore-ssl-errors');
             args.push('--allow-insecure-localhost');
+        }
+
+        // Disable Windows SSO auto-negotiation (Kerberos/NTLM) on VDI environments
+        // This prevents the browser from auto-passing domain credentials to login.microsoftonline.com
+        // which bypasses the username/password fields needed for test user authentication.
+        // Set AUTH_SERVER_ALLOWLIST="_" to block all auto-auth, or specify allowed domains.
+        // See: https://github.com/microsoft/playwright/issues/22060
+        const authServerAllowlist = this.config.get('AUTH_SERVER_ALLOWLIST');
+        if (authServerAllowlist) {
+            args.push(`--auth-server-allowlist=${authServerAllowlist}`);
         }
 
         // Add custom args
@@ -378,8 +377,26 @@ export class CSBrowserManager {
             };
         }
 
-        // Restore state if switching browsers (but only if not explicitly cleared)
-        if (this.browserState.cookies && !this.config.getBoolean('BROWSER_REUSE_CLEAR_STATE', false)) {
+        // Load storageState from file if AUTH_STORAGE_STATE_PATH is configured
+        // This is the primary mechanism for SSO session reuse (e.g., Microsoft Dynamics 365)
+        const storageStatePath = this.config.get('AUTH_STORAGE_STATE_PATH');
+        const storageStateReuse = this.config.getBoolean('AUTH_STORAGE_STATE_REUSE', true);
+        if (storageStatePath && storageStateReuse) {
+            const fs = require('fs');
+            const resolvedPath = path.resolve(storageStatePath);
+            if (fs.existsSync(resolvedPath)) {
+                try {
+                    contextOptions.storageState = resolvedPath;
+                    CSReporter.info(`Loading stored session from: ${resolvedPath}`);
+                } catch (error: any) {
+                    CSReporter.warn(`Failed to load storageState from ${resolvedPath}: ${error.message}`);
+                }
+            } else {
+                CSReporter.debug(`StorageState file not found (first run?): ${resolvedPath}`);
+            }
+        }
+        // Fallback: Restore in-memory state if switching browsers (but only if not explicitly cleared)
+        else if (this.browserState.cookies && !this.config.getBoolean('BROWSER_REUSE_CLEAR_STATE', false)) {
             contextOptions.storageState = {
                 cookies: this.browserState.cookies,
                 origins: []
@@ -538,6 +555,89 @@ export class CSBrowserManager {
             CSReporter.debug('Browser state saved');
         } catch (error) {
             CSReporter.warn(`Failed to save browser state: ${error}`);
+        }
+    }
+
+    /**
+     * Save browser storageState (cookies + localStorage) to a JSON file
+     * Used for SSO session persistence — login once, reuse across test runs
+     *
+     * @param filePath - Path to save the session file (default: AUTH_STORAGE_STATE_PATH config)
+     * @returns The resolved file path where the session was saved
+     */
+    public async saveStorageState(filePath?: string): Promise<string> {
+        if (!this.context) {
+            throw new Error('No browser context available. Launch a browser first.');
+        }
+
+        const targetPath = filePath || this.config.get('AUTH_STORAGE_STATE_PATH');
+        if (!targetPath) {
+            throw new Error('No file path provided and AUTH_STORAGE_STATE_PATH not configured');
+        }
+
+        const resolvedPath = path.resolve(targetPath);
+        const fs = require('fs');
+
+        // Ensure directory exists
+        const dir = path.dirname(resolvedPath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+
+        await this.context.storageState({ path: resolvedPath });
+        CSReporter.info(`Browser session saved to: ${resolvedPath}`);
+        return resolvedPath;
+    }
+
+    /**
+     * Load a previously saved storageState file for the NEXT context creation
+     * Call this before launch() or use AUTH_STORAGE_STATE_PATH config for automatic loading
+     *
+     * If a context is already open, this closes it and creates a new one with the loaded state.
+     *
+     * @param filePath - Path to the session file to load
+     */
+    public async loadStorageState(filePath?: string): Promise<void> {
+        const targetPath = filePath || this.config.get('AUTH_STORAGE_STATE_PATH');
+        if (!targetPath) {
+            throw new Error('No file path provided and AUTH_STORAGE_STATE_PATH not configured');
+        }
+
+        const resolvedPath = path.resolve(targetPath);
+        const fs = require('fs');
+
+        if (!fs.existsSync(resolvedPath)) {
+            throw new Error(`StorageState file not found: ${resolvedPath}`);
+        }
+
+        // If we have an active context, we need to recreate it with the new state
+        if (this.context && this.browser) {
+            CSReporter.info(`Loading session from ${resolvedPath} — recreating context`);
+
+            // Close current page and context
+            await this.closePage();
+            await this.closeContext();
+
+            // Create new context with the loaded storage state
+            // Temporarily override the config so createContext() picks it up
+            const originalPath = this.config.get('AUTH_STORAGE_STATE_PATH');
+            this.config.set('AUTH_STORAGE_STATE_PATH', resolvedPath);
+            this.config.set('AUTH_STORAGE_STATE_REUSE', 'true');
+
+            await this.createContext();
+            await this.createPage();
+
+            // Restore original config
+            if (originalPath) {
+                this.config.set('AUTH_STORAGE_STATE_PATH', originalPath);
+            }
+
+            // Notify listeners that page has changed
+            this.notifyPageChange();
+
+            CSReporter.info(`Browser session loaded from: ${resolvedPath}`);
+        } else {
+            CSReporter.info(`StorageState file registered: ${resolvedPath} (will be loaded on next context creation)`);
         }
     }
 
