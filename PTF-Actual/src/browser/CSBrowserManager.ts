@@ -106,6 +106,19 @@ export class CSBrowserManager {
         this.currentBrowserType = browserType;
 
         try {
+            // Check for CDP connection mode (BROWSER_CDP_URL)
+            // Connects to an already-running Edge/Chrome with remote debugging enabled.
+            // This is the solution for enterprise VDIs with Conditional Access device compliance:
+            // the running browser already satisfies CA policy, so Playwright can use it.
+            const cdpUrl = this.config.get('BROWSER_CDP_URL');
+            if (cdpUrl && !this.context) {
+                CSReporter.info(`Connecting to existing browser via CDP: ${cdpUrl}`);
+                await this.connectOverCDP(cdpUrl);
+                const launchTime = Date.now() - startTime;
+                CSReporter.info(`Browser ${browserType} (CDP) connected in ${launchTime}ms`);
+                return;
+            }
+
             // Check if persistent context mode is needed (BROWSER_USER_DATA_DIR)
             // Persistent context is required for scenarios where the browser profile state
             // matters (e.g., Conditional Access device compliance on enterprise VDIs)
@@ -236,6 +249,87 @@ export class CSBrowserManager {
         });
 
         CSReporter.info(`Persistent context launched with Edge profile: ${resolvedDir}`);
+    }
+
+    /**
+     * Connect to an already-running browser via Chrome DevTools Protocol (CDP).
+     *
+     * This is the recommended approach for enterprise VDIs with Conditional Access
+     * device compliance policies. The workflow is:
+     *   1. A helper script (or manual step) launches Edge with --remote-debugging-port=9222
+     *      using the VDI user's signed-in Edge profile (satisfies device compliance)
+     *   2. Playwright connects to that running browser via CDP
+     *   3. The SSO handler then clears the session and logs in as the test user
+     *   4. Conditional Access allows the test user because the BROWSER is compliant
+     *
+     * Config:
+     *   BROWSER_CDP_URL=http://localhost:9222    (CDP endpoint of running browser)
+     *
+     * To launch Edge with CDP on Windows VDI:
+     *   "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
+     *   Or: start msedge --remote-debugging-port=9222
+     */
+    private async connectOverCDP(cdpUrl: string): Promise<void> {
+        const pw = this.ensurePlaywright();
+
+        try {
+            this.browser = await pw.chromium.connectOverCDP(cdpUrl, {
+                timeout: this.config.getNumber('BROWSER_LAUNCH_TIMEOUT', 30000)
+            });
+
+            // Get existing contexts from the running browser
+            const contexts = this.browser.contexts();
+            if (contexts.length > 0) {
+                this.context = contexts[0];
+                CSReporter.debug(`CDP: Using existing context (${contexts.length} context(s) available)`);
+            } else {
+                // Create a new context if none exist
+                this.context = await this.browser.newContext({
+                    ignoreHTTPSErrors: this.config.getBoolean('BROWSER_IGNORE_HTTPS_ERRORS', true),
+                    acceptDownloads: true,
+                });
+                CSReporter.debug('CDP: Created new context in connected browser');
+            }
+
+            // Set default timeouts
+            this.context.setDefaultTimeout(this.config.getNumber('BROWSER_ACTION_TIMEOUT', 10000));
+            this.context.setDefaultNavigationTimeout(this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000));
+
+            // Get existing pages or create a new one
+            const pages = this.context.pages();
+            if (pages.length > 0) {
+                // Use an existing page — navigate to about:blank to start clean
+                this.page = pages[0];
+                await this.page.goto('about:blank');
+                CSReporter.debug(`CDP: Using existing page (${pages.length} page(s) in context)`);
+            } else {
+                this.page = await this.context.newPage();
+                CSReporter.debug('CDP: Created new page in connected context');
+            }
+
+            // Add console log listener
+            if (this.config.getBoolean('CONSOLE_LOG_CAPTURE', true)) {
+                this.page.on('console', (msg: any) => {
+                    const resultsManager = CSTestResultsManager.getInstance();
+                    resultsManager.addConsoleLog(msg.type(), msg.text(), new Date());
+                    CSReporter.debug(`Console [${msg.type()}]: ${msg.text()}`);
+                });
+            }
+
+            this.page.on('pageerror', (error: any) => {
+                CSReporter.warn(`Page error: ${error.message}`);
+            });
+
+            CSReporter.info(`Connected to browser via CDP at: ${cdpUrl}`);
+        } catch (error: any) {
+            throw new Error(
+                `Failed to connect via CDP to ${cdpUrl}: ${error.message}\n\n` +
+                'Make sure Edge is running with remote debugging enabled:\n' +
+                '  start msedge --remote-debugging-port=9222\n\n' +
+                'Or add to crm-dev.env:\n' +
+                '  BROWSER_CDP_URL=http://localhost:9222'
+            );
+        }
     }
 
     private async launchBrowser(browserType: string): Promise<any> {

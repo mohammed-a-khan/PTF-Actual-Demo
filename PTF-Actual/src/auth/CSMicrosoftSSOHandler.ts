@@ -111,15 +111,19 @@ export class CSMicrosoftSSOHandler {
     }
 
     /**
-     * Core login flow: Navigate → detect Microsoft login → fill credentials → wait for redirect
+     * Core login flow — Adaptive for enterprise VDIs
      *
-     * VDI/Domain-Joined Fix:
-     *   On enterprise VDIs, Windows Integrated Authentication (Kerberos/NTLM) and Azure AD
-     *   Seamless SSO automatically pass the logged-in Windows user's credentials, bypassing
-     *   the email/password fields entirely. To force login as the TEST user instead:
-     *   1. Sign out of any existing Microsoft session first
-     *   2. Intercept OAuth redirects to inject login_hint=<test_user> and prompt=login
-     *   3. This forces Microsoft to show the login form for the specified test user
+     * Supports two modes automatically:
+     *
+     * Mode A: Fresh browser (no persistent context)
+     *   Navigate → Microsoft logout → OAuth interception → enter credentials → redirect back
+     *
+     * Mode B: Persistent context (BROWSER_USER_DATA_DIR set — VDI Edge profile)
+     *   Navigate to app → app loads as VDI user (wrong user) → click Sign Out on app page →
+     *   Microsoft shows account picker → click "Use another account" → enter test credentials →
+     *   redirect back to app as test user
+     *
+     * The method detects which page it lands on and handles it accordingly.
      */
     public async login(options: SSOLoginOptions): Promise<void> {
         const { username, password, staySignedIn = true } = options;
@@ -136,53 +140,86 @@ export class CSMicrosoftSSOHandler {
         }
 
         const page = this.browserManager.getPage();
+        const isPersistentContext = !!this.config.get('BROWSER_USER_DATA_DIR');
         CSReporter.info(`Starting Microsoft SSO login for: ${username}`);
         CSReporter.info(`Login URL: ${loginUrl}`);
+        CSReporter.info(`Mode: ${isPersistentContext ? 'Persistent context (VDI profile)' : 'Fresh browser'}`);
 
         try {
-            // Step 1: Sign out any existing Microsoft session (VDI fix)
-            // On domain-joined machines, the browser may auto-authenticate as the Windows user.
-            // Signing out first ensures we get a clean login page for the test user.
-            CSReporter.info('Step 1: Clearing any existing Microsoft session...');
-            await this.clearMicrosoftSession(page, timeout);
+            if (!isPersistentContext) {
+                // === Mode A: Fresh browser — clear session + intercept OAuth ===
+                CSReporter.info('Step 1: Clearing any existing Microsoft session...');
+                await this.clearMicrosoftSession(page, timeout);
 
-            // Step 2: Set up route interception to inject login_hint into OAuth redirects
-            // This forces Microsoft to show the login page for our test user, not the VDI user.
-            CSReporter.info('Step 2: Setting up OAuth redirect interception...');
-            await this.setupOAuthInterception(page, username);
+                CSReporter.info('Step 2: Setting up OAuth redirect interception...');
+                await this.setupOAuthInterception(page, username);
+            }
 
-            // Step 3: Navigate to the app URL (triggers SSO redirect)
-            CSReporter.info('Step 3: Navigating to application URL...');
+            // Navigate to the application URL
+            CSReporter.info(`Step ${isPersistentContext ? '1' : '3'}: Navigating to application URL...`);
             await page.goto(loginUrl, {
                 waitUntil: 'domcontentloaded',
                 timeout: timeout
             });
 
-            // Step 4: Wait for Microsoft login page to appear
-            CSReporter.info('Step 4: Waiting for Microsoft login page...');
+            // Wait for page to settle and detect what we landed on
+            await page.waitForTimeout(3000);
+
+            const landingState = await this.detectLandingPage(page);
+            CSReporter.info(`Landing page detected: ${landingState}`);
+
+            if (landingState === 'microsoftLogin') {
+                // We're on the Microsoft login page — proceed with credentials
+                CSReporter.info('On Microsoft login page — entering credentials...');
+
+            } else if (landingState === 'appError' || landingState === 'accessRestriction') {
+                // App loaded but showing error (wrong user / not in security group)
+                // This happens with persistent context — the VDI user is authenticated
+                // but doesn't have access to this specific app.
+                // Click "Sign Out" to go to Microsoft login as different user.
+                CSReporter.info('App loaded as VDI user — clicking Sign Out to switch accounts...');
+                await this.clickAppSignOut(page, timeout);
+
+            } else if (landingState === 'conditionalAccess') {
+                // Conditional Access "Sign in with work account" / "can't get there from here"
+                // Look for "Sign out and sign in with a different account" link
+                CSReporter.info('Conditional Access block — clicking "Sign out and sign in with different account"...');
+                await this.clickConditionalAccessSignOut(page, timeout);
+
+            } else if (landingState === 'appLoaded') {
+                // App loaded successfully — already authenticated as the right user!
+                CSReporter.pass('App loaded — already authenticated!');
+                if (saveSessionPath) {
+                    await this.browserManager.saveStorageState(saveSessionPath);
+                    CSReporter.pass(`Session saved to: ${saveSessionPath}`);
+                }
+                return;
+
+            } else {
+                // Unknown page — try waiting for Microsoft login
+                CSReporter.warn(`Unknown landing page state, attempting to continue...`);
+            }
+
+            // Now we should be on the Microsoft login page
+            CSReporter.info('Waiting for Microsoft login page...');
             await this.waitForMicrosoftLoginPage(page, timeout);
 
-            // Step 5: Enter email/username (or skip if login_hint pre-filled it)
-            CSReporter.info('Step 5: Entering email address...');
+            // Enter email
+            CSReporter.info('Entering email address...');
             await this.enterEmail(page, username, timeout);
 
-            // Step 6: Enter password
-            CSReporter.info('Step 6: Entering password...');
+            // Enter password
+            CSReporter.info('Entering password...');
             await this.enterPassword(page, password, timeout);
 
-            // Step 7: Handle "Stay signed in?" prompt
+            // Handle "Stay signed in?" prompt
             if (staySignedIn !== false) {
-                CSReporter.info('Step 7: Handling "Stay signed in?" prompt...');
+                CSReporter.info('Handling "Stay signed in?" prompt...');
                 await this.handleStaySignedIn(page, staySignedIn, timeout);
             }
 
-            // Step 8: Check for Conditional Access "Sign in with your work account" block
-            // This appears on enterprise VDIs when the Edge profile is not signed in.
-            // Solution: Set BROWSER_USER_DATA_DIR to a pre-signed-in Edge profile path.
-            await this.checkForConditionalAccessBlock(page);
-
-            // Step 9: Wait for redirect back to the application
-            CSReporter.info('Step 9: Waiting for redirect back to application...');
+            // Wait for redirect back to the application
+            CSReporter.info('Waiting for redirect back to application...');
             await this.waitForAppRedirect(page, loginUrl, timeout);
 
             // Remove route interception (cleanup)
@@ -190,9 +227,9 @@ export class CSMicrosoftSSOHandler {
 
             CSReporter.pass(`Microsoft SSO login successful for: ${username}`);
 
-            // Step 10: Save session if configured
+            // Save session if configured
             if (saveSessionPath) {
-                CSReporter.info('Step 10: Saving browser session...');
+                CSReporter.info('Saving browser session...');
                 await this.browserManager.saveStorageState(saveSessionPath);
                 CSReporter.pass(`Session saved to: ${saveSessionPath}`);
             }
@@ -355,6 +392,173 @@ export class CSMicrosoftSSOHandler {
      * Wait for the Microsoft login page to appear
      * Handles various redirect patterns (ADFS, B2C, direct AAD)
      */
+    /**
+     * Detect what page we landed on after navigating to the app URL.
+     * Returns one of:
+     *   - 'microsoftLogin'     — on login.microsoftonline.com (normal SSO redirect)
+     *   - 'appError'           — app loaded but showing error (user not in security group)
+     *   - 'accessRestriction'  — "can't get there from here" or compliance block
+     *   - 'conditionalAccess'  — "Sign in with your work account" / "Switch Edge profile"
+     *   - 'appLoaded'          — app loaded successfully (already authenticated)
+     *   - 'unknown'            — unrecognized page
+     */
+    private async detectLandingPage(page: any): Promise<string> {
+        const url = page.url().toLowerCase();
+
+        // Check URL first
+        if (url.includes('login.microsoftonline.com') ||
+            url.includes('login.microsoft.com') ||
+            url.includes('login.live.com')) {
+            return 'microsoftLogin';
+        }
+
+        // Check page content
+        const pageState = await page.evaluate(() => {
+            const bodyText = document.body?.innerText || '';
+            const bodyLower = bodyText.toLowerCase();
+
+            // Conditional Access: "Sign in with your work account" / "Switch Edge profile"
+            if (bodyLower.includes('switch edge profile') ||
+                bodyLower.includes('sign in with your work account') ||
+                (bodyLower.includes("can't get there from here") && bodyLower.includes('compliance'))) {
+                return 'conditionalAccess';
+            }
+
+            // App error: "not a member" / "need to be added to a security group"
+            if (bodyLower.includes('security group') ||
+                bodyLower.includes('notmemberoforg') ||
+                bodyLower.includes('need to be added') ||
+                bodyLower.includes('not a member')) {
+                return 'appError';
+            }
+
+            // Access restriction: general block page
+            if (bodyLower.includes('access restriction') ||
+                (bodyLower.includes("can't get there") && bodyLower.includes('sign out'))) {
+                return 'accessRestriction';
+            }
+
+            // Check if the app actually loaded (Dynamics 365 specific indicators)
+            if (bodyLower.includes('dynamics 365') ||
+                document.querySelector('#mainContent') ||
+                document.querySelector('[data-id="mainContent"]') ||
+                bodyLower.includes('power apps')) {
+                return 'appLoaded';
+            }
+
+            // Check for a Sign Out link (generic app page with sign out option)
+            const signOutLink = document.querySelector('a[href*="SignOut"], a[href*="signout"], a[href*="logout"]');
+            if (signOutLink) {
+                return 'appError';
+            }
+
+            return 'unknown';
+        });
+
+        return pageState;
+    }
+
+    /**
+     * Click "Sign Out" on the application error/restriction page.
+     * This is used when the persistent context (VDI profile) auto-authenticated
+     * as the wrong user (e.g., khana8) and we need to sign out to switch users.
+     *
+     * Dynamics 365 error pages typically have:
+     *   - A "Sign Out" link in the header
+     *   - Text like "You (user@domain) need to be added to a security group"
+     */
+    private async clickAppSignOut(page: any, timeout: number): Promise<void> {
+        try {
+            // Look for Sign Out link on the page — try multiple selectors
+            const signOutClicked = await page.evaluate(() => {
+                // Try common Sign Out link patterns
+                const selectors = [
+                    'a[href*="SignOut"]',
+                    'a[href*="signout"]',
+                    'a[href*="logout"]',
+                    'a[href*="Logout"]',
+                ];
+                for (const selector of selectors) {
+                    const link = document.querySelector(selector) as HTMLElement;
+                    if (link) {
+                        link.click();
+                        return true;
+                    }
+                }
+
+                // Try by text content
+                const allLinks = Array.from(document.querySelectorAll('a'));
+                for (const link of allLinks) {
+                    const text = (link as HTMLElement).innerText?.toLowerCase() || '';
+                    if (text.includes('sign out') || text.includes('signout') || text.includes('log out')) {
+                        (link as HTMLElement).click();
+                        return true;
+                    }
+                }
+
+                return false;
+            });
+
+            if (signOutClicked) {
+                CSReporter.debug('Clicked Sign Out on app page');
+                // Wait for redirect to Microsoft login
+                await page.waitForTimeout(3000);
+            } else {
+                // If no Sign Out link found, try navigating to the app's sign-out URL directly
+                const appDomain = new URL(page.url()).origin;
+                CSReporter.debug(`No Sign Out link found — trying direct sign-out URL: ${appDomain}/SignOut.aspx`);
+                await page.goto(`${appDomain}/SignOut.aspx`, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 15000
+                });
+                await page.waitForTimeout(2000);
+            }
+        } catch (error: any) {
+            CSReporter.debug(`App sign-out attempt: ${error.message}`);
+            // Fall back to Microsoft logout
+            await page.goto('https://login.microsoftonline.com/common/oauth2/logout', {
+                waitUntil: 'domcontentloaded',
+                timeout: 15000
+            });
+            await page.waitForTimeout(2000);
+        }
+    }
+
+    /**
+     * Handle the Conditional Access "Sign in with your work account" / "can't get there from here" page.
+     * Click "Sign out and sign in with a different account" to reach the login page.
+     */
+    private async clickConditionalAccessSignOut(page: any, timeout: number): Promise<void> {
+        try {
+            const clicked = await page.evaluate(() => {
+                const allLinks = Array.from(document.querySelectorAll('a'));
+                for (const link of allLinks) {
+                    const text = (link as HTMLElement).innerText?.toLowerCase() || '';
+                    if (text.includes('sign out') || text.includes('different account') || text.includes('sign in with a different')) {
+                        (link as HTMLElement).click();
+                        return true;
+                    }
+                }
+                return false;
+            });
+
+            if (clicked) {
+                CSReporter.debug('Clicked "Sign out and sign in with a different account"');
+                await page.waitForTimeout(3000);
+            } else {
+                // Fallback: navigate to Microsoft logout
+                CSReporter.debug('No sign-out link found on CA page — navigating to Microsoft logout');
+                await page.goto('https://login.microsoftonline.com/common/oauth2/logout', {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 15000
+                });
+                await page.waitForTimeout(2000);
+            }
+        } catch (error: any) {
+            CSReporter.debug(`Conditional Access sign-out: ${error.message}`);
+        }
+    }
+
     private async waitForMicrosoftLoginPage(page: any, timeout: number): Promise<void> {
         try {
             // Wait for either the email input field or the URL to contain Microsoft login domains
