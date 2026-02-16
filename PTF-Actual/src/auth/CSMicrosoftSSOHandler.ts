@@ -514,20 +514,25 @@ export class CSMicrosoftSSOHandler {
      */
     private async clickAppSignOut(page: any, timeout: number): Promise<void> {
         try {
-            // First, get the Sign Out link href so we can navigate to it directly
-            // This avoids "execution context destroyed" from clicking + navigating
-            const signOutUrl = await page.evaluate(() => {
+            // Dynamics 365 Sign Out links are often javascript: URLs like:
+            //   javascript:var url='https://app.crm.dynamics.com/.../notification.aspx';SetSignOutCookie();window.top.location.href=url;
+            // We can't use page.goto() for javascript: URLs — instead we click the link directly
+            // and let the browser execute the JavaScript naturally.
+
+            const signOutInfo = await page.evaluate(() => {
                 // Try by href patterns
                 const selectors = [
                     'a[href*="SignOut"]',
                     'a[href*="signout"]',
                     'a[href*="logout"]',
                     'a[href*="Logout"]',
+                    'a[href*="notification.aspx"]',
                 ];
                 for (const selector of selectors) {
                     const link = document.querySelector(selector) as HTMLAnchorElement;
-                    if (link && link.href) {
-                        return link.href;
+                    if (link) {
+                        const href = link.getAttribute('href') || '';
+                        return { href, isJavascript: href.startsWith('javascript:') };
                     }
                 }
 
@@ -536,30 +541,57 @@ export class CSMicrosoftSSOHandler {
                 for (const link of allLinks) {
                     const text = (link as HTMLElement).innerText?.toLowerCase() || '';
                     if (text.includes('sign out') || text.includes('signout') || text.includes('log out')) {
-                        return (link as HTMLAnchorElement).href || null;
+                        const href = link.getAttribute('href') || '';
+                        return { href, isJavascript: href.startsWith('javascript:') };
                     }
                 }
 
                 return null;
             });
 
-            if (signOutUrl) {
-                CSReporter.debug(`Found Sign Out URL: ${signOutUrl}`);
-                // Navigate to the sign-out URL (safer than clicking — avoids context destruction)
-                await page.goto(signOutUrl, {
-                    waitUntil: 'domcontentloaded',
-                    timeout: 15000
-                });
-                await this.waitForNavigationToSettle(page, 5000);
+            if (signOutInfo) {
+                CSReporter.debug(`Found Sign Out link: ${signOutInfo.href.substring(0, 100)}...`);
+
+                if (signOutInfo.isJavascript) {
+                    // For javascript: links, click the element and wait for navigation
+                    CSReporter.debug('Sign Out is javascript: link — clicking and waiting for navigation...');
+                    // Click the sign-out link — this triggers page navigation via JS
+                    await Promise.all([
+                        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}),
+                        page.evaluate(() => {
+                            const selectors = [
+                                'a[href*="SignOut"]', 'a[href*="signout"]', 'a[href*="logout"]',
+                                'a[href*="Logout"]', 'a[href*="notification.aspx"]',
+                            ];
+                            for (const sel of selectors) {
+                                const el = document.querySelector(sel) as HTMLElement;
+                                if (el) { el.click(); return; }
+                            }
+                            // Fallback: try by text
+                            const allLinks = Array.from(document.querySelectorAll('a'));
+                            for (const link of allLinks) {
+                                const text = (link as HTMLElement).innerText?.toLowerCase() || '';
+                                if (text.includes('sign out')) { (link as HTMLElement).click(); return; }
+                            }
+                        })
+                    ]);
+                    await this.waitForNavigationToSettle(page, 5000);
+                } else {
+                    // Regular URL — navigate directly
+                    await page.goto(signOutInfo.href, {
+                        waitUntil: 'domcontentloaded',
+                        timeout: 15000
+                    });
+                    await this.waitForNavigationToSettle(page, 5000);
+                }
             } else {
-                // If no Sign Out link found, try navigating to the app's sign-out URL directly
-                const appDomain = new URL(page.url()).origin;
-                CSReporter.debug(`No Sign Out link found — trying direct sign-out URL: ${appDomain}/SignOut.aspx`);
-                await page.goto(`${appDomain}/SignOut.aspx`, {
+                // If no Sign Out link found, navigate to Microsoft logout directly
+                CSReporter.debug('No Sign Out link found — navigating to Microsoft logout');
+                await page.goto('https://login.microsoftonline.com/common/oauth2/logout', {
                     waitUntil: 'domcontentloaded',
                     timeout: 15000
                 });
-                await this.waitForNavigationToSettle(page, 5000);
+                await this.waitForNavigationToSettle(page, 3000);
             }
         } catch (error: any) {
             CSReporter.debug(`App sign-out attempt: ${error.message}`);
@@ -569,6 +601,61 @@ export class CSMicrosoftSSOHandler {
                 timeout: 15000
             });
             await page.waitForTimeout(2000);
+        }
+
+        // After sign-out we may land on Microsoft "You signed out of your account" page.
+        // This page has no login form — we need to check and handle it.
+        await this.handlePostSignOutPage(page, timeout);
+    }
+
+    /**
+     * After clicking Sign Out, Microsoft may show "You signed out of your account" page.
+     * This page has no email/password fields. We need to either:
+     *   1. Click "Sign in again" / "Sign in with a different account" link if present
+     *   2. Otherwise, navigate back to the app URL to trigger a fresh SSO redirect
+     */
+    private async handlePostSignOutPage(page: any, timeout: number): Promise<void> {
+        const currentUrl = page.url().toLowerCase();
+
+        // Check if we're on a Microsoft logout/signout confirmation page
+        if (currentUrl.includes('logout') || currentUrl.includes('signout')) {
+            CSReporter.debug(`Post-sign-out page detected: ${page.url()}`);
+
+            // Try to click "Sign in again" / "Sign in with a different account" link
+            const clicked = await page.evaluate(() => {
+                const allLinks = Array.from(document.querySelectorAll('a'));
+                for (const link of allLinks) {
+                    const text = (link as HTMLElement).innerText?.toLowerCase() || '';
+                    if (text.includes('sign in') || text.includes('login') || text.includes('another account')) {
+                        (link as HTMLElement).click();
+                        return true;
+                    }
+                }
+                // Also try buttons
+                const allButtons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
+                for (const btn of allButtons) {
+                    const text = ((btn as HTMLElement).innerText || (btn as HTMLInputElement).value || '').toLowerCase();
+                    if (text.includes('sign in') || text.includes('login')) {
+                        (btn as HTMLElement).click();
+                        return true;
+                    }
+                }
+                return false;
+            });
+
+            if (clicked) {
+                CSReporter.debug('Clicked "Sign in" on post-sign-out page');
+                await this.waitForNavigationToSettle(page, 5000);
+            } else {
+                // No sign-in link found — navigate back to the login URL to trigger SSO redirect
+                const loginUrl = this.config.get('SSO_LOGIN_URL') || this.config.get('BASE_URL');
+                CSReporter.debug(`No sign-in link found — navigating back to app: ${loginUrl}`);
+                await page.goto(loginUrl, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: timeout
+                });
+                await this.waitForNavigationToSettle(page, 5000);
+            }
         }
     }
 

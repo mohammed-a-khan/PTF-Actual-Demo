@@ -227,10 +227,17 @@ export class CSBrowserManager {
         this.context.setDefaultTimeout(this.config.getNumber('BROWSER_ACTION_TIMEOUT', 10000));
         this.context.setDefaultNavigationTimeout(this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000));
 
-        // Get or create a page
+        // Get or create a page — close any restored tabs from previous sessions
         const pages = this.context.pages();
         if (pages.length > 0) {
             this.page = pages[0];
+            // Close all extra tabs that Edge restored from the previous session
+            for (let i = 1; i < pages.length; i++) {
+                try { await pages[i].close(); } catch {}
+            }
+            if (pages.length > 1) {
+                CSReporter.debug(`[PersistentContext] Closed ${pages.length - 1} restored tab(s), keeping 1 clean tab`);
+            }
         } else {
             this.page = await this.context.newPage();
         }
@@ -446,6 +453,15 @@ export class CSBrowserManager {
             // Edge has deeper Windows identity integration than Chrome (WAM/PRT)
             // These flags disable Edge's implicit sign-in and account transfer features
             args.push('--disable-features=msImplicitSignin,msEdgeAutoSignIn,msPrimaryAccountMerge');
+        }
+
+        // When using a persistent user data directory (VDI profile), prevent Edge/Chrome from
+        // restoring tabs from the previous session — we only want a clean tab for the test URL
+        if (this.config.get('BROWSER_USER_DATA_DIR')) {
+            args.push('--restore-last-session=false');
+            args.push('--no-first-run');
+            args.push('--no-default-browser-check');
+            args.push('--disable-session-crashed-bubble');
         }
 
         // Add custom args
