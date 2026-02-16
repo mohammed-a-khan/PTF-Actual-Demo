@@ -198,9 +198,11 @@ export class CSBrowserManager {
             return await pw.webkit.launch(browserOptions);
         } else if (browserType === 'edge') {
             browserOptions.channel = 'msedge';
+            // Edge is Chromium-based — apply the same Chrome args (auth flags, etc.)
+            const chromeArgs = this.getChromeArgs();
+            browserOptions.args = [...(browserOptions.args || []), ...chromeArgs];
             // IE Compatibility Mode — requires Enterprise Site List configured via Group Policy
             if (this.config.getBoolean('BROWSER_EDGE_IE_MODE', false)) {
-                if (!browserOptions.args) browserOptions.args = [];
                 browserOptions.args.push('--internet-explorer-integration=iemode');
                 browserOptions.args.push('--ie-mode-test');
                 browserOptions.args.push('--no-first-run');
@@ -254,6 +256,10 @@ export class CSBrowserManager {
             args.push(`--auth-server-allowlist=${authServerAllowlist}`);
             args.push(`--auth-negotiate-delegate-allowlist=${authServerAllowlist}`);
             args.push('--disable-background-networking');
+            // Edge-specific: disable built-in Windows SSO/PRT integration
+            // Edge has deeper Windows identity integration than Chrome (WAM/PRT)
+            // These flags disable Edge's implicit sign-in and account transfer features
+            args.push('--disable-features=msImplicitSignin,msEdgeAutoSignIn,msPrimaryAccountMerge');
         }
 
         // Add custom args

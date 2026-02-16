@@ -214,9 +214,10 @@ export class CSMicrosoftSSOHandler {
     }
 
     /**
-     * Route handler reference — stored so we can remove it after login
+     * Route handler references — stored so we can remove them after login
      */
     private oauthRouteHandler: ((route: any) => Promise<void>) | null = null;
+    private autologonRouteHandler: ((route: any) => Promise<void>) | null = null;
 
     /**
      * Clear any existing Microsoft session by navigating to the Microsoft sign-out endpoint.
@@ -245,62 +246,103 @@ export class CSMicrosoftSSOHandler {
     }
 
     /**
-     * Set up Playwright route interception to inject login_hint and prompt=login
-     * into Microsoft OAuth redirect URLs.
+     * Set up Playwright route interception for VDI/domain-joined machine SSO bypass.
      *
-     * Why this is needed:
-     *   On domain-joined VDIs, Azure AD Seamless SSO detects the Windows user via Kerberos
-     *   and skips the email/password fields entirely (the email input becomes type="hidden").
-     *   By injecting login_hint=<test_user> and prompt=login into the OAuth URL, we force
-     *   Microsoft to show the login form for our specific test user.
+     * Problem: On enterprise VDIs (especially with Edge), multiple SSO mechanisms auto-authenticate:
+     *   1. Azure AD Seamless SSO — sends Kerberos ticket to autologon.microsoftonline.com
+     *   2. Primary Refresh Token (PRT) — Edge sends x-ms-RefreshTokenCredential cookie
+     *   3. Windows Negotiate Auth — browser sends Authorization: Negotiate header
+     *
+     * Solution (3 layers):
+     *   Layer 1: BLOCK autologon.microsoftonline.com entirely (prevents Seamless SSO)
+     *   Layer 2: STRIP auth headers & PRT cookies from login.microsoftonline.com requests
+     *   Layer 3: INJECT login_hint + prompt=login into OAuth authorize URLs
      */
     private async setupOAuthInterception(page: any, testUsername: string): Promise<void> {
+        // Layer 1: Block Azure AD Seamless SSO endpoint entirely
+        // autologon.microsoftonline.com is where Kerberos/PRT-based silent auth happens.
+        // By aborting these requests, we force Microsoft to show the interactive login page.
+        this.autologonRouteHandler = async (route: any) => {
+            CSReporter.debug(`Blocked Seamless SSO request: ${route.request().url()}`);
+            await route.abort('blockedbyclient');
+        };
+        await page.route('**/*autologon.microsoftonline.com/**', this.autologonRouteHandler);
+
+        // Layer 2 + 3: Intercept login.microsoftonline.com requests
         this.oauthRouteHandler = async (route: any) => {
             const url = route.request().url();
+            const headers = { ...route.request().headers() };
 
-            // Only intercept Microsoft OAuth authorize requests
-            if (url.includes('login.microsoftonline.com') && url.includes('/oauth2/authorize')) {
-                try {
-                    const urlObj = new URL(url);
+            // Layer 2: Strip Windows SSO credentials from ALL Microsoft login requests
+            // - Authorization header carries Kerberos/NTLM negotiate tokens
+            // - x-ms-RefreshTokenCredential cookie carries the PRT (Edge-specific)
+            let headersModified = false;
 
-                    // Inject login_hint to pre-fill the test user email
-                    urlObj.searchParams.set('login_hint', testUsername);
+            if (headers['authorization']) {
+                delete headers['authorization'];
+                headersModified = true;
+            }
 
-                    // Force the login prompt to appear (overrides Seamless SSO / Kerberos)
-                    urlObj.searchParams.set('prompt', 'login');
-
-                    const modifiedUrl = urlObj.toString();
-                    CSReporter.debug(`OAuth intercept: injected login_hint=${testUsername} and prompt=login`);
-
-                    // Continue the request with modified URL
-                    await route.continue({ url: modifiedUrl });
-                    return;
-                } catch (err: any) {
-                    CSReporter.debug(`OAuth intercept modification failed: ${err.message}`);
+            // Strip PRT cookie from the cookie header
+            if (headers['cookie']) {
+                const originalCookie = headers['cookie'];
+                const filteredCookies = originalCookie
+                    .split(';')
+                    .map((c: string) => c.trim())
+                    .filter((c: string) =>
+                        !c.startsWith('x-ms-RefreshTokenCredential') &&
+                        !c.startsWith('x-ms-DeviceCredential')
+                    )
+                    .join('; ');
+                if (filteredCookies !== originalCookie) {
+                    headers['cookie'] = filteredCookies;
+                    headersModified = true;
                 }
             }
 
-            // Let all other requests pass through unchanged
-            await route.continue();
+            if (headersModified) {
+                CSReporter.debug(`Stripped Windows SSO credentials from: ${url.substring(0, 80)}...`);
+            }
+
+            // Layer 3: Inject login_hint + prompt=login into OAuth authorize URLs
+            if (url.includes('/oauth2/authorize') || url.includes('/oauth2/v2.0/authorize')) {
+                try {
+                    const urlObj = new URL(url);
+                    urlObj.searchParams.set('login_hint', testUsername);
+                    urlObj.searchParams.set('prompt', 'login');
+                    const modifiedUrl = urlObj.toString();
+                    CSReporter.debug(`OAuth intercept: login_hint=${testUsername}, prompt=login`);
+                    await route.continue({ url: modifiedUrl, headers });
+                    return;
+                } catch (err: any) {
+                    CSReporter.debug(`OAuth URL modification failed: ${err.message}`);
+                }
+            }
+
+            // For non-OAuth requests to login.microsoftonline.com, still strip headers
+            await route.continue({ headers });
         };
 
-        // Intercept all requests to Microsoft login domains
         await page.route('**/*login.microsoftonline.com/**', this.oauthRouteHandler);
-        CSReporter.debug('OAuth redirect interception active');
+        CSReporter.debug('VDI SSO bypass active: autologon blocked + headers stripped + OAuth params injected');
     }
 
     /**
-     * Remove route interception after login is complete
+     * Remove all route interception after login is complete
      */
     private async removeOAuthInterception(page: any): Promise<void> {
-        if (this.oauthRouteHandler) {
-            try {
+        try {
+            if (this.autologonRouteHandler) {
+                await page.unroute('**/*autologon.microsoftonline.com/**', this.autologonRouteHandler);
+                this.autologonRouteHandler = null;
+            }
+            if (this.oauthRouteHandler) {
                 await page.unroute('**/*login.microsoftonline.com/**', this.oauthRouteHandler);
                 this.oauthRouteHandler = null;
-                CSReporter.debug('OAuth redirect interception removed');
-            } catch {
-                // Ignore — page may already be closed
             }
+            CSReporter.debug('VDI SSO bypass routes removed');
+        } catch {
+            // Ignore — page may already be closed
         }
     }
 
