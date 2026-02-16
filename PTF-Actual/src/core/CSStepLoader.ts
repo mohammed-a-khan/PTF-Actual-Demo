@@ -15,7 +15,7 @@ import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from './CSConfigurationManager';
 import type { ParsedFeature } from '../bdd/CSBDDTypes'
 
-export type StepGroup = 'common' | 'api' | 'database' | 'soap' | 'browser' | 'ai';
+export type StepGroup = 'common' | 'api' | 'database' | 'soap' | 'browser' | 'ai' | 'auth';
 
 export class CSStepLoader {
     private static instance: CSStepLoader;
@@ -128,6 +128,19 @@ export class CSStepLoader {
                 }
             } catch (error: any) {
                 CSReporter.debug(`[StepLoader] AI steps not available: ${error.message}`);
+            }
+        }
+
+        // Auth steps are ALWAYS loaded unconditionally - SSO login steps
+        // must be available to any consumer that needs authentication flows
+        if (!this.loadedGroups.has('auth')) {
+            try {
+                const authLoaded = await this.loadStepGroup('auth');
+                if (authLoaded.length > 0) {
+                    CSReporter.debug(`[StepLoader] Auth steps loaded: ${authLoaded.length} file(s)`);
+                }
+            } catch (error: any) {
+                CSReporter.debug(`[StepLoader] Auth steps not available: ${error.message}`);
             }
         }
 
