@@ -112,6 +112,14 @@ export class CSMicrosoftSSOHandler {
 
     /**
      * Core login flow: Navigate → detect Microsoft login → fill credentials → wait for redirect
+     *
+     * VDI/Domain-Joined Fix:
+     *   On enterprise VDIs, Windows Integrated Authentication (Kerberos/NTLM) and Azure AD
+     *   Seamless SSO automatically pass the logged-in Windows user's credentials, bypassing
+     *   the email/password fields entirely. To force login as the TEST user instead:
+     *   1. Sign out of any existing Microsoft session first
+     *   2. Intercept OAuth redirects to inject login_hint=<test_user> and prompt=login
+     *   3. This forces Microsoft to show the login form for the specified test user
      */
     public async login(options: SSOLoginOptions): Promise<void> {
         const { username, password, staySignedIn = true } = options;
@@ -132,46 +140,62 @@ export class CSMicrosoftSSOHandler {
         CSReporter.info(`Login URL: ${loginUrl}`);
 
         try {
-            // Step 1: Navigate to the app URL (triggers SSO redirect)
-            CSReporter.info('Step 1: Navigating to application URL...');
+            // Step 1: Sign out any existing Microsoft session (VDI fix)
+            // On domain-joined machines, the browser may auto-authenticate as the Windows user.
+            // Signing out first ensures we get a clean login page for the test user.
+            CSReporter.info('Step 1: Clearing any existing Microsoft session...');
+            await this.clearMicrosoftSession(page, timeout);
+
+            // Step 2: Set up route interception to inject login_hint into OAuth redirects
+            // This forces Microsoft to show the login page for our test user, not the VDI user.
+            CSReporter.info('Step 2: Setting up OAuth redirect interception...');
+            await this.setupOAuthInterception(page, username);
+
+            // Step 3: Navigate to the app URL (triggers SSO redirect)
+            CSReporter.info('Step 3: Navigating to application URL...');
             await page.goto(loginUrl, {
                 waitUntil: 'domcontentloaded',
                 timeout: timeout
             });
 
-            // Step 2: Wait for Microsoft login page to appear
-            // The page may redirect through multiple URLs before landing on login.microsoftonline.com
-            CSReporter.info('Step 2: Waiting for Microsoft login page...');
+            // Step 4: Wait for Microsoft login page to appear
+            CSReporter.info('Step 4: Waiting for Microsoft login page...');
             await this.waitForMicrosoftLoginPage(page, timeout);
 
-            // Step 3: Enter email/username
-            CSReporter.info('Step 3: Entering email address...');
+            // Step 5: Enter email/username (or skip if login_hint pre-filled it)
+            CSReporter.info('Step 5: Entering email address...');
             await this.enterEmail(page, username, timeout);
 
-            // Step 4: Enter password
-            CSReporter.info('Step 4: Entering password...');
+            // Step 6: Enter password
+            CSReporter.info('Step 6: Entering password...');
             await this.enterPassword(page, password, timeout);
 
-            // Step 5: Handle "Stay signed in?" prompt
+            // Step 7: Handle "Stay signed in?" prompt
             if (staySignedIn !== false) {
-                CSReporter.info('Step 5: Handling "Stay signed in?" prompt...');
+                CSReporter.info('Step 7: Handling "Stay signed in?" prompt...');
                 await this.handleStaySignedIn(page, staySignedIn, timeout);
             }
 
-            // Step 6: Wait for redirect back to the application
-            CSReporter.info('Step 6: Waiting for redirect back to application...');
+            // Step 8: Wait for redirect back to the application
+            CSReporter.info('Step 8: Waiting for redirect back to application...');
             await this.waitForAppRedirect(page, loginUrl, timeout);
+
+            // Remove route interception (cleanup)
+            await this.removeOAuthInterception(page);
 
             CSReporter.pass(`Microsoft SSO login successful for: ${username}`);
 
-            // Step 7: Save session if configured
+            // Step 9: Save session if configured
             if (saveSessionPath) {
-                CSReporter.info('Step 7: Saving browser session...');
+                CSReporter.info('Step 9: Saving browser session...');
                 await this.browserManager.saveStorageState(saveSessionPath);
                 CSReporter.pass(`Session saved to: ${saveSessionPath}`);
             }
 
         } catch (error: any) {
+            // Remove route interception on failure too
+            try { await this.removeOAuthInterception(page); } catch { /* ignore */ }
+
             // Capture screenshot on failure for debugging
             try {
                 const screenshotPath = path.join(
@@ -186,6 +210,97 @@ export class CSMicrosoftSSOHandler {
 
             CSReporter.fail(`Microsoft SSO login failed: ${error.message}`);
             throw new Error(`Microsoft SSO login failed for ${username}: ${error.message}`);
+        }
+    }
+
+    /**
+     * Route handler reference — stored so we can remove it after login
+     */
+    private oauthRouteHandler: ((route: any) => Promise<void>) | null = null;
+
+    /**
+     * Clear any existing Microsoft session by navigating to the Microsoft sign-out endpoint.
+     * This is critical on VDI/domain-joined machines where Windows Integrated Auth (Kerberos)
+     * auto-passes the logged-in Windows user's credentials, bypassing the test user login.
+     */
+    private async clearMicrosoftSession(page: any, timeout: number): Promise<void> {
+        try {
+            // Navigate to Microsoft sign-out endpoint
+            // This clears Microsoft session cookies so the next login starts fresh
+            await page.goto('https://login.microsoftonline.com/common/oauth2/logout', {
+                waitUntil: 'domcontentloaded',
+                timeout: 15000
+            });
+            // Brief wait for sign-out to complete
+            await page.waitForTimeout(1500);
+
+            // Also clear all cookies in the current context to remove any cached auth
+            const context = page.context();
+            await context.clearCookies();
+            CSReporter.debug('Microsoft session cleared and cookies purged');
+        } catch (error: any) {
+            // Sign-out failure is non-fatal — continue with the login flow
+            CSReporter.debug(`Microsoft session clear attempt: ${error.message} (non-fatal)`);
+        }
+    }
+
+    /**
+     * Set up Playwright route interception to inject login_hint and prompt=login
+     * into Microsoft OAuth redirect URLs.
+     *
+     * Why this is needed:
+     *   On domain-joined VDIs, Azure AD Seamless SSO detects the Windows user via Kerberos
+     *   and skips the email/password fields entirely (the email input becomes type="hidden").
+     *   By injecting login_hint=<test_user> and prompt=login into the OAuth URL, we force
+     *   Microsoft to show the login form for our specific test user.
+     */
+    private async setupOAuthInterception(page: any, testUsername: string): Promise<void> {
+        this.oauthRouteHandler = async (route: any) => {
+            const url = route.request().url();
+
+            // Only intercept Microsoft OAuth authorize requests
+            if (url.includes('login.microsoftonline.com') && url.includes('/oauth2/authorize')) {
+                try {
+                    const urlObj = new URL(url);
+
+                    // Inject login_hint to pre-fill the test user email
+                    urlObj.searchParams.set('login_hint', testUsername);
+
+                    // Force the login prompt to appear (overrides Seamless SSO / Kerberos)
+                    urlObj.searchParams.set('prompt', 'login');
+
+                    const modifiedUrl = urlObj.toString();
+                    CSReporter.debug(`OAuth intercept: injected login_hint=${testUsername} and prompt=login`);
+
+                    // Continue the request with modified URL
+                    await route.continue({ url: modifiedUrl });
+                    return;
+                } catch (err: any) {
+                    CSReporter.debug(`OAuth intercept modification failed: ${err.message}`);
+                }
+            }
+
+            // Let all other requests pass through unchanged
+            await route.continue();
+        };
+
+        // Intercept all requests to Microsoft login domains
+        await page.route('**/*login.microsoftonline.com/**', this.oauthRouteHandler);
+        CSReporter.debug('OAuth redirect interception active');
+    }
+
+    /**
+     * Remove route interception after login is complete
+     */
+    private async removeOAuthInterception(page: any): Promise<void> {
+        if (this.oauthRouteHandler) {
+            try {
+                await page.unroute('**/*login.microsoftonline.com/**', this.oauthRouteHandler);
+                this.oauthRouteHandler = null;
+                CSReporter.debug('OAuth redirect interception removed');
+            } catch {
+                // Ignore — page may already be closed
+            }
         }
     }
 
@@ -231,34 +346,80 @@ export class CSMicrosoftSSOHandler {
     }
 
     /**
-     * Enter email address on the Microsoft login page
+     * Enter email address on the Microsoft login page.
+     *
+     * When login_hint is injected via OAuth interception, Microsoft may:
+     *   a) Pre-fill the email and still show the email page → we click Next
+     *   b) Skip the email page entirely and show the password page directly
+     *   c) Show "Pick an account" page → we click "Use another account" or select the right one
+     *
+     * This method handles all three cases gracefully.
      */
     private async enterEmail(page: any, email: string, timeout: number): Promise<void> {
-        // Wait for the email input to be visible
-        const emailSelector = 'input[type="email"], input[name="loginfmt"], #i0116';
-        const emailInput = await page.waitForSelector(emailSelector, {
-            state: 'visible',
-            timeout: timeout
-        });
+        // Race: wait for either the email input OR the password input to become visible.
+        // With login_hint + prompt=login, Microsoft may skip straight to password.
+        try {
+            const result = await Promise.race([
+                page.waitForSelector('input[type="email"]:visible, input[name="loginfmt"]:visible, #i0116:visible', { timeout: 15000 })
+                    .then((el: any) => ({ type: 'email', element: el })),
+                page.waitForSelector('input[type="password"]:visible, input[name="passwd"]:visible, #i0118:visible, #passwordInput:visible', { timeout: 15000 })
+                    .then((el: any) => ({ type: 'password', element: el })),
+                page.waitForSelector('#otherTileText, text="Use another account"', { timeout: 15000 })
+                    .then((el: any) => ({ type: 'pickAccount', element: el })),
+            ]);
 
-        if (!emailInput) {
-            throw new Error('Email input field not found on Microsoft login page');
+            if (result.type === 'password') {
+                // login_hint worked — Microsoft skipped email and went straight to password
+                CSReporter.debug('Email page skipped (login_hint accepted) — password page shown directly');
+                return;
+            }
+
+            if (result.type === 'pickAccount') {
+                // "Pick an account" page — click "Use another account"
+                CSReporter.debug('"Pick an account" page detected — clicking "Use another account"');
+                await result.element.click();
+                await page.waitForTimeout(1000);
+                // Now wait for the email input
+                await page.waitForSelector('input[type="email"]:visible, input[name="loginfmt"]:visible, #i0116:visible', { timeout: 10000 });
+            }
+
+            // Email input is visible — fill it
+            const emailSelector = 'input[type="email"], input[name="loginfmt"], #i0116';
+            const emailInput = await page.waitForSelector(emailSelector, {
+                state: 'visible',
+                timeout: 10000
+            });
+
+            if (!emailInput) {
+                throw new Error('Email input field not found on Microsoft login page');
+            }
+
+            // Clear any pre-filled value and type the email
+            await emailInput.fill('');
+            await emailInput.fill(email);
+
+            // Click "Next" button
+            const nextButton = await page.waitForSelector(
+                'input[type="submit"][value="Next"], #idSIButton9, button[type="submit"]',
+                { state: 'visible', timeout: 10000 }
+            );
+            await nextButton.click();
+
+            // Wait for the page transition (password page or error)
+            await page.waitForTimeout(1000);
+            CSReporter.debug('Email entered and Next clicked');
+        } catch (error: any) {
+            // Check if we ended up on the password page despite the race timeout
+            try {
+                const passwordVisible = await page.isVisible('input[type="password"], input[name="passwd"], #i0118, #passwordInput');
+                if (passwordVisible) {
+                    CSReporter.debug('Password page detected after email step — continuing');
+                    return;
+                }
+            } catch { /* ignore */ }
+
+            throw new Error(`Email entry failed: ${error.message}`);
         }
-
-        // Clear any pre-filled value and type the email
-        await emailInput.fill('');
-        await emailInput.fill(email);
-
-        // Click "Next" button
-        const nextButton = await page.waitForSelector(
-            'input[type="submit"][value="Next"], #idSIButton9, button[type="submit"]',
-            { state: 'visible', timeout: 10000 }
-        );
-        await nextButton.click();
-
-        // Wait for the page transition (password page or error)
-        await page.waitForTimeout(1000);
-        CSReporter.debug('Email entered and Next clicked');
     }
 
     /**

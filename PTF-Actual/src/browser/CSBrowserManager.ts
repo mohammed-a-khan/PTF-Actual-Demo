@@ -252,6 +252,8 @@ export class CSBrowserManager {
         const authServerAllowlist = this.config.get('AUTH_SERVER_ALLOWLIST');
         if (authServerAllowlist) {
             args.push(`--auth-server-allowlist=${authServerAllowlist}`);
+            args.push(`--auth-negotiate-delegate-allowlist=${authServerAllowlist}`);
+            args.push('--disable-background-networking');
         }
 
         // Add custom args
