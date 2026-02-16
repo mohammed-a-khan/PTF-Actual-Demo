@@ -98,14 +98,26 @@ export class CSBrowserManager {
 
     public async launch(browserType?: string): Promise<void> {
         const startTime = Date.now();
-        
+
         if (!browserType) {
             browserType = this.config.get('BROWSER', 'chrome');
         }
-        
+
         this.currentBrowserType = browserType;
-        
+
         try {
+            // Check if persistent context mode is needed (BROWSER_USER_DATA_DIR)
+            // Persistent context is required for scenarios where the browser profile state
+            // matters (e.g., Conditional Access device compliance on enterprise VDIs)
+            const userDataDir = this.config.get('BROWSER_USER_DATA_DIR');
+            if (userDataDir && !this.context) {
+                CSReporter.info(`Launching persistent context with user data dir: ${userDataDir}`);
+                await this.launchPersistentContext(browserType, userDataDir);
+                const launchTime = Date.now() - startTime;
+                CSReporter.info(`Browser ${browserType} (persistent) launched in ${launchTime}ms`);
+                return;
+            }
+
             // Get browser instance based on reuse configuration
             const browserReuseEnabled = this.config.getBoolean('BROWSER_REUSE_ENABLED', false);
 
@@ -133,17 +145,97 @@ export class CSBrowserManager {
             } else {
                 CSReporter.debug('Context and page already exist');
             }
-            
+
             const launchTime = Date.now() - startTime;
             if (launchTime > 3000) {
                 CSReporter.warn(`Browser launch took ${launchTime}ms (target: <3000ms)`);
             }
-            
+
             CSReporter.info(`Browser ${browserType} launched successfully in ${launchTime}ms`);
         } catch (error) {
             CSReporter.fail(`Failed to launch browser: ${error}`);
             throw error;
         }
+    }
+
+    /**
+     * Launch browser with a persistent user data directory.
+     * Uses Playwright's launchPersistentContext() which preserves the Edge/Chrome profile state
+     * including device compliance tokens, signed-in browser profiles, and cached certificates.
+     *
+     * This is required for enterprise VDI scenarios where Conditional Access policies
+     * check the browser profile's sign-in state (e.g., "Sign in with your work account").
+     *
+     * Config: BROWSER_USER_DATA_DIR=/path/to/edge/profile
+     */
+    private async launchPersistentContext(browserType: string, userDataDir: string): Promise<void> {
+        const fs = require('fs');
+        const resolvedDir = path.resolve(userDataDir);
+
+        if (!fs.existsSync(resolvedDir)) {
+            fs.mkdirSync(resolvedDir, { recursive: true });
+            CSReporter.debug(`Created user data directory: ${resolvedDir}`);
+        }
+
+        const isHeadless = this.config.getBoolean('HEADLESS', false);
+        const contextOptions: any = {
+            headless: isHeadless,
+            channel: browserType === 'edge' ? 'msedge' : undefined,
+            timeout: this.config.getNumber('BROWSER_LAUNCH_TIMEOUT', 30000),
+            slowMo: this.config.getNumber('BROWSER_SLOWMO', 0),
+            viewport: isHeadless ? {
+                width: this.config.getNumber('BROWSER_VIEWPORT_WIDTH', 1920),
+                height: this.config.getNumber('BROWSER_VIEWPORT_HEIGHT', 1080)
+            } : null,
+            ignoreHTTPSErrors: this.config.getBoolean('BROWSER_IGNORE_HTTPS_ERRORS', true),
+            locale: this.config.get('BROWSER_LOCALE', 'en-US'),
+            acceptDownloads: true,
+            args: isHeadless ? [] : [
+                '--start-maximized',
+                '--no-default-browser-check',
+                '--disable-features=VizDisplayCompositor',
+                '--force-device-scale-factor=1'
+            ]
+        };
+
+        // Add Chrome/Edge args (auth flags, VDI fixes, etc.)
+        if (browserType === 'chrome' || browserType === 'chromium' || browserType === 'edge') {
+            const chromeArgs = this.getChromeArgs();
+            contextOptions.args = [...(contextOptions.args || []), ...chromeArgs];
+        }
+
+        const pw = this.ensurePlaywright();
+        // launchPersistentContext returns a BrowserContext directly (not a Browser)
+        this.context = await pw.chromium.launchPersistentContext(resolvedDir, contextOptions);
+        // The persistent context owns a browser internally
+        this.browser = this.context.browser() || this.context;
+
+        // Set default timeouts
+        this.context.setDefaultTimeout(this.config.getNumber('BROWSER_ACTION_TIMEOUT', 10000));
+        this.context.setDefaultNavigationTimeout(this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000));
+
+        // Get or create a page
+        const pages = this.context.pages();
+        if (pages.length > 0) {
+            this.page = pages[0];
+        } else {
+            this.page = await this.context.newPage();
+        }
+
+        // Add console log listener
+        if (this.config.getBoolean('CONSOLE_LOG_CAPTURE', true)) {
+            this.page.on('console', (msg: any) => {
+                const resultsManager = CSTestResultsManager.getInstance();
+                resultsManager.addConsoleLog(msg.type(), msg.text(), new Date());
+                CSReporter.debug(`Console [${msg.type()}]: ${msg.text()}`);
+            });
+        }
+
+        this.page.on('pageerror', (error: any) => {
+            CSReporter.warn(`Page error: ${error.message}`);
+        });
+
+        CSReporter.info(`Persistent context launched with Edge profile: ${resolvedDir}`);
     }
 
     private async launchBrowser(browserType: string): Promise<any> {

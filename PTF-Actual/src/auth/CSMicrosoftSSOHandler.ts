@@ -176,8 +176,13 @@ export class CSMicrosoftSSOHandler {
                 await this.handleStaySignedIn(page, staySignedIn, timeout);
             }
 
-            // Step 8: Wait for redirect back to the application
-            CSReporter.info('Step 8: Waiting for redirect back to application...');
+            // Step 8: Check for Conditional Access "Sign in with your work account" block
+            // This appears on enterprise VDIs when the Edge profile is not signed in.
+            // Solution: Set BROWSER_USER_DATA_DIR to a pre-signed-in Edge profile path.
+            await this.checkForConditionalAccessBlock(page);
+
+            // Step 9: Wait for redirect back to the application
+            CSReporter.info('Step 9: Waiting for redirect back to application...');
             await this.waitForAppRedirect(page, loginUrl, timeout);
 
             // Remove route interception (cleanup)
@@ -185,9 +190,9 @@ export class CSMicrosoftSSOHandler {
 
             CSReporter.pass(`Microsoft SSO login successful for: ${username}`);
 
-            // Step 9: Save session if configured
+            // Step 10: Save session if configured
             if (saveSessionPath) {
-                CSReporter.info('Step 9: Saving browser session...');
+                CSReporter.info('Step 10: Saving browser session...');
                 await this.browserManager.saveStorageState(saveSessionPath);
                 CSReporter.pass(`Session saved to: ${saveSessionPath}`);
             }
@@ -506,6 +511,51 @@ export class CSMicrosoftSSOHandler {
             } else {
                 throw error;
             }
+        }
+    }
+
+    /**
+     * Check for Conditional Access "Sign in with your work account" interstitial.
+     * This page appears on enterprise VDIs when the Conditional Access policy requires
+     * a signed-in Edge browser profile (device compliance).
+     *
+     * If detected, throws a clear error with instructions instead of timing out.
+     */
+    private async checkForConditionalAccessBlock(page: any): Promise<void> {
+        try {
+            // Wait briefly — this page appears right after password entry
+            await page.waitForTimeout(2000);
+
+            // Check for the Conditional Access block page indicators
+            const isBlocked = await page.evaluate(() => {
+                const bodyText = document.body?.innerText || '';
+                return (
+                    bodyText.includes('Sign in with your work account') ||
+                    bodyText.includes('Switch Edge profile') ||
+                    bodyText.includes("can't get there from here") ||
+                    bodyText.includes('management compliance policy') ||
+                    bodyText.includes('meet') && bodyText.includes('compliance policy')
+                );
+            });
+
+            if (isBlocked) {
+                const currentUrl = page.url();
+                CSReporter.warn('Conditional Access device compliance block detected!');
+                throw new Error(
+                    'Conditional Access policy is blocking access. The organization requires a signed-in Edge browser profile.\n\n' +
+                    'Two solutions:\n' +
+                    '  1. (Recommended) Ask your Azure AD admin to exclude the test service account from the device compliance Conditional Access policy.\n' +
+                    '  2. (Alternative) Set BROWSER_USER_DATA_DIR in your env file to point to a pre-signed-in Edge profile directory.\n' +
+                    '     Example: BROWSER_USER_DATA_DIR=C:\\Users\\YourName\\AppData\\Local\\Microsoft\\Edge\\User Data\\Profile 1\n\n' +
+                    `Current URL: ${currentUrl}`
+                );
+            }
+        } catch (error: any) {
+            if (error.message.includes('Conditional Access')) {
+                throw error; // Re-throw our own error
+            }
+            // Page check failed (e.g., navigated away already) — this is fine, continue
+            CSReporter.debug('Conditional Access check: page is not blocked');
         }
     }
 
