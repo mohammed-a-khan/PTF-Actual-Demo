@@ -162,8 +162,9 @@ export class CSMicrosoftSSOHandler {
                 timeout: timeout
             });
 
-            // Wait for page to settle and detect what we landed on
-            await page.waitForTimeout(3000);
+            // Wait for all redirects to finish — CRM apps often chain multiple redirects
+            // (app URL → OAuth → Microsoft login → back, or app URL → error page)
+            await this.waitForNavigationToSettle(page, 5000);
 
             const landingState = await this.detectLandingPage(page);
             CSReporter.info(`Landing page detected: ${landingState}`);
@@ -393,6 +394,32 @@ export class CSMicrosoftSSOHandler {
      * Handles various redirect patterns (ADFS, B2C, direct AAD)
      */
     /**
+     * Wait for the page to stop navigating (all redirects complete).
+     * Retries waitForLoadState until the page is stable.
+     */
+    private async waitForNavigationToSettle(page: any, maxWaitMs: number): Promise<void> {
+        const startTime = Date.now();
+        let lastUrl = '';
+        while (Date.now() - startTime < maxWaitMs) {
+            try {
+                await page.waitForLoadState('domcontentloaded', { timeout: 3000 });
+                const currentUrl = page.url();
+                // If URL hasn't changed in this iteration, page is stable
+                if (currentUrl === lastUrl) {
+                    CSReporter.debug(`Page settled at: ${currentUrl}`);
+                    return;
+                }
+                lastUrl = currentUrl;
+                await page.waitForTimeout(1000);
+            } catch {
+                // Navigation in progress — wait and retry
+                await page.waitForTimeout(1000);
+            }
+        }
+        CSReporter.debug(`Page settle timeout — proceeding with current URL: ${page.url()}`);
+    }
+
+    /**
      * Detect what page we landed on after navigating to the app URL.
      * Returns one of:
      *   - 'microsoftLogin'     — on login.microsoftonline.com (normal SSO redirect)
@@ -403,6 +430,24 @@ export class CSMicrosoftSSOHandler {
      *   - 'unknown'            — unrecognized page
      */
     private async detectLandingPage(page: any): Promise<string> {
+        // Retry up to 3 times — page.evaluate can fail if a navigation is still in progress
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                return await this._detectLandingPageOnce(page);
+            } catch (error: any) {
+                if (error.message.includes('context was destroyed') || error.message.includes('navigation')) {
+                    CSReporter.debug(`Landing page detection attempt ${attempt + 1} failed (navigation in progress), retrying...`);
+                    await page.waitForTimeout(2000);
+                    try { await page.waitForLoadState('domcontentloaded', { timeout: 5000 }); } catch { /* ignore */ }
+                } else {
+                    throw error;
+                }
+            }
+        }
+        return 'unknown';
+    }
+
+    private async _detectLandingPageOnce(page: any): Promise<string> {
         const url = page.url().toLowerCase();
 
         // Check URL first
@@ -469,9 +514,10 @@ export class CSMicrosoftSSOHandler {
      */
     private async clickAppSignOut(page: any, timeout: number): Promise<void> {
         try {
-            // Look for Sign Out link on the page — try multiple selectors
-            const signOutClicked = await page.evaluate(() => {
-                // Try common Sign Out link patterns
+            // First, get the Sign Out link href so we can navigate to it directly
+            // This avoids "execution context destroyed" from clicking + navigating
+            const signOutUrl = await page.evaluate(() => {
+                // Try by href patterns
                 const selectors = [
                     'a[href*="SignOut"]',
                     'a[href*="signout"]',
@@ -479,10 +525,9 @@ export class CSMicrosoftSSOHandler {
                     'a[href*="Logout"]',
                 ];
                 for (const selector of selectors) {
-                    const link = document.querySelector(selector) as HTMLElement;
-                    if (link) {
-                        link.click();
-                        return true;
+                    const link = document.querySelector(selector) as HTMLAnchorElement;
+                    if (link && link.href) {
+                        return link.href;
                     }
                 }
 
@@ -491,18 +536,21 @@ export class CSMicrosoftSSOHandler {
                 for (const link of allLinks) {
                     const text = (link as HTMLElement).innerText?.toLowerCase() || '';
                     if (text.includes('sign out') || text.includes('signout') || text.includes('log out')) {
-                        (link as HTMLElement).click();
-                        return true;
+                        return (link as HTMLAnchorElement).href || null;
                     }
                 }
 
-                return false;
+                return null;
             });
 
-            if (signOutClicked) {
-                CSReporter.debug('Clicked Sign Out on app page');
-                // Wait for redirect to Microsoft login
-                await page.waitForTimeout(3000);
+            if (signOutUrl) {
+                CSReporter.debug(`Found Sign Out URL: ${signOutUrl}`);
+                // Navigate to the sign-out URL (safer than clicking — avoids context destruction)
+                await page.goto(signOutUrl, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 15000
+                });
+                await this.waitForNavigationToSettle(page, 5000);
             } else {
                 // If no Sign Out link found, try navigating to the app's sign-out URL directly
                 const appDomain = new URL(page.url()).origin;
@@ -511,7 +559,7 @@ export class CSMicrosoftSSOHandler {
                     waitUntil: 'domcontentloaded',
                     timeout: 15000
                 });
-                await page.waitForTimeout(2000);
+                await this.waitForNavigationToSettle(page, 5000);
             }
         } catch (error: any) {
             CSReporter.debug(`App sign-out attempt: ${error.message}`);
