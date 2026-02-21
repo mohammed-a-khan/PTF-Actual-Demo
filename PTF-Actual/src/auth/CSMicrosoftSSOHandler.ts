@@ -119,9 +119,9 @@ export class CSMicrosoftSSOHandler {
      *   Navigate → Microsoft logout → OAuth interception → enter credentials → redirect back
      *
      * Mode B: Persistent context (BROWSER_USER_DATA_DIR set — VDI Edge profile)
-     *   Navigate to app → app loads as VDI user (wrong user) → click Sign Out on app page →
-     *   Microsoft shows account picker → click "Use another account" → enter test credentials →
-     *   redirect back to app as test user
+     *   Clear cookies → Navigate to app → VDI auto-authenticates (Conditional Access OK) →
+     *   app error page → set up OAuth interception (block autologon + rewrite redirect_uri) →
+     *   click Sign Out → Microsoft login → enter test credentials → redirect back to app
      *
      * The method detects which page it lands on and handles it accordingly.
      */
@@ -152,11 +152,71 @@ export class CSMicrosoftSSOHandler {
                 await this.clearMicrosoftSession(page, timeout);
 
                 CSReporter.info('Step 2: Setting up OAuth redirect interception...');
-                await this.setupOAuthInterception(page, username);
+                await this.setupOAuthInterception(page, username, loginUrl);
+            } else {
+                // === Mode B: Persistent context (VDI Edge profile) ===
+                //
+                // Strategy: Clear ALL state and set up OAuth interception BEFORE navigating
+                // to the app. This prevents VDI auto-authentication and goes directly to the
+                // Microsoft login page, bypassing the error page → Sign Out flow entirely.
+                //
+                // Why skip the Sign Out flow?
+                // The CRM Sign Out redirect chain embeds the sign-out page URL (notification.aspx)
+                // as the return URL in the OAuth state. After form_post, CRM tries to redirect
+                // to notification.aspx which fails or triggers another sign-out — creating a loop.
+                // By navigating fresh (no CRM sign-out), the OAuth state has the correct return URL.
+
+                // Phase 1: Clear ALL cookies (CRM + Microsoft) for a clean slate
+                CSReporter.info('Step 0: Clearing all browsing state for clean login...');
+                try {
+                    await page.context().clearCookies();
+                    CSReporter.debug('Cleared all cookies');
+                } catch (e: any) {
+                    CSReporter.debug(`Cookie clear: ${e.message}`);
+                }
+
+                // Phase 2: CDP — clear cache, storage, and service workers
+                try {
+                    const cdpSession = await page.context().newCDPSession(page);
+                    await cdpSession.send('Network.clearBrowserCache');
+                    // Clear all storage for the CRM origin (localStorage, indexedDB, service workers)
+                    const crmOrigin = new URL(loginUrl).origin;
+                    await cdpSession.send('Storage.clearDataForOrigin', {
+                        origin: crmOrigin,
+                        storageTypes: 'all'
+                    });
+                    await cdpSession.send('Storage.clearDataForOrigin', {
+                        origin: 'https://login.microsoftonline.com',
+                        storageTypes: 'all'
+                    });
+                    CSReporter.debug('CDP: Cleared cache, storage, and service workers');
+                    await cdpSession.detach();
+                } catch (e: any) {
+                    CSReporter.debug(`CDP state clear: ${e.message}`);
+                }
+
+                // Phase 3: Microsoft logout — clear server-side session
+                CSReporter.info('Step 1: Clearing Microsoft server-side session...');
+                try {
+                    await page.goto('https://login.microsoftonline.com/common/oauth2/logout', {
+                        waitUntil: 'domcontentloaded',
+                        timeout: 15000
+                    });
+                    await page.waitForTimeout(2000);
+                    CSReporter.debug('Microsoft server-side session cleared');
+                } catch (e: any) {
+                    CSReporter.debug(`Microsoft logout: ${e.message}`);
+                }
+
+                // Phase 4: Set up OAuth interception BEFORE navigating to CRM
+                // By blocking autologon before the first CRM request, we prevent
+                // VDI Kerberos/PRT auto-authentication and go directly to the login page.
+                CSReporter.info('Step 2: Setting up OAuth interception...');
+                await this.setupOAuthInterception(page, username, loginUrl);
             }
 
             // Navigate to the application URL
-            CSReporter.info(`Step ${isPersistentContext ? '1' : '3'}: Navigating to application URL...`);
+            CSReporter.info(`Step ${isPersistentContext ? '3' : '3'}: Navigating to application URL...`);
             await page.goto(loginUrl, {
                 waitUntil: 'domcontentloaded',
                 timeout: timeout
@@ -174,16 +234,45 @@ export class CSMicrosoftSSOHandler {
                 CSReporter.info('On Microsoft login page — entering credentials...');
 
             } else if (landingState === 'appError' || landingState === 'accessRestriction') {
-                // App loaded but showing error (wrong user / not in security group)
-                // This happens with persistent context — the VDI user is authenticated
-                // but doesn't have access to this specific app.
-                // Click "Sign Out" to go to Microsoft login as different user.
-                CSReporter.info('App loaded as VDI user — clicking Sign Out to switch accounts...');
-                await this.clickAppSignOut(page, timeout);
+                // VDI user auto-authenticated despite OAuth interception (PRT bypassed autologon block).
+                // Instead of clicking the app's Sign Out (which embeds notification.aspx as return URL
+                // in the OAuth state, causing form_post → redirect to notification.aspx → 404 loop),
+                // we: Microsoft logout → clear cookies → re-navigate to app with interception active.
+                CSReporter.info('VDI user auto-authenticated — performing direct Microsoft logout...');
+                if (!isPersistentContext) {
+                    await this.setupOAuthInterception(page, username, loginUrl);
+                }
+                // Microsoft logout directly (skip CRM sign-out redirect chain)
+                await page.goto('https://login.microsoftonline.com/common/oauth2/logout', {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 15000
+                });
+                await page.waitForTimeout(2000);
+                // Clear all cookies again (remove VDI user's CRM session)
+                try { await page.context().clearCookies(); } catch {}
+                // Re-navigate to app — interception already active, autologon blocked
+                CSReporter.info('Re-navigating to app with interception active...');
+                await page.goto(loginUrl, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: timeout
+                });
+                await this.waitForNavigationToSettle(page, 10000);
+                const retryLanding = await this.detectLandingPage(page);
+                CSReporter.info(`After logout + re-navigation: ${retryLanding}`);
+                if (retryLanding === 'appLoaded') {
+                    CSReporter.pass('App loaded after re-navigation!');
+                    if (saveSessionPath) {
+                        await this.browserManager.saveStorageState(saveSessionPath);
+                    }
+                    return;
+                }
+                // If still not on login page, continue — waitForMicrosoftLoginPage will handle it
 
             } else if (landingState === 'conditionalAccess') {
                 // Conditional Access "Sign in with work account" / "can't get there from here"
-                // Look for "Sign out and sign in with a different account" link
+                if (!isPersistentContext) {
+                    await this.setupOAuthInterception(page, username, loginUrl);
+                }
                 CSReporter.info('Conditional Access block — clicking "Sign out and sign in with different account"...');
                 await this.clickConditionalAccessSignOut(page, timeout);
 
@@ -223,8 +312,17 @@ export class CSMicrosoftSSOHandler {
             CSReporter.info('Waiting for redirect back to application...');
             await this.waitForAppRedirect(page, loginUrl, timeout);
 
-            // Remove route interception (cleanup)
+            // CRITICAL: Remove route interception BEFORE the app fully loads.
+            // After the redirect back to the app, MSAL.js starts making token requests
+            // (discovery, token exchange, silent authorize) to login.microsoftonline.com.
+            // If our interception is still active, it strips headers and modifies URLs
+            // that MSAL.js needs, causing token requests to fail with 400 errors.
+            // This results in the "Sign in required" popup and corrupted token state.
             await this.removeOAuthInterception(page);
+
+            // Wait for the application to fully load (spinners gone, key elements visible)
+            CSReporter.info('Waiting for application to fully load...');
+            await this.waitForAppReady(page, timeout);
 
             CSReporter.pass(`Microsoft SSO login successful for: ${username}`);
 
@@ -288,6 +386,7 @@ export class CSMicrosoftSSOHandler {
         }
     }
 
+
     /**
      * Set up Playwright route interception for VDI/domain-joined machine SSO bypass.
      *
@@ -301,24 +400,37 @@ export class CSMicrosoftSSOHandler {
      *   Layer 2: STRIP auth headers & PRT cookies from login.microsoftonline.com requests
      *   Layer 3: INJECT login_hint + prompt=login into OAuth authorize URLs
      */
-    private async setupOAuthInterception(page: any, testUsername: string): Promise<void> {
+    /**
+     * credentialsEntered flag — set to true after the test user enters email+password.
+     * Used by OAuth interception to stop injecting prompt=login after credentials are in,
+     * so that subsequent OAuth redirects (e.g., after 404 error recovery) can use
+     * the test user's Microsoft session cookie instead of forcing a re-login.
+     */
+    private credentialsEntered: boolean = false;
+
+    private async setupOAuthInterception(page: any, testUsername: string, mainAppUrl?: string): Promise<void> {
+        // Reset flag
+        this.credentialsEntered = false;
+
+        const isPersistentContext = !!this.config.get('BROWSER_USER_DATA_DIR');
+
         // Layer 1: Block Azure AD Seamless SSO endpoint entirely
         // autologon.microsoftonline.com is where Kerberos/PRT-based silent auth happens.
         // By aborting these requests, we force Microsoft to show the interactive login page.
         this.autologonRouteHandler = async (route: any) => {
-            CSReporter.debug(`Blocked Seamless SSO request: ${route.request().url()}`);
+            CSReporter.debug(`Blocked Seamless SSO: ${route.request().url().substring(0, 80)}`);
             await route.abort('blockedbyclient');
         };
-        await page.route('**/*autologon.microsoftonline.com/**', this.autologonRouteHandler);
+        await page.route(/autologon\.microsoftonline\.com/, this.autologonRouteHandler);
 
-        // Layer 2 + 3: Intercept login.microsoftonline.com requests
+        // Layers 2 + 3 + 4: Intercept login.microsoftonline.com requests
         this.oauthRouteHandler = async (route: any) => {
             const url = route.request().url();
+            CSReporter.debug(`[Route] login.msol: ${url.substring(0, 120)}`);
             const headers = { ...route.request().headers() };
 
-            // Layer 2: Strip Windows SSO credentials from ALL Microsoft login requests
-            // - Authorization header carries Kerberos/NTLM negotiate tokens
-            // - x-ms-RefreshTokenCredential cookie carries the PRT (Edge-specific)
+            // Layer 2: Strip Windows SSO credentials
+            // Authorization header carries Kerberos/NTLM negotiate tokens
             let headersModified = false;
 
             if (headers['authorization']) {
@@ -326,8 +438,10 @@ export class CSMicrosoftSSOHandler {
                 headersModified = true;
             }
 
-            // Strip PRT cookie from the cookie header
-            if (headers['cookie']) {
+            // Strip PRT cookie ONLY for fresh browser (not persistent context).
+            // Persistent context needs PRT on login.microsoftonline.com for
+            // Conditional Access device compliance proof.
+            if (!isPersistentContext && headers['cookie']) {
                 const originalCookie = headers['cookie'];
                 const filteredCookies = originalCookie
                     .split(';')
@@ -344,17 +458,40 @@ export class CSMicrosoftSSOHandler {
             }
 
             if (headersModified) {
-                CSReporter.debug(`Stripped Windows SSO credentials from: ${url.substring(0, 80)}...`);
+                CSReporter.debug(`Stripped SSO credentials from: ${url.substring(0, 80)}...`);
             }
 
-            // Layer 3: Inject login_hint + prompt=login into OAuth authorize URLs
+            // Layer 3: Modify OAuth authorize URLs (login_hint + prompt).
+            // Note: page.route() only fires for XHR/fetch requests and direct navigations,
+            // not for 302 redirect targets. The authorize URL from CRM → Azure AD is a
+            // redirect target and won't be intercepted here. But autologon blocking (Layer 1)
+            // and header stripping (Layer 2) prevent VDI auto-auth on the login page itself.
             if (url.includes('/oauth2/authorize') || url.includes('/oauth2/v2.0/authorize')) {
                 try {
-                    const urlObj = new URL(url);
-                    urlObj.searchParams.set('login_hint', testUsername);
-                    urlObj.searchParams.set('prompt', 'login');
-                    const modifiedUrl = urlObj.toString();
-                    CSReporter.debug(`OAuth intercept: login_hint=${testUsername}, prompt=login`);
+                    let modifiedUrl = url;
+
+                    // Layer 3a: Add or replace login_hint
+                    const encodedHint = encodeURIComponent(testUsername);
+                    if (modifiedUrl.includes('login_hint=')) {
+                        modifiedUrl = modifiedUrl.replace(/login_hint=[^&]*/, `login_hint=${encodedHint}`);
+                    } else {
+                        modifiedUrl += `&login_hint=${encodedHint}`;
+                    }
+
+                    // Layer 3b: Add or replace prompt
+                    if (!this.credentialsEntered) {
+                        if (modifiedUrl.includes('prompt=')) {
+                            modifiedUrl = modifiedUrl.replace(/prompt=[^&]*/, 'prompt=login');
+                        } else {
+                            modifiedUrl += '&prompt=login';
+                        }
+                        CSReporter.debug(`OAuth intercept: login_hint=${testUsername}, prompt=login`);
+                    } else {
+                        // Remove prompt param so Microsoft uses the existing session
+                        modifiedUrl = modifiedUrl.replace(/[&?]prompt=[^&]*/, '');
+                        CSReporter.debug(`OAuth intercept (post-login): login_hint=${testUsername}, no prompt`);
+                    }
+
                     await route.continue({ url: modifiedUrl, headers });
                     return;
                 } catch (err: any) {
@@ -362,12 +499,13 @@ export class CSMicrosoftSSOHandler {
                 }
             }
 
-            // For non-OAuth requests to login.microsoftonline.com, still strip headers
+            // For non-OAuth requests, continue with (possibly modified) headers
             await route.continue({ headers });
         };
 
-        await page.route('**/*login.microsoftonline.com/**', this.oauthRouteHandler);
-        CSReporter.debug('VDI SSO bypass active: autologon blocked + headers stripped + OAuth params injected');
+        await page.route(/login\.microsoftonline\.com/, this.oauthRouteHandler);
+
+        CSReporter.debug('OAuth interception active: autologon blocked + login_hint/prompt injected');
     }
 
     /**
@@ -376,14 +514,14 @@ export class CSMicrosoftSSOHandler {
     private async removeOAuthInterception(page: any): Promise<void> {
         try {
             if (this.autologonRouteHandler) {
-                await page.unroute('**/*autologon.microsoftonline.com/**', this.autologonRouteHandler);
+                await page.unroute(/autologon\.microsoftonline\.com/, this.autologonRouteHandler);
                 this.autologonRouteHandler = null;
             }
             if (this.oauthRouteHandler) {
-                await page.unroute('**/*login.microsoftonline.com/**', this.oauthRouteHandler);
+                await page.unroute(/login\.microsoftonline\.com/, this.oauthRouteHandler);
                 this.oauthRouteHandler = null;
             }
-            CSReporter.debug('VDI SSO bypass routes removed');
+            CSReporter.debug('OAuth interception routes removed');
         } catch {
             // Ignore — page may already be closed
         }
@@ -506,7 +644,7 @@ export class CSMicrosoftSSOHandler {
     /**
      * Click "Sign Out" on the application error/restriction page.
      * This is used when the persistent context (VDI profile) auto-authenticated
-     * as the wrong user (e.g., khana8) and we need to sign out to switch users.
+     * as the VDI user (wrong user) and we need to sign out to switch to the test user.
      *
      * Dynamics 365 error pages typically have:
      *   - A "Sign Out" link in the header
@@ -609,54 +747,43 @@ export class CSMicrosoftSSOHandler {
     }
 
     /**
-     * After clicking Sign Out, Microsoft may show "You signed out of your account" page.
-     * This page has no email/password fields. We need to either:
-     *   1. Click "Sign in again" / "Sign in with a different account" link if present
-     *   2. Otherwise, navigate back to the app URL to trigger a fresh SSO redirect
+     * After clicking Sign Out, the logout URL typically has post_logout_redirect_uri
+     * which triggers an automatic redirect chain:
+     *   Microsoft logout → post_logout_redirect_uri (app) → SSO redirect → Pick an account / login page
+     *
+     * We must NOT run page.evaluate() during this redirect chain — it will fail with
+     * "Execution context was destroyed". Instead, we wait for the redirects to fully settle,
+     * then check where we ended up. If we're still on a dead-end page, navigate to the app.
      */
     private async handlePostSignOutPage(page: any, timeout: number): Promise<void> {
-        const currentUrl = page.url().toLowerCase();
+        // The logout page often has post_logout_redirect_uri which triggers automatic redirects.
+        // Give the redirect chain plenty of time to complete (up to 15s).
+        CSReporter.debug(`Post-sign-out: waiting for redirect chain to complete...`);
+        await this.waitForNavigationToSettle(page, 15000);
 
-        // Check if we're on a Microsoft logout/signout confirmation page
-        if (currentUrl.includes('logout') || currentUrl.includes('signout')) {
-            CSReporter.debug(`Post-sign-out page detected: ${page.url()}`);
+        const settledUrl = page.url().toLowerCase();
+        CSReporter.debug(`Post-sign-out settled at: ${page.url()}`);
 
-            // Try to click "Sign in again" / "Sign in with a different account" link
-            const clicked = await page.evaluate(() => {
-                const allLinks = Array.from(document.querySelectorAll('a'));
-                for (const link of allLinks) {
-                    const text = (link as HTMLElement).innerText?.toLowerCase() || '';
-                    if (text.includes('sign in') || text.includes('login') || text.includes('another account')) {
-                        (link as HTMLElement).click();
-                        return true;
-                    }
-                }
-                // Also try buttons
-                const allButtons = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-                for (const btn of allButtons) {
-                    const text = ((btn as HTMLElement).innerText || (btn as HTMLInputElement).value || '').toLowerCase();
-                    if (text.includes('sign in') || text.includes('login')) {
-                        (btn as HTMLElement).click();
-                        return true;
-                    }
-                }
-                return false;
-            });
-
-            if (clicked) {
-                CSReporter.debug('Clicked "Sign in" on post-sign-out page');
-                await this.waitForNavigationToSettle(page, 5000);
-            } else {
-                // No sign-in link found — navigate back to the login URL to trigger SSO redirect
-                const loginUrl = this.config.get('SSO_LOGIN_URL') || this.config.get('BASE_URL');
-                CSReporter.debug(`No sign-in link found — navigating back to app: ${loginUrl}`);
-                await page.goto(loginUrl, {
-                    waitUntil: 'domcontentloaded',
-                    timeout: timeout
-                });
-                await this.waitForNavigationToSettle(page, 5000);
-            }
+        // If we landed on the Microsoft login page or account picker — perfect, we're done
+        if (settledUrl.includes('login.microsoftonline.com') && !settledUrl.includes('logout')) {
+            CSReporter.debug('Post-sign-out: landed on Microsoft login page — ready for credentials');
+            return;
         }
+
+        // If we're still on a logout/signout confirmation page (no redirect happened),
+        // navigate back to the app URL to trigger a fresh SSO redirect
+        if (settledUrl.includes('logout') || settledUrl.includes('signout') || settledUrl.includes('signed+out')) {
+            const loginUrl = this.config.get('SSO_LOGIN_URL') || this.config.get('BASE_URL');
+            CSReporter.debug(`Post-sign-out: still on sign-out page — navigating to app: ${loginUrl}`);
+            await page.goto(loginUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: timeout
+            });
+            await this.waitForNavigationToSettle(page, 10000);
+        }
+
+        // If we landed back on the app (already authenticated) — that's fine too
+        // The main login() flow will handle detection via waitForMicrosoftLoginPage / enterEmail
     }
 
     /**
@@ -696,7 +823,7 @@ export class CSMicrosoftSSOHandler {
 
     private async waitForMicrosoftLoginPage(page: any, timeout: number): Promise<void> {
         try {
-            // Wait for either the email input field or the URL to contain Microsoft login domains
+            // Wait for Microsoft login page: email input, password input, OR account picker
             await page.waitForFunction(
                 () => {
                     const url = window.location.href.toLowerCase();
@@ -707,13 +834,18 @@ export class CSMicrosoftSSOHandler {
                         url.includes('sts.windows.net') ||
                         url.includes('adfs');
 
-                    // Also check if the email input field is present
+                    // Check for email input, password input, or account picker
                     const emailInput =
                         document.querySelector('input[type="email"]') ||
                         document.querySelector('input[name="loginfmt"]') ||
                         document.querySelector('#i0116');
+                    const passwordInput = document.querySelector('input[type="password"]');
+                    const accountPicker =
+                        document.querySelector('#otherTileText') ||
+                        document.querySelector('[data-test-id="otherTile"]') ||
+                        document.querySelector('.table[role="presentation"]');
 
-                    return isMicrosoftLogin || emailInput;
+                    return isMicrosoftLogin || emailInput || passwordInput || accountPicker;
                 },
                 { timeout: timeout }
             );
@@ -740,28 +872,52 @@ export class CSMicrosoftSSOHandler {
      *   c) Show "Pick an account" page → click "Use another account", then fill email
      */
     private async enterEmail(page: any, email: string, timeout: number): Promise<void> {
-        // Wait a moment for the page to settle after redirect
-        await page.waitForTimeout(2000);
+        // Wait for the page to fully settle — redirects may still be in progress
+        await this.waitForNavigationToSettle(page, 5000);
+        await page.waitForTimeout(1000);
 
-        // Check what state the page is in
-        const pageState = await page.evaluate(() => {
-            // Password field visible? (login_hint skipped email page)
-            const pwdInput = document.querySelector('input[type="password"]') as HTMLElement | null;
-            if (pwdInput && pwdInput.offsetParent !== null) return 'password';
+        // Check what state the page is in — with retry for mid-navigation errors
+        let pageState = 'unknown';
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                pageState = await page.evaluate(() => {
+                    // Password field visible? (login_hint skipped email page)
+                    const pwdInput = document.querySelector('input[type="password"]') as HTMLElement | null;
+                    if (pwdInput && pwdInput.offsetParent !== null) return 'password';
 
-            // "Pick an account" page? (Microsoft shows previously used accounts)
-            const otherTile = document.querySelector('#otherTileText');
-            if (otherTile) return 'pickAccount';
+                    // "Pick an account" page? (Microsoft shows previously used accounts)
+                    // Multiple selectors for robustness
+                    const otherTile = document.querySelector('#otherTileText') ||
+                        document.querySelector('[data-test-id="otherTile"]');
+                    if (otherTile) return 'pickAccount';
 
-            // Email input visible? (standard login page)
-            const emailInput = document.querySelector('input[type="email"], input[name="loginfmt"], #i0116') as HTMLElement | null;
-            if (emailInput && emailInput.offsetParent !== null) return 'email';
+                    // Also check by text: look for "Use another account" text anywhere
+                    const allDivs = Array.from(document.querySelectorAll('div, span, p'));
+                    for (const el of allDivs) {
+                        const text = (el as HTMLElement).innerText?.toLowerCase() || '';
+                        if (text === 'use another account') return 'pickAccount';
+                    }
 
-            // Email input exists but hidden? (might still be loading)
-            if (emailInput) return 'emailHidden';
+                    // Email input visible? (standard login page)
+                    const emailInput = document.querySelector('input[type="email"], input[name="loginfmt"], #i0116') as HTMLElement | null;
+                    if (emailInput && emailInput.offsetParent !== null) return 'email';
 
-            return 'unknown';
-        });
+                    // Email input exists but hidden? (might still be loading)
+                    if (emailInput) return 'emailHidden';
+
+                    return 'unknown';
+                });
+                break; // Success — exit retry loop
+            } catch (error: any) {
+                if (error.message.includes('context was destroyed') || error.message.includes('navigation')) {
+                    CSReporter.debug(`enterEmail page state detection attempt ${attempt + 1} failed (navigation), retrying...`);
+                    await page.waitForTimeout(2000);
+                    try { await page.waitForLoadState('domcontentloaded', { timeout: 5000 }); } catch {}
+                } else {
+                    throw error;
+                }
+            }
+        }
 
         CSReporter.debug(`Microsoft login page state: ${pageState}`);
 
@@ -772,8 +928,39 @@ export class CSMicrosoftSSOHandler {
 
         if (pageState === 'pickAccount') {
             CSReporter.debug('"Pick an account" page detected — clicking "Use another account"');
-            await page.click('#otherTileText');
-            await page.waitForTimeout(1500);
+            // Try multiple approaches to click "Use another account"
+            try {
+                // Approach 1: Click by ID
+                const otherTile = await page.$('#otherTileText');
+                if (otherTile) {
+                    await otherTile.click();
+                } else {
+                    // Approach 2: Click by data-test-id
+                    const otherTile2 = await page.$('[data-test-id="otherTile"]');
+                    if (otherTile2) {
+                        await otherTile2.click();
+                    } else {
+                        // Approach 3: Find and click by text content
+                        await page.evaluate(() => {
+                            const allElements = Array.from(document.querySelectorAll('div, span, a, p'));
+                            for (const el of allElements) {
+                                const text = (el as HTMLElement).innerText?.trim().toLowerCase() || '';
+                                if (text === 'use another account') {
+                                    // Click the closest clickable parent (the tile row)
+                                    const clickTarget = (el as HTMLElement).closest('[role="button"], [role="link"], a, div[tabindex]') || el;
+                                    (clickTarget as HTMLElement).click();
+                                    return;
+                                }
+                            }
+                        });
+                    }
+                }
+                CSReporter.debug('Clicked "Use another account"');
+                await page.waitForTimeout(2000);
+            } catch (clickError: any) {
+                CSReporter.debug(`Click "Use another account" error: ${clickError.message}`);
+                await page.waitForTimeout(2000);
+            }
         }
 
         // Wait for the email input to be visible
@@ -832,6 +1019,10 @@ export class CSMicrosoftSSOHandler {
         // Wait for the page transition
         await page.waitForTimeout(2000);
         CSReporter.debug('Password entered and Sign in clicked');
+
+        // Mark credentials as entered — OAuth interception will stop injecting prompt=login
+        // so subsequent OAuth redirects use the test user's session cookie
+        this.credentialsEntered = true;
 
         // Check for error messages
         try {
@@ -976,7 +1167,11 @@ export class CSMicrosoftSSOHandler {
             );
 
             // Additional wait for the app to fully load
-            await page.waitForLoadState('domcontentloaded', { timeout: timeout });
+            try {
+                await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+            } catch {
+                // domcontentloaded may not fire on error pages — that's OK
+            }
 
             CSReporter.debug(`Redirected back to application: ${page.url()}`);
         } catch (error) {
@@ -988,6 +1183,412 @@ export class CSMicrosoftSSOHandler {
                 return;
             }
             throw new Error(`App redirect did not complete within ${timeout}ms. Current URL: ${currentUrl}`);
+        }
+
+        // After redirect, check if we landed on an error page (404, chrome-error://, etc.)
+        // This happens when the OAuth redirect_uri points to an internal CRM server URL
+        // (e.g., an internal CRM server hostname) that returns 404.
+        // The session cookies are already set, so navigating to the original app URL will work.
+        const currentUrl = page.url();
+        const isErrorPage =
+            currentUrl.startsWith('chrome-error://') ||
+            currentUrl.startsWith('edge-error://') ||
+            currentUrl.includes('ERR_') ||
+            currentUrl === 'about:blank';
+
+        // Also check if we're on a different CRM server (internal redirect) that gave a 404
+        let isInternalServerError = false;
+        if (!isErrorPage) {
+            try {
+                isInternalServerError = await page.evaluate(() => {
+                    const bodyText = document.body?.innerText?.toLowerCase() || '';
+                    const title = document.title?.toLowerCase() || '';
+                    return bodyText.includes('page can\'t be found') ||
+                        bodyText.includes('page not found') ||
+                        bodyText.includes('http error 404') ||
+                        bodyText.includes('http error 403') ||
+                        title.includes('404') ||
+                        title.includes('error');
+                });
+            } catch {
+                // page.evaluate may fail on chrome-error:// pages
+                isInternalServerError = false;
+            }
+        }
+
+        if (isErrorPage || isInternalServerError) {
+            // Post-login error page detected. This typically means the OAuth redirect_uri
+            // went to an unreachable internal server. Navigate to the main app URL as recovery.
+            CSReporter.warn(`Post-login error detected at: ${currentUrl}. Navigating to main app URL...`);
+            await page.goto(originalUrl, {
+                waitUntil: 'domcontentloaded',
+                timeout: timeout
+            });
+            await this.waitForNavigationToSettle(page, 15000);
+
+            const recoveryUrl = page.url().toLowerCase();
+            CSReporter.debug(`After recovery navigation, now at: ${page.url()}`);
+
+            // If recovery landed on the Microsoft login page (e.g., "Pick an account"),
+            // the auth code was consumed by the 404. Try to reuse the test user's session
+            // by clicking their account tile, or wait for auto-redirect.
+            if (recoveryUrl.includes('login.microsoftonline.com')) {
+                CSReporter.warn('Recovery landed on Microsoft login page — attempting to reuse test user session...');
+
+                // Check if "Pick an account" is shown — click the test user's tile
+                try {
+                    const clickedAccount = await page.evaluate(() => {
+                        // Look for account tiles (Microsoft's "Pick an account" page)
+                        const tiles = Array.from(document.querySelectorAll('[data-test-id]'));
+                        for (const tile of tiles) {
+                            const testId = tile.getAttribute('data-test-id') || '';
+                            // Click the first non-"other" tile (the test user's account)
+                            if (testId && testId !== 'otherTile' && testId.includes('Tile')) {
+                                (tile as HTMLElement).click();
+                                return true;
+                            }
+                        }
+                        // Fallback: look for any account tile by role
+                        const listItems = Array.from(document.querySelectorAll('[role="listitem"], .table[role="presentation"] div[tabindex]'));
+                        if (listItems.length > 0) {
+                            (listItems[0] as HTMLElement).click();
+                            return true;
+                        }
+                        return false;
+                    });
+
+                    if (clickedAccount) {
+                        CSReporter.debug('Clicked test user account tile on "Pick an account" page');
+                        // Wait for the re-authentication redirect to complete
+                        try {
+                            await page.waitForFunction(
+                                (domain: string) => !window.location.href.toLowerCase().includes('login.microsoftonline.com') ||
+                                    window.location.href.toLowerCase().includes(domain),
+                                new URL(originalUrl).hostname.toLowerCase(),
+                                { timeout: 30000 }
+                            );
+                            await this.waitForNavigationToSettle(page, 10000);
+                            CSReporter.debug(`After account selection, now at: ${page.url()}`);
+                        } catch {
+                            CSReporter.warn('Account selection did not redirect to app within timeout');
+                        }
+                    } else {
+                        CSReporter.warn('No account tile found — login page may require fresh credentials');
+                    }
+                } catch (e: any) {
+                    CSReporter.debug(`Pick-an-account recovery failed: ${e.message}`);
+                }
+            }
+        }
+    }
+
+    /**
+     * Wait for the application to fully load after SSO login redirect.
+     *
+     * Dynamics 365 / Power Platform apps can take several seconds to initialize after redirect.
+     * This method waits for:
+     *   1. Block PowerApps web player resources (prevents infinite "Sign in required" popup)
+     *   2. Network to settle (no pending requests)
+     *   3. Loading spinners to disappear (uses framework's SPINNER_SELECTORS config)
+     *   4. "Sign in required" popup dismissal — close/remove from DOM (NOT click "Sign in")
+     *   5. SSO_APP_READY_SELECTOR — a configurable CSS selector or text that indicates the app is ready
+     *      e.g., SSO_APP_READY_SELECTOR=text=SANDBOX  or  SSO_APP_READY_SELECTOR=#headerTitle
+     *   6. SSO_APP_READY_TEXT — wait for specific text to appear on the page
+     *      e.g., SSO_APP_READY_TEXT=SANDBOX
+     */
+    private async waitForAppReady(page: any, timeout: number): Promise<void> {
+        // Step 1: Block ALL PowerApps domains and inject continuous popup auto-dismissal.
+        // This MUST happen before network activity completes — the PowerApps component
+        // tries to authenticate via sandboxed iframe and CRM's MSAL.js requests tokens
+        // for PowerApps scopes. Both fail on VDI → infinite "Sign in required" popup.
+        await this.suppressPowerAppsSignInPopups(page);
+
+        // Step 2: Wait for networkidle (all XHR/fetch requests done)
+        try {
+            await page.waitForLoadState('networkidle', { timeout: Math.min(timeout, 30000) });
+            CSReporter.debug('App page: networkidle reached');
+        } catch {
+            CSReporter.debug('App page: networkidle timeout — continuing (app may use long-polling)');
+        }
+
+        // Step 3: Wait for loading spinners to disappear (framework-level)
+        try {
+            await this.browserManager.waitForSpinnersToDisappear(Math.min(timeout, 15000));
+        } catch {
+            // Spinner wait is best-effort
+        }
+
+        // Step 4: Wait for app-ready selector if configured
+        const readySelector = this.config.get('SSO_APP_READY_SELECTOR');
+        if (readySelector) {
+            try {
+                CSReporter.debug(`Waiting for app-ready selector: ${readySelector}`);
+                if (readySelector.startsWith('text=')) {
+                    // Text-based selector: wait for text to appear
+                    const textToFind = readySelector.substring(5);
+                    await page.waitForFunction(
+                        (text: string) => {
+                            return document.body?.innerText?.includes(text) || false;
+                        },
+                        textToFind,
+                        { timeout: Math.min(timeout, 30000) }
+                    );
+                } else {
+                    // CSS selector
+                    await page.waitForSelector(readySelector, {
+                        state: 'visible',
+                        timeout: Math.min(timeout, 30000)
+                    });
+                }
+                CSReporter.debug(`App-ready selector found: ${readySelector}`);
+            } catch (error: any) {
+                CSReporter.warn(`App-ready selector "${readySelector}" not found within timeout — continuing`);
+            }
+        }
+
+        // Step 6: Wait for app-ready text if configured
+        const readyText = this.config.get('SSO_APP_READY_TEXT');
+        if (readyText) {
+            try {
+                CSReporter.debug(`Waiting for app-ready text: "${readyText}"`);
+                await page.waitForFunction(
+                    (text: string) => {
+                        return document.body?.innerText?.includes(text) || false;
+                    },
+                    readyText,
+                    { timeout: Math.min(timeout, 30000) }
+                );
+                CSReporter.debug(`App-ready text found: "${readyText}"`);
+            } catch (error: any) {
+                CSReporter.warn(`App-ready text "${readyText}" not found within timeout — continuing`);
+            }
+        }
+
+        CSReporter.info(`Application loaded at: ${page.url()}`);
+    }
+
+    /**
+     * Suppress PowerApps-related "Sign in required" popups in Dynamics 365.
+     *
+     * Three-pronged approach:
+     *
+     * 1. BLOCK all *.powerapps.com domains via Playwright route interception.
+     *    Not just the web player JS — ALL subdomains (content, service, api, etc.).
+     *    This prevents PowerApps from loading, authenticating, OR making API calls.
+     *
+     * 2. INJECT a MutationObserver into the page that continuously monitors the DOM
+     *    and auto-dismisses any "Sign in required" dialog the instant it appears.
+     *    This handles timing — the popup can appear at ANY point during or after load.
+     *    The observer also runs on a 3-second polling interval as backup.
+     *
+     * 3. BLOCK hidden iframe auth attempts by intercepting requests to
+     *    login.microsoftonline.com that contain prompt=none and powerapps in the scope.
+     *    These are MSAL.js silent token refresh attempts that fail and trigger the popup.
+     *
+     * Why this is needed:
+     *   - CRM's MSAL.js requests tokens for PowerApps scopes from login.microsoftonline.com
+     *   - The token request fails (400) because the test user / VDI environment can't get them
+     *   - MSAL.js escalates from silent → interactive → shows "Sign in required" popup
+     *   - Clicking "Sign in" retries the same failing flow → infinite loop
+     *   - Even dismissing the popup doesn't stop MSAL.js from recreating it
+     *
+     * Safe to call multiple times — idempotent.
+     * Safe to call on non-Dynamics 365 pages — no-ops.
+     *
+     * Can be called from page objects and step definitions via the public API.
+     */
+    private powerAppsRouteHandler: ((route: any) => Promise<void>) | null = null;
+    private powerAppsAuthRouteHandler: ((route: any) => Promise<void>) | null = null;
+    private popupDismissalInjected: boolean = false;
+
+    public async suppressPowerAppsSignInPopups(page: any): Promise<void> {
+        await this.blockPowerAppsResources(page);
+        await this.injectSignInPopupAutoDismissal(page);
+    }
+
+    /**
+     * One-shot dismiss of "Sign in required" popup.
+     * For manual/step-definition use. The MutationObserver handles continuous dismissal.
+     */
+    public async handleSignInRequiredPopup(page: any, _timeout?: number): Promise<boolean> {
+        try {
+            return await page.evaluate(() => {
+                return (window as any).__csSignInDismissFn ? (window as any).__csSignInDismissFn() : false;
+            });
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Block ALL PowerApps-related domains via route interception.
+     *
+     * Blocks:
+     *   - content.powerapps.com (web player JS, resources)
+     *   - service.powerapps.com (PowerApps API)
+     *   - api.powerapps.com (PowerApps API)
+     *   - *.tip.powerapps.com (PowerApps TIP endpoints)
+     *   - Any other *.powerapps.com subdomain
+     *
+     * Also blocks MSAL.js silent token requests (prompt=none hidden iframes) that
+     * target PowerApps scopes — these are the requests whose 400 failure triggers
+     * the interactive "Sign in required" popup.
+     */
+    private async blockPowerAppsResources(page: any): Promise<void> {
+        // Block all *.powerapps.com subdomains
+        if (!this.powerAppsRouteHandler) {
+            try {
+                this.powerAppsRouteHandler = async (route: any) => {
+                    CSReporter.debug(`Blocked PowerApps: ${route.request().url().substring(0, 120)}`);
+                    await route.abort('blockedbyclient');
+                };
+                await page.route(/\.powerapps\.com/, this.powerAppsRouteHandler);
+                CSReporter.debug('PowerApps domain block active (*.powerapps.com)');
+            } catch (error: any) {
+                CSReporter.debug(`Could not set up PowerApps block: ${error.message}`);
+            }
+        }
+
+        // Block MSAL.js silent token requests (hidden iframes) for PowerApps scopes.
+        // These go to login.microsoftonline.com with prompt=none in the URL.
+        // When they fail (400), MSAL.js escalates to interactive → popup.
+        // We only block requests that contain "powerapps" in the URL (scope/resource param).
+        if (!this.powerAppsAuthRouteHandler) {
+            try {
+                this.powerAppsAuthRouteHandler = async (route: any) => {
+                    const url = route.request().url();
+                    if (url.includes('prompt=none') && url.toLowerCase().includes('powerapps')) {
+                        CSReporter.debug(`Blocked PowerApps silent auth: ${url.substring(0, 120)}`);
+                        await route.abort('blockedbyclient');
+                        return;
+                    }
+                    await route.continue();
+                };
+                await page.route(/login\.microsoftonline\.com.*oauth2/, this.powerAppsAuthRouteHandler);
+                CSReporter.debug('PowerApps silent auth block active');
+            } catch (error: any) {
+                CSReporter.debug(`Could not set up PowerApps auth block: ${error.message}`);
+            }
+        }
+    }
+
+    /**
+     * Inject a persistent MutationObserver + polling that automatically dismisses
+     * "Sign in required" popups the instant they appear in the DOM.
+     *
+     * Unlike one-shot checks, this runs continuously in the browser context:
+     *   - MutationObserver fires on every DOM change (catches popups as they're added)
+     *   - setInterval polls every 3 seconds as backup (catches edge cases)
+     *   - Runs for up to 2 minutes (40 polls × 3s), then stops polling (observer continues)
+     *
+     * The dismiss logic:
+     *   1. Detects "sign in required" / "sign in to continue" text in the page
+     *   2. Clicks close/cancel/dismiss/X buttons (NOT "Sign in")
+     *   3. If no dismiss button found, removes dialog elements from the DOM
+     *   4. Removes overlay/backdrop elements blocking interaction
+     *
+     * Idempotent — safe to call multiple times (checks __csPopupDismissalActive flag).
+     */
+    private async injectSignInPopupAutoDismissal(page: any): Promise<void> {
+        if (this.popupDismissalInjected) return;
+
+        try {
+            await page.evaluate(() => {
+                if ((window as any).__csPopupDismissalActive) return;
+                (window as any).__csPopupDismissalActive = true;
+
+                // ─── Core dismiss function ───
+                const dismissSignInPopup = (): boolean => {
+                    const bodyText = document.body?.innerText?.toLowerCase() || '';
+
+                    const signInRequired =
+                        (bodyText.includes('required') && bodyText.includes('sign in')) ||
+                        (bodyText.includes('sign in') && bodyText.includes('features')) ||
+                        bodyText.includes('sign in to continue') ||
+                        bodyText.includes('session has expired') ||
+                        bodyText.includes('your session has timed out');
+
+                    if (!signInRequired) return false;
+
+                    // Strategy 1: Click close/cancel/dismiss/X/ok buttons (NOT "Sign in")
+                    const dismissBtnSelectors = ['button', 'a', '[role="button"]', 'span'];
+                    for (const selector of dismissBtnSelectors) {
+                        const elements = Array.from(document.querySelectorAll(selector));
+                        for (const el of elements) {
+                            const text = ((el as HTMLElement).innerText || '').trim().toLowerCase();
+                            const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+                            const title = (el.getAttribute('title') || '').toLowerCase();
+
+                            if (text === 'close' || text === 'cancel' || text === 'dismiss' ||
+                                text === 'x' || text === 'ok' || text === 'not now' ||
+                                ariaLabel === 'close' || ariaLabel.includes('dismiss') ||
+                                title === 'close' || title.includes('dismiss')) {
+                                (el as HTMLElement).click();
+                                return true;
+                            }
+                        }
+                    }
+
+                    // Strategy 2: Remove dialog/modal elements containing sign-in text
+                    const dialogSelectors = [
+                        '[role="dialog"]', '[role="alertdialog"]',
+                        '.ms-Dialog', '.ms-Modal',
+                        '[class*="dialog"]', '[class*="Dialog"]',
+                        '[class*="modal"]', '[class*="Modal"]',
+                        '[class*="popup"]', '[class*="Popup"]',
+                    ];
+                    for (const sel of dialogSelectors) {
+                        const dialogs = Array.from(document.querySelectorAll(sel));
+                        for (const dialog of dialogs) {
+                            const dt = ((dialog as HTMLElement).innerText || '').toLowerCase();
+                            if (dt.includes('sign in') &&
+                                (dt.includes('required') || dt.includes('features') ||
+                                 dt.includes('continue') || dt.includes('session'))) {
+                                (dialog as HTMLElement).remove();
+                                return true;
+                            }
+                        }
+                    }
+
+                    // Strategy 3: Remove overlay/backdrop blocking interaction
+                    const overlays = document.querySelectorAll(
+                        '[class*="overlay"], [class*="Overlay"], [class*="backdrop"], .ms-Overlay'
+                    );
+                    let removedOverlay = false;
+                    overlays.forEach(overlay => {
+                        const style = window.getComputedStyle(overlay);
+                        if (style.position === 'fixed' || style.position === 'absolute') {
+                            (overlay as HTMLElement).remove();
+                            removedOverlay = true;
+                        }
+                    });
+
+                    return removedOverlay;
+                };
+
+                // Expose for manual one-shot calls from Playwright
+                (window as any).__csSignInDismissFn = dismissSignInPopup;
+
+                // ─── MutationObserver: fires on every DOM change ───
+                if (document.body) {
+                    const observer = new MutationObserver(() => {
+                        try { dismissSignInPopup(); } catch { /* ignore */ }
+                    });
+                    observer.observe(document.body, { childList: true, subtree: true });
+                }
+
+                // ─── Polling backup: every 3s for 2 minutes ───
+                let pollCount = 0;
+                const interval = setInterval(() => {
+                    try { dismissSignInPopup(); } catch { /* ignore */ }
+                    if (++pollCount >= 40) clearInterval(interval);
+                }, 3000);
+            });
+
+            this.popupDismissalInjected = true;
+            CSReporter.debug('Sign-in popup auto-dismissal active (MutationObserver + 3s polling)');
+        } catch (error: any) {
+            CSReporter.debug(`Could not inject popup auto-dismissal: ${error.message}`);
         }
     }
 
@@ -1037,14 +1638,94 @@ export class CSMicrosoftSSOHandler {
     /**
      * Smart login: Use saved session if valid, otherwise perform fresh login
      * This is the recommended method for test suites
+     *
+     * When a valid session file exists:
+     *   1. Injects saved cookies into the EXISTING browser context (non-destructive)
+     *   2. Navigates to the app URL
+     *   3. Injects saved localStorage for matching origins
+     *   4. If the app redirects to the Microsoft login page (tokens expired), falls back to fresh login
+     *
+     * This handles the common case where BROWSER_REUSE_CLEAR_STATE=true wipes cookies
+     * between scenarios — the session file is still valid on disk but the browser has no cookies.
+     *
+     * IMPORTANT: Does NOT call loadStorageState() (which closes/recreates the context) because
+     * that conflicts with BROWSER_REUSE_ENABLED mode where the BDD runner manages the context
+     * lifecycle and has active trace recording. Instead, injects cookies via context.addCookies().
      */
     public async ensureLoggedIn(options?: Partial<SSOLoginOptions>): Promise<void> {
         const maxSessionAge = this.config.getNumber('SSO_SESSION_MAX_AGE_HOURS', 12);
 
         if (this.isSessionValid(maxSessionAge)) {
-            CSReporter.info('Using existing saved session (still valid)');
-            // Session will be loaded automatically via AUTH_STORAGE_STATE_PATH in createContext
-            return;
+            CSReporter.info('Valid session file found — restoring cookies and navigating to app');
+
+            const sessionPath = this.config.get('AUTH_STORAGE_STATE_PATH');
+            const loginUrl = options?.loginUrl || this.config.get('SSO_LOGIN_URL') || this.config.get('BASE_URL');
+            const timeout = options?.timeout || this.config.getNumber('SSO_WAIT_TIMEOUT', 60000);
+
+            try {
+                // Read the saved session file
+                const fs = require('fs');
+                const resolvedPath = path.resolve(sessionPath);
+                const sessionData = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
+
+                const page = this.browserManager.getPage();
+                const context = page.context();
+
+                // Step 1: Inject saved cookies into the existing context
+                // context.addCookies() is non-destructive — it adds cookies without closing/recreating
+                if (sessionData.cookies && sessionData.cookies.length > 0) {
+                    await context.addCookies(sessionData.cookies);
+                    CSReporter.debug(`Injected ${sessionData.cookies.length} cookies into browser context`);
+                }
+
+                // Step 2: Navigate to the app URL
+                if (loginUrl) {
+                    CSReporter.info(`Navigating to app: ${loginUrl}`);
+                    await page.goto(loginUrl, {
+                        waitUntil: 'domcontentloaded',
+                        timeout: timeout
+                    });
+
+                    // Step 3: Inject localStorage for matching origins (MSAL tokens, app state)
+                    if (sessionData.origins && sessionData.origins.length > 0) {
+                        const currentOrigin = new URL(page.url()).origin;
+                        for (const origin of sessionData.origins) {
+                            if (origin.origin === currentOrigin &&
+                                origin.localStorage && origin.localStorage.length > 0) {
+                                await page.evaluate((items: { name: string; value: string }[]) => {
+                                    for (const item of items) {
+                                        try { localStorage.setItem(item.name, item.value); } catch {}
+                                    }
+                                }, origin.localStorage);
+                                CSReporter.debug(`Injected ${origin.localStorage.length} localStorage items for ${currentOrigin}`);
+                                // Reload so the app picks up the injected localStorage (MSAL tokens etc.)
+                                await page.reload({ waitUntil: 'domcontentloaded', timeout: timeout });
+                            }
+                        }
+                    }
+
+                    // Wait for redirects to complete
+                    await this.waitForNavigationToSettle(page, 10000);
+
+                    // Step 4: Check if we landed on the app or got redirected to login (expired tokens)
+                    const currentUrl = page.url().toLowerCase();
+                    if (currentUrl.includes('login.microsoftonline.com') ||
+                        currentUrl.includes('login.microsoft.com') ||
+                        currentUrl.includes('login.live.com')) {
+                        // Session tokens expired — fall back to fresh login
+                        CSReporter.info('Saved session expired (redirected to login) — performing fresh SSO login');
+                        await this.loginWithConfigCredentials(options);
+                        return;
+                    }
+
+                    // Step 5: Wait for app to be ready
+                    await this.waitForAppReady(page, timeout);
+                    CSReporter.pass('Session restored and app loaded successfully');
+                    return;
+                }
+            } catch (error: any) {
+                CSReporter.warn(`Session restore failed: ${error.message} — falling back to fresh login`);
+            }
         }
 
         CSReporter.info('No valid session found — performing fresh SSO login');

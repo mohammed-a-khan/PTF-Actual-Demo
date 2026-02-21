@@ -106,6 +106,14 @@ export class CSBrowserManager {
         this.currentBrowserType = browserType;
 
         try {
+            // Close existing browser processes if configured — but ONLY on the first launch
+            // when Playwright doesn't already own a browser. In browser reuse mode, the 2nd+
+            // scenario calls launch() again but the browser from scenario 1 is still alive.
+            // Killing it would destroy the Playwright-managed browser/context/page.
+            if (this.config.getBoolean('BROWSER_CLOSE_EXISTING', false) && !this.browser && !this.context) {
+                await this.closeExistingBrowserProcesses(browserType);
+            }
+
             // Check for CDP connection mode (BROWSER_CDP_URL)
             // Connects to an already-running Edge/Chrome with remote debugging enabled.
             // This is the solution for enterprise VDIs with Conditional Access device compliance:
@@ -119,10 +127,27 @@ export class CSBrowserManager {
                 return;
             }
 
+            // Resolve user data directory for persistent context mode
+            // Priority: BROWSER_USER_DATA_DIR (explicit) > BROWSER_USE_EXISTING_PROFILE=true (auto-detect)
+            let userDataDir: string | null = this.config.get('BROWSER_USER_DATA_DIR') || null;
+
+            if (!userDataDir && this.config.getBoolean('BROWSER_USE_EXISTING_PROFILE', false)) {
+                userDataDir = this.detectEdgeProfilePath(browserType);
+                if (userDataDir) {
+                    // Store the detected path in config so downstream code (SSO handler,
+                    // getChromeArgs, etc.) that checks BROWSER_USER_DATA_DIR sees it.
+                    // Without this, the SSO handler would use Mode A (fresh browser) instead
+                    // of Mode B (persistent context) and skip the aggressive VDI cleanup.
+                    this.config.set('BROWSER_USER_DATA_DIR', userDataDir);
+                    CSReporter.info(`Auto-detected browser profile path: ${userDataDir}`);
+                } else {
+                    CSReporter.warn('BROWSER_USE_EXISTING_PROFILE=true but could not auto-detect profile path. Falling back to fresh browser.');
+                }
+            }
+
             // Check if persistent context mode is needed (BROWSER_USER_DATA_DIR)
             // Persistent context is required for scenarios where the browser profile state
             // matters (e.g., Conditional Access device compliance on enterprise VDIs)
-            const userDataDir = this.config.get('BROWSER_USER_DATA_DIR');
             if (userDataDir && !this.context) {
                 CSReporter.info(`Launching persistent context with user data dir: ${userDataDir}`);
                 await this.launchPersistentContext(browserType, userDataDir);
@@ -241,6 +266,25 @@ export class CSBrowserManager {
         } else {
             this.page = await this.context.newPage();
         }
+
+        // Navigate the main page to about:blank immediately to stop any restored page
+        // from continuing to load (Edge crash recovery can trigger navigations on the first tab)
+        try {
+            await this.page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 });
+        } catch { /* ignore — page may already be on about:blank */ }
+
+        // Listen for new pages/tabs that Edge might open asynchronously (crash recovery,
+        // startup pages, extension popups, etc.) and close them immediately
+        this.context.on('page', async (newPage: any) => {
+            // Only auto-close if this is NOT our active test page
+            if (newPage !== this.page) {
+                try {
+                    const url = newPage.url();
+                    CSReporter.debug(`[PersistentContext] Auto-closing unexpected new tab: ${url}`);
+                    await newPage.close();
+                } catch { /* page may already be closed */ }
+            }
+        });
 
         // Add console log listener
         if (this.config.getBoolean('CONSOLE_LOG_CAPTURE', true)) {
@@ -458,10 +502,18 @@ export class CSBrowserManager {
         // When using a persistent user data directory (VDI profile), prevent Edge/Chrome from
         // restoring tabs from the previous session — we only want a clean tab for the test URL
         if (this.config.get('BROWSER_USER_DATA_DIR')) {
-            args.push('--restore-last-session=false');
             args.push('--no-first-run');
             args.push('--no-default-browser-check');
+            // Suppress crash recovery: prevents "Restore pages?" bubble and tab restoration
             args.push('--disable-session-crashed-bubble');
+            args.push('--hide-crash-restore-bubble');
+            // Disable background features that can open tabs or trigger navigations
+            args.push('--disable-background-mode');
+            args.push('--disable-backgrounding-occluded-windows');
+            // Disable Edge startup boost (pre-launches Edge in background, can interfere)
+            args.push('--disable-features=msStartupBoost,StartupBoostEnabled');
+            // Disable component updates that can trigger background activity
+            args.push('--disable-component-update');
         }
 
         // Add custom args
@@ -469,6 +521,341 @@ export class CSBrowserManager {
         args.push(...customArgs);
 
         return args;
+    }
+
+    /**
+     * Auto-detect the browser profile directory path for the current VDI user.
+     *
+     * Used when BROWSER_USE_EXISTING_PROFILE=true and no explicit BROWSER_USER_DATA_DIR is set.
+     * Constructs the default profile path based on the current OS username and browser type.
+     *
+     * Windows paths:
+     *   Edge:   C:\Users\{USERNAME}\AppData\Local\Microsoft\Edge\User Data
+     *   Chrome: C:\Users\{USERNAME}\AppData\Local\Google\Chrome\User Data
+     *
+     * Linux/WSL paths:
+     *   Edge:   /home/{USER}/.config/microsoft-edge
+     *   Chrome: /home/{USER}/.config/google-chrome
+     *
+     * macOS paths:
+     *   Edge:   /Users/{USER}/Library/Application Support/Microsoft Edge
+     *   Chrome: /Users/{USER}/Library/Application Support/Google/Chrome
+     *
+     * @param browserType - Browser type (edge, chrome, chromium)
+     * @returns Detected profile path, or null if detection fails
+     */
+    private detectEdgeProfilePath(browserType: string): string | null {
+        const fs = require('fs');
+        const os = require('os');
+
+        // Get the current username
+        const username = process.env.USERNAME || process.env.USER || os.userInfo().username;
+        if (!username) {
+            CSReporter.warn('Could not determine current username for profile path detection');
+            return null;
+        }
+
+        const platform = os.platform();
+        let profilePath: string | null = null;
+
+        if (platform === 'win32') {
+            // Windows
+            if (browserType === 'edge') {
+                profilePath = `C:\\Users\\${username}\\AppData\\Local\\Microsoft\\Edge\\User Data`;
+            } else if (browserType === 'chrome' || browserType === 'chromium') {
+                profilePath = `C:\\Users\\${username}\\AppData\\Local\\Google\\Chrome\\User Data`;
+            }
+        } else if (platform === 'linux') {
+            // Linux / WSL
+            // On WSL, Windows paths are accessible via /mnt/c/
+            // Check if running on WSL by looking for WSL-specific indicators
+            const isWSL = fs.existsSync('/proc/version') &&
+                fs.readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft');
+
+            if (isWSL) {
+                // WSL: use the Windows path via /mnt/c/
+                // Get Windows username from WSLENV or try common approaches
+                const winUsername = process.env.LOGNAME || process.env.USER || username;
+                if (browserType === 'edge') {
+                    profilePath = `/mnt/c/Users/${winUsername}/AppData/Local/Microsoft/Edge/User Data`;
+                } else if (browserType === 'chrome' || browserType === 'chromium') {
+                    profilePath = `/mnt/c/Users/${winUsername}/AppData/Local/Google/Chrome/User Data`;
+                }
+
+                // If WSL path doesn't exist, the Windows username might differ from Linux username
+                if (profilePath && !fs.existsSync(profilePath)) {
+                    CSReporter.debug(`WSL path not found: ${profilePath}`);
+                    // Try to get Windows username via cmd.exe
+                    try {
+                        const { execSync } = require('child_process');
+                        const winUser = execSync('cmd.exe /c echo %USERNAME% 2>/dev/null', { encoding: 'utf8' }).trim();
+                        if (winUser && winUser !== '%USERNAME%') {
+                            if (browserType === 'edge') {
+                                profilePath = `/mnt/c/Users/${winUser}/AppData/Local/Microsoft/Edge/User Data`;
+                            } else {
+                                profilePath = `/mnt/c/Users/${winUser}/AppData/Local/Google/Chrome/User Data`;
+                            }
+                            CSReporter.debug(`WSL Windows username detected: ${winUser}`);
+                        }
+                    } catch {
+                        CSReporter.debug('Could not detect Windows username from WSL');
+                    }
+                }
+            } else {
+                // Native Linux
+                const homeDir = os.homedir();
+                if (browserType === 'edge') {
+                    profilePath = path.join(homeDir, '.config', 'microsoft-edge');
+                } else if (browserType === 'chrome' || browserType === 'chromium') {
+                    profilePath = path.join(homeDir, '.config', 'google-chrome');
+                }
+            }
+        } else if (platform === 'darwin') {
+            // macOS
+            const homeDir = os.homedir();
+            if (browserType === 'edge') {
+                profilePath = path.join(homeDir, 'Library', 'Application Support', 'Microsoft Edge');
+            } else if (browserType === 'chrome' || browserType === 'chromium') {
+                profilePath = path.join(homeDir, 'Library', 'Application Support', 'Google', 'Chrome');
+            }
+        }
+
+        if (!profilePath) {
+            CSReporter.warn(`Profile path auto-detection not supported for browser: ${browserType} on platform: ${platform}`);
+            return null;
+        }
+
+        // Verify the path exists
+        if (fs.existsSync(profilePath)) {
+            CSReporter.info(`Detected browser profile directory: ${profilePath}`);
+            return profilePath;
+        }
+
+        CSReporter.warn(`Auto-detected profile path does not exist: ${profilePath}`);
+        return null;
+    }
+
+    /**
+     * Close existing browser processes before launching with persistent context.
+     *
+     * Required because Edge/Chrome lock the profile directory — Playwright cannot
+     * use launchPersistentContext() if another browser instance is using the same profile.
+     *
+     * Behavior:
+     *   - On Windows/WSL: Uses taskkill to close Edge/Chrome processes
+     *   - On Linux: Uses pkill to close browser processes
+     *   - On macOS: Uses pkill to close browser processes
+     *   - Waits briefly after killing to allow file locks to release
+     *
+     * Config: BROWSER_CLOSE_EXISTING=true
+     *
+     * WARNING: This will close ALL instances of the browser type (Edge/Chrome).
+     * The user should be aware that any open browser windows will be closed.
+     */
+    private async closeExistingBrowserProcesses(browserType: string): Promise<void> {
+        const os = require('os');
+        const { execSync } = require('child_process');
+        const platform = os.platform();
+
+        let processName: string;
+        let killCommand: string;
+
+        // Determine the process name based on browser type and OS
+        if (browserType === 'edge') {
+            if (platform === 'win32') {
+                processName = 'msedge.exe';
+                killCommand = `taskkill /f /im ${processName} /t 2>nul`;
+            } else if (platform === 'linux') {
+                // On WSL, Edge might be running as a Windows process
+                const isWSL = require('fs').existsSync('/proc/version') &&
+                    require('fs').readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft');
+                if (isWSL) {
+                    processName = 'msedge.exe';
+                    killCommand = `taskkill.exe /f /im ${processName} /t 2>/dev/null || pkill -f microsoft-edge 2>/dev/null`;
+                } else {
+                    processName = 'microsoft-edge';
+                    killCommand = `pkill -f ${processName} 2>/dev/null`;
+                }
+            } else if (platform === 'darwin') {
+                processName = 'Microsoft Edge';
+                killCommand = `pkill -f "Microsoft Edge" 2>/dev/null`;
+            } else {
+                CSReporter.debug(`Browser process close not supported on platform: ${platform}`);
+                return;
+            }
+        } else if (browserType === 'chrome' || browserType === 'chromium') {
+            if (platform === 'win32') {
+                processName = 'chrome.exe';
+                killCommand = `taskkill /f /im ${processName} /t 2>nul`;
+            } else if (platform === 'linux') {
+                const isWSL = require('fs').existsSync('/proc/version') &&
+                    require('fs').readFileSync('/proc/version', 'utf8').toLowerCase().includes('microsoft');
+                if (isWSL) {
+                    processName = 'chrome.exe';
+                    killCommand = `taskkill.exe /f /im ${processName} /t 2>/dev/null || pkill -f google-chrome 2>/dev/null`;
+                } else {
+                    processName = 'google-chrome';
+                    killCommand = `pkill -f ${processName} 2>/dev/null`;
+                }
+            } else if (platform === 'darwin') {
+                processName = 'Google Chrome';
+                killCommand = `pkill -f "Google Chrome" 2>/dev/null`;
+            } else {
+                CSReporter.debug(`Browser process close not supported on platform: ${platform}`);
+                return;
+            }
+        } else {
+            CSReporter.debug(`Browser close not supported for type: ${browserType}`);
+            return;
+        }
+
+        try {
+            CSReporter.info(`Closing existing ${browserType} browser processes...`);
+            execSync(killCommand, { encoding: 'utf8', timeout: 10000 });
+            // Wait for file locks to release after killing browser processes
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            CSReporter.info(`Existing ${browserType} browser processes closed`);
+        } catch (error: any) {
+            // Exit code 128 (taskkill: no matching processes) or similar is expected
+            // when no browser is running — this is not an error
+            CSReporter.debug(`Browser close result: ${error.message || 'no matching processes'}`);
+        }
+
+        // After force-killing, Edge/Chrome interprets this as a crash and will try to
+        // restore all previously open tabs on next launch. Clean up crash recovery data
+        // from the profile directory to prevent this.
+        const userDataDir = this.config.get('BROWSER_USER_DATA_DIR');
+        if (userDataDir) {
+            this.clearSessionRecoveryFiles(userDataDir);
+        }
+    }
+
+    /**
+     * Clear Edge/Chrome session recovery files from the profile directory.
+     *
+     * When a browser is force-killed (taskkill /f), it records a "crash" state.
+     * On next launch, crash recovery restores all previously open tabs, which
+     * interferes with test automation (extra tabs, background navigations, etc.).
+     *
+     * This method:
+     *   1. Deletes session recovery files (Current Session, Current Tabs, etc.)
+     *   2. Modifies the Preferences file to disable "Continue where you left off"
+     *      and suppress the crash restore bubble
+     *
+     * Safe to call even if files don't exist (silently skips missing files).
+     */
+    private clearSessionRecoveryFiles(userDataDir: string): void {
+        const fs = require('fs');
+        const resolvedDir = path.resolve(userDataDir);
+
+        // Session recovery files live inside the "Default" profile subfolder
+        // (or whichever profile folder is active)
+        const profileDirs = ['Default', 'Profile 1', 'Profile 2', 'Profile 3'];
+
+        for (const profileDir of profileDirs) {
+            const profilePath = path.join(resolvedDir, profileDir);
+            if (!fs.existsSync(profilePath)) continue;
+
+            // 1. Delete session/tab recovery files
+            const sessionFiles = [
+                'Current Session',
+                'Current Tabs',
+                'Last Session',
+                'Last Tabs',
+                'Session Storage',
+                'Sessions',
+            ];
+
+            for (const sessionFile of sessionFiles) {
+                const filePath = path.join(profilePath, sessionFile);
+                try {
+                    if (fs.existsSync(filePath)) {
+                        const stat = fs.statSync(filePath);
+                        if (stat.isDirectory()) {
+                            fs.rmSync(filePath, { recursive: true, force: true });
+                        } else {
+                            fs.unlinkSync(filePath);
+                        }
+                        CSReporter.debug(`Deleted session recovery: ${filePath}`);
+                    }
+                } catch (e: any) {
+                    CSReporter.debug(`Could not delete ${filePath}: ${e.message}`);
+                }
+            }
+
+            // 2. Modify Preferences to prevent session restore and crash bubble
+            const prefsPath = path.join(profilePath, 'Preferences');
+            if (fs.existsSync(prefsPath)) {
+                try {
+                    const prefs = JSON.parse(fs.readFileSync(prefsPath, 'utf8'));
+
+                    // Set startup to "Open the New Tab page" (value 5)
+                    // instead of "Continue where you left off" (value 1)
+                    if (!prefs.session) prefs.session = {};
+                    prefs.session.restore_on_startup = 5;
+
+                    // Clear the "exited cleanly" crash flag — tells Edge it was NOT a crash
+                    if (!prefs.profile) prefs.profile = {};
+                    prefs.profile.exit_type = 'Normal';
+                    prefs.profile.exited_cleanly = true;
+
+                    // Disable the "Restore pages?" crash bubble prompt
+                    if (!prefs.sessions) prefs.sessions = {};
+                    prefs.sessions.restore_on_startup = 5;
+
+                    // Disable startup boost (pre-launches Edge in background)
+                    if (!prefs.browser) prefs.browser = {};
+                    prefs.browser.startup_boost_enabled = false;
+
+                    fs.writeFileSync(prefsPath, JSON.stringify(prefs, null, 2), 'utf8');
+                    CSReporter.debug(`Updated Preferences: restore_on_startup=5, exit_type=Normal in ${profileDir}`);
+                } catch (e: any) {
+                    CSReporter.debug(`Could not update Preferences in ${profileDir}: ${e.message}`);
+                }
+            }
+
+            // 3. Also update "Secure Preferences" exit_type if it exists
+            // Edge uses this as a secondary crash detection mechanism
+            const securePrefsPath = path.join(profilePath, 'Secure Preferences');
+            if (fs.existsSync(securePrefsPath)) {
+                try {
+                    const secPrefs = JSON.parse(fs.readFileSync(securePrefsPath, 'utf8'));
+                    if (secPrefs.profile) {
+                        secPrefs.profile.exit_type = 'Normal';
+                        secPrefs.profile.exited_cleanly = true;
+                        fs.writeFileSync(securePrefsPath, JSON.stringify(secPrefs, null, 2), 'utf8');
+                        CSReporter.debug(`Updated Secure Preferences: exit_type=Normal in ${profileDir}`);
+                    }
+                } catch (e: any) {
+                    CSReporter.debug(`Could not update Secure Preferences in ${profileDir}: ${e.message}`);
+                }
+            }
+        }
+
+        // 4. Clean up top-level crash sentinel files
+        const topLevelCrashFiles = [
+            'BrowserMetrics-active.pma',
+            'BrowserMetrics-spare.pma',
+            'Crashpad',
+        ];
+        for (const crashFile of topLevelCrashFiles) {
+            const filePath = path.join(resolvedDir, crashFile);
+            try {
+                if (fs.existsSync(filePath)) {
+                    const stat = fs.statSync(filePath);
+                    if (stat.isDirectory()) {
+                        // Don't delete Crashpad dir, just its contents that trigger restore
+                    } else {
+                        fs.unlinkSync(filePath);
+                        CSReporter.debug(`Deleted crash file: ${filePath}`);
+                    }
+                }
+            } catch (e: any) {
+                CSReporter.debug(`Could not delete ${filePath}: ${e.message}`);
+            }
+        }
+
+        CSReporter.info('Session recovery files cleared — browser will start clean');
     }
 
     private getFirefoxArgs(): string[] {
@@ -820,32 +1207,85 @@ export class CSBrowserManager {
             throw new Error(`StorageState file not found: ${resolvedPath}`);
         }
 
-        // If we have an active context, we need to recreate it with the new state
-        if (this.context && this.browser) {
-            CSReporter.info(`Loading session from ${resolvedPath} — recreating context`);
+        // If we have an active context, inject state into it
+        if (this.context && this.page) {
+            const browserReuseEnabled = this.config.getBoolean('BROWSER_REUSE_ENABLED', false);
+            const isPersistentContext = !!this.config.get('BROWSER_USER_DATA_DIR');
 
-            // Close current page and context
-            await this.closePage();
-            await this.closeContext();
+            if (browserReuseEnabled || isPersistentContext) {
+                // NON-DESTRUCTIVE: Inject cookies/localStorage into the existing context
+                // This is required for browser reuse mode and persistent context mode
+                // where closing/recreating the context breaks trace recording and the
+                // BDD runner's context lifecycle management.
+                CSReporter.info(`Loading session from ${resolvedPath} — injecting into existing context`);
 
-            // Create new context with the loaded storage state
-            // Temporarily override the config so createContext() picks it up
-            const originalPath = this.config.get('AUTH_STORAGE_STATE_PATH');
-            this.config.set('AUTH_STORAGE_STATE_PATH', resolvedPath);
-            this.config.set('AUTH_STORAGE_STATE_REUSE', 'true');
+                const sessionData = JSON.parse(fs.readFileSync(resolvedPath, 'utf8'));
 
-            await this.createContext();
-            await this.createPage();
+                // Step 1: Inject cookies into the context
+                if (sessionData.cookies && sessionData.cookies.length > 0) {
+                    await this.context.addCookies(sessionData.cookies);
+                    CSReporter.debug(`Injected ${sessionData.cookies.length} cookies into browser context`);
+                }
 
-            // Restore original config
-            if (originalPath) {
-                this.config.set('AUTH_STORAGE_STATE_PATH', originalPath);
+                // Step 2: Inject localStorage for each origin
+                // localStorage is same-origin: we MUST navigate to each origin before we can
+                // set its localStorage. Without this, MSAL tokens are not restored and
+                // Dynamics 365 shows "Sign in required" popup on every page load.
+                if (sessionData.origins && sessionData.origins.length > 0) {
+                    const navTimeout = this.config.getNumber('BROWSER_NAVIGATION_TIMEOUT', 30000);
+                    for (const origin of sessionData.origins) {
+                        if (origin.localStorage && origin.localStorage.length > 0) {
+                            try {
+                                // Check if we're already on this origin
+                                const currentUrl = this.page.url();
+                                const currentOrigin = currentUrl !== 'about:blank' ? new URL(currentUrl).origin : '';
+
+                                if (origin.origin !== currentOrigin) {
+                                    // Navigate to the origin so localStorage is accessible
+                                    CSReporter.debug(`Navigating to ${origin.origin} to inject localStorage...`);
+                                    await this.page.goto(origin.origin, {
+                                        waitUntil: 'domcontentloaded',
+                                        timeout: navTimeout
+                                    });
+                                }
+
+                                // Now inject localStorage items
+                                await this.page.evaluate((items: { name: string; value: string }[]) => {
+                                    for (const item of items) {
+                                        try { localStorage.setItem(item.name, item.value); } catch {}
+                                    }
+                                }, origin.localStorage);
+                                CSReporter.debug(`Injected ${origin.localStorage.length} localStorage items for ${origin.origin}`);
+                            } catch (e: any) {
+                                CSReporter.debug(`localStorage injection for ${origin.origin}: ${e.message}`);
+                            }
+                        }
+                    }
+                }
+
+                CSReporter.info(`Browser session loaded (non-destructive) from: ${resolvedPath}`);
+            } else {
+                // DESTRUCTIVE: Close context and recreate with loaded state
+                // Safe in non-reuse mode where context lifecycle is per-scenario
+                CSReporter.info(`Loading session from ${resolvedPath} — recreating context`);
+
+                await this.closePage();
+                await this.closeContext();
+
+                const originalPath = this.config.get('AUTH_STORAGE_STATE_PATH');
+                this.config.set('AUTH_STORAGE_STATE_PATH', resolvedPath);
+                this.config.set('AUTH_STORAGE_STATE_REUSE', 'true');
+
+                await this.createContext();
+                await this.createPage();
+
+                if (originalPath) {
+                    this.config.set('AUTH_STORAGE_STATE_PATH', originalPath);
+                }
+
+                this.notifyPageChange();
+                CSReporter.info(`Browser session loaded from: ${resolvedPath}`);
             }
-
-            // Notify listeners that page has changed
-            this.notifyPageChange();
-
-            CSReporter.info(`Browser session loaded from: ${resolvedPath}`);
         } else {
             CSReporter.info(`StorageState file registered: ${resolvedPath} (will be loaded on next context creation)`);
         }

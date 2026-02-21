@@ -222,6 +222,133 @@ export const BROWSER_GRAMMAR_RULES: GrammarRule[] = [
     },
 
     // ========================================================================
+    // BROWSER DIALOG HANDLING (Priority 400-409) — JSP/Legacy App Support
+    // Handles alert(), confirm(), prompt() dialogs common in JSP applications
+    // ========================================================================
+    {
+        id: 'browser-accept-dialog',
+        pattern: /^(?:accept|ok|close|dismiss)\s+(?:the\s+)?(?:alert|dialog)$/i,
+        category: 'action',
+        intent: 'accept-dialog',
+        priority: 400,
+        extract: () => ({
+            targetText: '',
+            params: { dialogAction: 'accept' }
+        }),
+        examples: [
+            'Accept the alert',
+            'OK the alert',
+            'Close the dialog',
+            'Accept the dialog'
+        ]
+    },
+    {
+        id: 'browser-dismiss-dialog',
+        pattern: /^(?:dismiss|cancel|reject)\s+(?:the\s+)?(?:alert|confirm|dialog|popup)$/i,
+        category: 'action',
+        intent: 'dismiss-dialog',
+        priority: 401,
+        extract: () => ({
+            targetText: '',
+            params: { dialogAction: 'dismiss' }
+        }),
+        examples: [
+            'Dismiss the alert',
+            'Cancel the confirm',
+            'Reject the dialog',
+            'Dismiss the popup'
+        ]
+    },
+    {
+        id: 'browser-accept-confirm',
+        pattern: /^(?:accept|confirm|ok)\s+(?:the\s+)?confirm(?:ation)?(?:\s+dialog)?$/i,
+        category: 'action',
+        intent: 'accept-dialog',
+        priority: 402,
+        extract: () => ({
+            targetText: '',
+            params: { dialogAction: 'accept' }
+        }),
+        examples: [
+            'Accept the confirm dialog',
+            'Confirm the confirmation',
+            'OK the confirm'
+        ]
+    },
+    {
+        id: 'browser-enter-prompt',
+        pattern: /^(?:enter|type|input)\s+__QUOTED_(\d+)__\s+(?:in|into)\s+(?:the\s+)?prompt(?:\s+(?:dialog|and\s+accept))?$/i,
+        category: 'action',
+        intent: 'accept-dialog',
+        priority: 403,
+        extract: (match, quotedStrings) => {
+            const promptText = quotedStrings[parseInt(match[1])] || '';
+            return {
+                targetText: '',
+                value: promptText,
+                params: { dialogAction: 'accept', promptText }
+            };
+        },
+        examples: [
+            "Enter 'John' in the prompt",
+            "Type 'test' into the prompt and accept",
+            "Input 'hello' in the prompt dialog"
+        ]
+    },
+    {
+        id: 'browser-handle-next-dialog-accept',
+        pattern: /^(?:handle|prepare\s+for|expect)\s+(?:the\s+)?(?:next\s+)?(?:alert|dialog|confirm|prompt)\s+(?:by\s+)?accept(?:ing)?$/i,
+        category: 'action',
+        intent: 'handle-next-dialog',
+        priority: 404,
+        extract: () => ({
+            targetText: '',
+            params: { dialogAction: 'accept' }
+        }),
+        examples: [
+            'Handle the next alert by accepting',
+            'Expect the next dialog accept',
+            'Prepare for the next confirm by accepting'
+        ]
+    },
+    {
+        id: 'browser-handle-next-dialog-dismiss',
+        pattern: /^(?:handle|prepare\s+for|expect)\s+(?:the\s+)?(?:next\s+)?(?:alert|dialog|confirm|prompt)\s+(?:by\s+)?dismiss(?:ing)?$/i,
+        category: 'action',
+        intent: 'handle-next-dialog',
+        priority: 405,
+        extract: () => ({
+            targetText: '',
+            params: { dialogAction: 'dismiss' }
+        }),
+        examples: [
+            'Handle the next alert by dismissing',
+            'Expect the next confirm by dismissing',
+            'Prepare for the next dialog by dismissing'
+        ]
+    },
+    {
+        id: 'browser-verify-dialog-text',
+        pattern: /^(?:verify|assert|check)\s+(?:the\s+)?(?:alert|dialog|confirm|prompt)\s+(?:text\s+)?(?:is|equals?|contains?|says?|shows?)\s+__QUOTED_(\d+)__$/i,
+        category: 'assertion',
+        intent: 'verify-dialog-text',
+        priority: 406,
+        extract: (match, quotedStrings) => {
+            const expectedText = quotedStrings[parseInt(match[1])] || '';
+            return {
+                targetText: '',
+                expectedValue: expectedText,
+                params: { dialogAction: 'verify' }
+            };
+        },
+        examples: [
+            "Verify the alert text is 'Are you sure?'",
+            "Check the confirm says 'Delete this record?'",
+            "Assert the dialog contains 'Success'"
+        ]
+    },
+
+    // ========================================================================
     // COOKIE OPERATIONS (Priority 500-509) — Phase 9
     // ========================================================================
     {

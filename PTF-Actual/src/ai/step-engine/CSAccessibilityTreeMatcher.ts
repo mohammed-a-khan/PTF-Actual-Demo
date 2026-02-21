@@ -1,19 +1,22 @@
 /**
  * CSAccessibilityTreeMatcher - Element Matching via Accessibility Tree
  *
- * 4-strategy cascade for finding elements on the page:
+ * 5-strategy cascade for finding elements on the page:
  *   1. Accessibility Tree (primary) - ariaSnapshot() + weighted scoring
- *   2. Playwright Semantic Locators (fallback) - getByRole/getByText/getByLabel
+ *   2. Playwright Semantic Locators (fallback) - getByRole/getByLabel/getByPlaceholder/getByTitle/getByAltText/[name]
  *   3. Text-based search (fallback) - text content matching
  *   4. Role-based search (last resort) - ARIA role + keyword matching
+ *   5. Frame/iframe search - searches inside all frames using strategies 1-4
  *
  * Uses Jaro-Winkler similarity for fuzzy text matching.
  *
  * @module ai/step-engine
  */
 
-import { Page, Locator } from 'playwright';
+import { Page, Locator, Frame } from 'playwright';
 import { CSReporter } from '../../reporter/CSReporter';
+import { CSFuzzyMatcher } from './CSFuzzyMatcher';
+import { CSElementCache } from './CSElementCache';
 import {
     ElementTarget,
     MatchedElement,
@@ -36,8 +39,16 @@ export class CSAccessibilityTreeMatcher {
 
     private config: CSAIStepConfig;
 
+    /** Enhanced fuzzy matcher (N-gram + token matching) */
+    private fuzzyMatcher: CSFuzzyMatcher;
+
+    /** Element cache for adaptive confidence thresholds */
+    private elementCache: CSElementCache;
+
     private constructor(config?: Partial<CSAIStepConfig>) {
         this.config = { ...DEFAULT_AI_STEP_CONFIG, ...config };
+        this.fuzzyMatcher = CSFuzzyMatcher.getInstance();
+        this.elementCache = CSElementCache.getInstance();
     }
 
     /** Get singleton instance */
@@ -57,8 +68,13 @@ export class CSAccessibilityTreeMatcher {
      * @param intent - Step intent (helps infer element roles)
      * @returns MatchedElement with locator and confidence, or null
      */
+    /**
+     * Find element matching the target description on the page or frame.
+     * Accepts Page or Frame — Frame is used when AI steps target a switched frame
+     * (JSP frameset/iframe support via 'switch-frame' intent).
+     */
     public async findElement(
-        page: Page,
+        page: Page | Frame,
         target: ElementTarget,
         intent: StepIntent
     ): Promise<MatchedElement | null> {
@@ -72,12 +88,37 @@ export class CSAccessibilityTreeMatcher {
 
         CSReporter.debug(`CSAccessibilityTreeMatcher: Searching for "${searchText}" (type: ${target.elementType || 'any'}, intent: ${intent})`);
 
+        // Adaptive confidence threshold: use per-page learned threshold if available
+        let confidenceThreshold = this.config.confidenceThreshold;
+        try {
+            const pageUrl = 'url' in page ? (page as Page).url().split('?')[0].split('#')[0] : '';
+            if (pageUrl) {
+                const recommended = this.elementCache.getRecommendedThreshold(pageUrl);
+                if (recommended !== null) {
+                    confidenceThreshold = recommended;
+                    CSReporter.debug(`CSAccessibilityTreeMatcher: Using adaptive confidence threshold ${recommended.toFixed(2)} for ${pageUrl}`);
+                }
+            }
+        } catch { /* use default threshold */ }
+
+        // DOM context-aware disambiguation: if a modal/dialog is active, scope search to it first
+        const activeContext = await this.detectActiveContext(page);
+        if (activeContext) {
+            CSReporter.debug(`CSAccessibilityTreeMatcher: Active context detected — scoping search to ${activeContext.type}`);
+            const contextResult = await this.searchWithinContext(activeContext.locator, target, intent, searchText, confidenceThreshold);
+            if (contextResult) {
+                const duration = Date.now() - startTime;
+                CSReporter.debug(`CSAccessibilityTreeMatcher: Found element in ${activeContext.type} context in ${duration}ms`);
+                return contextResult;
+            }
+        }
+
         const alternatives: AlternativeMatch[] = [];
 
         // Strategy 1: Accessibility Tree
         try {
             const a11yResult = await this.matchViaAccessibilityTree(page, target, intent);
-            if (a11yResult && a11yResult.confidence >= this.config.confidenceThreshold) {
+            if (a11yResult && a11yResult.confidence >= confidenceThreshold) {
                 const duration = Date.now() - startTime;
                 CSReporter.debug(`CSAccessibilityTreeMatcher: A11y tree match in ${duration}ms (confidence: ${a11yResult.confidence.toFixed(2)})`);
                 return a11yResult;
@@ -97,7 +138,7 @@ export class CSAccessibilityTreeMatcher {
         // Strategy 2: Playwright Semantic Locators
         try {
             const semanticResult = await this.matchViaSemanticLocators(page, target, intent);
-            if (semanticResult && semanticResult.confidence >= this.config.confidenceThreshold) {
+            if (semanticResult && semanticResult.confidence >= confidenceThreshold) {
                 semanticResult.alternatives = alternatives;
                 const duration = Date.now() - startTime;
                 CSReporter.debug(`CSAccessibilityTreeMatcher: Semantic locator match in ${duration}ms (confidence: ${semanticResult.confidence.toFixed(2)})`);
@@ -118,7 +159,7 @@ export class CSAccessibilityTreeMatcher {
         // Strategy 3: Text-based search
         try {
             const textResult = await this.matchViaTextSearch(page, target);
-            if (textResult && textResult.confidence >= this.config.confidenceThreshold) {
+            if (textResult && textResult.confidence >= confidenceThreshold) {
                 textResult.alternatives = alternatives;
                 const duration = Date.now() - startTime;
                 CSReporter.debug(`CSAccessibilityTreeMatcher: Text search match in ${duration}ms (confidence: ${textResult.confidence.toFixed(2)})`);
@@ -139,7 +180,7 @@ export class CSAccessibilityTreeMatcher {
         // Strategy 4: Role-based search
         try {
             const roleResult = await this.matchViaRoleSearch(page, target, intent);
-            if (roleResult && roleResult.confidence >= this.config.confidenceThreshold) {
+            if (roleResult && roleResult.confidence >= confidenceThreshold) {
                 roleResult.alternatives = alternatives;
                 const duration = Date.now() - startTime;
                 CSReporter.debug(`CSAccessibilityTreeMatcher: Role search match in ${duration}ms (confidence: ${roleResult.confidence.toFixed(2)})`);
@@ -164,7 +205,7 @@ export class CSAccessibilityTreeMatcher {
             alternatives.sort((a, b) => b.confidence - a.confidence);
             const best = alternatives[0];
             const isAssertion = intent.startsWith('verify-');
-            const minAcceptable = isAssertion ? this.config.confidenceThreshold : this.config.confidenceThreshold * 0.75;
+            const minAcceptable = isAssertion ? confidenceThreshold : confidenceThreshold * 0.75;
             if (best.confidence >= minAcceptable) {
                 const duration = Date.now() - startTime;
                 CSReporter.debug(`CSAccessibilityTreeMatcher: Using best alternative in ${duration}ms (confidence: ${best.confidence.toFixed(2)}, method: ${best.method})`);
@@ -180,8 +221,10 @@ export class CSAccessibilityTreeMatcher {
         }
 
         // Strategy 5: Search inside frames (handles legacy IE-era apps with iframes/framesets)
+        // Skip if already searching within a specific frame context (user switched to it)
+        const isPage = 'frames' in page && typeof (page as any).frames === 'function' && !('parentFrame' in page && typeof (page as any).parentFrame === 'function');
         try {
-            const frameResult = await this.searchFrames(page, target, intent, searchText);
+            const frameResult = isPage ? await this.searchFrames(page as Page, target, intent, searchText) : null;
             if (frameResult) {
                 frameResult.alternatives = alternatives;
                 const duration = Date.now() - startTime;
@@ -202,7 +245,7 @@ export class CSAccessibilityTreeMatcher {
     // ========================================================================
 
     private async matchViaAccessibilityTree(
-        page: Page,
+        page: Page | Frame,
         target: ElementTarget,
         intent: StepIntent
     ): Promise<MatchedElement | null> {
@@ -222,7 +265,7 @@ export class CSAccessibilityTreeMatcher {
         const scores: AccessibilityMatchScore[] = [];
 
         for (const node of nodes) {
-            const score = this.scoreAccessibilityNode(node, searchText, expectedRoles, target);
+            const score = this.scoreAccessibilityNode(node, searchText, expectedRoles, target, nodes);
             if (score.total > 0.3) { // Minimum viable score
                 scores.push(score);
             }
@@ -303,7 +346,7 @@ export class CSAccessibilityTreeMatcher {
     /**
      * Get accessibility snapshot with caching
      */
-    private async getAccessibilitySnapshot(page: Page): Promise<string | null> {
+    private async getAccessibilitySnapshot(page: Page | Frame): Promise<string | null> {
         try {
             const url = page.url();
             const now = Date.now();
@@ -449,7 +492,8 @@ export class CSAccessibilityTreeMatcher {
         node: AccessibilityNode,
         searchText: string,
         expectedRoles: string[],
-        target: ElementTarget
+        target: ElementTarget,
+        allNodes?: AccessibilityNode[]
     ): AccessibilityMatchScore {
         // Role match (30% weight)
         let roleMatch = 0;
@@ -463,10 +507,12 @@ export class CSAccessibilityTreeMatcher {
             roleMatch = 0.1;
         }
 
-        // Name match (40% weight) - fuzzy text matching
+        // Name match (40% weight) - enhanced fuzzy text matching (N-gram + token + Jaro-Winkler)
         let nameMatch = 0;
         if (searchText && node.name) {
-            nameMatch = this.jaroWinkler(searchText.toLowerCase(), node.name.toLowerCase());
+            // Use composite fuzzy matching for better accuracy
+            const fuzzyResult = this.fuzzyMatcher.compare(searchText, node.name);
+            nameMatch = fuzzyResult.score;
 
             // Bonus for exact containment
             if (node.name.toLowerCase().includes(searchText.toLowerCase()) ||
@@ -502,8 +548,13 @@ export class CSAccessibilityTreeMatcher {
             positionMatch = 0.7; // Will be refined when selecting among candidates
         }
 
-        // Calculate total
-        const total = roleMatch * 0.3 + nameMatch * 0.4 + labelMatch * 0.2 + positionMatch * 0.1;
+        // Calculate total with optional landmark bonus
+        let total = roleMatch * 0.3 + nameMatch * 0.4 + labelMatch * 0.2 + positionMatch * 0.1;
+
+        // Apply landmark proximity bonus (enhanced a11y parsing)
+        if (allNodes) {
+            total += this.scoreLandmarkBonus(node, target.elementType as any || 'click', allNodes);
+        }
 
         return {
             node,
@@ -517,7 +568,7 @@ export class CSAccessibilityTreeMatcher {
      * Tries exact matching first (fewer false positives), then falls back to inexact.
      * This prevents "Submit" from matching "Submit Form" and "Submit Application".
      */
-    private async buildLocatorFromNode(page: Page, node: AccessibilityNode, searchText: string): Promise<Locator | null> {
+    private async buildLocatorFromNode(page: Page | Frame, node: AccessibilityNode, searchText: string): Promise<Locator | null> {
         try {
             if (node.name) {
                 // Try exact match first — avoids matching "Submit Form" when we want "Submit"
@@ -544,7 +595,7 @@ export class CSAccessibilityTreeMatcher {
     // ========================================================================
 
     private async matchViaSemanticLocators(
-        page: Page,
+        page: Page | Frame,
         target: ElementTarget,
         intent: StepIntent
     ): Promise<MatchedElement | null> {
@@ -659,6 +710,68 @@ export class CSAccessibilityTreeMatcher {
             } catch { /* continue */ }
         }
 
+        // Try getByTitle — legacy/JSP apps often use title attribute for tooltips & element identity
+        if (searchText) {
+            try {
+                const locator = page.getByTitle(searchText, { exact: false });
+                const count = await locator.count();
+                if (count > 0) {
+                    return {
+                        locator: this.selectByOrdinal(locator, count, target.ordinal),
+                        broadLocator: locator,
+                        confidence: 0.6,
+                        method: 'semantic-locator',
+                        description: `getByTitle('${searchText}')`,
+                        alternatives: []
+                    };
+                }
+            } catch { /* continue */ }
+        }
+
+        // Try getByAltText — image buttons (<input type="image">) and images in JSP apps
+        if (searchText) {
+            try {
+                const locator = page.getByAltText(searchText, { exact: false });
+                const count = await locator.count();
+                if (count > 0) {
+                    return {
+                        locator: this.selectByOrdinal(locator, count, target.ordinal),
+                        broadLocator: locator,
+                        confidence: 0.6,
+                        method: 'semantic-locator',
+                        description: `getByAltText('${searchText}')`,
+                        alternatives: []
+                    };
+                }
+            } catch { /* continue */ }
+        }
+
+        // Try CSS [name="..."] — JSP/Struts/Spring MVC forms use name attributes instead of id/aria-label
+        if (searchText) {
+            try {
+                // Escape CSS special chars in the search text for attribute selector
+                const escapedText = searchText.replace(/["\\]/g, '\\$&');
+                // Try exact name match first
+                let locator = page.locator(`[name="${escapedText}"]`);
+                let count = await locator.count();
+                if (count === 0) {
+                    // Try case-insensitive partial match via name*= (contains)
+                    locator = page.locator(`[name*="${escapedText}" i]`);
+                    count = await locator.count();
+                }
+                if (count > 0 && count <= 10) {
+                    return {
+                        locator: this.selectByOrdinal(locator, count, target.ordinal),
+                        broadLocator: locator,
+                        confidence: count === 1 ? 0.6 : Math.max(0.4, 0.6 - count * 0.05),
+                        method: 'semantic-locator',
+                        description: `[name="${escapedText}"]${count > 1 ? ` (${count} matches)` : ''}`,
+                        alternatives: []
+                    };
+                }
+            } catch { /* continue */ }
+        }
+
         return null;
     }
 
@@ -667,7 +780,7 @@ export class CSAccessibilityTreeMatcher {
     // ========================================================================
 
     private async matchViaTextSearch(
-        page: Page,
+        page: Page | Frame,
         target: ElementTarget
     ): Promise<MatchedElement | null> {
         const searchText = this.buildSearchText(target);
@@ -739,7 +852,7 @@ export class CSAccessibilityTreeMatcher {
     // ========================================================================
 
     private async matchViaRoleSearch(
-        page: Page,
+        page: Page | Frame,
         target: ElementTarget,
         intent: StepIntent
     ): Promise<MatchedElement | null> {
@@ -790,7 +903,7 @@ export class CSAccessibilityTreeMatcher {
                     if (searchText) {
                         for (let i = 0; i < Math.min(count, 10); i++) {
                             const text = await locator.nth(i).textContent().catch(() => '');
-                            if (text && this.jaroWinkler(searchText.toLowerCase(), text.toLowerCase().trim()) > 0.7) {
+                            if (text && this.fuzzyMatcher.compare(searchText, text.trim()).score > 0.7) {
                                 return {
                                     locator: locator.nth(i),
                                     confidence: 0.55,
@@ -801,12 +914,15 @@ export class CSAccessibilityTreeMatcher {
                             }
                         }
 
-                        // Also try matching by accessible name (aria-label, aria-labelledby, associated label)
+                        // Also try matching by accessible name, title, alt, name, id attributes
+                        // Legacy JSP apps often lack aria-label but have title, alt, or name attributes
                         for (let i = 0; i < Math.min(count, 10); i++) {
                             const accName = await locator.nth(i).getAttribute('aria-label').catch(() => null)
+                                || await locator.nth(i).getAttribute('title').catch(() => null)
+                                || await locator.nth(i).getAttribute('alt').catch(() => null)
                                 || await locator.nth(i).getAttribute('name').catch(() => null)
                                 || await locator.nth(i).getAttribute('id').catch(() => null) || '';
-                            if (accName && this.jaroWinkler(searchText.toLowerCase(), accName.toLowerCase()) > 0.6) {
+                            if (accName && this.fuzzyMatcher.compare(searchText, accName).score > 0.6) {
                                 return {
                                     locator: locator.nth(i),
                                     confidence: 0.55,
@@ -928,6 +1044,42 @@ export class CSAccessibilityTreeMatcher {
                     } catch { /* continue */ }
                 }
 
+                // Try getByTitle in frame (JSP apps with title attributes)
+                if (searchText) {
+                    try {
+                        const titleLocator = frame.getByTitle(searchText, { exact: false });
+                        const count = await titleLocator.count();
+                        if (count > 0) {
+                            return {
+                                locator: this.selectByOrdinal(titleLocator, count, target.ordinal),
+                                broadLocator: titleLocator,
+                                confidence: 0.55,
+                                method: 'semantic-locator',
+                                description: `frame[${frame.name() || 'iframe'}] > getByTitle('${searchText}')`,
+                                alternatives: []
+                            };
+                        }
+                    } catch { /* continue */ }
+                }
+
+                // Try getByAltText in frame (image buttons in JSP apps)
+                if (searchText) {
+                    try {
+                        const altLocator = frame.getByAltText(searchText, { exact: false });
+                        const count = await altLocator.count();
+                        if (count > 0) {
+                            return {
+                                locator: this.selectByOrdinal(altLocator, count, target.ordinal),
+                                broadLocator: altLocator,
+                                confidence: 0.55,
+                                method: 'semantic-locator',
+                                description: `frame[${frame.name() || 'iframe'}] > getByAltText('${searchText}')`,
+                                alternatives: []
+                            };
+                        }
+                    } catch { /* continue */ }
+                }
+
                 // Try individual descriptor words in frame
                 for (const desc of target.descriptors) {
                     if (desc.length < 3) continue;
@@ -1006,7 +1158,7 @@ export class CSAccessibilityTreeMatcher {
         locator: Locator,
         count: number,
         target: ElementTarget,
-        page: Page
+        page: Page | Frame
     ): Promise<Locator | null> {
         // Strategy A: Position cue (top/bottom/left/right)
         if (target.position) {
@@ -1186,6 +1338,199 @@ export class CSAccessibilityTreeMatcher {
         }
 
         return Math.min(jaro + prefixLength * 0.1 * (1 - jaro), 1.0);
+    }
+
+    // ========================================================================
+    // DOM Context-Aware Disambiguation
+    // ========================================================================
+
+    /**
+     * Detect active modal, dialog, or focused tab panel on the page.
+     * Returns a scoped locator when an overlay or focused context is found.
+     */
+    private async detectActiveContext(
+        page: Page | Frame
+    ): Promise<{ type: string; locator: Locator } | null> {
+        try {
+            // Check for open dialogs (native <dialog> or role="dialog")
+            const dialogSelectors = [
+                'dialog[open]',
+                '[role="dialog"]:not([aria-hidden="true"])',
+                '[role="alertdialog"]:not([aria-hidden="true"])',
+                '.modal.show', '.modal.in', '.modal[style*="display: block"]',
+                '.MuiDialog-root', '.ant-modal-wrap:not([style*="display: none"])',
+                // Dynamics 365 / Power Apps dialogs
+                '[data-id="dialogWrapper"]', '.ms-Dialog-main'
+            ];
+
+            for (const selector of dialogSelectors) {
+                try {
+                    const dialogLocator = page.locator(selector);
+                    const count = await dialogLocator.count();
+                    if (count > 0) {
+                        // Use the last (topmost) dialog if multiple
+                        const activeDialog = count === 1 ? dialogLocator : dialogLocator.last();
+                        // Verify it's visible
+                        const isVisible = await activeDialog.isVisible({ timeout: 1000 }).catch(() => false);
+                        if (isVisible) {
+                            return { type: `dialog(${selector})`, locator: activeDialog };
+                        }
+                    }
+                } catch { continue; }
+            }
+
+            // Check for active tab panels
+            try {
+                const activePanel = page.locator('[role="tabpanel"]:not([hidden]):not([aria-hidden="true"])');
+                const panelCount = await activePanel.count();
+                if (panelCount === 1) {
+                    return { type: 'tabpanel', locator: activePanel };
+                }
+            } catch { /* continue */ }
+
+        } catch {
+            // Non-critical — fall through to full-page search
+        }
+        return null;
+    }
+
+    /**
+     * Search for an element within a scoped context (modal/dialog/tab panel).
+     * Uses semantic locator strategies scoped to the container.
+     */
+    private async searchWithinContext(
+        contextLocator: Locator,
+        target: ElementTarget,
+        intent: StepIntent,
+        searchText: string,
+        confidenceThreshold: number
+    ): Promise<MatchedElement | null> {
+        const expectedRoles = this.getExpectedRoles(target.elementType, intent);
+
+        // Try getByRole within context
+        for (const role of expectedRoles) {
+            try {
+                const locator = contextLocator.getByRole(role as any, {
+                    name: searchText || undefined,
+                    exact: false
+                });
+                const count = await locator.count();
+                if (count > 0) {
+                    const finalLocator = this.selectByOrdinal(locator, count, target.ordinal);
+                    const confidence = 0.85; // Higher confidence because scoped to active context
+                    if (confidence >= confidenceThreshold) {
+                        return {
+                            locator: finalLocator,
+                            broadLocator: locator,
+                            confidence,
+                            method: 'accessibility-tree' as MatchMethod,
+                            description: `context-scoped getByRole('${role}', '${searchText}')`,
+                            alternatives: []
+                        };
+                    }
+                }
+            } catch { continue; }
+        }
+
+        // Try getByLabel within context
+        if (searchText) {
+            try {
+                const locator = contextLocator.getByLabel(searchText, { exact: false });
+                const count = await locator.count();
+                if (count > 0) {
+                    return {
+                        locator: this.selectByOrdinal(locator, count, target.ordinal),
+                        broadLocator: locator,
+                        confidence: 0.8,
+                        method: 'semantic-locator' as MatchMethod,
+                        description: `context-scoped getByLabel('${searchText}')`,
+                        alternatives: []
+                    };
+                }
+            } catch { /* continue */ }
+        }
+
+        // Try getByText within context
+        if (searchText) {
+            try {
+                const locator = contextLocator.getByText(searchText, { exact: false });
+                const count = await locator.count();
+                if (count > 0 && count <= 10) {
+                    const baseConfidence = count === 1 ? 0.75 : Math.max(0.5, 0.75 - count * 0.05);
+                    return {
+                        locator: this.selectByOrdinal(locator, count, target.ordinal),
+                        broadLocator: locator,
+                        confidence: baseConfidence,
+                        method: 'text-search' as MatchMethod,
+                        description: `context-scoped getByText('${searchText}')`,
+                        alternatives: []
+                    };
+                }
+            } catch { /* continue */ }
+        }
+
+        // Try getByPlaceholder within context
+        if (searchText) {
+            try {
+                const locator = contextLocator.getByPlaceholder(searchText, { exact: false });
+                const count = await locator.count();
+                if (count > 0) {
+                    return {
+                        locator: this.selectByOrdinal(locator, count, target.ordinal),
+                        broadLocator: locator,
+                        confidence: 0.7,
+                        method: 'semantic-locator' as MatchMethod,
+                        description: `context-scoped getByPlaceholder('${searchText}')`,
+                        alternatives: []
+                    };
+                }
+            } catch { /* continue */ }
+        }
+
+        return null;
+    }
+
+    // ========================================================================
+    // Enhanced A11y: Landmark & ARIA Relationship Scoring
+    // ========================================================================
+
+    /**
+     * Score bonus for landmark proximity in the accessibility tree.
+     * Elements inside navigation, main, or form landmarks get scoring boost
+     * based on the landmark type matching the intent.
+     */
+    private scoreLandmarkBonus(node: AccessibilityNode, intent: StepIntent, nodes: AccessibilityNode[]): number {
+        // Find parent landmarks by looking at nodes with lower indentation level
+        const nodeIdx = nodes.indexOf(node);
+        if (nodeIdx <= 0) return 0;
+
+        // Walk backwards to find enclosing landmark
+        const landmarkRoles = ['banner', 'navigation', 'main', 'complementary', 'contentinfo', 'form', 'search', 'region'];
+        for (let i = nodeIdx - 1; i >= 0; i--) {
+            if ((nodes[i].level ?? 0) < (node.level ?? 0) && landmarkRoles.includes(nodes[i].role)) {
+                const landmark = nodes[i].role;
+                // Navigation actions in a nav landmark get a boost
+                if (landmark === 'navigation' && (intent === 'click' || intent === 'navigate')) return 0.05;
+                // Form actions in a form landmark get a boost
+                if (landmark === 'form' && ['fill', 'type', 'select', 'check', 'clear'].includes(intent)) return 0.05;
+                // Search actions in a search landmark get a boost
+                if (landmark === 'search' && (intent === 'fill' || intent === 'type')) return 0.05;
+                // Main content is neutral (no bonus, no penalty)
+                if (landmark === 'main') return 0.02;
+                break;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Update page statistics after element search (for adaptive confidence learning).
+     */
+    public updatePageStats(pageUrl: string, success: boolean, confidence: number = 0): void {
+        try {
+            const urlPattern = pageUrl.split('?')[0].split('#')[0];
+            this.elementCache.updatePageStats(urlPattern, success, confidence);
+        } catch { /* non-critical */ }
     }
 
     /** Invalidate the snapshot cache */

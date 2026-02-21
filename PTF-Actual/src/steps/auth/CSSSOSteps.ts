@@ -181,6 +181,27 @@ export class CSSSOSteps {
         }
         CSReporter.pass('SSO session is valid');
     }
+
+    /**
+     * Handle "Sign in required" popup that Dynamics 365 shows when session is partially valid.
+     * Safe to call even if no popup is present — returns immediately.
+     *
+     * Example: Then I handle the sign in required popup if present
+     */
+    @CSBDDStepDef('I handle the sign in required popup if present')
+    async handleSignInPopup(): Promise<void> {
+        const { CSMicrosoftSSOHandler } = await import('../../auth/CSMicrosoftSSOHandler');
+        const { CSBrowserManager } = await import('../../browser/CSBrowserManager');
+        const handler = new CSMicrosoftSSOHandler();
+        const browserManager = CSBrowserManager.getInstance();
+        const page = browserManager.getPage();
+        const handled = await handler.handleSignInRequiredPopup(page);
+        if (handled) {
+            CSReporter.pass('Sign in required popup handled successfully');
+        } else {
+            CSReporter.info('No sign in required popup detected — continuing');
+        }
+    }
 }
 
 export default CSSSOSteps;

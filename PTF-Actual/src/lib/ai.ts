@@ -4,11 +4,10 @@
  * Only exports AI-specific modules
  *
  * @example
- * import { CSAIEngine, CSIntelligentAI } from '@mdakhan.mak/cs-playwright-test-framework/ai';
+ * import { CSIntelligentAI } from '@mdakhan.mak/cs-playwright-test-framework/ai';
  */
 
 // AI Core
-export {CSAIEngine} from '../ai/CSAIEngine';
 export {CSIntelligentAI} from '../ai/CSIntelligentAI';
 export { CSAIContextManager } from '../ai/CSAIContextManager';
 
@@ -26,8 +25,6 @@ export {CSPatternMatcher} from '../ai/patterns/CSPatternMatcher';
 
 //AI Learning
 export { CSAIHistory } from '../ai/learning/CSAIHistory';
-export {CSStrategyOptimizer} from '../ai/learning/CSStrategyOptimizer';
-export { CSPatternLearner } from '../ai/learning/CSPatternLearner';
 
 //AI Healing
 export { CSIntelligentHealer } from '../ai/healing/CSIntelligentHealer';
@@ -37,9 +34,6 @@ export { CSFeatureExtractor } from '../ai/features/CSFeatureExtractor';
 
 //AI DOM Intelligence
 export { CSDOMIntelligence } from '../ai/analysis/CSDOMIntelligence';
-
-//AI Similarity
-export { CSSimilarityEngine } from '../ai/similarity/CSSimilarityEngine';
 
 //AI Utilities
 export { CSLocatorExtractor } from '../ai/utils/CSLocatorExtractor';

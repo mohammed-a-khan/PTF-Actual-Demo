@@ -5,9 +5,6 @@ import { CSFeatureContext } from './CSFeatureContext';
 import { CSScenarioContext } from './CSScenarioContext';
 import { CSValueResolver } from '../utils/CSValueResolver';
 
-// Lazy load intelligent step executor for zero-code feature
-let CSIntelligentStepExecutor: any = null;
-
 export interface StepDefinitionOptions {
     timeout?: number;
     retry?: number;
@@ -199,41 +196,10 @@ export async function executeStep(
     const stepDef = findStepDefinition(stepText, stepType);
 
     if (!stepDef) {
-        // Try intelligent step execution (zero-code feature)
-        try {
-            if (!CSIntelligentStepExecutor) {
-                CSIntelligentStepExecutor = require('./CSIntelligentStepExecutor').CSIntelligentStepExecutor;
-            }
-
-            const intelligentExecutor = CSIntelligentStepExecutor.getInstance();
-
-            if (intelligentExecutor.isEnabled()) {
-                CSReporter.debug(`[ZeroCode] No step definition found, trying intelligent execution: ${stepType} ${stepText}`);
-
-                // Get page from context
-                const page = (context as any).page;
-                if (!page) {
-                    throw new Error('Page not available for intelligent step execution');
-                }
-
-                // Try to execute intelligently
-                const result = await intelligentExecutor.executeIntelligently(stepText, stepType, context, page);
-
-                if (result.success) {
-                    CSReporter.info(`[ZeroCode] ✅ ${result.message}`);
-                    return; // SUCCESS - step executed without step definition!
-                } else {
-                    CSReporter.debug(`[ZeroCode] Intelligent execution failed: ${result.message}`);
-                    // Fall through to throw error
-                }
-            }
-        } catch (error: any) {
-            CSReporter.debug(`[ZeroCode] Error during intelligent execution: ${error.message}`);
-            // Fall through to throw error
-        }
-
-        // If intelligent execution failed or is disabled, throw original error
-        throw new Error(`Step definition not found for: ${stepType} ${stepText}`);
+        throw new Error(
+            `Step definition not found for: ${stepType} ${stepText}\n` +
+            `Tip: Use AI steps instead — When AI "${stepText}"`
+        );
     }
 
     // Store current step text in context for page injection

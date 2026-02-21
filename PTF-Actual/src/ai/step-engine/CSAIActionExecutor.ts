@@ -56,6 +56,13 @@ export class CSAIActionExecutor {
     /** Guard flag to prevent infinite recursion during error recovery */
     private inRecovery: boolean = false;
 
+    /**
+     * Active frame context for subsequent AI steps (JSP frameset/iframe support).
+     * Set by 'switch-frame', cleared by 'switch-main-frame'.
+     * When set, AI step engine element searches and actions target this frame.
+     */
+    private activeFrame: any = null;
+
     private constructor(config?: Partial<CSAIStepConfig>) {
         this.config = { ...DEFAULT_AI_STEP_CONFIG, ...config };
     }
@@ -66,6 +73,22 @@ export class CSAIActionExecutor {
             CSAIActionExecutor.instance = new CSAIActionExecutor(config);
         }
         return CSAIActionExecutor.instance;
+    }
+
+    /**
+     * Get the active frame context (set by 'switch-frame').
+     * Returns null when targeting the main page (default).
+     * The AI step engine's element matcher uses this to search within the correct frame.
+     */
+    public getActiveFrame(): any {
+        return this.activeFrame;
+    }
+
+    /**
+     * Clear the active frame context (used on page navigation or test teardown).
+     */
+    public clearActiveFrame(): void {
+        this.activeFrame = null;
     }
 
     /**
@@ -637,15 +660,14 @@ export class CSAIActionExecutor {
                 const currentPage = browserManager.getPage();
                 if (!currentPage) throw new Error('No active page for switch-frame');
 
-                // Try by name first, then by selector, then by index
+                // Try by name first (works for <frame name="..."> in framesets AND <iframe name="...">)
                 const selector = parameters.frameSelector;
                 let frame = currentPage.frame({ name: selector });
                 if (!frame) {
                     frame = currentPage.frame({ url: new RegExp(this.escapeRegex(selector)) });
                 }
                 if (!frame) {
-                    // Try as CSS selector via frameLocator — store for subsequent AI steps
-                    // We can't directly return a frame reference, but we can set the page context
+                    // Try by index — page.frames() returns ALL frames including frameset frames
                     const frameIndex = parseInt(selector);
                     if (!isNaN(frameIndex)) {
                         const frames = currentPage.frames();
@@ -657,13 +679,117 @@ export class CSAIActionExecutor {
                 if (!frame) {
                     throw new Error(`Frame not found: "${selector}". Try a frame name, URL pattern, or index.`);
                 }
-                CSReporter.debug(`AI Step: Switched to frame "${frame.name() || frame.url()}"`);
+                // Persist the active frame so subsequent AI steps search within it
+                this.activeFrame = frame;
+                CSReporter.debug(`AI Step: Switched to frame "${frame.name() || frame.url()}" — subsequent AI steps will target this frame`);
                 return this.success('switch-frame');
             }
 
             case 'switch-main-frame': {
-                CSReporter.debug('AI Step: Switched to main frame');
+                // Clear active frame — subsequent AI steps will use the main page context
+                this.activeFrame = null;
+                CSReporter.debug('AI Step: Switched to main frame — subsequent AI steps will target main page');
                 return this.success('switch-main-frame');
+            }
+
+            // ================================================================
+            // BROWSER DIALOG HANDLING (JSP/Legacy App Support)
+            // Handles alert(), confirm(), prompt() dialogs
+            // ================================================================
+
+            case 'accept-dialog': {
+                const promptText = parameters.promptText as string | undefined;
+                // Register one-shot handler for the next dialog
+                const dialogPromise = new Promise<string>((resolve) => {
+                    page.once('dialog', async (dialog) => {
+                        const message = dialog.message();
+                        CSReporter.info(`AI Step: Dialog detected (type: ${dialog.type()}, message: "${message}")`);
+                        await dialog.accept(promptText || '');
+                        resolve(message);
+                    });
+                });
+                // If there's already a pending dialog, handle it immediately
+                // Otherwise the handler waits for the next dialog triggered by a subsequent action
+                try {
+                    const message = await Promise.race([
+                        dialogPromise,
+                        new Promise<string>((resolve) => setTimeout(() => resolve('__no_dialog__'), 2000))
+                    ]);
+                    if (message === '__no_dialog__') {
+                        CSReporter.info('AI Step: Dialog handler registered — will accept the next dialog automatically');
+                        return this.success('accept-dialog', 'handler-registered');
+                    }
+                    return this.success('accept-dialog', message);
+                } catch (error: any) {
+                    throw new Error(`Failed to accept dialog: ${error.message}`);
+                }
+            }
+
+            case 'dismiss-dialog': {
+                const dismissPromise = new Promise<string>((resolve) => {
+                    page.once('dialog', async (dialog) => {
+                        const message = dialog.message();
+                        CSReporter.info(`AI Step: Dialog detected (type: ${dialog.type()}, message: "${message}")`);
+                        await dialog.dismiss();
+                        resolve(message);
+                    });
+                });
+                try {
+                    const message = await Promise.race([
+                        dismissPromise,
+                        new Promise<string>((resolve) => setTimeout(() => resolve('__no_dialog__'), 2000))
+                    ]);
+                    if (message === '__no_dialog__') {
+                        CSReporter.info('AI Step: Dialog handler registered — will dismiss the next dialog automatically');
+                        return this.success('dismiss-dialog', 'handler-registered');
+                    }
+                    return this.success('dismiss-dialog', message);
+                } catch (error: any) {
+                    throw new Error(`Failed to dismiss dialog: ${error.message}`);
+                }
+            }
+
+            case 'handle-next-dialog': {
+                const action = parameters.dialogAction as string;
+                const handlePromptText = parameters.promptText as string | undefined;
+                // Pre-register a handler for the NEXT dialog (before the triggering action)
+                page.once('dialog', async (dialog) => {
+                    const message = dialog.message();
+                    CSReporter.info(`AI Step: Pre-registered handler caught dialog (type: ${dialog.type()}, message: "${message}")`);
+                    if (action === 'accept') {
+                        await dialog.accept(handlePromptText || '');
+                    } else {
+                        await dialog.dismiss();
+                    }
+                });
+                CSReporter.info(`AI Step: Pre-registered dialog handler — will ${action} the next dialog`);
+                return this.success('handle-next-dialog', `will-${action}`);
+            }
+
+            case 'verify-dialog-text': {
+                const expectedText = step.parameters.expectedValue || '';
+                const verifyPromise = new Promise<string>((resolve) => {
+                    page.once('dialog', async (dialog) => {
+                        const message = dialog.message();
+                        await dialog.accept();
+                        resolve(message);
+                    });
+                });
+                try {
+                    const message = await Promise.race([
+                        verifyPromise,
+                        new Promise<string>((_, reject) => setTimeout(() => reject(new Error('No dialog appeared within 5 seconds')), 5000))
+                    ]);
+                    const csAssert = getCSAssert();
+                    if (step.rawText.toLowerCase().includes('contains')) {
+                        csAssert.assertContains(message, expectedText, `Dialog text should contain "${expectedText}"`);
+                    } else {
+                        csAssert.assertEquals(message, expectedText, `Dialog text should equal "${expectedText}"`);
+                    }
+                    return this.success('verify-dialog-text', message);
+                } catch (error: any) {
+                    throw new Error(`Dialog verification failed: ${error.message}`);
+                }
             }
 
             // ================================================================

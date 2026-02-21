@@ -2,8 +2,11 @@ import { Page, Locator } from '@playwright/test';
 import { CSBrowserManager } from '../browser/CSBrowserManager';
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from '../reporter/CSReporter';
-import { CSAIEngine } from '../ai/CSAIEngine';
 import { CSWebElement, ElementOptions } from './CSWebElement';
+
+// Zero-step engine modules (lazy loaded)
+let accessibilityTreeMatcher: any = null;
+let zeroStepElementCache: any = null;
 
 export interface ResolverOptions {
     page?: Page;
@@ -29,7 +32,6 @@ export interface DynamicElement {
 export class CSElementResolver {
     private static instance: CSElementResolver;
     private config: CSConfigurationManager;
-    private aiEngine: CSAIEngine;
     private page: Page;
     private elementCache: Map<string, CSWebElement> = new Map();
     private selectorPatterns: Map<string, ElementPattern[]> = new Map();
@@ -38,9 +40,24 @@ export class CSElementResolver {
 
     private constructor() {
         this.config = CSConfigurationManager.getInstance();
-        this.aiEngine = CSAIEngine.getInstance();
         this.page = CSBrowserManager.getInstance().getPage();
         this.initializePatterns();
+    }
+
+    private getAccessibilityTreeMatcher(): any {
+        if (!accessibilityTreeMatcher) {
+            const mod = require('../ai/step-engine/CSAccessibilityTreeMatcher');
+            accessibilityTreeMatcher = mod.CSAccessibilityTreeMatcher.getInstance();
+        }
+        return accessibilityTreeMatcher;
+    }
+
+    private getElementCache(): any {
+        if (!zeroStepElementCache) {
+            const mod = require('../ai/step-engine/CSElementCache');
+            zeroStepElementCache = mod.CSElementCache.getInstance();
+        }
+        return zeroStepElementCache;
     }
 
     public static getInstance(): CSElementResolver {
@@ -176,18 +193,45 @@ export class CSElementResolver {
     }
 
     private async resolveByAI(description: string, options?: ResolverOptions): Promise<CSWebElement | null> {
-        CSReporter.debug('Attempting AI-based element resolution');
+        CSReporter.debug('Attempting AI-based element resolution (zero-step accessibility tree)');
 
         try {
-            const element = await this.aiEngine.findByVisualDescription(this.page, description);
-            
-            if (element) {
+            const matcher = this.getAccessibilityTreeMatcher();
+            const page = options?.page || this.page;
+
+            // Build an ElementTarget from the description
+            const target = {
+                descriptor: description,
+                elementType: undefined,
+                ordinal: undefined,
+                position: undefined,
+                relationship: undefined
+            };
+
+            const match = await matcher.findElement(page, target);
+
+            if (match && match.locator) {
+                // Build a CSWebElement from the matched locator
+                const info = await match.locator.evaluate((el: Element) => {
+                    if (el.id) return { selector: `#${el.id}` };
+                    const ariaLabel = el.getAttribute('aria-label');
+                    if (ariaLabel) return { selector: `${el.tagName.toLowerCase()}[aria-label="${ariaLabel}"]` };
+                    const testId = el.getAttribute('data-testid');
+                    if (testId) return { selector: `[data-testid="${testId}"]` };
+                    const name = el.getAttribute('name');
+                    if (name) return { selector: `${el.tagName.toLowerCase()}[name="${name}"]` };
+                    return { selector: el.tagName.toLowerCase() };
+                });
+
+                const element = new CSWebElement({
+                    css: info.selector,
+                    description: description,
+                    timeout: options?.timeout || 5000
+                });
+
                 if (await element.count() > 0) {
-                    CSReporter.debug('Element resolved by AI');
-                    
-                    // Store for self-healing - use element's selector if available
-                    this.updateHealingHistory(description, 'ai-generated');
-                    
+                    CSReporter.debug(`Element resolved by zero-step a11y tree (confidence: ${(match.confidence * 100).toFixed(1)}%)`);
+                    this.updateHealingHistory(description, info.selector);
                     return element;
                 }
             }
@@ -201,10 +245,10 @@ export class CSElementResolver {
     private async resolveBySelfHealing(description: string, options?: ResolverOptions): Promise<CSWebElement | null> {
         CSReporter.debug('Attempting self-healing resolution');
 
-        // Check healing history
+        // Check local healing history first
         if (this.healingHistory.has(description)) {
             const previousSelectors = this.healingHistory.get(description)!;
-            
+
             for (const selector of previousSelectors) {
                 try {
                     const element = new CSWebElement({
@@ -214,13 +258,36 @@ export class CSElementResolver {
                     });
 
                     if (await element.count() > 0) {
-                        CSReporter.debug('Element resolved by self-healing');
+                        CSReporter.debug('Element resolved by local self-healing history');
                         return element;
                     }
                 } catch (error) {
                     // Continue to next selector
                 }
             }
+        }
+
+        // Check zero-step cross-run element cache
+        try {
+            const cache = this.getElementCache();
+            const page = options?.page || this.page;
+            const pageUrl = await page.url();
+
+            const cached = cache.get(`${pageUrl}::${description.toLowerCase().trim()}`);
+            if (cached && cached.selector) {
+                const element = new CSWebElement({
+                    css: cached.selector,
+                    description: description,
+                    timeout: options?.timeout || 5000
+                });
+
+                if (await element.count() > 0) {
+                    CSReporter.debug('Element resolved by zero-step cross-run cache');
+                    return element;
+                }
+            }
+        } catch (error: any) {
+            CSReporter.debug(`Cross-run cache lookup failed: ${error.message}`);
         }
 
         return null;

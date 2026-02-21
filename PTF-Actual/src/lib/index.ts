@@ -134,7 +134,6 @@ export { CSADOConfiguration } from '../ado/CSADOConfiguration';
 export { CSADOTagExtractor } from '../ado/CSADOTagExtractor';
 
 // AI & Self-Healing
-export { CSAIEngine } from '../ai/CSAIEngine';
 export { CSSelfHealingEngine } from '../self-healing/CSSelfHealingEngine';
 
 // AI Step Engine (Natural Language Test Steps)

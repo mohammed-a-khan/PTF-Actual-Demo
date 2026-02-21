@@ -17,6 +17,10 @@ import {
     FailureAnalysis
 } from '../types/AITypes';
 
+// Zero-step engine modules (lazy loaded)
+let zeroStepA11yMatcher: any = null;
+let zeroStepFingerprint: any = null;
+
 export class CSIntelligentHealer {
     private static instance: CSIntelligentHealer;
     private strategies: HealingStrategy[] = [];
@@ -123,7 +127,104 @@ export class CSIntelligentHealer {
             }
         });
 
-        // Strategy 2: Scroll Into View
+        // Strategy 2: Zero-Step Accessibility Tree Search
+        this.strategies.push({
+            name: 'zero_step_a11y',
+            priority: 9.5,
+            apply: async (context: HealingContext): Promise<HealingAttemptResult> => {
+                const startTime = Date.now();
+                try {
+                    CSReporter.debug('[Healer] Trying zero-step accessibility tree strategy');
+
+                    // Lazy load zero-step matcher
+                    if (!zeroStepA11yMatcher) {
+                        const mod = require('../step-engine/CSAccessibilityTreeMatcher');
+                        zeroStepA11yMatcher = mod.CSAccessibilityTreeMatcher.getInstance();
+                    }
+
+                    // Extract descriptor from the original locator
+                    const descriptor = this.extractDescriptorFromLocator(context.originalLocator);
+                    if (!descriptor) {
+                        return { success: false, confidence: 0, duration: Date.now() - startTime };
+                    }
+
+                    const target = {
+                        descriptor,
+                        elementType: undefined,
+                        ordinal: undefined,
+                        position: undefined,
+                        relationship: undefined
+                    };
+
+                    const match = await zeroStepA11yMatcher.findElement(context.page, target);
+
+                    if (match && match.locator) {
+                        // Convert locator to selector string
+                        const selector = await this.generateSelector(match.locator);
+                        return {
+                            success: true,
+                            locator: selector,
+                            confidence: match.confidence * 0.9,
+                            duration: Date.now() - startTime
+                        };
+                    }
+
+                    return { success: false, confidence: 0, duration: Date.now() - startTime };
+                } catch (error) {
+                    return { success: false, confidence: 0, duration: Date.now() - startTime };
+                }
+            }
+        });
+
+        // Strategy 2b: Zero-Step Fingerprint Self-Heal
+        this.strategies.push({
+            name: 'zero_step_fingerprint',
+            priority: 9.2,
+            apply: async (context: HealingContext): Promise<HealingAttemptResult> => {
+                const startTime = Date.now();
+                try {
+                    CSReporter.debug('[Healer] Trying zero-step fingerprint strategy');
+
+                    // Lazy load fingerprint module
+                    if (!zeroStepFingerprint) {
+                        const mod = require('../step-engine/CSElementFingerprint');
+                        zeroStepFingerprint = mod.CSElementFingerprint.getInstance();
+                    }
+
+                    // Try to get cached fingerprint
+                    let cachedMod: any;
+                    try {
+                        cachedMod = require('../step-engine/CSElementCache');
+                    } catch {
+                        return { success: false, confidence: 0, duration: Date.now() - startTime };
+                    }
+
+                    const cache = cachedMod.CSElementCache.getInstance();
+                    const pageUrl = await context.page.url();
+                    const key = zeroStepFingerprint.generateKey(pageUrl, context.originalLocator);
+                    const cached = cache.get(key);
+
+                    if (cached && cached.fingerprint) {
+                        const match = await zeroStepFingerprint.selfHeal(context.page, cached.fingerprint);
+                        if (match && match.locator) {
+                            const selector = await this.generateSelector(match.locator);
+                            return {
+                                success: true,
+                                locator: selector,
+                                confidence: match.confidence,
+                                duration: Date.now() - startTime
+                            };
+                        }
+                    }
+
+                    return { success: false, confidence: 0, duration: Date.now() - startTime };
+                } catch (error) {
+                    return { success: false, confidence: 0, duration: Date.now() - startTime };
+                }
+            }
+        });
+
+        // Strategy 3: Scroll Into View
         this.strategies.push({
             name: 'scroll_into_view',
             priority: 9,
@@ -581,6 +682,31 @@ export class CSIntelligentHealer {
         });
 
         return selected;
+    }
+
+    /**
+     * Extract a human-readable descriptor from a CSS/Playwright locator string.
+     */
+    private extractDescriptorFromLocator(locator: string): string | null {
+        let match = locator.match(/text[=:]?\s*["']([^"']+)["']/i);
+        if (match) return match[1];
+        match = locator.match(/:has-text\(["']([^"']+)["']\)/i);
+        if (match) return match[1];
+        match = locator.match(/\[aria-label=["']([^"']+)["']\]/i);
+        if (match) return match[1];
+        match = locator.match(/\[placeholder=["']([^"']+)["']\]/i);
+        if (match) return match[1];
+        match = locator.match(/\[title=["']([^"']+)["']\]/i);
+        if (match) return match[1];
+        match = locator.match(/\[name=["']([^"']+)["']\]/i);
+        if (match) return match[1];
+        match = locator.match(/^#([\w-]+)$/);
+        if (match) return match[1].replace(/[-_]/g, ' ');
+        match = locator.match(/^\.([\w-]+)$/);
+        if (match) return match[1].replace(/[-_]/g, ' ');
+        match = locator.match(/\[data-(?:testid|test-id|cy)=["']([^"']+)["']\]/i);
+        if (match) return match[1].replace(/[-_]/g, ' ');
+        return null;
     }
 
     /**

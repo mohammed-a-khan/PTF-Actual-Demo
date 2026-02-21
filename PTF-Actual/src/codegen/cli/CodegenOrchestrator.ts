@@ -543,12 +543,6 @@ REPORT_TYPES=html
 GENERATE_EXCEL_REPORT=true
 GENERATE_PDF_REPORT=true
 
-# ====================================================================================
-# INTELLIGENT STEP EXECUTION
-# ====================================================================================
-
-# Enable intelligent step execution (AI-powered)
-INTELLIGENT_STEP_EXECUTION_ENABLED=false
 `;
     }
 

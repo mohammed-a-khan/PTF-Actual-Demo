@@ -47,6 +47,9 @@ export class CSDatabase {
     this.adapter = await this.createAdapterAsync(this.config.type);
     this.connectionManager = new ConnectionManager(this.adapter);
     this.queryExecutor = new QueryExecutor(this.adapter);
+    if (this.config.queryTimeout) {
+      this.queryExecutor.setDefaultTimeout(this.config.queryTimeout);
+    }
     this.transactionManager = new TransactionManager(this.adapter);
     this.resultSetParser = new ResultSetParser(this.adapter);
     this.initialized = true;

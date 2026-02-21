@@ -48,6 +48,10 @@ export type ActionIntent =
     | 'clear-session'
     | 'switch-frame'
     | 'switch-main-frame'
+    // Dialog handling (JSP/legacy app support)
+    | 'accept-dialog'
+    | 'dismiss-dialog'
+    | 'handle-next-dialog'
     | 'set-variable'
     | 'take-screenshot'
     | 'clear-cookies'
@@ -120,6 +124,7 @@ export type AssertionIntent =
     | 'verify-dropdown-options'
     | 'verify-url-param'
     | 'verify-table-cell'
+    | 'verify-dialog-text'
     | 'verify-download'
     | 'verify-download-content'
     | 'verify-api-response'
@@ -301,6 +306,14 @@ export interface StepParameters {
     rangeMax?: number;
     /** Page load state for wait-page-load (domcontentloaded, load, networkidle) */
     loadState?: string;
+
+    // ========================================================================
+    // Dialog handling (JSP/legacy app support)
+    // ========================================================================
+    /** Dialog action: 'accept' or 'dismiss' */
+    dialogAction?: string;
+    /** Text to enter in a prompt dialog */
+    promptText?: string;
 
     // ========================================================================
     // Database operations (Phase 2)
@@ -686,6 +699,8 @@ export const ELEMENT_TYPE_TO_ROLES: Record<string, string[]> = {
     'tooltip': ['tooltip'],
     'img': ['img'],
     'image': ['img'],
+    'image button': ['button', 'img'],
+    'image submit': ['button', 'img'],
     'navigation': ['navigation'],
     'region': ['region'],
     'banner': ['banner'],
@@ -735,6 +750,10 @@ export const INTENT_TO_LIKELY_ROLES: Record<string, string[]> = {
     'clear-session': [],
     'switch-frame': [],
     'switch-main-frame': [],
+    'accept-dialog': [],
+    'dismiss-dialog': [],
+    'handle-next-dialog': [],
+    'verify-dialog-text': [],
     'set-variable': [],
     'take-screenshot': [],
     // Assertion intents

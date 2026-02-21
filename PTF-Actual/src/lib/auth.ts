@@ -9,3 +9,5 @@
 
 // Auth Core
 export { CSTokenManager } from '../auth/CSTokenManager';
+export { CSMicrosoftSSOHandler } from '../auth/CSMicrosoftSSOHandler';
+export type { SSOLoginOptions } from '../auth/CSMicrosoftSSOHandler';

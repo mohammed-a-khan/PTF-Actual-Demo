@@ -14,8 +14,10 @@ import { CSAIContextManager } from '../CSAIContextManager';
 import { CSIntelligentHealer } from '../healing/CSIntelligentHealer';
 import { CSAIHistory } from '../learning/CSAIHistory';
 import { CSPredictiveHealer } from '../prediction/CSPredictiveHealer';
-import { CSIntelligentAI } from '../CSIntelligentAI';
 import { CSConfigurationManager } from '../../core/CSConfigurationManager';
+
+// Zero-step engine module (lazy loaded for element identification)
+let accessibilityTreeMatcher: any = null;
 
 export interface AIIntegrationConfig {
     enabled: boolean;
@@ -34,7 +36,6 @@ export class CSAIIntegrationLayer {
     private healer: CSIntelligentHealer;
     private predictor: CSPredictiveHealer;
     private aiHistory: CSAIHistory;
-    private intelligentAI: CSIntelligentAI;
     private workerId: string;
 
     private constructor(workerId: string = 'main') {
@@ -57,7 +58,6 @@ export class CSAIIntegrationLayer {
         this.healer = CSIntelligentHealer.getInstance();
         this.predictor = CSPredictiveHealer.getInstance();
         this.aiHistory = CSAIHistory.getInstance();
-        this.intelligentAI = CSIntelligentAI.getInstance();
 
         // Configure modules
         this.predictor.setPredictionEnabled(this.config.predictionEnabled);
@@ -261,23 +261,39 @@ export class CSAIIntegrationLayer {
         }
 
         try {
-            const result = await this.intelligentAI.identifyElement(description, page, context);
+            // Lazy-load zero-step accessibility tree matcher
+            if (!accessibilityTreeMatcher) {
+                const mod = require('../step-engine/CSAccessibilityTreeMatcher');
+                accessibilityTreeMatcher = mod.CSAccessibilityTreeMatcher.getInstance();
+            }
 
-            if (result) {
+            const startTime = Date.now();
+            const target = {
+                descriptor: description,
+                elementType: undefined,
+                ordinal: undefined,
+                position: undefined,
+                relationship: undefined
+            };
+
+            const match = await accessibilityTreeMatcher.findElement(page, target);
+
+            if (match && match.locator) {
+                const duration = Date.now() - startTime;
                 const identificationData: StepAIData['identification'] = {
-                    method: result.method,
-                    confidence: result.confidence,
-                    alternatives: result.alternatives.length,
-                    duration: result.duration
+                    method: match.method || 'accessibility-tree',
+                    confidence: match.confidence,
+                    alternatives: match.alternatives?.length || 0,
+                    duration
                 };
 
                 // Record in reporter
                 CSReporter.recordAIIdentification(identificationData);
 
-                CSReporter.debug(`[AIIntegration][${this.workerId}] 🔍 Element identified using ${result.method} (${(result.confidence * 100).toFixed(1)}% confidence)`);
+                CSReporter.debug(`[AIIntegration][${this.workerId}] Element identified using ${match.method || 'a11y-tree'} (${(match.confidence * 100).toFixed(1)}% confidence)`);
 
                 return {
-                    locator: result.locator,
+                    locator: match.locator,
                     identificationData
                 };
             }

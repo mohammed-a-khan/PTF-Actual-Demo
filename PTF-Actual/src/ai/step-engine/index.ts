@@ -25,7 +25,7 @@
 // ============================================================================
 
 /** The main csAI() function - primary entry point */
-export { csAI, configureAIStepEngine, getAIStepConfig } from './CSAIStepFunction';
+export { csAI, configureAIStepEngine, getAIStepConfig, flushAIStepCache } from './CSAIStepFunction';
 
 // ============================================================================
 // BDD Integration
@@ -49,6 +49,38 @@ export { CSAccessibilityTreeMatcher } from './CSAccessibilityTreeMatcher';
 
 /** Action/assertion/query executor */
 export { CSAIActionExecutor } from './CSAIActionExecutor';
+
+// ============================================================================
+// Accuracy & Self-Healing Modules (Phase 1-3)
+// ============================================================================
+
+/** MutationObserver-based smart waits for DOM stability */
+export { CSMutationObserverWait } from './CSMutationObserverWait';
+export type { DOMStabilityOptions, StabilityResult } from './CSMutationObserverWait';
+
+/** Post-action verification (detects silent action failures) */
+export { CSPostActionVerifier } from './CSPostActionVerifier';
+export type { DOMStateSnapshot, ElementStateSnapshot, VerificationResult } from './CSPostActionVerifier';
+
+/** Enhanced fuzzy matching (N-gram + token + Jaro-Winkler composite) */
+export { CSFuzzyMatcher } from './CSFuzzyMatcher';
+export type { FuzzyMatchResult } from './CSFuzzyMatcher';
+
+/** Multi-signal element fingerprinting with LCS self-healing */
+export { CSElementFingerprint } from './CSElementFingerprint';
+export type { ElementFingerprint, StoredFingerprint } from './CSElementFingerprint';
+
+/** Persistent cross-run element cache with adaptive confidence */
+export { CSElementCache } from './CSElementCache';
+export type { CacheEntry, PageStats } from './CSElementCache';
+
+/** Rule-based compound instruction decomposer */
+export { CSInstructionDecomposer } from './CSInstructionDecomposer';
+export type { DecomposedInstruction, SubInstruction } from './CSInstructionDecomposer';
+
+/** Visual stability detection via screenshot comparison */
+export { CSVisualStabilityDetector } from './CSVisualStabilityDetector';
+export type { VisualComparisonResult } from './CSVisualStabilityDetector';
 
 // ============================================================================
 // Types

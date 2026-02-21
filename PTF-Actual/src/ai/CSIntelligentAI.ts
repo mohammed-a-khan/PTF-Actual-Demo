@@ -10,7 +10,6 @@ import { CSPageDiagnostics, PageDiagnosticData } from '../diagnostics/CSPageDiag
 import { CSNaturalLanguageEngine } from './nlp/CSNaturalLanguageEngine';
 import { CSFeatureExtractor } from './features/CSFeatureExtractor';
 import { CSDOMIntelligence } from './analysis/CSDOMIntelligence';
-import { CSSimilarityEngine } from './similarity/CSSimilarityEngine';
 import {
     ElementIdentificationResult,
     FailureAnalysis,
@@ -36,13 +35,11 @@ export class CSIntelligentAI {
     private nlpEngine: CSNaturalLanguageEngine;
     private featureExtractor: CSFeatureExtractor;
     private domIntelligence: CSDOMIntelligence;
-    private similarityEngine: CSSimilarityEngine;
 
     private constructor() {
         this.nlpEngine = CSNaturalLanguageEngine.getInstance();
         this.featureExtractor = CSFeatureExtractor.getInstance();
         this.domIntelligence = CSDOMIntelligence.getInstance();
-        this.similarityEngine = CSSimilarityEngine.getInstance();
 
         CSReporter.debug('[CSIntelligentAI] Initialized with all AI modules');
     }

@@ -18,7 +18,6 @@ export { CSFeatureContext } from '../bdd/CSFeatureContext';
 export { CSBDDContext } from '../bdd/CSBDDContext';
 export { CSDataSource } from '../bdd/CSDataSourceDecorator';
 export { CSStepValidator } from '../bdd/CSStepValidator';
-export { CSIntelligentStepExecutor } from '../bdd/CSIntelligentStepExecutor';
 export { CSStepPatternScanner } from '../bdd/CSStepPatternScanner';
 export * from '../bdd/CSBDDDecorators';
 

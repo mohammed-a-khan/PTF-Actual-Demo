@@ -258,6 +258,21 @@ export class CSStepValidator {
 
                 const lineNumber = this.getLineNumber(content, match.index);
 
+                // Skip matches inside string/template literals.
+                // The regex can match words inside template strings as method names — false positive.
+                // Detect by counting unescaped backticks/quotes before the match on the line.
+                const matchLine = lines[lineNumber - 1] || '';
+                const matchColIndex = matchLine.indexOf(methodName);
+                if (matchColIndex > -1) {
+                    const beforeMatch = matchLine.substring(0, matchColIndex);
+                    const backticks = (beforeMatch.match(/(?<!\\)`/g) || []).length;
+                    const singleQuotes = (beforeMatch.match(/(?<!\\)'/g) || []).length;
+                    const doubleQuotes = (beforeMatch.match(/(?<!\\)"/g) || []).length;
+                    if (backticks % 2 === 1 || singleQuotes % 2 === 1 || doubleQuotes % 2 === 1) {
+                        continue; // Inside a string literal — skip
+                    }
+                }
+
                 // Determine which class this method belongs to
                 let className: string | undefined;
                 for (const cls of classes) {
