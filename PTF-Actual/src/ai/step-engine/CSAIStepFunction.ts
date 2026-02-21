@@ -24,16 +24,11 @@ import { CSAIStepParser } from './CSAIStepParser';
 import { CSAccessibilityTreeMatcher } from './CSAccessibilityTreeMatcher';
 import { CSAIActionExecutor } from './CSAIActionExecutor';
 import { CSInstructionDecomposer } from './CSInstructionDecomposer';
-import { CSPostActionVerifier } from './CSPostActionVerifier';
-import { CSElementFingerprint } from './CSElementFingerprint';
 import { CSElementCache } from './CSElementCache';
-import { CSMutationObserverWait } from './CSMutationObserverWait';
-import { CSVisualStabilityDetector } from './CSVisualStabilityDetector';
 import {
     CSAIOptions,
     ParsedStep,
     MatchedElement,
-    ActionResult,
     CSAIStepConfig,
     DEFAULT_AI_STEP_CONFIG
 } from './CSAIStepTypes';
@@ -46,11 +41,7 @@ let parser: CSAIStepParser | null = null;
 let matcher: CSAccessibilityTreeMatcher | null = null;
 let executor: CSAIActionExecutor | null = null;
 let decomposer: CSInstructionDecomposer | null = null;
-let verifier: CSPostActionVerifier | null = null;
-let fingerprinter: CSElementFingerprint | null = null;
 let elementCache: CSElementCache | null = null;
-let mutationWaiter: CSMutationObserverWait | null = null;
-let visualDetector: CSVisualStabilityDetector | null = null;
 
 /**
  * Execute a natural language instruction against a Playwright page
@@ -99,11 +90,7 @@ export async function csAI(
         if (!matcher) matcher = CSAccessibilityTreeMatcher.getInstance(config);
         if (!executor) executor = CSAIActionExecutor.getInstance(config);
         if (!decomposer) decomposer = CSInstructionDecomposer.getInstance();
-        if (!verifier) verifier = CSPostActionVerifier.getInstance();
-        if (!fingerprinter) fingerprinter = CSElementFingerprint.getInstance();
         if (!elementCache) elementCache = CSElementCache.getInstance();
-        if (!mutationWaiter) mutationWaiter = CSMutationObserverWait.getInstance();
-        if (!visualDetector) visualDetector = CSVisualStabilityDetector.getInstance();
 
         // Step 0: Decompose compound instructions
         const decomposed = decomposer.decompose(instruction.trim());
@@ -155,79 +142,28 @@ export async function csAI(
                 await validatePageHealth(options.page, parsedStep);
             }
 
-            // Step 2a: Check element cache for a previously successful match
-            const cacheKey = fingerprinter.generateKey(pageUrl, parsedStep.target.rawText);
-            const cachedEntry = elementCache.get(cacheKey);
-            if (cachedEntry) {
-                CSReporter.debug(`AI Cache: Found cached entry for "${parsedStep.target.rawText}" (strategy: ${cachedEntry.locatorStrategy})`);
-                // Try to verify the cached element still exists
-                try {
-                    const activeFrame = executor.getActiveFrame();
-                    const searchContext = activeFrame || options.page;
-                    const cachedLocator = searchContext.getByRole(cachedEntry.fingerprint.ariaRole as any, {
-                        name: cachedEntry.fingerprint.ariaLabel || cachedEntry.fingerprint.textContent,
-                        exact: false
-                    });
-                    const count = await cachedLocator.count().catch(() => 0);
-                    if (count > 0) {
-                        matchedElement = {
-                            locator: cachedLocator.first(),
-                            confidence: cachedEntry.confidence,
-                            method: 'pattern-matcher',
-                            description: `Cached: ${cachedEntry.locatorDescription}`,
-                            alternatives: []
-                        };
-                        CSReporter.debug(`AI Cache: Verified cached element — using cached match`);
-                    } else {
-                        // Cache miss — try self-healing via fingerprint
-                        CSReporter.debug(`AI Cache: Cached element not found — attempting self-heal`);
-                        elementCache.recordFailure(cacheKey);
-                        const healed = await fingerprinter.selfHeal(
-                            executor.getActiveFrame() || options.page,
-                            cachedEntry.fingerprint,
-                            0.5
-                        );
-                        if (healed) {
-                            matchedElement = healed;
-                            CSReporter.debug(`AI Self-Heal: Found element via fingerprint matching`);
-                        }
-                    }
-                } catch {
-                    // Cache verification failed — proceed with normal search
-                }
-            }
+            // Element search with lightweight retry (no cache/fingerprint/self-heal overhead)
+            const maxAttempts = parsedStep.category === 'assertion' ? 3 : 2;
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                // Invalidate accessibility cache for fresh snapshot
+                matcher.invalidateCache();
 
-            // Step 2b: Normal element search (if cache miss)
-            if (!matchedElement) {
-                // Retry element search with progressive waits to handle page transitions
-                const maxAttempts = parsedStep.category === 'assertion' ? 4 : 3;
-                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                    // Invalidate accessibility cache for fresh snapshot
-                    matcher.invalidateCache();
+                // Use active frame context if set (via 'switch-frame'), otherwise main page.
+                const activeFrame = executor.getActiveFrame();
+                const searchContext = activeFrame || options.page;
 
-                    // Use active frame context if set (via 'switch-frame'), otherwise main page.
-                    const activeFrame = executor.getActiveFrame();
-                    const searchContext = activeFrame || options.page;
+                matchedElement = await matcher.findElement(
+                    searchContext,
+                    parsedStep.target,
+                    parsedStep.intent
+                );
 
-                    matchedElement = await matcher.findElement(
-                        searchContext,
-                        parsedStep.target,
-                        parsedStep.intent
-                    );
+                if (matchedElement) break;
 
-                    if (matchedElement) break;
-
-                    // Element not found - use MutationObserver-based smart wait instead of fixed timeout
-                    if (attempt < maxAttempts && parsedStep.target.descriptors.length > 0) {
-                        CSReporter.debug(`AI Step: Element "${parsedStep.target.rawText}" not found, waiting for DOM stability (attempt ${attempt}/${maxAttempts})`);
-                        await mutationWaiter.waitForDOMStability(options.page, {
-                            timeout: attempt * 2000,
-                            stableDuration: 300,
-                            waitForNetworkIdle: true
-                        });
-                        // Also clear spinners
-                        await mutationWaiter.waitForSpinnersCleared(options.page, 2000);
-                    }
+                // Element not found — short wait before retry (let page settle)
+                if (attempt < maxAttempts && parsedStep.target.descriptors.length > 0) {
+                    CSReporter.debug(`AI Step: Element "${parsedStep.target.rawText}" not found (attempt ${attempt}/${maxAttempts}), retrying...`);
+                    await options.page.waitForTimeout(attempt * 500);
                 }
             }
 
@@ -237,19 +173,14 @@ export async function csAI(
                     CSReporter.pass(`AI Step: Element "${parsedStep.target.rawText}" not found — verify-not-present passed`);
                     const duration = Date.now() - startTime;
                     CSReporter.addAction(`AI: ${instruction}`, 'pass', duration);
-                    matcher.updatePageStats(pageUrl, true, 1.0);
                     return true;
                 }
                 if (parsedStep.intent === 'verify-hidden') {
                     CSReporter.pass(`AI Step: Element "${parsedStep.target.rawText}" not found — verify-hidden passed (not in DOM)`);
                     const duration = Date.now() - startTime;
                     CSReporter.addAction(`AI: ${instruction}`, 'pass', duration);
-                    matcher.updatePageStats(pageUrl, true, 1.0);
                     return true;
                 }
-
-                // Update page stats for failed search
-                matcher.updatePageStats(pageUrl, false);
 
                 CSReporter.warn(`AI Step: Could not find element matching "${parsedStep.target.rawText}"`);
                 throw new Error(`Element not found: "${parsedStep.target.rawText}". Ensure the element is visible on the page.`);
@@ -257,83 +188,14 @@ export async function csAI(
 
             if (matchedElement) {
                 CSReporter.debug(`AI Match: ${matchedElement.description} (confidence: ${matchedElement.confidence.toFixed(2)}, method: ${matchedElement.method})`);
-
-                // Update page stats for successful search
-                matcher.updatePageStats(pageUrl, true, matchedElement.confidence);
-
-                // Cache the successful match with fingerprint for future self-healing
-                try {
-                    const fp = await fingerprinter.capture(
-                        matchedElement.locator,
-                        pageUrl,
-                        parsedStep.target.rawText,
-                        matchedElement.method,
-                        matchedElement.confidence
-                    );
-                    if (fp) {
-                        const cacheKey = fingerprinter.generateKey(pageUrl, parsedStep.target.rawText);
-                        elementCache.set(
-                            cacheKey,
-                            fp,
-                            matchedElement.method,
-                            matchedElement.description,
-                            matchedElement.confidence
-                        );
-                    }
-                } catch {
-                    // Fingerprint capture failure is non-critical
-                }
             }
         }
 
-        // Step 3: Pre-action state capture (for post-action verification)
-        let beforeState: any = null;
-        if (parsedStep.category === 'action' && isDOMModifyingAction(parsedStep.intent)) {
-            try {
-                const searchContext = executor.getActiveFrame() || options.page;
-                beforeState = await verifier.captureBeforeState(
-                    searchContext,
-                    matchedElement?.locator
-                );
-            } catch {
-                // Pre-action capture failure is non-critical
-            }
-        }
-
-        // Step 4: Execute
+        // Step 3: Execute (no pre/post action overhead — tests validate outcomes directly)
         const result = await executor.execute(options.page, parsedStep, matchedElement);
 
-        // Step 5: Post-action verification & DOM stability
+        // Invalidate accessibility tree cache after DOM-modifying actions
         if (parsedStep.category === 'action' && isDOMModifyingAction(parsedStep.intent)) {
-            // Wait for DOM to stabilize after action
-            try {
-                await mutationWaiter.waitForDOMStability(
-                    executor.getActiveFrame() || options.page,
-                    { timeout: 3000, stableDuration: 200 }
-                );
-            } catch {
-                // Non-critical — continue
-            }
-
-            // Verify action took effect
-            if (beforeState && result.success) {
-                try {
-                    const searchContext = executor.getActiveFrame() || options.page;
-                    const verification = await verifier.verifyAction(
-                        searchContext,
-                        parsedStep.intent,
-                        beforeState,
-                        matchedElement?.locator
-                    );
-                    if (verification.warning) {
-                        CSReporter.warn(`AI Verify: ${verification.warning}`);
-                    }
-                } catch {
-                    // Verification failure is non-critical
-                }
-            }
-
-            // Invalidate accessibility tree cache
             matcher.invalidateCache();
         }
 

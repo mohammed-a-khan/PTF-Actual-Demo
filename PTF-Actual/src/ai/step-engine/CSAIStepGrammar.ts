@@ -306,13 +306,17 @@ export class CSAIStepGrammar {
         // Build descriptors: split remaining text into meaningful parts
         // Filter out articles, filler words, AND element type words that don't help identification
         // Element type words (field, button, etc.) are already captured by elementType inference
-        const stopWords = new Set([
-            'the', 'a', 'an', 'of', 'for', 'on', 'in', 'to', 'is', 'are', 'and', 'or', 'with',
+        //
+        // IMPORTANT: Only filter element-type words (button, field, etc.).
+        // Do NOT filter common English words like "on", "in", "to" etc. because they may be
+        // part of the element's actual name (e.g., "Log On", "Sign In", "Add To Cart").
+        // The quoted text IS the element name — stripping words from it causes wrong matches.
+        const elementTypeWords = new Set([
             'field', 'button', 'btn', 'link', 'input', 'textbox', 'checkbox', 'radio',
             'dropdown', 'tab', 'heading', 'header', 'icon', 'image', 'switch', 'toggle',
             'element', 'message', 'label', 'section', 'area', 'box', 'item', 'column', 'row'
         ]);
-        const descriptors = text.split(/\s+/).filter(w => w.length > 0 && !stopWords.has(w.toLowerCase()));
+        const descriptors = text.split(/\s+/).filter(w => w.length > 0 && !elementTypeWords.has(w.toLowerCase()));
 
         return {
             elementType,

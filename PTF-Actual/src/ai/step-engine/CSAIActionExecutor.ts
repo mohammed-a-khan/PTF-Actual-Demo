@@ -212,16 +212,15 @@ export class CSAIActionExecutor {
             case 'type': {
                 this.requireElement(element, 'fill');
                 this.requireValue(parameters, 'fill');
+                // Pre-check: if matched element is not fillable, find the input FIRST
+                // This handles cases where the matcher found a label/header/span instead of the input
+                const fillTarget = await this.resolveFillableElement(element!.locator);
                 try {
-                    const el = this.createWrappedElement(element!, timeout);
-                    await el.fill(parameters.value!, { timeout });
+                    await fillTarget.fill(parameters.value!, { timeout });
                 } catch (fillError: any) {
-                    // If the matched element is a container (tr, div, td, span, etc.),
-                    // the fill will fail because it's not an input. Drill down to find
-                    // the actual fillable child element inside the container.
+                    // Last resort: try findInTableLayout
                     if (fillError.message?.includes('not an <input>')) {
-                        CSReporter.debug('CSAIActionExecutor: Matched element is a container — searching for fillable element');
-                        // Try children first, then sibling cell, then parent row
+                        CSReporter.debug('CSAIActionExecutor: Fill failed — searching for fillable element in table layout');
                         const resolved = await this.findInTableLayout(
                             element!.locator,
                             'input:visible, textarea:visible, [contenteditable="true"]:visible, [contenteditable=""]:visible'
@@ -240,9 +239,9 @@ export class CSAIActionExecutor {
 
             case 'clear': {
                 this.requireElement(element, 'clear');
+                const clearTarget = await this.resolveFillableElement(element!.locator);
                 try {
-                    const el = this.createWrappedElement(element!, timeout);
-                    await el.clear({ timeout });
+                    await clearTarget.clear({ timeout });
                 } catch (clearError: any) {
                     if (clearError.message?.includes('not an <input>')) {
                         const resolved = await this.findInTableLayout(
@@ -1122,25 +1121,47 @@ export class CSAIActionExecutor {
                                 // Try exact match first, then containment
                                 if (text === expected || text.includes(expected)) return true;
 
-                                // Table layout fallback: if the matched element is a <th> or label,
-                                // the value is in the adjacent <td>. Check the parent <tr> row text
-                                // which contains both label and value. Common in legacy IE-era apps:
-                                //   <tr><th>Full Name</th><td>John Smith</td></tr>
+                                // Label:value layout fallback
+                                // Handles both table layouts and div/span layouts:
+                                //   <tr><th>Tranche ID</th><td>A</td></tr>
+                                //   <div><span>Tranche ID:</span> <span>A</span></div>
+                                //   <label>Tranche ID</label><span>A</span>
                                 try {
-                                    const rowText = await element!.locator.evaluate((el: Element) => {
-                                        // Walk up to find the closest <tr>
-                                        let parent: Element | null = el.parentElement;
-                                        for (let i = 0; i < 5 && parent; i++) {
-                                            if (parent.tagName === 'TR') {
-                                                // Get text from <td> siblings only (exclude the <th> label)
-                                                const tds = parent.querySelectorAll('td');
-                                                return Array.from(tds).map(td => td.textContent?.trim() || '').join(' ');
-                                            }
-                                            parent = parent.parentElement;
+                                    const adjacentText = await element!.locator.evaluate((el: Element, expected: string) => {
+                                        // Strategy 1: Check next sibling element
+                                        let sibling = el.nextElementSibling;
+                                        if (sibling) {
+                                            const sibText = (sibling as HTMLElement).textContent?.trim() || '';
+                                            if (sibText === expected || sibText.includes(expected)) return sibText;
                                         }
+
+                                        // Strategy 2: Check parent's text (parent contains label + value)
+                                        const parent = el.parentElement;
+                                        if (parent) {
+                                            // Get all child text nodes excluding the matched element
+                                            const parentText = Array.from(parent.childNodes)
+                                                .filter(n => n !== el)
+                                                .map(n => n.textContent?.trim() || '')
+                                                .filter(t => t.length > 0)
+                                                .join(' ');
+                                            if (parentText === expected || parentText.includes(expected)) return parentText;
+                                        }
+
+                                        // Strategy 3: Walk up to find <tr> and check <td> siblings
+                                        let ancestor: Element | null = el.parentElement;
+                                        for (let i = 0; i < 5 && ancestor; i++) {
+                                            if (ancestor.tagName === 'TR') {
+                                                const tds = ancestor.querySelectorAll('td');
+                                                const tdText = Array.from(tds).map(td => td.textContent?.trim() || '').join(' ');
+                                                if (tdText === expected || tdText.includes(expected)) return tdText;
+                                                break;
+                                            }
+                                            ancestor = ancestor.parentElement;
+                                        }
+
                                         return '';
-                                    });
-                                    if (rowText && (rowText === expected || rowText.includes(expected))) {
+                                    }, expected);
+                                    if (adjacentText) {
                                         return true;
                                     }
                                 } catch {
@@ -2423,6 +2444,72 @@ export class CSAIActionExecutor {
             // Non-critical — caller will use original locator
         }
         return null;
+    }
+
+    /**
+     * Resolve a fillable element from a matched locator.
+     * If the matched element is already an input/textarea, returns it as-is.
+     * If it's a label/span/th/div, looks for the associated input:
+     *   1. Child input inside the element
+     *   2. Next sibling input (label → input pattern)
+     *   3. Input in next table cell (<th>Label</th><td><input></td>)
+     *   4. Input in same parent row
+     */
+    private async resolveFillableElement(locator: Locator): Promise<Locator> {
+        try {
+            const tagName = await locator.evaluate(el => el.tagName.toLowerCase()).catch(() => '');
+            // Already fillable — return as-is
+            if (['input', 'textarea', 'select'].includes(tagName) ||
+                await locator.evaluate(el => el.getAttribute('contenteditable') === 'true').catch(() => false)) {
+                return locator;
+            }
+
+            const fillableSelector = 'input:visible, textarea:visible, [contenteditable="true"]:visible';
+
+            // 1. Child input inside the element
+            const child = locator.locator(fillableSelector).first();
+            if (await child.count().catch(() => 0) > 0) {
+                CSReporter.debug('CSAIActionExecutor: Resolved fillable child inside matched element');
+                return child;
+            }
+
+            // 2. Next sibling element (label → input)
+            const nextSibling = locator.locator('xpath=following-sibling::*[1]').first();
+            if (await nextSibling.count().catch(() => 0) > 0) {
+                const sibTag = await nextSibling.evaluate(el => el.tagName.toLowerCase()).catch(() => '');
+                if (['input', 'textarea'].includes(sibTag)) {
+                    CSReporter.debug('CSAIActionExecutor: Resolved fillable next sibling');
+                    return nextSibling;
+                }
+                // Check if sibling contains an input
+                const sibChild = nextSibling.locator(fillableSelector).first();
+                if (await sibChild.count().catch(() => 0) > 0) {
+                    CSReporter.debug('CSAIActionExecutor: Resolved fillable inside next sibling');
+                    return sibChild;
+                }
+            }
+
+            // 3. Next table cell (<th>/<td> → <td><input>)
+            const nextTd = locator.locator('xpath=following-sibling::td[1]').first();
+            if (await nextTd.count().catch(() => 0) > 0) {
+                const tdInput = nextTd.locator(fillableSelector).first();
+                if (await tdInput.count().catch(() => 0) > 0) {
+                    CSReporter.debug('CSAIActionExecutor: Resolved fillable in next table cell');
+                    return tdInput;
+                }
+            }
+
+            // 4. Same parent row
+            const rowInput = locator.locator('xpath=ancestor::tr[1]').first().locator(fillableSelector).first();
+            if (await rowInput.count().catch(() => 0) > 0) {
+                CSReporter.debug('CSAIActionExecutor: Resolved fillable in parent table row');
+                return rowInput;
+            }
+        } catch {
+            // Resolution failed — return original, let the caller handle the error
+        }
+
+        return locator;
     }
 
     private requireElement(element: MatchedElement | null, action: string): asserts element is MatchedElement {

@@ -359,7 +359,7 @@ export class CSAccessibilityTreeMatcher {
             }
 
             // Take new snapshot
-            const snapshot = await page.locator('body').ariaSnapshot({ timeout: 5000 });
+            const snapshot = await page.locator('body').ariaSnapshot({ timeout: 2000 });
 
             // Cache it
             this.snapshotCache = { snapshot, timestamp: now, url };

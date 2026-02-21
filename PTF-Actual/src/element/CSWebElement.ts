@@ -2362,7 +2362,10 @@ export class CSElementFactory {
                 description: `${this.options.description} [${index}]`
             }, this.page);
             // Set the specific locator for this element using private property access
+            // Must also set locatorPageRef so getLocator() recognizes the cached locator
+            // and doesn't rebuild from options (which would cause strict mode violation)
             (element as any).locator = locator;
+            (element as any).locatorPageRef = this.page;
             return element;
         });
         
