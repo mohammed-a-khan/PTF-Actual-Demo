@@ -171,9 +171,10 @@ export class CSStepValidator {
         // The \b ensures we match at the START of a word (prevents matching "rim" from ".trim()")
         const methodPatterns = [
             // Class methods - exclude method calls by ensuring no dot before method name and word boundary
-            /(?<!\.)(?:async\s+)?\b(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*{/g,
+            // Uses [^{\n]+ to prevent matching across line boundaries (avoids false positives from template literals)
+            /(?<!\.)(?:async\s+)?\b(\w+)\s*\([^)]*\)\s*(?::\s*[^{\n]+)?\s*{/g,
             // Function declarations
-            /function\s+(\w+)\s*\([^)]*\)\s*(?::\s*[^{]+)?\s*{/g,
+            /function\s+(\w+)\s*\([^)]*\)\s*(?::\s*[^{\n]+)?\s*{/g,
             // Arrow functions assigned to variables
             /(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>/g,
             // Arrow functions with type annotations
@@ -229,6 +230,13 @@ export class CSStepValidator {
                 const builtInMethods = [
                     // Control flow keywords that might match
                     'constructor', 'if', 'for', 'while', 'switch', 'catch', 'return', 'throw',
+                    // Built-in constructors/global functions (e.g., String(x), Number(x), Boolean(x))
+                    'String', 'Number', 'Boolean', 'Object', 'Array', 'Date', 'RegExp', 'Error',
+                    'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'URIError', 'EvalError',
+                    'Map', 'Set', 'WeakMap', 'WeakSet', 'Promise', 'Symbol', 'BigInt', 'Proxy', 'Reflect',
+                    'Int8Array', 'Uint8Array', 'Float32Array', 'Float64Array', 'ArrayBuffer', 'DataView',
+                    'encodeURIComponent', 'decodeURIComponent', 'encodeURI', 'decodeURI',
+                    'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'eval', 'require',
                     // Object methods
                     'toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable',
                     // String methods

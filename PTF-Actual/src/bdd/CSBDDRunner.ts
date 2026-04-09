@@ -33,6 +33,10 @@ let CSADOIntegration: any = null;
 let CSAIIntegrationLayer: any = null;
 // Lazy load locator extractor
 let CSLocatorExtractor: any = null;
+// Lazy load new enhancement modules
+let CSFlakyTestDetector: any = null;
+let CSScreencastManager: any = null;
+let CSBrowserDashboard: any = null;
 // Parallel execution imports are loaded dynamically when needed
 import * as path from 'path';
 import * as fs from 'fs';
@@ -377,12 +381,40 @@ export class CSBDDRunner {
                 CSReporter.debug('Validation skipped (VALIDATION_LEVEL=none)');
             }
 
+            // Start browser dashboard if enabled
+            try {
+                if (!CSBrowserDashboard) {
+                    CSBrowserDashboard = require('../dashboard/CSBrowserDashboard').CSBrowserDashboard;
+                }
+                const dashboard = CSBrowserDashboard.getInstance();
+                await dashboard.startDashboard();
+            } catch (e) { /* dashboard not available */ }
+
             // Execute features
             if (options.dryRun) {
                 await this.dryRun(features);
             } else {
                 await this.executeFeatures(features, options);
             }
+
+            // Flush flaky test data to disk + save summary to test results folder
+            try {
+                if (CSFlakyTestDetector) {
+                    const detector = CSFlakyTestDetector.getInstance();
+                    await detector.flush();
+
+                    // Save flaky summary to this run's test results folder
+                    const flakyDir = this.resultsManager.getDirectories().flaky;
+                    const flakyReport = detector.generateFlakinessReport();
+                    const fs = require('fs');
+                    if (!fs.existsSync(flakyDir)) fs.mkdirSync(flakyDir, { recursive: true });
+                    fs.writeFileSync(
+                        require('path').join(flakyDir, 'flaky-summary.json'),
+                        JSON.stringify(flakyReport, null, 2)
+                    );
+                    CSReporter.debug(`Flaky test summary saved to ${flakyDir}/flaky-summary.json`);
+                }
+            } catch (e) { /* flaky flush failed */ }
 
             // Generate reports only if parallel execution didn't already generate them
             if (!this.parallelExecutionDone) {
@@ -450,6 +482,14 @@ export class CSBDDRunner {
             // Complete ADO test run AFTER professional report to ensure all artifacts are included in zip
             const adoIntegration = this.ensureADOIntegration();
             await adoIntegration.afterAllTests();
+
+            // Stop browser dashboard
+            try {
+                if (CSBrowserDashboard) {
+                    const dashboard = CSBrowserDashboard.getInstance();
+                    await dashboard.stopDashboard();
+                }
+            } catch (e) { /* dashboard stop failed */ }
 
         } catch (error: any) {
             CSReporter.error(`Test execution failed: ${error.message}`);
@@ -1306,6 +1346,13 @@ export class CSBDDRunner {
         }
         
         CSReporter.startScenario(scenarioName);
+
+        // Start step timeline tracking for annotated video
+        try {
+            const { CSStepTimeline } = require('../evidence/CSStepTimeline');
+            CSStepTimeline.getInstance().startScenario(scenarioName);
+        } catch (e) { /* */ }
+
         this.scenarioContext.setCurrentScenario(scenarioName);
         this.scenarioContext.setScenarioTags([...feature.tags, ...scenario.tags]);
         this.context.setCurrentScenario(scenarioName);
@@ -1378,6 +1425,20 @@ export class CSBDDRunner {
             const page = browserManager.getPage();
 
             await this.context.initialize(page, browserContext);
+
+            // Screencast recording — DISABLED in auto-wiring
+            // Currently produces duplicate of existing BROWSER_VIDEO with no added value.
+            // The CSScreencastManager exists for programmatic use in custom steps
+            // when step-overlay or annotated timeline features are implemented.
+            // To enable manually: CSScreencastManager.getInstance().startScreencast(page)
+
+            // Notify dashboard of scenario start with total step count
+            try {
+                if (CSBrowserDashboard) {
+                    const totalSteps = (scenario.steps || []).length + (feature.background?.steps || []).length;
+                    CSBrowserDashboard.getInstance().notifyScenarioStart(scenarioName, totalSteps, feature.name || '');
+                }
+            } catch (e) { /* dashboard not available */ }
         } else {
             // Initialize context without browser for API-only tests
             await this.context.initialize(null, null);
@@ -1407,6 +1468,28 @@ export class CSBDDRunner {
 
             CSReporter.passScenario();
             await this.captureArtifactsIfNeeded('passed');
+
+            // Generate annotated video subtitle file (VTT) alongside the recorded video
+            try {
+                const { CSStepTimeline } = require('../evidence/CSStepTimeline');
+                const timeline = CSStepTimeline.getInstance();
+                const timelineSteps = timeline.getSteps();
+                if (timelineSteps.length > 0) {
+                    const dirs = this.resultsManager.getDirectories();
+                    const vttPath = path.join(dirs.videos, `${scenarioName.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 50)}-timeline.vtt`);
+                    timeline.generateVTT(vttPath, timelineSteps);
+                }
+            } catch (e) { /* */ }
+
+            // Record result for flaky test detection
+            try {
+                if (!CSFlakyTestDetector) {
+                    CSFlakyTestDetector = require('../flaky/CSFlakyTestDetector').CSFlakyTestDetector;
+                }
+                const detector = CSFlakyTestDetector.getInstance();
+                const featureFile = (feature as any).file || feature.name || 'unknown';
+                detector.recordTestResult(scenarioName, scenarioName, featureFile, 'passed', Date.now() - scenarioStartTime);
+            } catch (e) { /* flaky detection not available */ }
 
             // ADO: After scenario hook - passed
             const duration = Date.now() - scenarioStartTime;  // Calculate accurate duration from scenario start
@@ -1440,6 +1523,28 @@ export class CSBDDRunner {
 
             CSReporter.failScenario(error.message);
             await this.captureArtifactsIfNeeded('failed');
+
+            // Generate annotated video subtitle file (VTT) for failed scenario
+            try {
+                const { CSStepTimeline } = require('../evidence/CSStepTimeline');
+                const timeline = CSStepTimeline.getInstance();
+                const timelineSteps = timeline.getSteps();
+                if (timelineSteps.length > 0) {
+                    const dirs = this.resultsManager.getDirectories();
+                    const vttPath = path.join(dirs.videos, `${scenarioName.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 50)}-timeline.vtt`);
+                    timeline.generateVTT(vttPath, timelineSteps);
+                }
+            } catch (e) { /* */ }
+
+            // Record failure for flaky test detection
+            try {
+                if (!CSFlakyTestDetector) {
+                    CSFlakyTestDetector = require('../flaky/CSFlakyTestDetector').CSFlakyTestDetector;
+                }
+                const detector = CSFlakyTestDetector.getInstance();
+                const featureFile = (feature as any).file || feature.name || 'unknown';
+                detector.recordTestResult(scenarioName, scenarioName, featureFile, 'failed', Date.now() - scenarioStartTime, error.message);
+            } catch (e) { /* flaky detection not available */ }
 
             // DISABLED: Scenario-level screenshot on failure
             // Step-level screenshots are already captured for failures
@@ -1734,6 +1839,13 @@ export class CSBDDRunner {
                     })
                 };
 
+                // Attach step timeline data for annotated video player in HTML report
+                try {
+                    const { CSStepTimeline } = require('../evidence/CSStepTimeline');
+                    scenarioData.stepTimeline = CSStepTimeline.getInstance().generateTimelineData();
+                    CSStepTimeline.getInstance().reset();
+                } catch (e) { /* */ }
+
                 // Only add to scenarios array if:
                 // 1. We're NOT going to retry (willRetryAfterFailure=false), AND
                 // 2. Either this is NOT a retry attempt OR this IS a retry and it's the final attempt
@@ -1800,6 +1912,13 @@ export class CSBDDRunner {
                     artifacts: artifacts
                 };
 
+                // Attach step timeline data for annotated video player in HTML report
+                try {
+                    const { CSStepTimeline } = require('../evidence/CSStepTimeline');
+                    scenarioData.stepTimeline = CSStepTimeline.getInstance().generateTimelineData();
+                    CSStepTimeline.getInstance().reset();
+                } catch (e) { /* */ }
+
                 // Only add to scenarios array if:
                 // 1. We're NOT going to retry (willRetryAfterFailure=false), AND
                 // 2. Either this is NOT a retry attempt OR this IS a retry and it's the final attempt
@@ -1858,6 +1977,10 @@ export class CSBDDRunner {
             }
 
             CSReporter.endScenario();
+
+            // Notify dashboard of scenario end
+            try { if (CSBrowserDashboard) CSBrowserDashboard.getInstance().notifyScenarioEnd(); } catch { /* */ }
+
             await this.context.cleanupScenario();
         }
     }
@@ -1894,7 +2017,20 @@ export class CSBDDRunner {
 
         this.context.setCurrentStep(`${step.keyword} ${stepText}`);
         CSReporter.startStep(`${step.keyword} ${stepText}`);
-        
+
+        // Track step timing for annotated video
+        try {
+            const { CSStepTimeline } = require('../evidence/CSStepTimeline');
+            CSStepTimeline.getInstance().startStep(step.keyword, stepText);
+        } catch (e) { /* */ }
+
+        // Notify dashboard of step start
+        try {
+            if (CSBrowserDashboard) {
+                CSBrowserDashboard.getInstance().notifyStepStart(`${step.keyword} ${stepText}`);
+            }
+        } catch (e) { /* */ }
+
         try {
             // Execute before step hooks
             await this.executeHooks('beforeStep', []);
@@ -1923,7 +2059,16 @@ export class CSBDDRunner {
             }
             
             CSReporter.passStep(duration);
-            
+
+            // Record step pass in timeline
+            try {
+                const { CSStepTimeline } = require('../evidence/CSStepTimeline');
+                CSStepTimeline.getInstance().endStep(step.keyword, stepText, 'passed');
+            } catch (e) { /* */ }
+
+            // Notify dashboard of step pass
+            try { if (CSBrowserDashboard) CSBrowserDashboard.getInstance().notifyStepEnd('passed'); } catch { /* */ }
+
         } catch (error: any) {
             const duration = Date.now() - stepStartTime;
             const stepFullText = `${step.keyword} ${stepText}`;
@@ -1971,6 +2116,12 @@ export class CSBDDRunner {
                             const retryStepActions = this.scenarioContext.getCurrentStepActions();
                             this.scenarioContext.addStepResult(stepFullText, 'passed', retryDuration, undefined, retryStepActions);
                             CSReporter.passStep(retryDuration);
+
+                            // Record healed step pass in timeline
+                            try {
+                                const { CSStepTimeline } = require('../evidence/CSStepTimeline');
+                                CSStepTimeline.getInstance().endStep(step.keyword, stepText, 'passed');
+                            } catch (e) { /* */ }
 
                             CSReporter.info(`[AI] Step passed after healing (retry duration: ${retryDuration}ms)`);
                             return; // SUCCESS - exit early, step passed after healing
@@ -2067,6 +2218,16 @@ export class CSBDDRunner {
             this.scenarioContext.addStepResult(`${step.keyword} ${stepText}`, 'failed', duration, undefined, failedStepActions);
 
             CSReporter.failStep(error.message, duration);
+
+            // Record step failure in timeline
+            try {
+                const { CSStepTimeline } = require('../evidence/CSStepTimeline');
+                CSStepTimeline.getInstance().endStep(step.keyword, stepText, 'failed');
+            } catch (e) { /* */ }
+
+            // Notify dashboard of step failure
+            try { if (CSBrowserDashboard) CSBrowserDashboard.getInstance().notifyStepEnd('failed'); } catch { /* */ }
+
             throw error;
             
         } finally {

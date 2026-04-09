@@ -303,20 +303,12 @@ export class CSAIStepGrammar {
             elementType = ELEMENT_TYPE_SYNONYMS[elementType.toLowerCase()] || elementType;
         }
 
-        // Build descriptors: split remaining text into meaningful parts
-        // Filter out articles, filler words, AND element type words that don't help identification
-        // Element type words (field, button, etc.) are already captured by elementType inference
-        //
-        // IMPORTANT: Only filter element-type words (button, field, etc.).
-        // Do NOT filter common English words like "on", "in", "to" etc. because they may be
-        // part of the element's actual name (e.g., "Log On", "Sign In", "Add To Cart").
-        // The quoted text IS the element name — stripping words from it causes wrong matches.
-        const elementTypeWords = new Set([
-            'field', 'button', 'btn', 'link', 'input', 'textbox', 'checkbox', 'radio',
-            'dropdown', 'tab', 'heading', 'header', 'icon', 'image', 'switch', 'toggle',
-            'element', 'message', 'label', 'section', 'area', 'box', 'item', 'column', 'row'
-        ]);
-        const descriptors = text.split(/\s+/).filter(w => w.length > 0 && !elementTypeWords.has(w.toLowerCase()));
+        // Build descriptors from the remaining text.
+        // Do NOT filter any words here — the grammar's stripElementType() already
+        // removes element-type words (button, field, etc.) from targetText before
+        // it reaches this method. Filtering again here breaks element names like
+        // "Log On" (strips "On"), "Sign In" (strips "In"), "Add To Cart" (strips "To").
+        const descriptors = text.split(/\s+/).filter(w => w.length > 0);
 
         return {
             elementType,

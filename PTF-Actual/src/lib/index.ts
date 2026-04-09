@@ -198,6 +198,33 @@ export { CSPipelineOrchestrator } from '../pipeline/CSPipelineOrchestrator';
 // Dashboard
 export { CSLiveDashboard } from '../dashboard/CSLiveDashboard';
 
+// Accessibility Testing (Aria Snapshots)
+export { CSAriaSnapshotTesting } from '../accessibility/CSAriaSnapshotTesting';
+export * from '../accessibility/CSAccessibilityTypes';
+
+// Flaky Test Detection
+export { CSFlakyTestDetector } from '../flaky/CSFlakyTestDetector';
+export * from '../flaky/CSFlakyTestTypes';
+
+// Visual AI Testing (Smart Comparison)
+export { CSVisualAITesting } from '../visual/CSVisualAITesting';
+export * from '../visual/CSVisualAITypes';
+
+// Locator Normalization
+export { CSLocatorNormalizer } from '../element/CSLocatorNormalizer';
+
+// Screencast Recording
+export { CSScreencastManager } from '../recording/CSScreencastManager';
+
+// Async Disposable Browser Sessions
+export { DisposableBrowserSession, DisposablePageSession, CSAsyncDisposable } from '../browser/CSAsyncDisposable';
+
+// Enhanced Browser Dashboard
+export { CSBrowserDashboard } from '../dashboard/CSBrowserDashboard';
+
+// CLI (Token-Efficient AI Agent Interface)
+export { CSPlaywrightCLI } from '../cli/CSPlaywrightCLI';
+
 // Step Definitions (for extending)
 export * from '../steps/api';
 export * from '../steps/common/CSCommonSteps';

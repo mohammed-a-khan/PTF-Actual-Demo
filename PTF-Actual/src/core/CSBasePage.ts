@@ -16,6 +16,14 @@ export abstract class CSBasePage {
     protected elements: Map<string, CSWebElement> = new Map();
     private static crossDomainHandlers: Map<any, CSCrossDomainNavigationHandler> = new Map();
 
+    // Capture of the most recent browser dialog (alert/confirm/prompt/beforeunload)
+    // observed by any of the acceptNext*/dismissNext*/alwaysAccept*/alwaysDismiss*
+    // dialog handlers. Read via getLastDialogMessage() / getLastDialogType() after
+    // the triggering action completes. Call clearLastDialog() before the action
+    // if you want a clean slate.
+    private lastDialogMessage: string | null = null;
+    private lastDialogType: string | null = null;
+
     // Dynamic page getter - always returns current page from browserManager
     // This ensures page objects always use the current page after browser switch
     protected get page(): any {
@@ -879,58 +887,111 @@ export abstract class CSBasePage {
     // =========================================================================
 
     /**
-     * Accept the next dialog (alert, confirm, prompt) that appears
+     * Accept the next dialog (alert, confirm, prompt) that appears.
+     * Also captures the dialog's message and type so they can be asserted
+     * on afterwards via getLastDialogMessage() / getLastDialogType().
      */
     public async acceptNextDialog(): Promise<void> {
         this.page.once('dialog', async (dialog: any) => {
-            CSReporter.debug(`Accepting dialog: ${dialog.message()}`);
+            this.lastDialogMessage = dialog.message();
+            this.lastDialogType = dialog.type();
+            CSReporter.debug(`Accepting dialog (${this.lastDialogType}): ${this.lastDialogMessage}`);
             await dialog.accept();
         });
         CSReporter.debug('Set up to accept next dialog');
     }
 
     /**
-     * Dismiss the next dialog (alert, confirm, prompt) that appears
+     * Dismiss the next dialog (alert, confirm, prompt) that appears.
+     * Also captures the dialog's message and type so they can be asserted
+     * on afterwards via getLastDialogMessage() / getLastDialogType().
      */
     public async dismissNextDialog(): Promise<void> {
         this.page.once('dialog', async (dialog: any) => {
-            CSReporter.debug(`Dismissing dialog: ${dialog.message()}`);
+            this.lastDialogMessage = dialog.message();
+            this.lastDialogType = dialog.type();
+            CSReporter.debug(`Dismissing dialog (${this.lastDialogType}): ${this.lastDialogMessage}`);
             await dialog.dismiss();
         });
         CSReporter.debug('Set up to dismiss next dialog');
     }
 
     /**
-     * Accept the next dialog with input text (for prompt dialogs)
+     * Accept the next dialog with input text (for prompt dialogs).
+     * Also captures the dialog's original message and type.
      */
     public async acceptNextDialogWithText(text: string): Promise<void> {
         this.page.once('dialog', async (dialog: any) => {
-            CSReporter.debug(`Accepting dialog with text: ${text}`);
+            this.lastDialogMessage = dialog.message();
+            this.lastDialogType = dialog.type();
+            CSReporter.debug(`Accepting dialog (${this.lastDialogType}) with text: ${text}`);
             await dialog.accept(text);
         });
         CSReporter.debug('Set up to accept next dialog with text');
     }
 
     /**
-     * Set up persistent dialog handler to always accept
+     * Set up persistent dialog handler to always accept.
+     * Captures the most recent dialog's message and type.
      */
     public async alwaysAcceptDialogs(): Promise<void> {
         this.page.on('dialog', async (dialog: any) => {
-            CSReporter.debug(`Auto-accepting dialog: ${dialog.message()}`);
+            this.lastDialogMessage = dialog.message();
+            this.lastDialogType = dialog.type();
+            CSReporter.debug(`Auto-accepting dialog (${this.lastDialogType}): ${this.lastDialogMessage}`);
             await dialog.accept();
         });
         CSReporter.debug('Set up to always accept dialogs');
     }
 
     /**
-     * Set up persistent dialog handler to always dismiss
+     * Set up persistent dialog handler to always dismiss.
+     * Captures the most recent dialog's message and type.
      */
     public async alwaysDismissDialogs(): Promise<void> {
         this.page.on('dialog', async (dialog: any) => {
-            CSReporter.debug(`Auto-dismissing dialog: ${dialog.message()}`);
+            this.lastDialogMessage = dialog.message();
+            this.lastDialogType = dialog.type();
+            CSReporter.debug(`Auto-dismissing dialog (${this.lastDialogType}): ${this.lastDialogMessage}`);
             await dialog.dismiss();
         });
         CSReporter.debug('Set up to always dismiss dialogs');
+    }
+
+    /**
+     * Return the message text of the most recent dialog observed by any
+     * of the acceptNext / dismissNext / alwaysAccept / alwaysDismiss
+     * dialog handlers. Returns null if no dialog has been captured since
+     * the last clearLastDialog() call or since page-object construction.
+     *
+     * Typical usage:
+     *   await this.clearLastDialog();
+     *   await this.acceptNextDialog();       // register handler
+     *   await this.buttonSomething.click();  // action triggers dialog
+     *   const msg = this.getLastDialogMessage();
+     *   expect(msg).toBe('Are you sure?');
+     */
+    public getLastDialogMessage(): string | null {
+        return this.lastDialogMessage;
+    }
+
+    /**
+     * Return the type of the most recent dialog observed ('alert',
+     * 'beforeunload', 'confirm', or 'prompt'). Returns null if no dialog
+     * has been captured since the last clearLastDialog() call or since
+     * page-object construction.
+     */
+    public getLastDialogType(): string | null {
+        return this.lastDialogType;
+    }
+
+    /**
+     * Reset the captured dialog message/type to null. Call before the
+     * action that triggers a new dialog if you want a clean slate.
+     */
+    public clearLastDialog(): void {
+        this.lastDialogMessage = null;
+        this.lastDialogType = null;
     }
 
     // =========================================================================

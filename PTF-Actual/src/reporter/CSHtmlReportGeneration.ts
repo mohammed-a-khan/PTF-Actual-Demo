@@ -10,6 +10,7 @@ import { CSSecretMasker } from '../utils/CSSecretMasker';
 let CSExcelReportGenerator: any = null;
 let CSPdfReportGenerator: any = null;
 import { CSAIReportAggregator } from './CSAIReportAggregator';
+import { collectFlakyData, generateFlakyCSS, generateFlakyNavItem, generateFlakySection } from './CSFlakyReportSection';
 
 // Test result types
 interface TestStep {
@@ -682,6 +683,26 @@ export class CSHtmlReportGenerator {
         const testFormat = this.detectTestFormat(suite);
         const terms = this.getTerminology(testFormat);
 
+        // Collect flaky test data — filtered to only tests from THIS run
+        let flakyReportData: any = null;
+        try {
+            const currentTestNames: string[] = [];
+            // TestSuite has scenarios directly, OR features[].scenarios (professional report format)
+            if (suite.scenarios && suite.scenarios.length > 0) {
+                for (const scenario of suite.scenarios) {
+                    if (scenario.name) currentTestNames.push(scenario.name);
+                }
+            }
+            if ((suite as any).features) {
+                for (const feature of (suite as any).features) {
+                    for (const scenario of (feature.scenarios || [])) {
+                        if (scenario.name) currentTestNames.push(scenario.name);
+                    }
+                }
+            }
+            flakyReportData = collectFlakyData(currentTestNames);
+        } catch (e) { /* flaky module not available */ }
+
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -742,6 +763,8 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             <div id="artifacts-view" class="view">
                 ${this.generateEnhancedArtifactsView(artifacts)}
             </div>
+
+            ${generateFlakySection(flakyReportData)}
         </main>
 
         ${this.generateFooter()}
@@ -1876,6 +1899,8 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         .ai-fragile-table th:nth-child(4) {
             text-align: center;
         }
+
+        ${generateFlakyCSS()}
         `;
     }
 
@@ -1933,6 +1958,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 <div class="nav-item" data-view="artifacts">
                     📎 Artifacts
                 </div>
+                ${generateFlakyNavItem()}
             </div>
         </nav>`;
     }
@@ -2381,6 +2407,35 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                             return html;
                         })()}
                     </div>
+                    ${(() => {
+                        const sd = scenario as any;
+                        const tl = sd.stepTimeline;
+                        const videos = sd.artifacts?.videos || [];
+                        if (!tl || tl.length === 0 || videos.length === 0) return '';
+                        const videoFile = typeof videos[0] === 'string' ? videos[0] : (videos[0].path || videos[0].name || videos[0]);
+                        const totalDur = tl.reduce((sum: number, s: any) => sum + s.durationSec, 0) || 1;
+                        const playerId = 'avp-' + Math.random().toString(36).substr(2, 9);
+                        return `
+                        <div class="annotated-video-player" id="${playerId}" style="margin: 12px 15px; padding: 12px; background: #f8f9fa; border-radius: 6px; border: 1px solid #dee2e6;">
+                            <div style="font-weight: 600; font-size: 0.9em; color: #495057; margin-bottom: 8px;">
+                                🎬 Annotated Video Playback
+                            </div>
+                            <video controls width="100%" style="border-radius: 4px; background: #000;">
+                                <source src="${attrEscape(videoFile)}" type="video/webm">
+                                Your browser does not support video playback.
+                            </video>
+                            <div class="step-timeline-bar" style="display: flex; height: 28px; border-radius: 4px; overflow: hidden; margin-top: 8px; cursor: pointer;">
+                                ${tl.map((s: any) => {
+                                    const widthPct = Math.max(2, (s.durationSec / totalDur) * 100);
+                                    const bgColor = s.status === 'passed' ? '#22c55e' : s.status === 'failed' ? '#ef4444' : '#94a3b8';
+                                    const icon = s.status === 'passed' ? 'P' : s.status === 'failed' ? 'F' : 'S';
+                                    return `<div class="tl-step" data-time="${s.startSec}" title="${htmlEscape(s.name)} (${s.durationSec}s)" style="display: flex; align-items: center; justify-content: center; font-size: 11px; min-width: 20px; width: ${widthPct}%; background: ${bgColor}; color: white; transition: opacity 0.2s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'"><span style="margin-right: 2px;">${icon}</span><span>${s.index}</span></div>`;
+                                }).join('')}
+                            </div>
+                            <div class="step-timeline-detail" style="font-size: 12px; color: #64748b; margin-top: 6px; min-height: 20px;"></div>
+                        </div>
+                        `;
+                    })()}
                 </div>
             `).join('');
 
@@ -4309,6 +4364,30 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 targetPane.style.display = 'block';
             }
         }
+
+        // Annotated video player: click timeline step to seek video
+        document.querySelectorAll('.tl-step').forEach(function(el) {
+            el.addEventListener('click', function() {
+                var player = el.closest('.annotated-video-player');
+                if (!player) return;
+                var video = player.querySelector('video');
+                if (!video) return;
+                video.currentTime = parseFloat(el.dataset.time) || 0;
+                video.play();
+            });
+            el.addEventListener('mouseenter', function() {
+                var player = el.closest('.annotated-video-player');
+                if (!player) return;
+                var detail = player.querySelector('.step-timeline-detail');
+                if (detail) detail.textContent = el.getAttribute('title') || '';
+            });
+            el.addEventListener('mouseleave', function() {
+                var player = el.closest('.annotated-video-player');
+                if (!player) return;
+                var detail = player.querySelector('.step-timeline-detail');
+                if (detail) detail.textContent = '';
+            });
+        });
 
         // Screenshot modal functionality
         function showScreenshotModal(imageSrc) {

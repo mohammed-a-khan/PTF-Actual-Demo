@@ -171,6 +171,10 @@ function generateMCPConfig(serverName: string, loop: LoopType): object {
                     command: 'npx',
                     args: ['-y', 'cs-playwright-mcp'],
                 },
+                'playwright': {
+                    command: 'npx',
+                    args: ['-y', '@playwright/mcp@latest'],
+                },
             },
         };
     } else {
@@ -180,6 +184,10 @@ function generateMCPConfig(serverName: string, loop: LoopType): object {
                 [serverName]: {
                     command: 'npx',
                     args: ['-y', 'cs-playwright-mcp'],
+                },
+                'playwright': {
+                    command: 'npx',
+                    args: ['-y', '@playwright/mcp@latest'],
                 },
             },
         };

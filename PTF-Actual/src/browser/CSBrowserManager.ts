@@ -110,7 +110,8 @@ export class CSBrowserManager {
             // when Playwright doesn't already own a browser. In browser reuse mode, the 2nd+
             // scenario calls launch() again but the browser from scenario 1 is still alive.
             // Killing it would destroy the Playwright-managed browser/context/page.
-            if (this.config.getBoolean('BROWSER_CLOSE_EXISTING', false) && !this.browser && !this.context) {
+            // NOTE: Only supported for Edge — Chrome uses fresh profiles by default.
+            if (browserType === 'edge' && this.config.getBoolean('BROWSER_CLOSE_EXISTING', false) && !this.browser && !this.context) {
                 await this.closeExistingBrowserProcesses(browserType);
             }
 
@@ -127,22 +128,31 @@ export class CSBrowserManager {
                 return;
             }
 
-            // Resolve user data directory for persistent context mode
+            // Resolve user data directory for persistent context mode (Edge only)
+            // BROWSER_USE_EXISTING_PROFILE, BROWSER_USER_DATA_DIR, and BROWSER_CLOSE_EXISTING
+            // are Edge-specific features for enterprise VDI/Dynamics 365 scenarios.
+            // Chrome always launches with a fresh profile — these settings are ignored for Chrome.
             // Priority: BROWSER_USER_DATA_DIR (explicit) > BROWSER_USE_EXISTING_PROFILE=true (auto-detect)
-            let userDataDir: string | null = this.config.get('BROWSER_USER_DATA_DIR') || null;
+            let userDataDir: string | null = null;
 
-            if (!userDataDir && this.config.getBoolean('BROWSER_USE_EXISTING_PROFILE', false)) {
-                userDataDir = this.detectEdgeProfilePath(browserType);
-                if (userDataDir) {
-                    // Store the detected path in config so downstream code (SSO handler,
-                    // getChromeArgs, etc.) that checks BROWSER_USER_DATA_DIR sees it.
-                    // Without this, the SSO handler would use Mode A (fresh browser) instead
-                    // of Mode B (persistent context) and skip the aggressive VDI cleanup.
-                    this.config.set('BROWSER_USER_DATA_DIR', userDataDir);
-                    CSReporter.info(`Auto-detected browser profile path: ${userDataDir}`);
-                } else {
-                    CSReporter.warn('BROWSER_USE_EXISTING_PROFILE=true but could not auto-detect profile path. Falling back to fresh browser.');
+            if (browserType === 'edge') {
+                userDataDir = this.config.get('BROWSER_USER_DATA_DIR') || null;
+
+                if (!userDataDir && this.config.getBoolean('BROWSER_USE_EXISTING_PROFILE', false)) {
+                    userDataDir = this.detectEdgeProfilePath(browserType);
+                    if (userDataDir) {
+                        // Store the detected path in config so downstream code (SSO handler,
+                        // getChromeArgs, etc.) that checks BROWSER_USER_DATA_DIR sees it.
+                        // Without this, the SSO handler would use Mode A (fresh browser) instead
+                        // of Mode B (persistent context) and skip the aggressive VDI cleanup.
+                        this.config.set('BROWSER_USER_DATA_DIR', userDataDir);
+                        CSReporter.info(`Auto-detected Edge profile path: ${userDataDir}`);
+                    } else {
+                        CSReporter.warn('BROWSER_USE_EXISTING_PROFILE=true but could not auto-detect Edge profile path. Falling back to fresh browser.');
+                    }
                 }
+            } else if (this.config.getBoolean('BROWSER_USE_EXISTING_PROFILE', false) || this.config.get('BROWSER_USER_DATA_DIR')) {
+                CSReporter.warn(`BROWSER_USE_EXISTING_PROFILE and BROWSER_USER_DATA_DIR are only supported for Edge. Ignoring for ${browserType}.`);
             }
 
             // Check if persistent context mode is needed (BROWSER_USER_DATA_DIR)
@@ -240,6 +250,22 @@ export class CSBrowserManager {
         if (browserType === 'chrome' || browserType === 'chromium' || browserType === 'edge') {
             const chromeArgs = this.getChromeArgs();
             contextOptions.args = [...(contextOptions.args || []), ...chromeArgs];
+        }
+
+        // Edge IE Compatibility Mode for persistent context
+        // When using an existing Edge profile (BROWSER_USE_EXISTING_PROFILE or BROWSER_USER_DATA_DIR),
+        // the profile's Enterprise Site List may auto-switch URLs to IE mode (Trident engine).
+        // Without these flags, Playwright's CDP connection breaks when Edge switches to IE mode.
+        // --internet-explorer-integration=iemode: enables the IE mode integration
+        // --ie-mode-test: keeps the CDP bridge alive so Playwright retains control in IE mode
+        if (browserType === 'edge' && this.config.getBoolean('BROWSER_EDGE_IE_MODE', false)) {
+            contextOptions.args.push('--internet-explorer-integration=iemode');
+            contextOptions.args.push('--ie-mode-test');
+            contextOptions.args.push('--no-first-run');
+            if (!contextOptions.timeout || contextOptions.timeout < 60000) {
+                contextOptions.timeout = 60000;
+            }
+            CSReporter.info('Edge IE Compatibility Mode enabled (persistent context)');
         }
 
         const pw = this.ensurePlaywright();
@@ -499,9 +525,10 @@ export class CSBrowserManager {
             args.push('--disable-features=msImplicitSignin,msEdgeAutoSignIn,msPrimaryAccountMerge');
         }
 
-        // When using a persistent user data directory (VDI profile), prevent Edge/Chrome from
+        // When using a persistent user data directory (Edge VDI profile), prevent Edge from
         // restoring tabs from the previous session — we only want a clean tab for the test URL
-        if (this.config.get('BROWSER_USER_DATA_DIR')) {
+        // Note: BROWSER_USER_DATA_DIR is only set for Edge (guarded in launch())
+        if (this.currentBrowserType === 'edge' && this.config.get('BROWSER_USER_DATA_DIR')) {
             args.push('--no-first-run');
             args.push('--no-default-browser-check');
             // Suppress crash recovery: prevents "Restore pages?" bubble and tab restoration

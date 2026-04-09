@@ -136,7 +136,9 @@ export class CSTestResultsManager {
             path.join(this.currentTestRunDir, 'har'),
             path.join(this.currentTestRunDir, 'console-logs'),
             path.join(this.currentTestRunDir, 'reports'),
-            path.join(this.currentTestRunDir, 'downloads')
+            path.join(this.currentTestRunDir, 'downloads'),
+            path.join(this.currentTestRunDir, 'screencasts'),
+            path.join(this.currentTestRunDir, 'flaky')
         ];
         
         directories.forEach(dir => {
@@ -170,7 +172,9 @@ export class CSTestResultsManager {
             har: path.join(baseDir, 'har'),
             consoleLogs: path.join(baseDir, 'console-logs'),
             reports: path.join(baseDir, 'reports'),
-            downloads: path.join(baseDir, 'downloads')
+            downloads: path.join(baseDir, 'downloads'),
+            screencasts: path.join(baseDir, 'screencasts'),
+            flaky: path.join(baseDir, 'flaky')
         };
     }
     

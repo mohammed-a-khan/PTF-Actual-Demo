@@ -113,6 +113,20 @@ export class CSAccessibilityTreeMatcher {
             }
         }
 
+        // Strategy 0: Direct Role Match — fastest and most reliable strategy.
+        // When user explicitly specified an element type (e.g., "button", "link"),
+        // use Playwright's getByRole() which leverages the browser's native
+        // accessibility engine. This is the approach recommended by Playwright docs.
+        // Bypasses ariaSnapshot fuzzy scoring entirely — no false positives.
+        if (target.elementType && searchText) {
+            const directResult = await this.matchViaDirectRole(page, target, searchText);
+            if (directResult) {
+                const duration = Date.now() - startTime;
+                CSReporter.debug(`CSAccessibilityTreeMatcher: Direct role match in ${duration}ms (confidence: ${directResult.confidence.toFixed(2)})`);
+                return directResult;
+            }
+        }
+
         const alternatives: AlternativeMatch[] = [];
 
         // Strategy 1: Accessibility Tree
@@ -198,14 +212,18 @@ export class CSAccessibilityTreeMatcher {
             CSReporter.debug(`CSAccessibilityTreeMatcher: Role search strategy failed: ${error.message}`);
         }
 
-        // If we have alternatives but none met threshold, return the best one
-        // Assertions require full confidence threshold to prevent false positives (e.g., wrong element on 404 page)
-        // Actions/queries use a relaxed threshold (75% of threshold) for better usability
+        // If we have alternatives but none met threshold, return the best one.
+        // Assertions require full confidence threshold to prevent false positives.
+        // When element type is specified and Strategy 0 failed, require higher threshold
+        // because alternatives are likely wrong elements (e.g., h1 with title="Log On"
+        // when user asked for a button). Don't accept them — force a retry instead.
         if (alternatives.length > 0) {
             alternatives.sort((a, b) => b.confidence - a.confidence);
             const best = alternatives[0];
             const isAssertion = intent.startsWith('verify-');
-            const minAcceptable = isAssertion ? confidenceThreshold : confidenceThreshold * 0.75;
+            const minAcceptable = isAssertion ? confidenceThreshold :
+                target.elementType ? confidenceThreshold * 0.90 :
+                confidenceThreshold * 0.75;
             if (best.confidence >= minAcceptable) {
                 const duration = Date.now() - startTime;
                 CSReporter.debug(`CSAccessibilityTreeMatcher: Using best alternative in ${duration}ms (confidence: ${best.confidence.toFixed(2)}, method: ${best.method})`);
@@ -237,6 +255,417 @@ export class CSAccessibilityTreeMatcher {
 
         const duration = Date.now() - startTime;
         CSReporter.debug(`CSAccessibilityTreeMatcher: No element found in ${duration}ms for "${searchText}"`);
+        return null;
+    }
+
+    // ========================================================================
+    // Strategy 0: Direct Role Match (Playwright-recommended approach)
+    // ========================================================================
+
+    /**
+     * Direct role match — the fastest and most reliable strategy.
+     * When user explicitly specified an element type (e.g., "button", "link", "input"),
+     * uses a comprehensive 4-phase search:
+     *
+     * Phase 1: getByRole on current context (Playwright's #1 recommended approach)
+     * Phase 2: CSS-based element discovery on current context
+     *          (catches <input type="submit">, [role="button"], custom elements)
+     * Phase 3: getByRole across ALL iframes (handles ADFS/SSO login pages)
+     * Phase 4: CSS-based discovery across ALL iframes
+     *
+     * This ensures the element is found regardless of WHERE it is (main page vs
+     * iframe) or HOW it's implemented (standard <button>, <input type="submit">,
+     * <a>, <div role="button">, etc.)
+     *
+     * Benefits:
+     * - No fuzzy scoring → no false positives (heading can never outscore button)
+     * - Exact name matching → "Log On" finds button "Log On", not heading "Please log on"
+     * - Frame-aware → finds buttons inside ADFS/SSO login iframes
+     * - CSS fallback → catches non-standard elements that getByRole misses
+     */
+    private async matchViaDirectRole(
+        page: Page | Frame,
+        target: ElementTarget,
+        searchText: string
+    ): Promise<MatchedElement | null> {
+        if (!target.elementType || !searchText) return null;
+
+        const expectedRoles = this.getExpectedRoles(target.elementType, '' as StepIntent);
+        if (expectedRoles.length === 0) return null;
+
+        // Phase 1: getByRole on current context (main page or active frame)
+        const roleResult = await this.tryDirectRoleOnContext(page, expectedRoles, searchText, target);
+        if (roleResult) return roleResult;
+
+        // Phase 2: CSS-based element discovery on current context
+        // Handles <input type="submit" value="Log On">, <a>Log On</a>, etc.
+        // where getByRole may fail due to missing/incomplete ARIA attributes
+        const cssResult = await this.tryCSSElementDiscovery(page, expectedRoles, searchText, target);
+        if (cssResult) return cssResult;
+
+        // Phase 3 & 4: Search inside iframes
+        // Microsoft ADFS/SSO, Dynamics 365, and legacy JSP apps commonly embed
+        // login forms in iframes. Without this, the button is invisible to main-page locators.
+        // Only search frames if we're on the main Page (not already inside a Frame)
+        const isPage = 'frames' in page && typeof (page as any).frames === 'function'
+            && !('parentFrame' in page && typeof (page as any).parentFrame === 'function');
+
+        if (isPage) {
+            const frames = (page as Page).frames();
+            if (frames.length > 1) {
+                CSReporter.debug(`CSAccessibilityTreeMatcher: Strategy 0 — searching ${frames.length - 1} iframe(s) for ${target.elementType} "${searchText}"`);
+
+                for (const frame of frames) {
+                    if (frame === (page as Page).mainFrame()) continue;
+                    if (!frame.url() || frame.url() === 'about:blank') continue;
+
+                    try {
+                        // Phase 3: getByRole in frame
+                        const frameRoleResult = await this.tryDirectRoleOnContext(frame, expectedRoles, searchText, target);
+                        if (frameRoleResult) {
+                            frameRoleResult.description = `frame[${frame.name() || 'iframe'}] > ${frameRoleResult.description}`;
+                            CSReporter.debug(`CSAccessibilityTreeMatcher: Strategy 0 — found in iframe via getByRole`);
+                            return frameRoleResult;
+                        }
+
+                        // Phase 4: CSS-based discovery in frame
+                        const frameCSSResult = await this.tryCSSElementDiscovery(frame, expectedRoles, searchText, target);
+                        if (frameCSSResult) {
+                            frameCSSResult.description = `frame[${frame.name() || 'iframe'}] > ${frameCSSResult.description}`;
+                            CSReporter.debug(`CSAccessibilityTreeMatcher: Strategy 0 — found in iframe via CSS`);
+                            return frameCSSResult;
+                        }
+                    } catch {
+                        // Frame may be detached or cross-origin — skip
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Also try getByLabel → filter by expected role (for labeled form controls)
+        if (expectedRoles.some(r => ['textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'spinbutton'].includes(r))) {
+            try {
+                const labelLocator = page.getByLabel(searchText, { exact: false });
+                const labelCount = await labelLocator.count();
+                if (labelCount > 0 && labelCount <= 5) {
+                    return {
+                        locator: this.selectByOrdinal(labelLocator, labelCount, target.ordinal),
+                        broadLocator: labelLocator,
+                        confidence: labelCount === 1 ? 0.90 : 0.80,
+                        method: 'semantic-locator' as MatchMethod,
+                        description: `direct: getByLabel('${searchText}')${labelCount > 1 ? ` (${labelCount} matches)` : ''}`,
+                        alternatives: []
+                    };
+                }
+            } catch { /* continue to fallback strategies */ }
+        }
+
+        // Phase 5: Nuclear text search — last resort within Strategy 0.
+        // Searches ALL contexts (main page + frames) for ANY visible element with
+        // matching text, then walks up the DOM to find the nearest interactive
+        // ancestor that matches the expected element type.
+        // This catches cases where:
+        // - Text is inside a <span> inside a <button> (getByRole fails, CSS :text-is fails)
+        // - Button is rendered with non-standard markup but has text content
+        // - The element's accessible name doesn't match its visible text
+        const allContexts: (Page | Frame)[] = [page];
+        if (isPage) {
+            const childFrames = (page as Page).frames().filter(f =>
+                f !== (page as Page).mainFrame() && f.url() && f.url() !== 'about:blank'
+            );
+            allContexts.push(...childFrames);
+        }
+
+        for (const ctx of allContexts) {
+            try {
+                const nuclearResult = await this.tryNuclearTextSearch(ctx, expectedRoles, searchText, target);
+                if (nuclearResult) {
+                    const isFrame = ctx !== page;
+                    if (isFrame) {
+                        nuclearResult.description = `frame > ${nuclearResult.description}`;
+                    }
+                    CSReporter.debug(`CSAccessibilityTreeMatcher: Strategy 0 — found via nuclear text search${isFrame ? ' (in iframe)' : ''}`);
+                    return nuclearResult;
+                }
+            } catch { continue; }
+        }
+
+        return null;
+    }
+
+    /**
+     * Nuclear text search — finds elements by visible text content and verifies
+     * the element (or its nearest interactive ancestor) matches the expected type.
+     *
+     * Handles cases like:
+     *   <div class="btn-wrapper"><span onclick="submit()">Log On</span></div>
+     *   <a class="btn btn-primary" href="#">Log On</a> (styled as button)
+     *   <label><input type="submit" value="Log On"></label> (labeled submit)
+     */
+    private async tryNuclearTextSearch(
+        context: Page | Frame,
+        expectedRoles: string[],
+        searchText: string,
+        target: ElementTarget
+    ): Promise<MatchedElement | null> {
+        // Try exact text match first
+        const textLocator = context.getByText(searchText, { exact: true });
+        const textCount = await textLocator.count();
+
+        if (textCount === 0 || textCount > 20) return null;
+
+        const buttonTypes = ['submit', 'button', 'reset', 'image'];
+
+        for (let i = 0; i < Math.min(textCount, 8); i++) {
+            const el = textLocator.nth(i);
+            const isVisible = await el.isVisible({ timeout: 500 }).catch(() => false);
+            if (!isVisible) continue;
+
+            // Walk up DOM to find the nearest interactive ancestor matching expected type.
+            // SMART: matches visual appearance, not just semantic HTML.
+            // <a class="btn">Log On</a> is treated as a button because that's what the user SEES.
+            const matchInfo = await el.evaluate((node: Element, args: { roles: string[]; btnTypes: string[] }) => {
+                let current: Element | null = node;
+                for (let depth = 0; current && depth < 6; depth++) {
+                    const tag = current.tagName.toLowerCase();
+                    const role = current.getAttribute('role');
+                    const type = current.getAttribute('type');
+                    const cls = (current.className || '').toString().toLowerCase();
+                    const hasOnClick = current.hasAttribute('onclick') || current.hasAttribute('ng-click') || current.hasAttribute('data-action');
+                    const hasButtonClass = cls.includes('btn') || cls.includes('button') || cls.includes('submit') || cls.includes('action');
+
+                    // Button match
+                    if (args.roles.includes('button')) {
+                        // Standard button elements
+                        if (tag === 'button' || (tag === 'input' && args.btnTypes.includes(type || ''))
+                            || role === 'button' || (tag === 'summary')) {
+                            return { depth, tag, role, cls, interactiveTag: tag };
+                        }
+                        // Smart match: <a>, <span>, <div> STYLED as button (CSS class contains btn/button/submit)
+                        // Users see a button on screen — the HTML tag is irrelevant
+                        if (['a', 'span', 'div', 'label', 'li', 'td'].includes(tag) && hasButtonClass) {
+                            return { depth, tag, role: role || 'button-styled', cls, interactiveTag: tag };
+                        }
+                        // Elements with click handlers (onclick, ng-click, data-action)
+                        if (hasOnClick && ['span', 'div', 'a', 'label', 'td'].includes(tag)) {
+                            return { depth, tag, role: role || 'clickable', cls, interactiveTag: tag };
+                        }
+                    }
+
+                    // Link match
+                    if (args.roles.includes('link')) {
+                        if (tag === 'a' || role === 'link') {
+                            return { depth, tag, role, cls, interactiveTag: tag };
+                        }
+                    }
+
+                    current = current.parentElement;
+                }
+                return null;
+            }, { roles: expectedRoles, btnTypes: buttonTypes }).catch(() => null);
+
+            if (matchInfo) {
+                let locator: Locator;
+                if (matchInfo.depth === 0) {
+                    locator = el;
+                } else {
+                    // Navigate up to the ancestor using xpath
+                    const xpathUp = Array(matchInfo.depth).fill('..').join('/');
+                    locator = el.locator(`xpath=${xpathUp}`);
+                    const ancestorCount = await locator.count().catch(() => 0);
+                    if (ancestorCount === 0) continue;
+                }
+
+                // Verify the resolved locator is visible and enabled
+                const isClickable = await locator.isVisible({ timeout: 500 }).catch(() => false);
+                if (!isClickable) continue;
+
+                // Higher confidence for direct match (depth=0), lower for ancestor walk
+                const confidence = matchInfo.depth === 0 ? 0.88 : Math.max(0.75, 0.88 - matchInfo.depth * 0.03);
+
+                return {
+                    locator,
+                    confidence,
+                    method: 'semantic-locator' as MatchMethod,
+                    description: `nuclear: text("${searchText}") -> <${matchInfo.interactiveTag}>${matchInfo.role ? `[role="${matchInfo.role}"]` : ''} (depth=${matchInfo.depth})`,
+                    alternatives: []
+                };
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Try getByRole on a single context (Page or Frame).
+     * Pass 1: exact name match. Pass 2: inexact match.
+     * Includes a brief auto-wait for dynamically rendered elements (SPAs).
+     */
+    private async tryDirectRoleOnContext(
+        context: Page | Frame,
+        expectedRoles: string[],
+        searchText: string,
+        target: ElementTarget
+    ): Promise<MatchedElement | null> {
+        for (const role of expectedRoles) {
+            try {
+                // Pass 1: Exact name match (highest confidence, zero false positives)
+                const exactLocator = context.getByRole(role as any, { name: searchText, exact: true });
+                let exactCount = await exactLocator.count();
+
+                // If not immediately present, wait briefly for dynamic rendering.
+                // SPA/Dynamics 365 pages render buttons via JavaScript after initial load.
+                if (exactCount === 0 && role === expectedRoles[0]) {
+                    await exactLocator.first().waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
+                    exactCount = await exactLocator.count();
+                }
+
+                if (exactCount > 0) {
+                    let finalLocator: Locator;
+                    let confidence = 0.95;
+                    if (exactCount > 1 && target.ordinal === undefined) {
+                        const disambiguated = await this.disambiguateByContext(exactLocator, exactCount, target, context);
+                        finalLocator = disambiguated || exactLocator.first();
+                        confidence = disambiguated
+                            ? Math.max(0.80, 0.95 - (exactCount - 1) * 0.03)
+                            : Math.max(0.65, 0.95 - (exactCount - 1) * 0.05);
+                    } else {
+                        finalLocator = this.selectByOrdinal(exactLocator, exactCount, target.ordinal);
+                    }
+                    return {
+                        locator: finalLocator,
+                        broadLocator: exactLocator,
+                        confidence,
+                        method: 'accessibility-tree' as MatchMethod,
+                        description: `direct: getByRole('${role}', { name: '${searchText}', exact })${exactCount > 1 ? ` (${exactCount} matches)` : ''}`,
+                        alternatives: []
+                    };
+                }
+
+                // Pass 2: Inexact name match (handles whitespace/casing variations)
+                const inexactLocator = context.getByRole(role as any, { name: searchText, exact: false });
+                const inexactCount = await inexactLocator.count();
+                if (inexactCount > 0 && inexactCount <= 10) {
+                    return {
+                        locator: this.selectByOrdinal(inexactLocator, inexactCount, target.ordinal),
+                        broadLocator: inexactLocator,
+                        confidence: inexactCount === 1 ? 0.90 : Math.max(0.70, 0.90 - inexactCount * 0.05),
+                        method: 'accessibility-tree' as MatchMethod,
+                        description: `direct: getByRole('${role}', { name: '${searchText}' })${inexactCount > 1 ? ` (${inexactCount} matches)` : ''}`,
+                        alternatives: []
+                    };
+                }
+            } catch {
+                continue;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * CSS-based element discovery — finds elements that getByRole misses.
+     *
+     * Why this is needed:
+     * - <input type="submit" value="Log On"> — some browsers/pages don't expose
+     *   correct accessible name, making getByRole fail
+     * - Custom elements with onclick but no ARIA role
+     * - Legacy JSP/ADFS pages with non-semantic HTML
+     * - <a class="btn"> styled as buttons
+     *
+     * Builds CSS selectors based on the expected element type and text.
+     * Verifies each match is visible before returning.
+     */
+    private async tryCSSElementDiscovery(
+        context: Page | Frame,
+        expectedRoles: string[],
+        searchText: string,
+        target: ElementTarget
+    ): Promise<MatchedElement | null> {
+        // Build CSS selectors based on expected roles
+        const selectors: { css: string; confidence: number }[] = [];
+
+        // Escape quotes in search text for CSS attribute selectors
+        const escapedText = searchText.replace(/"/g, '\\"');
+
+        if (expectedRoles.includes('button')) {
+            selectors.push(
+                // Standard <button> with matching text content
+                { css: `button:text-is("${escapedText}")`, confidence: 0.92 },
+                // <input type="submit"> with matching value (ADFS login pages)
+                { css: `input[type="submit"][value="${escapedText}"]`, confidence: 0.92 },
+                // <input type="button"> with matching value
+                { css: `input[type="button"][value="${escapedText}"]`, confidence: 0.90 },
+                // <input type="image"> with matching alt (image buttons in JSP apps)
+                { css: `input[type="image"][alt="${escapedText}"]`, confidence: 0.85 },
+                // Custom elements with role="button" and matching text
+                { css: `[role="button"]:text-is("${escapedText}")`, confidence: 0.88 },
+                // Broader text containment fallbacks (lower confidence)
+                { css: `button:has-text("${escapedText}")`, confidence: 0.85 },
+                { css: `[role="button"]:has-text("${escapedText}")`, confidence: 0.82 },
+                // Case-insensitive value matching (handles "Log On" vs "Log on" vs "LOG ON")
+                { css: `input[type="submit"][value="${escapedText}" i]`, confidence: 0.88 },
+                { css: `input[type="button"][value="${escapedText}" i]`, confidence: 0.86 },
+                // <a> STYLED as button — extremely common in enterprise/legacy apps.
+                // User sees a button on screen; doesn't know it's <a class="btn">.
+                // CSS class-based selectors (high confidence — class proves button intent)
+                { css: `a[class*="btn"]:text-is("${escapedText}")`, confidence: 0.90 },
+                { css: `a[class*="button"]:text-is("${escapedText}")`, confidence: 0.90 },
+                { css: `a[class*="submit"]:text-is("${escapedText}")`, confidence: 0.88 },
+                { css: `span[class*="btn"]:text-is("${escapedText}")`, confidence: 0.88 },
+                { css: `div[class*="btn"]:text-is("${escapedText}")`, confidence: 0.86 },
+                // Generic <a> text match (lower confidence — could be a nav link)
+                { css: `a:text-is("${escapedText}")`, confidence: 0.78 },
+                { css: `a[class*="btn"]:has-text("${escapedText}")`, confidence: 0.82 },
+                { css: `a[class*="button"]:has-text("${escapedText}")`, confidence: 0.82 },
+                { css: `a:has-text("${escapedText}")`, confidence: 0.72 },
+            );
+        }
+
+        if (expectedRoles.includes('link')) {
+            selectors.push(
+                { css: `a:text-is("${escapedText}")`, confidence: 0.90 },
+                { css: `[role="link"]:text-is("${escapedText}")`, confidence: 0.88 },
+                { css: `a:has-text("${escapedText}")`, confidence: 0.82 },
+            );
+        }
+
+        for (const { css, confidence: baseConfidence } of selectors) {
+            try {
+                const locator = context.locator(css);
+                const count = await locator.count();
+                if (count > 0 && count <= 10) {
+                    // Verify at least one match is visible
+                    let visibleIdx = -1;
+                    for (let i = 0; i < Math.min(count, 5); i++) {
+                        const isVisible = await locator.nth(i).isVisible({ timeout: 1000 }).catch(() => false);
+                        if (isVisible) {
+                            visibleIdx = i;
+                            break;
+                        }
+                    }
+                    if (visibleIdx < 0) continue; // No visible matches, try next selector
+
+                    const finalCount = count === 1 ? 1 : count;
+                    const confidence = finalCount === 1 ? baseConfidence : Math.max(0.70, baseConfidence - (finalCount - 1) * 0.05);
+                    const finalLocator = target.ordinal !== undefined
+                        ? this.selectByOrdinal(locator, count, target.ordinal)
+                        : (count === 1 ? locator.first() : locator.nth(visibleIdx));
+
+                    return {
+                        locator: finalLocator,
+                        broadLocator: locator,
+                        confidence,
+                        method: 'semantic-locator' as MatchMethod,
+                        description: `direct-css: ${css}${count > 1 ? ` (${count} matches)` : ''}`,
+                        alternatives: []
+                    };
+                }
+            } catch {
+                continue;
+            }
+        }
+
         return null;
     }
 
@@ -514,10 +943,18 @@ export class CSAccessibilityTreeMatcher {
             const fuzzyResult = this.fuzzyMatcher.compare(searchText, node.name);
             nameMatch = fuzzyResult.score;
 
-            // Bonus for exact containment
-            if (node.name.toLowerCase().includes(searchText.toLowerCase()) ||
-                searchText.toLowerCase().includes(node.name.toLowerCase())) {
-                nameMatch = Math.max(nameMatch, 0.85);
+            // Bonus for containment — scaled by how much of the name is covered.
+            // "Log On" in "Log On" = 100% coverage → 0.95 bonus
+            // "Log On" in "Please log on" = 46% coverage → 0.65 bonus (partial match)
+            // This prevents long element names from getting inflated scores.
+            const searchLower = searchText.toLowerCase();
+            const nameLower = node.name.toLowerCase();
+            if (nameLower.includes(searchLower)) {
+                const coverage = searchLower.length / nameLower.length;
+                nameMatch = Math.max(nameMatch, 0.55 + coverage * 0.4);
+            } else if (searchLower.includes(nameLower)) {
+                const coverage = nameLower.length / searchLower.length;
+                nameMatch = Math.max(nameMatch, 0.55 + coverage * 0.4);
             }
 
             // Bonus for exact match
@@ -554,6 +991,15 @@ export class CSAccessibilityTreeMatcher {
         // Apply landmark proximity bonus (enhanced a11y parsing)
         if (allNodes) {
             total += this.scoreLandmarkBonus(node, target.elementType as any || 'click', allNodes);
+        }
+
+        // CRITICAL: Hard penalty when user EXPLICITLY specified an element type
+        // (e.g., "button", "link", "input") and this node is a wrong type.
+        // Without this, a heading "Please log on" can outscore button "Log On"
+        // because fuzzy name matching (0.85) overwhelms the weak role penalty (0.1).
+        // A wrong-type match should NEVER meet the confidence threshold.
+        if (target.elementType && expectedRoles.length > 0 && !expectedRoles.includes(node.role)) {
+            total *= 0.3;
         }
 
         return {
@@ -716,10 +1162,35 @@ export class CSAccessibilityTreeMatcher {
                 const locator = page.getByTitle(searchText, { exact: false });
                 const count = await locator.count();
                 if (count > 0) {
+                    const selectedLocator = this.selectByOrdinal(locator, count, target.ordinal);
+                    let confidence = 0.6;
+
+                    // When user specified element type, verify the matched element
+                    // ACTUALLY matches that type. Smart matching: an <a class="btn">
+                    // IS a button (user sees it as a button on screen).
+                    // But an <a class="nav-link"> is NOT a button — reject it.
+                    if (target.elementType && expectedRoles.length > 0) {
+                        const elInfo = await selectedLocator.evaluate(el => ({
+                            tag: el.tagName.toLowerCase(),
+                            role: el.getAttribute('role'),
+                            type: el.getAttribute('type'),
+                            className: el.className || ''
+                        })).catch(() => ({ tag: '', role: null as string | null, type: null as string | null, className: '' }));
+
+                        const matchesType = this.elementMatchesExpectedRoles(
+                            elInfo.tag, elInfo.role, elInfo.type, expectedRoles, elInfo.className
+                        );
+                        if (!matchesType) {
+                            // Element type mismatch — drop confidence far below threshold
+                            confidence = 0.15;
+                            CSReporter.debug(`CSAccessibilityTreeMatcher: getByTitle('${searchText}') found <${elInfo.tag} class="${elInfo.className}">${elInfo.role ? ` role="${elInfo.role}"` : ''} — doesn't match expected "${target.elementType}", rejecting`);
+                        }
+                    }
+
                     return {
-                        locator: this.selectByOrdinal(locator, count, target.ordinal),
+                        locator: selectedLocator,
                         broadLocator: locator,
-                        confidence: 0.6,
+                        confidence,
                         method: 'semantic-locator',
                         description: `getByTitle('${searchText}')`,
                         alternatives: []
@@ -823,25 +1294,28 @@ export class CSAccessibilityTreeMatcher {
             }
         } catch { /* continue */ }
 
-        // Try with individual descriptor words — lower confidence since these are partial matches
-        for (const desc of target.descriptors) {
-            if (desc.length < 3) continue;
-            try {
-                const locator = page.getByText(desc, { exact: false });
-                const count = await locator.count();
-                if (count > 0 && count <= 10) {
-                    // Individual word matches are less reliable
-                    const baseConfidence = count === 1 ? 0.45 : Math.max(0.25, 0.45 - count * 0.05);
-                    return {
-                        locator: this.selectByOrdinal(locator, count, target.ordinal),
-                        broadLocator: locator,
-                        confidence: baseConfidence,
-                        method: 'text-search',
-                        description: `getByText('${desc}')${count > 1 ? ` (${count} matches)` : ''}`,
-                        alternatives: []
-                    };
-                }
-            } catch { /* continue */ }
+        // Try with individual descriptor words — ONLY when multiple descriptors exist
+        // and the full search text didn't match. Skip short words (< 4 chars) to avoid
+        // matching partial/generic text (e.g., "Log" alone matching "Login", "Logout", etc.)
+        if (target.descriptors.length > 1) {
+            for (const desc of target.descriptors) {
+                if (desc.length < 4) continue;
+                try {
+                    const locator = page.getByText(desc, { exact: false });
+                    const count = await locator.count();
+                    if (count > 0 && count <= 5) {
+                        const baseConfidence = count === 1 ? 0.45 : Math.max(0.25, 0.45 - count * 0.05);
+                        return {
+                            locator: this.selectByOrdinal(locator, count, target.ordinal),
+                            broadLocator: locator,
+                            confidence: baseConfidence,
+                            method: 'text-search',
+                            description: `getByText('${desc}')${count > 1 ? ` (${count} matches)` : ''}`,
+                            alternatives: []
+                        };
+                    }
+                } catch { /* continue */ }
+            }
         }
 
         return null;
@@ -987,9 +1461,24 @@ export class CSAccessibilityTreeMatcher {
             if (!frame.url() || frame.url() === 'about:blank') continue;
 
             try {
-                // Try getByRole with name first (most precise)
+                // Try getByRole with exact name first, then inexact (most precise)
                 for (const role of expectedRoles) {
                     try {
+                        // Exact match first
+                        const exactLocator = frame.getByRole(role as any, { name: searchText, exact: true });
+                        const exactCount = await exactLocator.count();
+                        if (exactCount > 0) {
+                            CSReporter.debug(`CSAccessibilityTreeMatcher: Found in frame via getByRole('${role}', '${searchText}', exact)`);
+                            return {
+                                locator: this.selectByOrdinal(exactLocator, exactCount, target.ordinal),
+                                broadLocator: exactLocator,
+                                confidence: 0.90,
+                                method: 'semantic-locator',
+                                description: `frame[${frame.name() || 'iframe'}] > getByRole('${role}', '${searchText}', exact)`,
+                                alternatives: []
+                            };
+                        }
+                        // Inexact fallback
                         const roleLocator = frame.getByRole(role as any, { name: searchText, exact: false });
                         const count = await roleLocator.count();
                         if (count > 0) {
@@ -1145,6 +1634,82 @@ export class CSAccessibilityTreeMatcher {
         }
 
         return [...new Set(roles)]; // Deduplicate
+    }
+
+    /**
+     * Check if an HTML element (by tag, role, type, class attributes) matches the expected ARIA roles.
+     * Used to reject getByTitle/getByText matches that are the wrong element type.
+     *
+     * SMART MATCHING: Users describe what they SEE on screen, not the DOM structure.
+     * An <a class="btn btn-primary">Log On</a> LOOKS like a button to the user.
+     * The engine must match visual appearance, not just semantic HTML.
+     *
+     * Examples:
+     * - expectedRoles=['button'] + tag='button' → true
+     * - expectedRoles=['button'] + tag='input', type='submit' → true
+     * - expectedRoles=['button'] + tag='a', class='btn' → true (styled as button)
+     * - expectedRoles=['button'] + tag='a', class='nav-link' → false (not a button)
+     * - expectedRoles=['link'] + tag='a' → true
+     */
+    private elementMatchesExpectedRoles(
+        tagName: string,
+        roleAttr: string | null,
+        typeAttr: string | null,
+        expectedRoles: string[],
+        className?: string
+    ): boolean {
+        // If element has an explicit ARIA role, check against expected roles
+        if (roleAttr && expectedRoles.includes(roleAttr)) return true;
+
+        // Map HTML elements to their implicit ARIA roles
+        const buttonInputTypes = ['submit', 'button', 'reset', 'image'];
+        const tag = tagName.toLowerCase();
+        const cls = (className || '').toLowerCase();
+
+        // Button-like CSS class patterns (enterprise apps heavily use these)
+        const hasButtonClass = cls.includes('btn') || cls.includes('button')
+            || cls.includes('submit') || cls.includes('action');
+
+        for (const role of expectedRoles) {
+            switch (role) {
+                case 'button':
+                    if (tag === 'button') return true;
+                    if (tag === 'input' && buttonInputTypes.includes(typeAttr || '')) return true;
+                    if (tag === 'summary') return true; // <summary> has implicit button role
+                    // Smart match: <a>, <span>, <div> STYLED as button
+                    // Users see a button on screen — they don't know/care about the HTML tag.
+                    // Accept if the element has button-like CSS classes.
+                    if (['a', 'span', 'div', 'label', 'li', 'td'].includes(tag) && hasButtonClass) return true;
+                    break;
+                case 'link':
+                    if (tag === 'a') return true;
+                    if (tag === 'area') return true;
+                    break;
+                case 'textbox':
+                case 'searchbox':
+                    if (tag === 'input' && (!typeAttr || ['text', 'search', 'email', 'tel', 'url', 'password'].includes(typeAttr))) return true;
+                    if (tag === 'textarea') return true;
+                    break;
+                case 'combobox':
+                case 'listbox':
+                    if (tag === 'select') return true;
+                    break;
+                case 'checkbox':
+                    if (tag === 'input' && typeAttr === 'checkbox') return true;
+                    break;
+                case 'radio':
+                    if (tag === 'input' && typeAttr === 'radio') return true;
+                    break;
+                case 'tab':
+                    // Tabs are typically custom elements with role="tab"
+                    break;
+                case 'heading':
+                    if (['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tag)) return true;
+                    break;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1407,9 +1972,29 @@ export class CSAccessibilityTreeMatcher {
     ): Promise<MatchedElement | null> {
         const expectedRoles = this.getExpectedRoles(target.elementType, intent);
 
-        // Try getByRole within context
+        // Try getByRole within context — exact match first for precision
         for (const role of expectedRoles) {
             try {
+                // Exact match first (highest confidence, no false positives)
+                if (searchText) {
+                    const exactLocator = contextLocator.getByRole(role as any, {
+                        name: searchText,
+                        exact: true
+                    });
+                    const exactCount = await exactLocator.count();
+                    if (exactCount > 0) {
+                        return {
+                            locator: this.selectByOrdinal(exactLocator, exactCount, target.ordinal),
+                            broadLocator: exactLocator,
+                            confidence: 0.95,
+                            method: 'accessibility-tree' as MatchMethod,
+                            description: `context: getByRole('${role}', { name: '${searchText}', exact })`,
+                            alternatives: []
+                        };
+                    }
+                }
+
+                // Inexact fallback
                 const locator = contextLocator.getByRole(role as any, {
                     name: searchText || undefined,
                     exact: false
@@ -1417,14 +2002,14 @@ export class CSAccessibilityTreeMatcher {
                 const count = await locator.count();
                 if (count > 0) {
                     const finalLocator = this.selectByOrdinal(locator, count, target.ordinal);
-                    const confidence = 0.85; // Higher confidence because scoped to active context
+                    const confidence = 0.85;
                     if (confidence >= confidenceThreshold) {
                         return {
                             locator: finalLocator,
                             broadLocator: locator,
                             confidence,
                             method: 'accessibility-tree' as MatchMethod,
-                            description: `context-scoped getByRole('${role}', '${searchText}')`,
+                            description: `context: getByRole('${role}', '${searchText}')`,
                             alternatives: []
                         };
                     }
