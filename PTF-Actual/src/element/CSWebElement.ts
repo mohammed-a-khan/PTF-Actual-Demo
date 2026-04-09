@@ -1407,6 +1407,94 @@ export class CSWebElement {
         return this.selectOption(values, { noWaitAfter: true });
     }
 
+    /**
+     * Read the visible text of every <option> child of this <select>.
+     * Convenience over `subLocator('option').allTextContents()`.
+     */
+    async getOptionTexts(): Promise<string[]> {
+        return this.executeAction('Get option texts', async () => {
+            const locator = await this.getLocator();
+            const optionLocator = locator.locator('option');
+            const texts = await optionLocator.allTextContents();
+            return texts.map((t: string) => t.trim());
+        });
+    }
+
+    /**
+     * Read the `value` attribute of every <option> child of this
+     * <select>. Useful when the visible text differs from the form
+     * value.
+     */
+    async getOptionValues(): Promise<string[]> {
+        return this.executeAction('Get option values', async () => {
+            const locator = await this.getLocator();
+            const optionLocator = locator.locator('option');
+            const count = await optionLocator.count();
+            const values: string[] = [];
+            for (let i = 0; i < count; i++) {
+                const v = await optionLocator.nth(i).getAttribute('value');
+                values.push((v || '').trim());
+            }
+            return values;
+        });
+    }
+
+    /**
+     * Count the <option> children of this <select>.
+     */
+    async getOptionCount(): Promise<number> {
+        return this.executeAction('Get option count', async () => {
+            const locator = await this.getLocator();
+            return await locator.locator('option').count();
+        });
+    }
+
+    /**
+     * Read the visible text of the currently-selected <option>.
+     * Returns the text of the first option that has the `selected`
+     * attribute, or the first option in the list if none has it
+     * (matching browser default behaviour for native <select>).
+     * For multi-select dropdowns use `getSelectedOptionTexts()`.
+     */
+    async getSelectedOptionText(): Promise<string> {
+        return this.executeAction('Get selected option text', async () => {
+            const locator = await this.getLocator();
+            const selected = locator.locator('option:checked');
+            const count = await selected.count();
+            if (count === 0) {
+                return '';
+            }
+            return ((await selected.first().textContent()) || '').trim();
+        });
+    }
+
+    /**
+     * Read the visible text of every currently-selected <option>.
+     * Returns an empty array if nothing is selected. Use this for
+     * multi-select dropdowns; for single-select use
+     * `getSelectedOptionText()`.
+     */
+    async getSelectedOptionTexts(): Promise<string[]> {
+        return this.executeAction('Get selected option texts', async () => {
+            const locator = await this.getLocator();
+            const selected = locator.locator('option:checked');
+            const texts = await selected.allTextContents();
+            return texts.map((t: string) => t.trim());
+        });
+    }
+
+    /**
+     * Returns true if this <select> has the `multiple` attribute set,
+     * meaning it allows multi-selection.
+     */
+    async isMultiSelect(): Promise<boolean> {
+        return this.executeAction('Check multi-select', async () => {
+            const locator = await this.getLocator();
+            const multipleAttr = await locator.getAttribute('multiple');
+            return multipleAttr !== null;
+        });
+    }
+
     async selectText(options?: SelectTextOptions): Promise<void> {
         return this.executeAction('Select text', async () => {
             const locator = await this.getLocator();

@@ -459,6 +459,28 @@ export class ParallelOrchestrator {
             case 'metrics':
                 this.performanceMetrics.set(`worker-${worker.id}`, message.metrics);
                 break;
+            case 'dashboard-event':
+                // Forward worker dashboard events to the main-process
+                // CSBrowserDashboard singleton (which is the one actually
+                // serving HTTP on port 8082). Without this bridge, the
+                // dashboard would stay on "Waiting for test execution to
+                // start..." for the entire parallel run because each
+                // worker only updates its OWN private singleton.
+                this.applyDashboardEvent(message);
+                break;
+        }
+    }
+
+    private applyDashboardEvent(message: any) {
+        try {
+            const { CSBrowserDashboard } = require('../dashboard/CSBrowserDashboard');
+            const dashboard = CSBrowserDashboard.getInstance();
+            const fn = dashboard[message.method];
+            if (typeof fn === 'function') {
+                fn.apply(dashboard, message.args || []);
+            }
+        } catch {
+            // Dashboard module not available — silent
         }
     }
 

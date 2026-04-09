@@ -52,6 +52,12 @@ export class CSBrowserDashboard {
     private _stepsPassed: number = 0;
     private _stepsFailed: number = 0;
     private _scenarioStartTime: number = 0;
+    // Whether the runner has signalled that an execution is in progress.
+    // Used to leave the "Waiting for test execution..." idle state even
+    // before the first scenario fires (e.g. while step loading runs).
+    private _executionStarted: boolean = false;
+    private _executionStartTime: number = 0;
+    private _plannedScenarioCount: number = 0;
 
     private constructor() {
         this.config = CSConfigurationManager.getInstance();
@@ -119,6 +125,8 @@ export class CSBrowserDashboard {
             if (this._stepsFailed > 0) status = 'failing';
             else if (this._stepsExecuted > 0) status = 'running';
             else status = 'starting';
+        } else if (this._executionStarted) {
+            status = 'starting';
         }
 
         let progress = '';
@@ -136,6 +144,18 @@ export class CSBrowserDashboard {
             stepsFailed: this._stepsFailed,
             duration: this._scenarioStartTime > 0 ? Date.now() - this._scenarioStartTime : 0,
         };
+    }
+
+    public getExecutionStarted(): boolean {
+        return this._executionStarted;
+    }
+
+    public getPlannedScenarioCount(): number {
+        return this._plannedScenarioCount;
+    }
+
+    public getExecutionStartTime(): number {
+        return this._executionStartTime;
     }
 
     private async getBrowserInfo(): Promise<BrowserSessionInfo | null> {
@@ -179,9 +199,76 @@ export class CSBrowserDashboard {
     }
 
     /**
+     * True when the current node process is a forked parallel worker.
+     * Detected by the presence of `process.send` (only set on children
+     * spawned via child_process.fork()) AND `process.env.WORKER_ID`
+     * which the orchestrator sets on each worker.
+     */
+    private isWorkerProcess(): boolean {
+        return typeof process.send === 'function' && !!process.env.WORKER_ID;
+    }
+
+    /**
+     * Forward a dashboard event from a worker process to the parent
+     * orchestrator via IPC. The orchestrator's handleWorkerMessage()
+     * picks up `dashboard-event` messages and applies them to the
+     * MAIN process's CSBrowserDashboard singleton (which is the one
+     * actually serving HTTP on port 8082).
+     *
+     * No-op when called from the main process.
+     */
+    private forwardToParent(method: string, args: any[]): void {
+        if (!this.isWorkerProcess()) return;
+        try {
+            process.send!({
+                type: 'dashboard-event',
+                method,
+                args,
+                workerId: process.env.WORKER_ID,
+            });
+        } catch {
+            // IPC channel may be down — silent
+        }
+    }
+
+    /**
+     * Called by CSBDDRunner when the runner kicks off a test execution,
+     * BEFORE any individual scenario starts. Lets the dashboard leave
+     * the "Waiting for test execution to start..." idle state immediately,
+     * so users see "Starting test execution (N scenarios)..." while step
+     * loading and browser-launch happen.
+     */
+    public notifyExecutionStart(plannedScenarioCount: number): void {
+        this._executionStarted = true;
+        this._executionStartTime = Date.now();
+        this._plannedScenarioCount = plannedScenarioCount;
+        this.forwardToParent('notifyExecutionStart', [plannedScenarioCount]);
+    }
+
+    /**
+     * Called by CSBDDRunner when the test execution is fully complete
+     * (after the final scenario, before the dashboard server is shut
+     * down). Returns the dashboard to the idle state.
+     */
+    public notifyExecutionEnd(): void {
+        this._executionStarted = false;
+        this._scenario = '';
+        this._feature = '';
+        this._step = '';
+        this.forwardToParent('notifyExecutionEnd', []);
+    }
+
+    /**
      * Called by CSBDDRunner when a new scenario starts.
      */
     public notifyScenarioStart(scenarioName: string, totalSteps: number, featureName?: string): void {
+        // Ensure execution-started is set even if notifyExecutionStart
+        // wasn't called for some reason — guarantees the dashboard
+        // leaves idle on the first scenario.
+        this._executionStarted = true;
+        if (this._executionStartTime === 0) {
+            this._executionStartTime = Date.now();
+        }
         this._scenario = scenarioName;
         this._feature = featureName || '';
         this._totalSteps = totalSteps;
@@ -190,6 +277,7 @@ export class CSBrowserDashboard {
         this._stepsFailed = 0;
         this._step = '';
         this._scenarioStartTime = Date.now();
+        this.forwardToParent('notifyScenarioStart', [scenarioName, totalSteps, featureName || '']);
     }
 
     /**
@@ -197,6 +285,7 @@ export class CSBrowserDashboard {
      */
     public notifyStepStart(stepText: string): void {
         this._step = stepText;
+        this.forwardToParent('notifyStepStart', [stepText]);
     }
 
     /**
@@ -206,6 +295,7 @@ export class CSBrowserDashboard {
         this._stepsExecuted++;
         if (status === 'passed') this._stepsPassed++;
         else this._stepsFailed++;
+        this.forwardToParent('notifyStepEnd', [status]);
     }
 
     /**
@@ -213,6 +303,7 @@ export class CSBrowserDashboard {
      */
     public notifyScenarioEnd(): void {
         this._step = '';
+        this.forwardToParent('notifyScenarioEnd', []);
     }
 
     // ========================================================================
@@ -231,8 +322,15 @@ export class CSBrowserDashboard {
         try {
             const execution = this.getExecutionInfo();
             const browser = await this.getBrowserInfo();
+            const run = {
+                started: this._executionStarted,
+                plannedScenarios: this._plannedScenarioCount,
+                executionElapsed: this._executionStartTime > 0
+                    ? Date.now() - this._executionStartTime
+                    : 0,
+            };
             res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-            res.end(JSON.stringify({ execution, browser, timestamp: Date.now() }));
+            res.end(JSON.stringify({ execution, browser, run, timestamp: Date.now() }));
         } catch (e) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: `${e}` }));
@@ -364,10 +462,28 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
                 var d = await res.json();
                 var ex = d.execution || {};
                 var br = d.browser;
+                var run = d.run || {};
                 var el = document.getElementById('content');
 
-                if (!ex.currentScenario && !br) {
+                // True idle: runner has not signalled execution start AND
+                // no scenario is in progress AND no browser is alive.
+                if (!run.started && !ex.currentScenario && !br) {
                     el.innerHTML = '<div class="idle-state"><div class="icon">⏳</div><p>Waiting for test execution to start...</p></div>';
+                    return;
+                }
+
+                // Runner has started but no scenario fired yet — show
+                // a "Starting..." panel with the planned scenario count
+                // so the dashboard immediately leaves the idle state.
+                if (run.started && !ex.currentScenario) {
+                    var planned = run.plannedScenarios || 0;
+                    var elapsed = run.executionElapsed || 0;
+                    el.innerHTML = '<div class="idle-state"><div class="icon">🚀</div>' +
+                        '<p>Starting test execution...' +
+                        (planned > 0 ? ' (' + planned + ' scenarios queued)' : '') +
+                        '</p>' +
+                        (elapsed > 1000 ? '<p style="margin-top:8px;font-size:11px;color:#64748b">Elapsed: ' + fmt(elapsed) + '</p>' : '') +
+                        '</div>';
                     return;
                 }
 

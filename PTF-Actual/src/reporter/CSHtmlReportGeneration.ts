@@ -397,6 +397,14 @@ export class CSHtmlReportGenerator {
 
     /**
      * Collect artifacts from the output directory
+     *
+     * Each artifact category has a whitelist of file extensions so that
+     * sidecar files written into the same folder don't get mis-classified.
+     * Notable: the videos/ folder also contains .vtt step-timeline files
+     * (sibling captions for the .webm), and without an extension filter
+     * those .vtt files would surface in the report's "Videos" artifact
+     * card as standalone clickable links — exactly the screencast bug
+     * users have been reporting.
      */
     private static collectArtifacts(outputDir: string): Artifacts {
         const artifacts: Artifacts = {
@@ -418,6 +426,18 @@ export class CSHtmlReportGenerator {
             consoleLogs: path.join(baseDir, 'console-logs')
         };
 
+        // Per-category extension whitelist (lowercase). `.vtt` is
+        // intentionally NOT in the videos list — it's a caption sidecar,
+        // not a playable video. The annotated player wires it as a
+        // <track> on the matching <video> element.
+        const allowedExtensions: Record<string, string[]> = {
+            screenshots: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+            videos: ['.webm', '.mp4', '.ogg', '.ogv', '.mov'],
+            har: ['.har', '.json'],
+            traces: ['.zip', '.trace'],
+            consoleLogs: ['.log', '.txt'],
+        };
+
         // Debug logging
         CSReporter.debug(`Collecting artifacts from baseDir: ${baseDir}`);
         CSReporter.debug(`OutputDir: ${outputDir}`);
@@ -428,7 +448,13 @@ export class CSHtmlReportGenerator {
                 try {
                     const files = fs.readdirSync(dir);
                     CSReporter.debug(`Found ${files.length} ${type} files in ${dir}`);
+                    const allowList = allowedExtensions[type] || [];
                     files.forEach(file => {
+                        const ext = path.extname(file).toLowerCase();
+                        if (allowList.length > 0 && !allowList.includes(ext)) {
+                            // Sidecar / metadata file — skip silently
+                            return;
+                        }
                         const filePath = path.join(dir, file);
                         const stats = fs.statSync(filePath);
                         const relativePath = path.relative(outputDir, filePath);
@@ -2413,6 +2439,13 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                         const videos = sd.artifacts?.videos || [];
                         if (!tl || tl.length === 0 || videos.length === 0) return '';
                         const videoFile = typeof videos[0] === 'string' ? videos[0] : (videos[0].path || videos[0].name || videos[0]);
+                        // Derive the matching .vtt sidecar path. CSStepTimeline writes
+                        // <scenarioName>-timeline.vtt next to the video; we infer it
+                        // from the video path so the <track> element below can attach
+                        // the per-step captions to the player itself.
+                        const videoDir = videoFile.includes('/') ? videoFile.substring(0, videoFile.lastIndexOf('/')) : '';
+                        const vttGuess = (sd.name || '').replace(/[^a-zA-Z0-9]/g, '-').substring(0, 50) + '-timeline.vtt';
+                        const vttPath = videoDir ? videoDir + '/' + vttGuess : vttGuess;
                         const totalDur = tl.reduce((sum: number, s: any) => sum + s.durationSec, 0) || 1;
                         const playerId = 'avp-' + Math.random().toString(36).substr(2, 9);
                         return `
@@ -2420,8 +2453,9 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                             <div style="font-weight: 600; font-size: 0.9em; color: #495057; margin-bottom: 8px;">
                                 🎬 Annotated Video Playback
                             </div>
-                            <video controls width="100%" style="border-radius: 4px; background: #000;">
+                            <video controls width="100%" style="border-radius: 4px; background: #000;" crossorigin="anonymous">
                                 <source src="${attrEscape(videoFile)}" type="video/webm">
+                                <track kind="captions" src="${attrEscape(vttPath)}" srclang="en" label="Test steps" default>
                                 Your browser does not support video playback.
                             </video>
                             <div class="step-timeline-bar" style="display: flex; height: 28px; border-radius: 4px; overflow: hidden; margin-top: 8px; cursor: pointer;">

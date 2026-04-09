@@ -256,13 +256,21 @@ export class CSFlakyTestDetector {
 
     /**
      * Deep flakiness analysis with pattern detection and root cause hints.
+     *
+     * Note: the score is recomputed on-the-fly here (rather than read
+     * from `record.flakinessScore`) so historical data automatically
+     * picks up any score-formula changes without needing a manual
+     * cleanup of the .flaky-test-data/ store.
      */
     public analyzeFlakiness(testId: string): FlakinessAnalysis | null {
         const store = this.ensureDataStore();
         const record = store.tests[testId];
         if (!record || record.totalRuns === 0) return null;
 
-        const score = record.flakinessScore;
+        const score = this.computeScore(record);
+        // Keep the stored score in sync so subsequent reads via
+        // getFlakinessScore() return the latest value too.
+        record.flakinessScore = score;
         const passRate = record.totalRuns > 0 ? (record.passCount / record.totalRuns) * 100 : 0;
 
         // Duration statistics
@@ -404,21 +412,32 @@ export class CSFlakyTestDetector {
     // ==========================================================================
 
     /**
-     * Compute flakiness score: (inconsistentRuns / totalRuns) * 100
-     * "Inconsistent" means the result differs from the majority result.
+     * Compute health score: failRate × 100
+     * 0 = perfectly healthy (every run passed)
+     * 100 = toxic (every run failed)
+     *
+     * Earlier versions of this method computed "minority count" as a
+     * proxy for inconsistency, which incorrectly labelled tests that
+     * had failed every run as "Solid" (because all-fails has zero
+     * variance from the majority). The new formula collapses health
+     * onto a single intuitive axis: how often does this test actually
+     * fail? Trend / pattern detection still surface alternation and
+     * regression direction separately on the report.
+     *
+     * Score ranges (matching HEALTH_LEVELS in CSFlakyReportSection):
+     *      0       Solid    (perfect record)
+     *      1-10    Stable   (occasional one-off failure)
+     *      11-25   Shaky    (intermittent failures)
+     *      26-40   Flaky    (often fails, ~1/3 of runs)
+     *      41-60   Broken   (fails more than it passes)
+     *      61-100  Toxic    (almost always fails — likely real regression)
      */
     private computeScore(record: FlakyTestRecord): number {
         const results = record.results.filter(r => r.status !== 'skipped');
         if (results.length < 2) return 0;
 
-        const passCount = results.filter(r => r.status === 'passed').length;
         const failCount = results.filter(r => r.status === 'failed').length;
-
-        // Majority is whichever has more
-        const majorityIsPassed = passCount >= failCount;
-        const inconsistentCount = majorityIsPassed ? failCount : passCount;
-
-        return Math.round((inconsistentCount / results.length) * 100);
+        return Math.round((failCount / results.length) * 100);
     }
 
     // ==========================================================================

@@ -275,6 +275,9 @@ export function generateFlakyCSS(): string {
         .stability-section h3 { font-size: 1.25rem; font-weight: 600; margin-bottom: 8px; color: #1e293b; }
         .stability-subtitle { font-size: 0.85rem; color: #64748b; margin-bottom: 20px; }
 
+        .flaky-table th[title] { cursor: help; text-decoration: underline dotted #94a3b8; text-underline-offset: 3px; }
+        .score-legend [title] { cursor: help; }
+
         .score-legend {
             display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px;
             padding: 12px 16px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;
@@ -408,17 +411,17 @@ export function generateFlakySection(flakyData: any): string {
     // Score legend
     const legendHTML = `
         <div class="score-legend">
-            <span style="font-weight:600;color:#334155;margin-right:6px;">Score:</span>
-            <span class="legend-item"><span class="legend-dot" style="background:#22c55e"></span> 0-10 Stable</span>
-            <span class="legend-item"><span class="legend-dot" style="background:#eab308"></span> 11-25 Shaky</span>
-            <span class="legend-item"><span class="legend-dot" style="background:#f97316"></span> 26-40 Flaky</span>
-            <span class="legend-item"><span class="legend-dot" style="background:#ef4444"></span> 41-60 Broken</span>
-            <span class="legend-item"><span class="legend-dot" style="background:#7f1d1d"></span> 61+ Toxic</span>
-            <span style="margin-left:12px;font-weight:600;color:#334155;">Confidence:</span>
-            <span class="legend-item">Low (2-3 runs)</span>
-            <span class="legend-item">Med (4-7)</span>
-            <span class="legend-item">High (8-15)</span>
-            <span class="legend-item">V.High (16+)</span>
+            <span style="font-weight:600;color:#334155;margin-right:6px;" title="The percentage of historical runs that failed. 0 = perfect, 100 = always fails.">Score:</span>
+            <span class="legend-item" title="0% failure rate — passes every run"><span class="legend-dot" style="background:#22c55e"></span> 0-10 Stable</span>
+            <span class="legend-item" title="11-25% failure rate — occasional failure"><span class="legend-dot" style="background:#eab308"></span> 11-25 Shaky</span>
+            <span class="legend-item" title="26-40% failure rate — fails about a third of runs"><span class="legend-dot" style="background:#f97316"></span> 26-40 Flaky</span>
+            <span class="legend-item" title="41-60% failure rate — fails as often as it passes"><span class="legend-dot" style="background:#ef4444"></span> 41-60 Broken</span>
+            <span class="legend-item" title="61-100% failure rate — almost always fails, treat as a real regression"><span class="legend-dot" style="background:#7f1d1d"></span> 61+ Toxic</span>
+            <span style="margin-left:12px;font-weight:600;color:#334155;" title="How much to trust this row's analysis, based on the depth of historical data behind it.">Confidence:</span>
+            <span class="legend-item" title="2-3 runs of history — too little signal, do not act on these rows yet">Low (2-3 runs)</span>
+            <span class="legend-item" title="4-7 runs of history — usable signal, treat as advisory">Med (4-7)</span>
+            <span class="legend-item" title="8-15 runs of history — actionable signal, fix the high-score rows">High (8-15)</span>
+            <span class="legend-item" title="16+ runs of history — very strong signal, these scores are reliable">V.High (16+)</span>
         </div>`;
 
     // Table rows
@@ -515,13 +518,13 @@ export function generateFlakySection(flakyData: any): string {
                     <table class="flaky-table">
                         <thead>
                             <tr>
-                                <th style="min-width:200px">Test</th>
-                                <th>Health</th>
-                                <th>Score</th>
-                                <th>Pass Rate</th>
-                                <th>History</th>
-                                <th>Trend</th>
-                                <th>Confidence</th>
+                                <th style="min-width:200px" title="Test name plus failure type, error snippet, and a fix suggestion when available">Test</th>
+                                <th title="Categorical health band derived from Score: Solid → Stable → Shaky → Flaky → Broken → Toxic">Health</th>
+                                <th title="The % of historical runs that failed. 0 = perfect, 100 = always fails.">Score</th>
+                                <th title="passes / totalRuns; the parenthesised number is the total run count">Pass Rate</th>
+                                <th title="Last 10 runs as dots, oldest on the left, most recent on the right">History</th>
+                                <th title="Direction of recent results vs older results — Improving / Steady / Degrading / Building history">Trend</th>
+                                <th title="How much to trust this row, based on how many historical runs are behind the analysis">Confidence</th>
                             </tr>
                         </thead>
                         <tbody>

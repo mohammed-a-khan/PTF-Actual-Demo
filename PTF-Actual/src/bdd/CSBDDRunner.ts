@@ -388,6 +388,15 @@ export class CSBDDRunner {
                 }
                 const dashboard = CSBrowserDashboard.getInstance();
                 await dashboard.startDashboard();
+                // Tell the dashboard the runner has started so the idle
+                // state is cleared immediately, even before the first
+                // scenario fires (lets users see "Starting test execution
+                // (N scenarios queued)..." instead of "Waiting...").
+                let plannedScenarios = 0;
+                for (const f of features) {
+                    plannedScenarios += (f.scenarios || []).length;
+                }
+                dashboard.notifyExecutionStart(plannedScenarios);
             } catch (e) { /* dashboard not available */ }
 
             // Execute features
@@ -487,6 +496,7 @@ export class CSBDDRunner {
             try {
                 if (CSBrowserDashboard) {
                     const dashboard = CSBrowserDashboard.getInstance();
+                    dashboard.notifyExecutionEnd();
                     await dashboard.stopDashboard();
                 }
             } catch (e) { /* dashboard stop failed */ }
@@ -1417,6 +1427,19 @@ export class CSBDDRunner {
             }
         }
 
+        // Notify dashboard of scenario start FIRST so the dashboard
+        // leaves the idle state immediately, regardless of whether the
+        // scenario is UI-driven or API-only. (Earlier this was nested
+        // inside `if (browserLaunchRequired)`, so API-only scenarios
+        // never notified and the dashboard stayed on "Waiting for test
+        // execution to start..." for the entire run.)
+        try {
+            if (CSBrowserDashboard) {
+                const totalSteps = (scenario.steps || []).length + (feature.background?.steps || []).length;
+                CSBrowserDashboard.getInstance().notifyScenarioStart(scenarioName, totalSteps, feature.name || '');
+            }
+        } catch (e) { /* dashboard not available */ }
+
         if (browserLaunchRequired) {
             // Create browser context and page for this scenario
             const browserManager = await this.ensureBrowserManager();
@@ -1426,19 +1449,25 @@ export class CSBDDRunner {
 
             await this.context.initialize(page, browserContext);
 
-            // Screencast recording — DISABLED in auto-wiring
-            // Currently produces duplicate of existing BROWSER_VIDEO with no added value.
-            // The CSScreencastManager exists for programmatic use in custom steps
-            // when step-overlay or annotated timeline features are implemented.
-            // To enable manually: CSScreencastManager.getInstance().startScreencast(page)
-
-            // Notify dashboard of scenario start with total step count
+            // Per-scenario screencast — uses Playwright 1.59+ page.screencast
+            // API to record a per-scenario .webm with action + step + pass/fail
+            // overlays burned directly into the video frames. Opt-in via
+            // SCREENCAST_ENABLED=true. See CSScreencastManager for details.
             try {
-                if (CSBrowserDashboard) {
-                    const totalSteps = (scenario.steps || []).length + (feature.background?.steps || []).length;
-                    CSBrowserDashboard.getInstance().notifyScenarioStart(scenarioName, totalSteps, feature.name || '');
+                if (page) {
+                    const { CSScreencastManager } = require('../recording/CSScreencastManager');
+                    const screencast = CSScreencastManager.getInstance();
+                    if (screencast.isEnabled()) {
+                        const totalSteps = (scenario.steps || []).length
+                            + (feature.background?.steps || []).length;
+                        await screencast.startScreencast(page, scenarioName);
+                        // Stash totalSteps on the manager so notifyStepStart
+                        // can render "Step N/M" chapters.
+                        (screencast as any)._currentTotalSteps = totalSteps;
+                        (screencast as any)._currentStepIndex = 0;
+                    }
                 }
-            } catch (e) { /* dashboard not available */ }
+            } catch (e) { /* screencast not available */ }
         } else {
             // Initialize context without browser for API-only tests
             await this.context.initialize(null, null);
@@ -1469,15 +1498,18 @@ export class CSBDDRunner {
             CSReporter.passScenario();
             await this.captureArtifactsIfNeeded('passed');
 
-            // Generate annotated video subtitle file (VTT) alongside the recorded video
+            // Stop the per-scenario screencast (if enabled). The .webm file
+            // is finalised here with all action+step+pass/fail overlays
+            // already burned in by Playwright. Replaces the old .vtt sidecar
+            // approach which never actually rendered captions on screen.
             try {
-                const { CSStepTimeline } = require('../evidence/CSStepTimeline');
-                const timeline = CSStepTimeline.getInstance();
-                const timelineSteps = timeline.getSteps();
-                if (timelineSteps.length > 0) {
-                    const dirs = this.resultsManager.getDirectories();
-                    const vttPath = path.join(dirs.videos, `${scenarioName.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 50)}-timeline.vtt`);
-                    timeline.generateVTT(vttPath, timelineSteps);
+                const page = this.browserManager?.getPage();
+                if (page) {
+                    const { CSScreencastManager } = require('../recording/CSScreencastManager');
+                    const screencast = CSScreencastManager.getInstance();
+                    if (screencast.isEnabled()) {
+                        await screencast.stopScreencast(page);
+                    }
                 }
             } catch (e) { /* */ }
 
@@ -1524,15 +1556,17 @@ export class CSBDDRunner {
             CSReporter.failScenario(error.message);
             await this.captureArtifactsIfNeeded('failed');
 
-            // Generate annotated video subtitle file (VTT) for failed scenario
+            // Stop the per-scenario screencast (failed branch). Same as the
+            // pass branch — Playwright finalises the .webm with all overlays
+            // already burned in.
             try {
-                const { CSStepTimeline } = require('../evidence/CSStepTimeline');
-                const timeline = CSStepTimeline.getInstance();
-                const timelineSteps = timeline.getSteps();
-                if (timelineSteps.length > 0) {
-                    const dirs = this.resultsManager.getDirectories();
-                    const vttPath = path.join(dirs.videos, `${scenarioName.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 50)}-timeline.vtt`);
-                    timeline.generateVTT(vttPath, timelineSteps);
+                const page = this.browserManager?.getPage();
+                if (page) {
+                    const { CSScreencastManager } = require('../recording/CSScreencastManager');
+                    const screencast = CSScreencastManager.getInstance();
+                    if (screencast.isEnabled()) {
+                        await screencast.stopScreencast(page);
+                    }
                 }
             } catch (e) { /* */ }
 
@@ -2031,6 +2065,25 @@ export class CSBDDRunner {
             }
         } catch (e) { /* */ }
 
+        // Notify per-scenario screencast — fire-and-forget. Playwright
+        // renders a non-blocking corner badge ("Step N/M — <text>") on
+        // the recording. The badge has pointer-events:none so it can't
+        // intercept clicks, and we don't await the overlay promise so
+        // it adds zero blocking latency to step execution.
+        try {
+            const page = this.browserManager?.getPage();
+            if (page) {
+                const { CSScreencastManager } = require('../recording/CSScreencastManager');
+                const screencast = CSScreencastManager.getInstance();
+                if (screencast.isEnabled()) {
+                    const sIdx = ((screencast as any)._currentStepIndex || 0) + 1;
+                    (screencast as any)._currentStepIndex = sIdx;
+                    const sTotal = (screencast as any)._currentTotalSteps || 0;
+                    screencast.notifyStepStart(page, sIdx, sTotal, step.keyword, stepText);
+                }
+            }
+        } catch (e) { /* */ }
+
         try {
             // Execute before step hooks
             await this.executeHooks('beforeStep', []);
@@ -2068,6 +2121,19 @@ export class CSBDDRunner {
 
             // Notify dashboard of step pass
             try { if (CSBrowserDashboard) CSBrowserDashboard.getInstance().notifyStepEnd('passed'); } catch { /* */ }
+
+            // Flash a green PASS overlay on the screencast — fire-and-forget,
+            // pointer-events:none, zero blocking latency.
+            try {
+                const page = this.browserManager?.getPage();
+                if (page) {
+                    const { CSScreencastManager } = require('../recording/CSScreencastManager');
+                    const screencast = CSScreencastManager.getInstance();
+                    if (screencast.isEnabled()) {
+                        screencast.notifyStepEnd(page, 'passed');
+                    }
+                }
+            } catch (e) { /* */ }
 
         } catch (error: any) {
             const duration = Date.now() - stepStartTime;
@@ -2227,6 +2293,19 @@ export class CSBDDRunner {
 
             // Notify dashboard of step failure
             try { if (CSBrowserDashboard) CSBrowserDashboard.getInstance().notifyStepEnd('failed'); } catch { /* */ }
+
+            // Flash a red FAIL overlay on the screencast — fire-and-forget,
+            // pointer-events:none, zero blocking latency.
+            try {
+                const failPage = this.browserManager?.getPage();
+                if (failPage) {
+                    const { CSScreencastManager } = require('../recording/CSScreencastManager');
+                    const screencast = CSScreencastManager.getInstance();
+                    if (screencast.isEnabled()) {
+                        screencast.notifyStepEnd(failPage, 'failed');
+                    }
+                }
+            } catch (e) { /* */ }
 
             throw error;
             
