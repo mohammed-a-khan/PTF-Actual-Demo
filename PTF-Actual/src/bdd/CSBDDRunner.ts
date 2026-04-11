@@ -1461,10 +1461,7 @@ export class CSBDDRunner {
                         const totalSteps = (scenario.steps || []).length
                             + (feature.background?.steps || []).length;
                         await screencast.startScreencast(page, scenarioName);
-                        // Stash totalSteps on the manager so notifyStepStart
-                        // can render "Step N/M" chapters.
-                        (screencast as any)._currentTotalSteps = totalSteps;
-                        (screencast as any)._currentStepIndex = 0;
+                        screencast.setTotalSteps(page, totalSteps);
                     }
                 }
             } catch (e) { /* screencast not available */ }
@@ -1508,6 +1505,7 @@ export class CSBDDRunner {
                     const { CSScreencastManager } = require('../recording/CSScreencastManager');
                     const screencast = CSScreencastManager.getInstance();
                     if (screencast.isEnabled()) {
+                        await screencast.showFinalResult(page, 'passed');
                         await screencast.stopScreencast(page);
                     }
                 }
@@ -1565,6 +1563,7 @@ export class CSBDDRunner {
                     const { CSScreencastManager } = require('../recording/CSScreencastManager');
                     const screencast = CSScreencastManager.getInstance();
                     if (screencast.isEnabled()) {
+                        await screencast.showFinalResult(page, 'failed');
                         await screencast.stopScreencast(page);
                     }
                 }
