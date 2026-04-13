@@ -14,7 +14,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { AGENT_CONTENT } from './embeddedAgentContent';
+import { AGENT_CONTENT, AGENT_NAMES } from './embeddedAgentContent';
 
 // ============================================================================
 // Types
@@ -260,7 +260,9 @@ export function generateAgents(
 
     // Delete only OUR existing agent files before creating new ones
     // Other tools may have their own agent files — leave those untouched
-    const agents = ['planner', 'generator', 'healer', 'assistant'];
+    // Use the canonical AGENT_NAMES from embeddedAgentContent so adding a new
+    // agent definition automatically includes it in generation — no second array to update.
+    const agents: readonly string[] = AGENT_NAMES;
     const csAgentPrefix = 'CS Playwright '; // Our VS Code .agent.md title prefix
 
     try {
@@ -453,6 +455,8 @@ Agents:
   - Planner:   Explores apps and generates test plans
   - Generator: Converts plans to Playwright tests
   - Healer:    Debugs and fixes failing tests
+  - Assistant:  Interactive test assistant
+  - Migration: Migrates legacy Selenium/QAF tests to CS Playwright
 `);
             process.exit(0);
         } else if (!arg.startsWith('-')) {
