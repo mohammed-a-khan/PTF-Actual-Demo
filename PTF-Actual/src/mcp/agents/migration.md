@@ -6,6 +6,7 @@ model: sonnet
 color: green
 tools:
   - migrate_scan_files
+  - migrate_read_file
   - migrate_convert_page
   - migrate_convert_steps
   - migrate_convert_data
@@ -41,7 +42,7 @@ You are the AI brain. The MCP tools are your hands. You:
 Call `migrate_scan_files` with the source folder path. Review the inventory. Show it to the user and get approval to proceed.
 
 ### Step 2: Read source files
-Read each Java file. For each file, extract:
+Use `migrate_read_file` to read each Java file identified in the scan. For each file, extract:
 - **Page objects**: element names, locators (@FindBy, By.*), methods, navigation URLs
 - **Step definitions**: step patterns, method bodies, assertions, waits
 - **Database operations**: SQL queries, connection details, parameter bindings

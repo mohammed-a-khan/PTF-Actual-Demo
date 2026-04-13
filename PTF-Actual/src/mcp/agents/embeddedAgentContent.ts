@@ -2021,6 +2021,7 @@ model: sonnet
 color: green
 tools:
   - migrate_scan_files
+  - migrate_read_file
   - migrate_convert_page
   - migrate_convert_steps
   - migrate_convert_data

@@ -197,6 +197,43 @@ const migrateScanFilesTool = defineTool()
     .build();
 
 // ============================================================================
+// Tool 1b: migrate_read_file
+// ============================================================================
+
+const migrateReadFileTool = defineTool()
+    .name('migrate_read_file')
+    .description('Read the contents of a source file (Java, properties, XML, feature, etc.) for migration analysis. Use this after migrate_scan_files to read individual files.')
+    .category('generation')
+    .stringParam('filePath', 'Absolute path to the file to read', { required: true })
+    .handler(async (params, context) => {
+        const filePath = params.filePath as string;
+
+        if (!fs.existsSync(filePath)) {
+            return errorResult(`File does not exist: ${filePath}`);
+        }
+
+        try {
+            const stats = fs.statSync(filePath);
+            if (stats.size > 500000) {
+                return errorResult(`File too large (${stats.size} bytes). Maximum is 500KB.`);
+            }
+
+            const content = fs.readFileSync(filePath, 'utf-8');
+            context.log('info', `Read file: ${filePath} (${content.length} chars)`);
+
+            return jsonResult({
+                filePath,
+                size: stats.size,
+                lines: content.split('\n').length,
+                content,
+            });
+        } catch (err: any) {
+            return errorResult(`Failed to read file: ${err.message}`);
+        }
+    })
+    .build();
+
+// ============================================================================
 // Tool 2: migrate_convert_page
 // ============================================================================
 
@@ -1170,6 +1207,7 @@ const migrateAuditCodeTool = defineTool()
 
 export const migrationTools: MCPToolDefinition[] = [
     migrateScanFilesTool,
+    migrateReadFileTool,
     migrateConvertPageTool,
     migrateConvertStepsTool,
     migrateConvertDataTool,
