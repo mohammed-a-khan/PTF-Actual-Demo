@@ -14,6 +14,19 @@ tools:
   - migrate_generate_config
   - migrate_validate_locators
   - migrate_audit_code
+  - migrate_detect_source_type
+  - migrate_enumerate_tests
+  - migrate_verify_locator_source
+  - migrate_map_test_flow
+  - migrate_check_step_density
+  - migrate_audit_coverage
+  - migrate_audit_fidelity
+  - migration_state_init
+  - migration_state_load
+  - migration_state_update
+  - migration_state_get_next_task
+  - migration_state_record_gate
+  - migration_step_registry_query
   - generate_page_object
   - generate_step_definitions
   - generate_feature_file

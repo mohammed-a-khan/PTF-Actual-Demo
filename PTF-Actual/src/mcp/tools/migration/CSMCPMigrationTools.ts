@@ -65,6 +65,24 @@ function escStr(s: string): string {
     return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
 }
 
+/**
+ * Normalize file paths for cross-platform compatibility.
+ * Fixes: backslash escape in JSON transport, drive letter case, mixed separators.
+ * Must be called before every fs.existsSync() / fs.readFileSync() on user-provided paths.
+ */
+function normalizePath(inputPath: string): string {
+    if (!inputPath) return inputPath;
+    // 1. Normalize all separators to OS-specific
+    let normalized = inputPath.replace(/[/\\]/g, path.sep);
+    // 2. Uppercase drive letter on Windows (y: → Y:)
+    if (/^[a-zA-Z]:/.test(normalized)) {
+        normalized = normalized[0].toUpperCase() + normalized.slice(1);
+    }
+    // 3. Resolve relative segments and normalize
+    normalized = path.resolve(normalized);
+    return normalized;
+}
+
 // ============================================================================
 // Tool 1: migrate_scan_files
 // ============================================================================
@@ -75,7 +93,7 @@ const migrateScanFilesTool = defineTool()
     .category('generation')
     .stringParam('sourcePath', 'Path to the Selenium/Java project source folder', { required: true })
     .handler(async (params, context) => {
-        const sourcePath = params.sourcePath as string;
+        const sourcePath = normalizePath(params.sourcePath as string);
 
         if (!fs.existsSync(sourcePath)) {
             return errorResult(`Source path does not exist: ${sourcePath}`);
@@ -206,7 +224,7 @@ const migrateReadFileTool = defineTool()
     .category('generation')
     .stringParam('filePath', 'Absolute path to the file to read', { required: true })
     .handler(async (params, context) => {
-        const filePath = params.filePath as string;
+        const filePath = normalizePath(params.filePath as string);
 
         if (!fs.existsSync(filePath)) {
             return errorResult(`File does not exist: ${filePath}`);
@@ -412,11 +430,12 @@ const migrateConvertStepsTool = defineTool()
 
         // Duplicate detection
         const existingPatterns = new Set<string>();
-        if (existingStepsDir && fs.existsSync(existingStepsDir)) {
-            const files = fs.readdirSync(existingStepsDir).filter(f => f.endsWith('.steps.ts'));
+        const normalizedStepsDir = existingStepsDir ? normalizePath(existingStepsDir) : null;
+        if (normalizedStepsDir && fs.existsSync(normalizedStepsDir)) {
+            const files = fs.readdirSync(normalizedStepsDir).filter(f => f.endsWith('.steps.ts'));
             for (const file of files) {
                 try {
-                    const content = fs.readFileSync(path.join(existingStepsDir, file), 'utf-8');
+                    const content = fs.readFileSync(path.join(normalizedStepsDir!, file), 'utf-8');
                     const matches = content.matchAll(/@CSBDDStepDef\(['"`](.+?)['"`]\)/g);
                     for (const match of matches) {
                         existingPatterns.add(match[1]);
@@ -816,7 +835,7 @@ const migrateValidateLocatorsTool = defineTool()
     .category('generation')
     .stringParam('pageFilePath', 'Path to the generated page object TypeScript file', { required: true })
     .handler(async (params, context) => {
-        const pageFilePath = params.pageFilePath as string;
+        const pageFilePath = normalizePath(params.pageFilePath as string);
 
         if (!fs.existsSync(pageFilePath)) {
             return errorResult(`Page file not found: ${pageFilePath}`);
@@ -903,7 +922,7 @@ const migrateAuditCodeTool = defineTool()
     .stringParam('projectDir', 'Root project directory containing test/ and config/ folders', { required: true })
     .stringParam('project', 'Project name', { required: true })
     .handler(async (params, context) => {
-        const projectDir = params.projectDir as string;
+        const projectDir = normalizePath(params.projectDir as string);
         const project = params.project as string;
 
         const testDir = path.resolve(projectDir, 'test', project);
@@ -1202,6 +1221,1113 @@ const migrateAuditCodeTool = defineTool()
     .build();
 
 // ============================================================================
+// Tool 10: migrate_detect_source_type
+// ============================================================================
+
+const migrateDetectSourceTypeTool = defineTool()
+    .name('migrate_detect_source_type')
+    .description('Detect whether a legacy source project uses TestNG or BDD (Cucumber/QAF) framework. Scans for .feature files, @Test annotations, @QAFTestStep, and framework-specific imports to determine the source type.')
+    .category('migration')
+    .stringParam('sourcePath', 'Path to the legacy source project root', { required: true })
+    .handler(async (params, context) => {
+        const sourcePath = normalizePath(params.sourcePath as string);
+
+        if (!fs.existsSync(sourcePath)) {
+            return errorResult(`Source path does not exist: ${sourcePath}`);
+        }
+
+        let featureCount = 0;
+        let testAnnotationCount = 0;
+        let qafStepCount = 0;
+        let cucumberStepCount = 0;
+        let javaFileCount = 0;
+        const sampleFiles: { type: string; file: string }[] = [];
+
+        function walk(dir: string): void {
+            try {
+                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                    const fullPath = path.join(dir, entry.name);
+                    if (entry.isDirectory() && !['node_modules', '.git', 'target', 'build', 'dist'].includes(entry.name)) {
+                        walk(fullPath);
+                    } else if (entry.isFile()) {
+                        if (entry.name.endsWith('.feature')) {
+                            featureCount++;
+                            if (sampleFiles.length < 5) sampleFiles.push({ type: 'feature', file: path.relative(sourcePath, fullPath) });
+                        } else if (entry.name.endsWith('.java')) {
+                            javaFileCount++;
+                            try {
+                                const content = fs.readFileSync(fullPath, 'utf-8');
+                                if (/@Test\b/.test(content)) testAnnotationCount++;
+                                if (/@QAFTestStep/.test(content)) qafStepCount++;
+                                if (/@Given|@When|@Then|@And/.test(content)) cucumberStepCount++;
+                            } catch { /* skip unreadable */ }
+                        }
+                    }
+                }
+            } catch { /* skip inaccessible dirs */ }
+        }
+
+        walk(sourcePath);
+
+        // Determine source type
+        let sourceType: 'testng' | 'bdd' | 'hybrid' | 'unknown';
+        let confidence: number;
+        let reasoning: string;
+
+        if (featureCount > 0 && (qafStepCount > 0 || cucumberStepCount > 0)) {
+            sourceType = 'bdd';
+            confidence = 95;
+            reasoning = `Found ${featureCount} .feature files and ${qafStepCount + cucumberStepCount} step definition files`;
+        } else if (featureCount > 0 && testAnnotationCount > 0) {
+            sourceType = 'hybrid';
+            confidence = 80;
+            reasoning = `Found both ${featureCount} .feature files and ${testAnnotationCount} @Test annotations — hybrid project`;
+        } else if (testAnnotationCount > 0) {
+            sourceType = 'testng';
+            confidence = 95;
+            reasoning = `Found ${testAnnotationCount} @Test annotations across ${javaFileCount} Java files, no .feature files`;
+        } else {
+            sourceType = 'unknown';
+            confidence = 0;
+            reasoning = `Could not detect framework: ${javaFileCount} Java files, ${featureCount} feature files`;
+        }
+
+        context.log('info', `Detected source type: ${sourceType} (${confidence}% confidence)`);
+
+        return jsonResult({
+            sourceType,
+            confidence,
+            reasoning,
+            stats: { javaFiles: javaFileCount, featureFiles: featureCount, testAnnotations: testAnnotationCount, qafSteps: qafStepCount, cucumberSteps: cucumberStepCount },
+            sampleFiles,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// Tool 11: migrate_enumerate_tests
+// ============================================================================
+
+const migrateEnumerateTestsTool = defineTool()
+    .name('migrate_enumerate_tests')
+    .description('Enumerate every @Test method (TestNG) or Scenario (BDD) in the legacy source project. Returns a structured list with testCaseId, class name, method name, module assignment, and cross-module references. This is the foundation for coverage tracking — migration cannot be considered complete until every enumerated test has a matching migrated scenario.')
+    .category('migration')
+    .stringParam('sourcePath', 'Path to the legacy source project root', { required: true })
+    .stringParam('sourceType', 'Source framework type (from migrate_detect_source_type)', { required: true, enum: ['testng', 'bdd'] })
+    .handler(async (params, context) => {
+        const sourcePath = normalizePath(params.sourcePath as string);
+        const sourceType = params.sourceType as string;
+
+        if (!fs.existsSync(sourcePath)) {
+            return errorResult(`Source path does not exist: ${sourcePath}`);
+        }
+
+        const tests: Array<{
+            testId: string;
+            className: string;
+            methodName: string;
+            module: string;
+            sourceFile: string;
+            sourceType: string;
+            crossModuleRefs: string[];
+            status: string;
+        }> = [];
+
+        function walk(dir: string): string[] {
+            const files: string[] = [];
+            try {
+                for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                    const fullPath = path.join(dir, entry.name);
+                    if (entry.isDirectory() && !['node_modules', '.git', 'target', 'build', 'dist'].includes(entry.name)) {
+                        files.push(...walk(fullPath));
+                    } else if (entry.isFile()) {
+                        files.push(fullPath);
+                    }
+                }
+            } catch { /* skip */ }
+            return files;
+        }
+
+        const allFiles = walk(sourcePath);
+
+        if (sourceType === 'testng') {
+            // Scan Java files for @Test + @MetaData annotations
+            const javaFiles = allFiles.filter(f => f.endsWith('.java'));
+
+            for (const file of javaFiles) {
+                try {
+                    const content = fs.readFileSync(file, 'utf-8');
+                    if (!/@Test\b/.test(content)) continue;
+
+                    const className = path.basename(file, '.java');
+                    // Detect module from parent directory or class name patterns
+                    const relPath = path.relative(sourcePath, file);
+                    const module = relPath.split(path.sep)[0] || 'default';
+
+                    // Extract @Test methods with testCaseId from @MetaData
+                    const testBlocks = content.split(/@Test\b/);
+                    for (let i = 1; i < testBlocks.length; i++) {
+                        const block = testBlocks[i];
+                        // Extract testCaseId from @MetaData annotation
+                        const metaMatch = testBlocks[i - 1].match(/@MetaData[^)]*testCaseId\s*=\s*["']?(\d+)["']?/);
+                        const testIdFromMeta = metaMatch ? metaMatch[1] : '';
+
+                        // Extract method name
+                        const methodMatch = block.match(/(?:public\s+)?void\s+(\w+)\s*\(/);
+                        const methodName = methodMatch ? methodMatch[1] : `unknown_${i}`;
+
+                        // Extract testCaseId from method body if not in @MetaData
+                        let testId = testIdFromMeta;
+                        if (!testId) {
+                            const bodyIdMatch = block.match(/testCaseId\s*[=:]\s*["']?(\d+)["']?/);
+                            testId = bodyIdMatch ? bodyIdMatch[1] : `${className}_${methodName}`;
+                        }
+
+                        // Detect cross-module references by looking for page object imports from other modules
+                        const crossRefs: string[] = [];
+                        const importMatches = content.matchAll(/import\s+[\w.]+\.(\w+)Page/g);
+                        for (const im of importMatches) {
+                            const pageModule = im[1].toLowerCase();
+                            if (pageModule !== module.toLowerCase()) {
+                                crossRefs.push(pageModule);
+                            }
+                        }
+
+                        tests.push({
+                            testId: `TS_${testId}`,
+                            className,
+                            methodName,
+                            module,
+                            sourceFile: relPath,
+                            sourceType: 'testng',
+                            crossModuleRefs: [...new Set(crossRefs)],
+                            status: 'pending',
+                        });
+                    }
+                } catch { /* skip unreadable */ }
+            }
+        } else if (sourceType === 'bdd') {
+            // Scan .feature files for Scenarios
+            const featureFiles = allFiles.filter(f => f.endsWith('.feature'));
+
+            for (const file of featureFiles) {
+                try {
+                    const content = fs.readFileSync(file, 'utf-8');
+                    const relPath = path.relative(sourcePath, file);
+                    const module = relPath.split(path.sep)[0] || 'default';
+                    const featureName = path.basename(file, '.feature');
+
+                    // Extract testCaseId from @testCaseId tag
+                    const scenarioBlocks = content.split(/Scenario(?:\s+Outline)?:/);
+                    for (let i = 1; i < scenarioBlocks.length; i++) {
+                        const block = scenarioBlocks[i];
+                        const titleMatch = block.match(/^\s*(.+?)$/m);
+                        const title = titleMatch ? titleMatch[1].trim() : `scenario_${i}`;
+
+                        // Look for @testCaseId in the preceding block
+                        const precBlock = scenarioBlocks[i - 1];
+                        const tcIdMatch = precBlock.match(/@testCaseId[:\s]*(\S+)/);
+                        const keyMatch = precBlock.match(/@key[:\s]*(\S+)/);
+                        const testId = tcIdMatch ? tcIdMatch[1] : (keyMatch ? keyMatch[1] : `${featureName}_${i}`);
+
+                        tests.push({
+                            testId,
+                            className: featureName,
+                            methodName: title,
+                            module,
+                            sourceFile: relPath,
+                            sourceType: 'bdd',
+                            crossModuleRefs: [],
+                            status: 'pending',
+                        });
+                    }
+                } catch { /* skip */ }
+            }
+        }
+
+        context.log('info', `Enumerated ${tests.length} tests across ${new Set(tests.map(t => t.module)).size} modules`);
+
+        // Group by module for summary
+        const byModule: Record<string, number> = {};
+        for (const t of tests) {
+            byModule[t.module] = (byModule[t.module] || 0) + 1;
+        }
+
+        return jsonResult({
+            totalTests: tests.length,
+            modules: byModule,
+            crossModuleTests: tests.filter(t => t.crossModuleRefs.length > 0).length,
+            tests,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// Tool 12: migration_state_init
+// ============================================================================
+
+const migrationStateInitTool = defineTool()
+    .name('migration_state_init')
+    .description('Initialize a new migration state file (migration-state.json) in the target project directory. This file persists migration progress across sessions — tracking phases, modules, test coverage, quality gates, and step registries.')
+    .category('migration')
+    .stringParam('projectDir', 'Root directory of the target Playwright project', { required: true })
+    .stringParam('projectName', 'Project name (used for folder structure)', { required: true })
+    .stringParam('sourceType', 'Source framework type', { required: true, enum: ['testng', 'bdd'] })
+    .stringParam('sourcePath', 'Absolute path to the legacy source project', { required: true })
+    .arrayParam('modules', 'List of module names detected in the source project', 'string')
+    .handler(async (params, context) => {
+        const projectDir = normalizePath(params.projectDir as string);
+        const stateFile = path.join(projectDir, 'migration-state.json');
+        const modules = (params.modules as string[]) || [];
+
+        const moduleMap: Record<string, any> = {};
+        for (const mod of modules) {
+            moduleMap[mod] = {
+                status: 'pending',
+                sourceFiles: [],
+                totalTests: 0,
+                migratedTests: 0,
+                generatedPages: [],
+                generatedSteps: [],
+                generatedFeatures: [],
+                generatedData: [],
+                auditResults: [],
+                healingAttempts: 0,
+                humanReviewItems: [],
+            };
+        }
+
+        const state = {
+            projectName: params.projectName as string,
+            sourceType: params.sourceType as string,
+            sourcePath: normalizePath(params.sourcePath as string),
+            targetPath: projectDir,
+            startedAt: new Date().toISOString(),
+            lastUpdatedAt: new Date().toISOString(),
+            currentPhase: 0,
+            currentModule: null,
+            modules: moduleMap,
+            coverage: {
+                totalLegacyTests: 0,
+                migratedTests: 0,
+                skippedTests: [] as any[],
+                humanReviewTests: [] as any[],
+            },
+            testEnumeration: [] as any[],
+            qualityGates: [] as any[],
+            stepRegistry: [] as any[],
+        };
+
+        fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf-8');
+        context.log('info', `Migration state initialized: ${stateFile}`);
+
+        return jsonResult({
+            stateFile,
+            projectName: state.projectName,
+            sourceType: state.sourceType,
+            modulesCount: modules.length,
+            modules,
+        });
+    })
+    .build();
+
+// ============================================================================
+// Tool 11: migration_state_load
+// ============================================================================
+
+const migrationStateLoadTool = defineTool()
+    .name('migration_state_load')
+    .description('Load the current migration state from migration-state.json. Returns the full state including current phase, module status, coverage metrics, quality gate history, and step registry.')
+    .category('migration')
+    .stringParam('projectDir', 'Root directory of the target Playwright project', { required: true })
+    .handler(async (params, context) => {
+        const projectDir = normalizePath(params.projectDir as string);
+        const stateFile = path.join(projectDir, 'migration-state.json');
+
+        if (!fs.existsSync(stateFile)) {
+            return errorResult(`Migration state not found at: ${stateFile}. Run migration_state_init first.`);
+        }
+
+        try {
+            const content = fs.readFileSync(stateFile, 'utf-8');
+            const state = JSON.parse(content);
+            context.log('info', `Migration state loaded: phase ${state.currentPhase}, ${Object.keys(state.modules).length} modules`);
+            return jsonResult(state);
+        } catch (err: any) {
+            return errorResult(`Failed to parse migration state: ${err.message}`);
+        }
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// Tool 12: migration_state_update
+// ============================================================================
+
+const migrationStateUpdateTool = defineTool()
+    .name('migration_state_update')
+    .description('Update a specific field in the migration state. Supports updating module status, current phase, coverage metrics, test enumeration entries, and adding generated file references.')
+    .category('migration')
+    .stringParam('projectDir', 'Root directory of the target Playwright project', { required: true })
+    .stringParam('field', 'Top-level field to update', { required: true, enum: ['currentPhase', 'currentModule', 'moduleStatus', 'coverage', 'testEnumeration', 'addGeneratedFile', 'addStepPattern'] })
+    .stringParam('module', 'Module name (required for moduleStatus and addGeneratedFile)')
+    .stringParam('value', 'New value (JSON string for complex types, plain string for simple)')
+    .handler(async (params, context) => {
+        const projectDir = normalizePath(params.projectDir as string);
+        const stateFile = path.join(projectDir, 'migration-state.json');
+
+        if (!fs.existsSync(stateFile)) {
+            return errorResult(`Migration state not found at: ${stateFile}`);
+        }
+
+        const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        const field = params.field as string;
+        const module = params.module as string;
+        const rawValue = params.value as string;
+
+        let parsedValue: any;
+        try { parsedValue = JSON.parse(rawValue); } catch { parsedValue = rawValue; }
+
+        state.lastUpdatedAt = new Date().toISOString();
+
+        switch (field) {
+            case 'currentPhase':
+                state.currentPhase = Number(parsedValue);
+                break;
+
+            case 'currentModule':
+                state.currentModule = parsedValue;
+                break;
+
+            case 'moduleStatus':
+                if (!module || !state.modules[module]) {
+                    return errorResult(`Module "${module}" not found in state`);
+                }
+                if (typeof parsedValue === 'string') {
+                    state.modules[module].status = parsedValue;
+                } else {
+                    Object.assign(state.modules[module], parsedValue);
+                }
+                break;
+
+            case 'coverage':
+                Object.assign(state.coverage, parsedValue);
+                break;
+
+            case 'testEnumeration':
+                if (Array.isArray(parsedValue)) {
+                    state.testEnumeration.push(...parsedValue);
+                } else {
+                    state.testEnumeration.push(parsedValue);
+                }
+                // Update coverage totals
+                state.coverage.totalLegacyTests = state.testEnumeration.length;
+                state.coverage.migratedTests = state.testEnumeration.filter((t: any) => t.status === 'migrated').length;
+                break;
+
+            case 'addGeneratedFile':
+                if (!module || !state.modules[module]) {
+                    return errorResult(`Module "${module}" not found in state`);
+                }
+                const fileInfo = parsedValue as { type: string; path: string };
+                const typeKey = `generated${toPascalCase(fileInfo.type)}s` as string;
+                if (state.modules[module][typeKey]) {
+                    state.modules[module][typeKey].push(fileInfo.path);
+                }
+                break;
+
+            case 'addStepPattern':
+                const stepEntry = parsedValue as { pattern: string; file: string; module: string };
+                // Check for duplicates
+                const exists = state.stepRegistry.some((s: any) => s.pattern === stepEntry.pattern);
+                if (exists) {
+                    return errorResult(`Duplicate step pattern: "${stepEntry.pattern}" — already registered`);
+                }
+                state.stepRegistry.push(stepEntry);
+                break;
+
+            default:
+                return errorResult(`Unknown field: ${field}`);
+        }
+
+        fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf-8');
+        context.log('info', `Migration state updated: ${field}`);
+        return jsonResult({ updated: field, module, timestamp: state.lastUpdatedAt });
+    })
+    .build();
+
+// ============================================================================
+// Tool 13: migration_state_get_next_task
+// ============================================================================
+
+const migrationStateGetNextTaskTool = defineTool()
+    .name('migration_state_get_next_task')
+    .description('Determine the next module and phase that needs work based on current migration state. Returns the highest-priority pending task with context.')
+    .category('migration')
+    .stringParam('projectDir', 'Root directory of the target Playwright project', { required: true })
+    .handler(async (params, context) => {
+        const projectDir = normalizePath(params.projectDir as string);
+        const stateFile = path.join(projectDir, 'migration-state.json');
+
+        if (!fs.existsSync(stateFile)) {
+            return errorResult(`Migration state not found at: ${stateFile}`);
+        }
+
+        const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        const phaseNames = ['init', 'source_analysis', 'page_generation', 'scenario_composition', 'config_data', 'full_audit', 'healing', 'complete'];
+
+        // Find the first module that isn't complete
+        for (const [modName, modState] of Object.entries(state.modules) as [string, any][]) {
+            if (modState.status === 'complete') continue;
+
+            // Determine which phase this module needs
+            let nextPhase = state.currentPhase;
+            let action = '';
+
+            switch (modState.status) {
+                case 'pending':
+                    nextPhase = 1;
+                    action = 'Run source analysis: extract tests, page objects, locators, and cross-module flows';
+                    break;
+                case 'analyzing':
+                    nextPhase = 1;
+                    action = 'Continue source analysis (in progress)';
+                    break;
+                case 'generating_pages':
+                    nextPhase = 2;
+                    action = 'Generate page objects from extracted manifest';
+                    break;
+                case 'composing_scenarios':
+                    nextPhase = 3;
+                    action = 'Compose scenarios from test enumeration';
+                    break;
+                case 'auditing':
+                    nextPhase = 5;
+                    action = 'Run full audit (framework rules, coverage, fidelity, density)';
+                    break;
+                case 'healing':
+                    nextPhase = 6;
+                    action = `Run healing iteration (attempt ${modState.healingAttempts + 1}/3)`;
+                    break;
+                case 'blocked':
+                    action = `Module blocked — ${modState.humanReviewItems.length} items need human review`;
+                    break;
+            }
+
+            return jsonResult({
+                hasWork: true,
+                module: modName,
+                currentStatus: modState.status,
+                nextPhase,
+                phaseName: phaseNames[nextPhase] || 'unknown',
+                action,
+                totalTests: modState.totalTests,
+                migratedTests: modState.migratedTests,
+                healingAttempts: modState.healingAttempts,
+                humanReviewItems: modState.humanReviewItems.length,
+            });
+        }
+
+        // All modules complete
+        return jsonResult({
+            hasWork: false,
+            message: 'All modules complete',
+            coverage: state.coverage,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// Tool 14: migration_state_record_gate
+// ============================================================================
+
+const migrationStateRecordGateTool = defineTool()
+    .name('migration_state_record_gate')
+    .description('Record a quality gate result (pass/fail/override) for a specific module and phase. Tracks gate history with timestamps for audit trail.')
+    .category('migration')
+    .stringParam('projectDir', 'Root directory of the target Playwright project', { required: true })
+    .stringParam('gateId', 'Quality gate identifier (e.g., QG1, QG2, QG3, QG4, QG5, QG6)', { required: true })
+    .stringParam('module', 'Module name', { required: true })
+    .stringParam('status', 'Gate result', { required: true, enum: ['passed', 'failed', 'overridden'] })
+    .stringParam('resultSummary', 'JSON summary of gate results (errors, warnings, coverage, etc.)')
+    .stringParam('overrideReason', 'Reason for override (required when status=overridden)')
+    .handler(async (params, context) => {
+        const projectDir = normalizePath(params.projectDir as string);
+        const stateFile = path.join(projectDir, 'migration-state.json');
+
+        if (!fs.existsSync(stateFile)) {
+            return errorResult(`Migration state not found at: ${stateFile}`);
+        }
+
+        const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        const gateId = params.gateId as string;
+        const module = params.module as string;
+        const status = params.status as string;
+
+        let resultData: any = {};
+        if (params.resultSummary) {
+            try { resultData = JSON.parse(params.resultSummary as string); } catch { resultData = { summary: params.resultSummary }; }
+        }
+
+        // Find or create gate record
+        const existingIdx = state.qualityGates.findIndex((g: any) => g.gateId === gateId && g.module === module);
+        const gateRecord = {
+            gateId,
+            module,
+            status,
+            attempts: existingIdx >= 0 ? state.qualityGates[existingIdx].attempts + 1 : 1,
+            result: resultData,
+            overrideReason: params.overrideReason || undefined,
+            timestamp: new Date().toISOString(),
+        };
+
+        if (existingIdx >= 0) {
+            state.qualityGates[existingIdx] = gateRecord;
+        } else {
+            state.qualityGates.push(gateRecord);
+        }
+
+        // Auto-advance module status on gate pass
+        if (status === 'passed' || status === 'overridden') {
+            const moduleState = state.modules[module];
+            if (moduleState) {
+                const statusAdvance: Record<string, string> = {
+                    QG1: 'generating_pages',
+                    QG2: 'composing_scenarios',
+                    QG3: 'auditing',
+                    QG4: 'auditing',
+                    QG5: 'complete',
+                    QG6: 'complete',
+                };
+                if (statusAdvance[gateId]) {
+                    moduleState.status = statusAdvance[gateId];
+                }
+            }
+        } else if (status === 'failed') {
+            const moduleState = state.modules[module];
+            if (moduleState && gateRecord.attempts >= 3) {
+                moduleState.status = 'blocked';
+            } else if (moduleState) {
+                moduleState.status = 'healing';
+            }
+        }
+
+        state.lastUpdatedAt = new Date().toISOString();
+        fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf-8');
+        context.log('info', `Quality gate ${gateId} for ${module}: ${status} (attempt ${gateRecord.attempts})`);
+
+        return jsonResult(gateRecord);
+    })
+    .build();
+
+// ============================================================================
+// Tool 15: migration_step_registry_query
+// ============================================================================
+
+const migrationStepRegistryQueryTool = defineTool()
+    .name('migration_step_registry_query')
+    .description('Query the global step registry for existing step patterns. Use before generating new step definitions to prevent duplicates. Supports exact match and regex search.')
+    .category('migration')
+    .stringParam('projectDir', 'Root directory of the target Playwright project', { required: true })
+    .stringParam('pattern', 'Step pattern to search for (exact or regex)', { required: true })
+    .booleanParam('regex', 'Treat pattern as regex instead of exact match', { default: false })
+    .handler(async (params, context) => {
+        const projectDir = normalizePath(params.projectDir as string);
+        const stateFile = path.join(projectDir, 'migration-state.json');
+
+        if (!fs.existsSync(stateFile)) {
+            return errorResult(`Migration state not found at: ${stateFile}`);
+        }
+
+        const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        const searchPattern = params.pattern as string;
+        const useRegex = params.regex as boolean;
+
+        let matches: any[];
+        if (useRegex) {
+            const regex = new RegExp(searchPattern, 'i');
+            matches = state.stepRegistry.filter((s: any) => regex.test(s.pattern));
+        } else {
+            // Normalize for comparison: remove {string}/{int}, lowercase, trim
+            const normalize = (p: string) => p.replace(/\{[^}]+\}/g, '*').replace(/["']/g, '').toLowerCase().trim();
+            const normalized = normalize(searchPattern);
+            matches = state.stepRegistry.filter((s: any) => normalize(s.pattern) === normalized);
+        }
+
+        return jsonResult({
+            query: searchPattern,
+            matchCount: matches.length,
+            matches,
+            isDuplicate: matches.length > 0,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// Tool 18: migrate_verify_locator_source
+// ============================================================================
+
+const migrateVerifyLocatorSourceTool = defineTool()
+    .name('migrate_verify_locator_source')
+    .description('Cross-check every @CSGetElement locator in a generated page object against a legacy page object manifest. Rejects any locator that cannot be traced back to the original @FindBy or QAF JSON source. Prevents fabricated/guessed locators.')
+    .category('migration')
+    .stringParam('generatedPagePath', 'Path to the generated TypeScript page object file', { required: true })
+    .stringParam('legacyManifestPath', 'Path to the legacy page object manifest JSON (from source analyzer)', { required: true })
+    .handler(async (params, context) => {
+        const pagePath = normalizePath(params.generatedPagePath as string);
+        const manifestPath = normalizePath(params.legacyManifestPath as string);
+
+        if (!fs.existsSync(pagePath)) return errorResult(`Generated page not found: ${pagePath}`);
+        if (!fs.existsSync(manifestPath)) return errorResult(`Legacy manifest not found: ${manifestPath}`);
+
+        const pageContent = fs.readFileSync(pagePath, 'utf-8');
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+
+        // Extract all @CSGetElement locators from generated file
+        const generatedLocators: Array<{ name: string; locator: string; line: number }> = [];
+        const lines = pageContent.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+            const xpathMatch = lines[i].match(/xpath:\s*["'`](.+?)["'`]/);
+            const cssMatch = lines[i].match(/css:\s*["'`](.+?)["'`]/);
+            const testIdMatch = lines[i].match(/testId:\s*["'`](.+?)["'`]/);
+            const locator = xpathMatch?.[1] || cssMatch?.[1] || testIdMatch?.[1];
+            if (locator) {
+                // Find the property name (usually 1-3 lines below)
+                const nameMatch = lines.slice(i, i + 5).join('\n').match(/public\s+(\w+)!?\s*:\s*CSWebElement/);
+                generatedLocators.push({ name: nameMatch?.[1] || `element_line_${i + 1}`, locator, line: i + 1 });
+            }
+        }
+
+        // Build set of legacy locator values for comparison
+        const legacyLocators = new Set<string>();
+        const legacyElements = manifest.elements || manifest;
+        if (Array.isArray(legacyElements)) {
+            for (const el of legacyElements) {
+                const val = el.locatorValue || el.locator || el.xpath || el.css || '';
+                if (val) legacyLocators.add(val.trim());
+            }
+        }
+
+        // Cross-check each generated locator
+        const verified: string[] = [];
+        const unverified: Array<{ name: string; locator: string; line: number }> = [];
+
+        for (const gen of generatedLocators) {
+            // Check exact match or substring match (legacy may have xpath= prefix)
+            const loc = gen.locator.trim();
+            const found = legacyLocators.has(loc)
+                || legacyLocators.has(`xpath=${loc}`)
+                || legacyLocators.has(`css=${loc}`)
+                || [...legacyLocators].some(l => l.includes(loc) || loc.includes(l));
+
+            if (found) {
+                verified.push(gen.name);
+            } else {
+                unverified.push(gen);
+            }
+        }
+
+        const passed = unverified.length === 0;
+        context.log('info', `Locator verification: ${verified.length}/${generatedLocators.length} verified, ${unverified.length} unverified`);
+
+        return jsonResult({
+            passed,
+            totalLocators: generatedLocators.length,
+            verified: verified.length,
+            unverified: unverified.length,
+            unverifiedLocators: unverified,
+            message: passed
+                ? 'All locators trace back to legacy source'
+                : `${unverified.length} locator(s) cannot be traced to legacy source — may be fabricated`,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// Tool 19: migrate_map_test_flow
+// ============================================================================
+
+const migrateMapTestFlowTool = defineTool()
+    .name('migrate_map_test_flow')
+    .description('Analyze a legacy Java @Test method body and produce a structured step-by-step flow mapping. Identifies which page objects are called, which methods, what assertions are made, and detects cross-module references. Used to enforce 1:1 scenario fidelity and prevent cross-module flow splitting.')
+    .category('migration')
+    .stringParam('filePath', 'Path to the legacy Java source file', { required: true })
+    .stringParam('methodName', 'Name of the @Test method to analyze (optional — analyzes all if omitted)')
+    .handler(async (params, context) => {
+        const filePath = normalizePath(params.filePath as string);
+        const targetMethod = params.methodName as string | undefined;
+
+        if (!fs.existsSync(filePath)) return errorResult(`File not found: ${filePath}`);
+
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const className = path.basename(filePath, '.java');
+
+        // Extract page object references from imports
+        const imports: Record<string, string> = {};
+        const importMatches = content.matchAll(/import\s+([\w.]+)\.(\w+);/g);
+        for (const m of importMatches) {
+            imports[m[2]] = m[1];
+        }
+
+        // Identify page object fields
+        const pageFields: Record<string, string> = {};
+        const fieldMatches = content.matchAll(/(\w+(?:Page|Screen|Modal|Dialog))\s+(\w+)\s*[=;]/g);
+        for (const m of fieldMatches) {
+            pageFields[m[2]] = m[1];
+        }
+
+        // Extract method bodies
+        const methods: Array<{
+            methodName: string;
+            testCaseId: string;
+            steps: Array<{ pageObject: string; method: string; args: string; isAssertion: boolean }>;
+            pageObjectsUsed: string[];
+            crossModuleRefs: string[];
+            isCrossModule: boolean;
+        }> = [];
+
+        // Split by @Test annotation to find method boundaries
+        const testBlocks = content.split(/@Test\b/);
+        for (let i = 1; i < testBlocks.length; i++) {
+            const block = testBlocks[i];
+            const methodMatch = block.match(/(?:public\s+)?void\s+(\w+)\s*\(/);
+            if (!methodMatch) continue;
+            const mName = methodMatch[1];
+
+            if (targetMethod && mName !== targetMethod) continue;
+
+            // Get testCaseId
+            const metaMatch = testBlocks[i - 1].match(/testCaseId\s*=\s*["']?(\d+)["']?/);
+            const testCaseId = metaMatch ? metaMatch[1] : '';
+
+            // Parse method body for page object calls
+            const steps: Array<{ pageObject: string; method: string; args: string; isAssertion: boolean }> = [];
+            const pageObjectsUsed = new Set<string>();
+
+            // Match patterns like: pageObj.methodName(args) or Assert.assertTrue(...)
+            const callMatches = block.matchAll(/(\w+)\.(\w+)\s*\(([^)]*)\)/g);
+            for (const cm of callMatches) {
+                const obj = cm[1];
+                const method = cm[2];
+                const args = cm[3].trim();
+
+                const isPage = pageFields[obj] || obj.endsWith('Page') || obj.endsWith('Screen');
+                const isAssert = obj === 'Assert' || obj === 'Validator' || method.startsWith('verify') || method.startsWith('assert');
+
+                if (isPage || isAssert) {
+                    const poName = pageFields[obj] || obj;
+                    steps.push({ pageObject: poName, method, args: args.substring(0, 100), isAssertion: isAssert });
+                    if (isPage) pageObjectsUsed.add(poName);
+                }
+            }
+
+            // Detect cross-module by checking if page objects come from different packages
+            const modules = new Set<string>();
+            for (const po of pageObjectsUsed) {
+                const pkg = imports[po] || '';
+                const modMatch = pkg.match(/\.(\w+)\.\w+$/);
+                if (modMatch) modules.add(modMatch[1]);
+            }
+
+            methods.push({
+                methodName: mName,
+                testCaseId,
+                steps,
+                pageObjectsUsed: [...pageObjectsUsed],
+                crossModuleRefs: [...modules],
+                isCrossModule: modules.size > 1,
+            });
+        }
+
+        context.log('info', `Mapped ${methods.length} test methods in ${className}`);
+
+        return jsonResult({
+            className,
+            filePath: path.relative(process.cwd(), filePath),
+            totalMethods: methods.length,
+            crossModuleMethods: methods.filter(m => m.isCrossModule).length,
+            methods,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// Tool 20: migrate_check_step_density
+// ============================================================================
+
+const migrateCheckStepDensityTool = defineTool()
+    .name('migrate_check_step_density')
+    .description('Count verification steps (Then/And with assertions) per scenario in a generated feature file. Rejects scenarios with fewer than 3 verification steps as "thin" — these indicate incomplete migration where the legacy test had more checks.')
+    .category('migration')
+    .stringParam('featureFilePath', 'Path to the generated .feature file', { required: true })
+    .numberParam('minVerificationSteps', 'Minimum verification steps per scenario (default: 3)', { default: 3 })
+    .handler(async (params, context) => {
+        const featurePath = normalizePath(params.featureFilePath as string);
+        const minSteps = (params.minVerificationSteps as number) || 3;
+
+        if (!fs.existsSync(featurePath)) return errorResult(`Feature file not found: ${featurePath}`);
+
+        const content = fs.readFileSync(featurePath, 'utf-8');
+        const lines = content.split('\n');
+
+        const scenarios: Array<{ name: string; line: number; totalSteps: number; verificationSteps: number; isThin: boolean }> = [];
+        let currentScenario: { name: string; line: number; totalSteps: number; verificationSteps: number } | null = null;
+
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+
+            if (/^Scenario( Outline)?:/.test(line)) {
+                if (currentScenario) {
+                    scenarios.push({ ...currentScenario, isThin: currentScenario.verificationSteps < minSteps });
+                }
+                currentScenario = { name: line.replace(/^Scenario( Outline)?:\s*/, ''), line: i + 1, totalSteps: 0, verificationSteps: 0 };
+            } else if (currentScenario && /^(Given|When|Then|And|But)\s/.test(line)) {
+                currentScenario.totalSteps++;
+                // Verification steps: Then or And with assertion keywords
+                if (/^Then\s/.test(line) || (/^And\s/.test(line) && /should|verify|assert|expect|visible|displayed|present|contain|match|equal|error|success|banner/i.test(line))) {
+                    currentScenario.verificationSteps++;
+                }
+            }
+        }
+        if (currentScenario) {
+            scenarios.push({ ...currentScenario, isThin: currentScenario.verificationSteps < minSteps });
+        }
+
+        const thinScenarios = scenarios.filter(s => s.isThin);
+        const passed = thinScenarios.length === 0;
+
+        context.log('info', `Density check: ${scenarios.length} scenarios, ${thinScenarios.length} thin`);
+
+        return jsonResult({
+            passed,
+            featureFile: path.basename(featurePath),
+            totalScenarios: scenarios.length,
+            thinScenarios: thinScenarios.length,
+            minVerificationSteps: minSteps,
+            scenarios,
+            message: passed
+                ? 'All scenarios meet minimum verification step density'
+                : `${thinScenarios.length} scenario(s) have fewer than ${minSteps} verification steps — likely incomplete migration`,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// Tool 21: migrate_audit_coverage
+// ============================================================================
+
+const migrateAuditCoverageTool = defineTool()
+    .name('migrate_audit_coverage')
+    .description('Compare the test enumeration (from migrate_enumerate_tests) against all generated .feature files. Returns coverage percentage and lists every legacy testCaseId that has no matching migrated scenario. Migration cannot be complete until coverage = 100%.')
+    .category('migration')
+    .stringParam('projectDir', 'Root directory of the target Playwright project', { required: true })
+    .stringParam('project', 'Project name (for test/ subfolder)', { required: true })
+    .handler(async (params, context) => {
+        const projectDir = normalizePath(params.projectDir as string);
+        const project = params.project as string;
+        const stateFile = path.join(projectDir, 'migration-state.json');
+
+        if (!fs.existsSync(stateFile)) {
+            return errorResult(`Migration state not found. Run migration_state_init first.`);
+        }
+
+        const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+        const enumeration = state.testEnumeration || [];
+
+        if (enumeration.length === 0) {
+            return errorResult(`No tests enumerated. Run migrate_enumerate_tests first.`);
+        }
+
+        // Scan all feature files for scenario names and test IDs
+        const featuresDir = path.join(projectDir, 'test', project, 'features');
+        const migratedIds = new Set<string>();
+
+        function scanFeatures(dir: string): void {
+            if (!fs.existsSync(dir)) return;
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) { scanFeatures(fullPath); continue; }
+                if (!entry.name.endsWith('.feature')) continue;
+
+                const content = fs.readFileSync(fullPath, 'utf-8');
+                // Extract @TS_XXXX tags and scenario names containing test IDs
+                const tagMatches = content.matchAll(/@(TS_\d+\w*)/g);
+                for (const m of tagMatches) migratedIds.add(m[1]);
+
+                const scenarioMatches = content.matchAll(/Scenario(?:\s+Outline)?:\s*(TS_\d+\w*)/g);
+                for (const m of scenarioMatches) migratedIds.add(m[1]);
+            }
+        }
+
+        scanFeatures(featuresDir);
+
+        // Compare
+        const missing: Array<{ testId: string; className: string; module: string }> = [];
+        let migrated = 0;
+
+        for (const test of enumeration) {
+            if (migratedIds.has(test.testId)) {
+                migrated++;
+            } else {
+                missing.push({ testId: test.testId, className: test.className, module: test.module });
+            }
+        }
+
+        const total = enumeration.length;
+        const percentage = total > 0 ? Math.round((migrated / total) * 100) : 0;
+        const passed = missing.length === 0;
+
+        // Group missing by module
+        const missingByModule: Record<string, string[]> = {};
+        for (const m of missing) {
+            if (!missingByModule[m.module]) missingByModule[m.module] = [];
+            missingByModule[m.module].push(m.testId);
+        }
+
+        context.log('info', `Coverage: ${migrated}/${total} (${percentage}%)`);
+
+        return jsonResult({
+            passed,
+            coverage: { total, migrated, missing: missing.length, percentage },
+            missingByModule,
+            missingTests: missing,
+            message: passed
+                ? `100% coverage: all ${total} legacy tests have matching migrated scenarios`
+                : `${percentage}% coverage: ${missing.length} legacy test(s) have no matching migrated scenario`,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// Tool 22: migrate_audit_fidelity
+// ============================================================================
+
+const migrateAuditFidelityTool = defineTool()
+    .name('migrate_audit_fidelity')
+    .description('Compare generated scenario step count against legacy test method step count to detect over-migration (added steps not in legacy) and under-migration (missing steps from legacy). Uses the migration state test enumeration and flow mappings for comparison.')
+    .category('migration')
+    .stringParam('projectDir', 'Root directory of the target Playwright project', { required: true })
+    .stringParam('project', 'Project name', { required: true })
+    .stringParam('module', 'Module to audit (or "all" for all modules)', { required: true })
+    .handler(async (params, context) => {
+        const projectDir = normalizePath(params.projectDir as string);
+        const project = params.project as string;
+        const targetModule = params.module as string;
+
+        // Scan feature files and count steps per scenario
+        const featuresDir = path.join(projectDir, 'test', project, 'features');
+        const scenarioStepCounts: Record<string, { steps: number; verifications: number; file: string }> = {};
+
+        function scanFeatures(dir: string): void {
+            if (!fs.existsSync(dir)) return;
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                const fullPath = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    if (targetModule === 'all' || entry.name === targetModule) scanFeatures(fullPath);
+                    continue;
+                }
+                if (!entry.name.endsWith('.feature')) continue;
+
+                const content = fs.readFileSync(fullPath, 'utf-8');
+                const lines = content.split('\n');
+                let currentId = '';
+                let stepCount = 0;
+                let verifyCount = 0;
+
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    const scenarioMatch = trimmed.match(/Scenario(?:\s+Outline)?:\s*(TS_\d+\w*)/);
+                    if (scenarioMatch) {
+                        if (currentId) {
+                            scenarioStepCounts[currentId] = { steps: stepCount, verifications: verifyCount, file: entry.name };
+                        }
+                        currentId = scenarioMatch[1];
+                        stepCount = 0;
+                        verifyCount = 0;
+                    } else if (/^(Given|When|Then|And|But)\s/.test(trimmed)) {
+                        stepCount++;
+                        if (/^(Then|And)\s/.test(trimmed) && /should|verify|assert|visible|error|success/i.test(trimmed)) {
+                            verifyCount++;
+                        }
+                    }
+                }
+                if (currentId) {
+                    scenarioStepCounts[currentId] = { steps: stepCount, verifications: verifyCount, file: entry.name };
+                }
+            }
+        }
+
+        scanFeatures(featuresDir);
+
+        // Compare with expected step counts (from state if available)
+        const stateFile = path.join(projectDir, 'migration-state.json');
+        let expectedCounts: Record<string, number> = {};
+        if (fs.existsSync(stateFile)) {
+            const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+            for (const test of state.testEnumeration || []) {
+                if (test.expectedSteps) {
+                    expectedCounts[test.testId] = test.expectedSteps;
+                }
+            }
+        }
+
+        const results: Array<{
+            testId: string;
+            generatedSteps: number;
+            generatedVerifications: number;
+            expectedSteps: number | null;
+            fidelity: 'matched' | 'over' | 'under' | 'unknown';
+            file: string;
+        }> = [];
+
+        for (const [testId, counts] of Object.entries(scenarioStepCounts)) {
+            const expected = expectedCounts[testId] || null;
+            let fidelity: 'matched' | 'over' | 'under' | 'unknown' = 'unknown';
+            if (expected !== null) {
+                if (counts.steps === expected) fidelity = 'matched';
+                else if (counts.steps > expected * 1.3) fidelity = 'over';
+                else if (counts.steps < expected * 0.7) fidelity = 'under';
+                else fidelity = 'matched';
+            }
+
+            results.push({
+                testId,
+                generatedSteps: counts.steps,
+                generatedVerifications: counts.verifications,
+                expectedSteps: expected,
+                fidelity,
+                file: counts.file,
+            });
+        }
+
+        const overMigrated = results.filter(r => r.fidelity === 'over');
+        const underMigrated = results.filter(r => r.fidelity === 'under');
+
+        context.log('info', `Fidelity audit: ${results.length} scenarios, ${overMigrated.length} over, ${underMigrated.length} under`);
+
+        return jsonResult({
+            totalScenarios: results.length,
+            matched: results.filter(r => r.fidelity === 'matched').length,
+            overMigrated: overMigrated.length,
+            underMigrated: underMigrated.length,
+            unknown: results.filter(r => r.fidelity === 'unknown').length,
+            overMigratedScenarios: overMigrated,
+            underMigratedScenarios: underMigrated,
+            results,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
 // Export all migration tools
 // ============================================================================
 
@@ -1215,6 +2341,19 @@ export const migrationTools: MCPToolDefinition[] = [
     migrateGenerateConfigTool,
     migrateValidateLocatorsTool,
     migrateAuditCodeTool,
+    migrateDetectSourceTypeTool,
+    migrateEnumerateTestsTool,
+    migrateVerifyLocatorSourceTool,
+    migrateMapTestFlowTool,
+    migrateCheckStepDensityTool,
+    migrateAuditCoverageTool,
+    migrateAuditFidelityTool,
+    migrationStateInitTool,
+    migrationStateLoadTool,
+    migrationStateUpdateTool,
+    migrationStateGetNextTaskTool,
+    migrationStateRecordGateTool,
+    migrationStepRegistryQueryTool,
 ];
 
 export function registerMigrationTools(registry: CSMCPToolRegistry): void {
