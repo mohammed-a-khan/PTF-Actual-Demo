@@ -1220,12 +1220,28 @@ export abstract class CSBasePage {
     // =========================================================================
 
     /**
-     * Switch to iframe by selector
+     * Switch to iframe by selector. Pass a string array for nested iframes
+     * (outermost first); returns the innermost FrameLocator in that case.
+     *
+     * @example
+     * // Single iframe
+     * const frame = await page.switchToFrame('#payment');
+     *
+     * // Nested iframes (outer -> inner)
+     * const inner = await page.switchToFrame(['#appShell', 'iframe[title="Editor"]']);
      */
-    public async switchToFrame(selector: string): Promise<any> {
-        const frameLocator = this.page.frameLocator(selector);
-        CSReporter.debug(`Switched to frame: ${selector}`);
-        return frameLocator;
+    public async switchToFrame(selector: string | string[]): Promise<any> {
+        const chain = Array.isArray(selector) ? selector : [selector];
+        let ctx: any = this.page;
+        for (const sel of chain) {
+            ctx = ctx.frameLocator(sel);
+        }
+        CSReporter.debug(
+            chain.length === 1
+                ? `Switched to frame: ${chain[0]}`
+                : `Switched to nested frame chain (${chain.length}): ${chain.join(' >> ')}`
+        );
+        return ctx;
     }
 
     /**

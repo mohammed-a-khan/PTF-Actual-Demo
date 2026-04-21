@@ -67,19 +67,39 @@ function escStr(s: string): string {
 
 /**
  * Normalize file paths for cross-platform compatibility.
- * Fixes: backslash escape in JSON transport, drive letter case, mixed separators.
- * Must be called before every fs.existsSync() / fs.readFileSync() on user-provided paths.
+ *
+ * Key problem: When Copilot sends a Windows path like Y:\test\file.java
+ * via JSON, backslash sequences get interpreted as escape characters:
+ *   \t → tab, \n → newline, \f → form feed, \r → carriage return, \b → backspace
+ * This corrupts the path before it even reaches our code.
+ *
+ * Fix: Detect and repair corrupted escape sequences, then normalize separators.
  */
 function normalizePath(inputPath: string): string {
     if (!inputPath) return inputPath;
-    // 1. Normalize all separators to OS-specific
-    let normalized = inputPath.replace(/[/\\]/g, path.sep);
-    // 2. Uppercase drive letter on Windows (y: → Y:)
+
+    let normalized = inputPath;
+
+    // 1. Repair JSON escape damage — replace control characters back to backslash + letter
+    //    \t(tab=0x09) → \t, \n(lf=0x0A) → \n, \r(cr=0x0D) → \r, \f(ff=0x0C) → \f, \b(bs=0x08) → \b
+    normalized = normalized
+        .replace(/\t/g, '\\t')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r')
+        .replace(/\f/g, '\\f')
+        .replace(/\x08/g, '\\b');
+
+    // 2. Normalize all separators to OS-native
+    normalized = normalized.replace(/[/\\]/g, path.sep);
+
+    // 3. Uppercase drive letter on Windows (y: → Y:)
     if (/^[a-zA-Z]:/.test(normalized)) {
         normalized = normalized[0].toUpperCase() + normalized.slice(1);
     }
-    // 3. Resolve relative segments and normalize
-    normalized = path.resolve(normalized);
+
+    // 4. Use path.normalize (NOT path.resolve — resolve changes relative to cwd which may differ)
+    normalized = path.normalize(normalized);
+
     return normalized;
 }
 
@@ -93,13 +113,33 @@ const migrateScanFilesTool = defineTool()
     .category('generation')
     .stringParam('sourcePath', 'Path to the Selenium/Java project source folder', { required: true })
     .handler(async (params, context) => {
-        const sourcePath = normalizePath(params.sourcePath as string);
+        const rawPath = params.sourcePath as string;
+        const sourcePath = normalizePath(rawPath);
 
+        context.log('info', `[migrate_scan_files] Raw input: "${rawPath}"`);
+        context.log('info', `[migrate_scan_files] Normalized: "${sourcePath}"`);
+        context.log('info', `[migrate_scan_files] platform: ${process.platform}, path.sep: "${path.sep}"`);
+
+        // Try raw path as fallback
+        let resolvedPath = sourcePath;
         if (!fs.existsSync(sourcePath)) {
-            return errorResult(`Source path does not exist: ${sourcePath}`);
+            if (fs.existsSync(rawPath)) {
+                context.log('info', `[migrate_scan_files] Raw path exists, using it`);
+                resolvedPath = rawPath;
+            } else {
+                // Try alternatives
+                const alts = [rawPath.replace(/\\/g, '/'), rawPath.replace(/\//g, '\\'), rawPath[0].toUpperCase() + rawPath.slice(1), rawPath[0].toLowerCase() + rawPath.slice(1)];
+                const found = alts.find(a => fs.existsSync(a));
+                if (found) {
+                    context.log('info', `[migrate_scan_files] Found at alternative: "${found}"`);
+                    resolvedPath = found;
+                } else {
+                    return errorResult(`Source path does not exist: ${sourcePath} (raw: "${rawPath}", platform: ${process.platform})`);
+                }
+            }
         }
 
-        context.log('info', `Scanning source folder: ${sourcePath}`);
+        context.log('info', `Scanning source folder: ${resolvedPath}`);
 
         const inventory: {
             pages: { file: string; className: string; elementCount: number }[];
@@ -132,7 +172,7 @@ const migrateScanFilesTool = defineTool()
                 }
 
                 inventory.totalFiles++;
-                const rel = path.relative(sourcePath, fullPath);
+                const rel = path.relative(resolvedPath, fullPath);
                 const ext = path.extname(entry.name).toLowerCase();
 
                 if (ext === '.java') {
@@ -185,7 +225,7 @@ const migrateScanFilesTool = defineTool()
             }
         }
 
-        scanDir(sourcePath);
+        scanDir(resolvedPath);
 
         context.log('info', `Scan complete: ${inventory.pages.length} pages, ${inventory.steps.length} step files, ${inventory.features.length} features, ${inventory.dataFiles.length} data files`);
 
@@ -224,10 +264,44 @@ const migrateReadFileTool = defineTool()
     .category('generation')
     .stringParam('filePath', 'Absolute path to the file to read', { required: true })
     .handler(async (params, context) => {
-        const filePath = normalizePath(params.filePath as string);
+        const rawPath = params.filePath as string;
+        const filePath = normalizePath(rawPath);
+
+        context.log('info', `[migrate_read_file] Raw input path: "${rawPath}"`);
+        context.log('info', `[migrate_read_file] Normalized path: "${filePath}"`);
+        context.log('info', `[migrate_read_file] path.sep: "${path.sep}", process.platform: "${process.platform}"`);
+        context.log('info', `[migrate_read_file] fs.existsSync result: ${fs.existsSync(filePath)}`);
+
+        // Also try the raw path in case normalization is the problem
+        if (!fs.existsSync(filePath) && fs.existsSync(rawPath)) {
+            context.log('info', `[migrate_read_file] Raw path EXISTS but normalized does NOT — using raw path`);
+            const stats = fs.statSync(rawPath);
+            if (stats.size > 500000) {
+                return errorResult(`File too large (${stats.size} bytes). Maximum is 500KB.`);
+            }
+            const content = fs.readFileSync(rawPath, 'utf-8');
+            return jsonResult({ filePath: rawPath, size: stats.size, lines: content.split('\n').length, content });
+        }
 
         if (!fs.existsSync(filePath)) {
-            return errorResult(`File does not exist: ${filePath}`);
+            // Try common path transformations as fallback
+            const alternatives = [
+                rawPath,
+                rawPath.replace(/\\/g, '/'),
+                rawPath.replace(/\//g, '\\'),
+                rawPath[0].toUpperCase() + rawPath.slice(1),
+                rawPath[0].toLowerCase() + rawPath.slice(1),
+            ];
+            for (const alt of alternatives) {
+                if (fs.existsSync(alt)) {
+                    context.log('info', `[migrate_read_file] Found file at alternative path: "${alt}"`);
+                    const stats = fs.statSync(alt);
+                    if (stats.size > 500000) return errorResult(`File too large (${stats.size} bytes). Maximum is 500KB.`);
+                    const content = fs.readFileSync(alt, 'utf-8');
+                    return jsonResult({ filePath: alt, size: stats.size, lines: content.split('\n').length, content });
+                }
+            }
+            return errorResult(`File does not exist: ${filePath} (raw input: "${rawPath}", platform: ${process.platform})`);
         }
 
         try {

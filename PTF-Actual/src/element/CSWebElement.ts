@@ -322,22 +322,25 @@ export interface ElementOptions {
     // Frame/Iframe support
     /**
      * Frame selector for elements inside iframes.
-     * Can be a string (auto-detects xpath/css) or FrameSelector object.
-     * @example
-     * // String (auto-detected)
-     * frame: '//iframe[@title="Payment"]'
-     * frame: 'iframe#editor'
-     * frame: '#myFrame'
+     * - Single frame: string (auto-detects xpath/css) or FrameSelector object.
+     * - Nested frames: array of strings / FrameSelector objects, outermost first.
+     *   Every entry is resolved independently, so strategies may be freely mixed.
      *
-     * // Object (explicit)
-     * frame: { xpath: '//iframe[@title="Payment"]' }
-     * frame: { id: 'payment-frame' }
-     * frame: { name: 'editorFrame' }
+     * @example
+     * // Single frame
+     * frame: '//iframe[@title="Payment"]'
      * frame: { title: 'Payment Gateway' }
-     * frame: { testId: 'checkout-iframe' }
-     * frame: { index: 0 }
+     *
+     * // Nested frames (outer -> inner)
+     * frame: ['#mainContent', '//iframe[@title="Payment Gateway"]']
+     * frame: [
+     *     { id: 'appShell' },
+     *     { name: 'workspaceFrame' },
+     *     { title: 'Document Editor' },
+     *     { index: 0 }
+     * ]
      */
-    frame?: string | FrameSelector;
+    frame?: string | FrameSelector | Array<string | FrameSelector>;
 }
 
 /**
@@ -562,16 +565,32 @@ export class CSWebElement {
     }
 
     /**
-     * Get the locator context - either page or frameLocator if frame is specified
+     * Get the locator context - either page or a chained FrameLocator if frame
+     * is specified. Accepts either a single frame or an outer-to-inner array
+     * for nested iframes; each level is resolved independently.
      */
     private getLocatorContext(): Page | FrameLocator {
         if (!this.options.frame) {
             return this.page;
         }
 
-        const frameSelector = this.resolveFrameSelector(this.options.frame);
-        CSReporter.debug(`Using frame context: ${frameSelector}`);
-        return this.page.frameLocator(frameSelector);
+        const chain: Array<string | FrameSelector> = Array.isArray(this.options.frame)
+            ? this.options.frame
+            : [this.options.frame];
+
+        let ctx: any = this.page;
+        const resolved: string[] = [];
+        for (const entry of chain) {
+            const sel = this.resolveFrameSelector(entry);
+            resolved.push(sel);
+            ctx = ctx.frameLocator(sel);
+        }
+        CSReporter.debug(
+            chain.length === 1
+                ? `Using frame context: ${resolved[0]}`
+                : `Using nested frame context (${chain.length} levels): ${resolved.join(' >> ')}`
+        );
+        return ctx;
     }
 
     /**

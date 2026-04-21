@@ -6,7 +6,7 @@
  * will automatically be scoped to the specified iframe.
  *
  * @example
- * // Define an iframe page
+ * // Single iframe
  * @CSPage('payment-iframe')
  * export class PaymentIframePage extends CSFramePage {
  *     // Frame selector - defined once, all elements inherit
@@ -25,6 +25,20 @@
  *         description: 'Submit Button'
  *     })
  *     public submitBtn!: CSWebElement;
+ * }
+ *
+ * @example
+ * // Nested iframes (outer -> inner). Strategies may be freely mixed.
+ * @CSPage('deep-editor')
+ * export class DeepEditorPage extends CSFramePage {
+ *     protected frame = [
+ *         { id: 'appShell' },
+ *         { name: 'workspaceFrame' },
+ *         { title: 'Document Editor' }
+ *     ];
+ *
+ *     @CSGetElement({ xpath: '//textarea[@id="body"]', description: 'Body' })
+ *     public body!: CSWebElement;
  * }
  *
  * // Usage
@@ -70,23 +84,26 @@ export interface FrameSelector {
 export abstract class CSFramePage extends CSBasePage {
     /**
      * Frame selector - must be defined by subclass.
-     * Can be a string (auto-detects xpath/css) or FrameSelector object.
+     * - Single iframe: string (auto-detects xpath/css) or FrameSelector object.
+     * - Nested iframes: array of strings / FrameSelector objects, outermost
+     *   first. Every entry is resolved independently, so strategies may be
+     *   freely mixed.
      *
      * @example
-     * // String (auto-detected)
+     * // Single iframe
      * protected frame = '//iframe[@title="Editor"]';
-     * protected frame = 'iframe#editor';
-     * protected frame = '#myFrame';
-     *
-     * // Object (explicit)
-     * protected frame = { xpath: '//iframe[@title="Editor"]' };
      * protected frame = { id: 'editor-frame' };
-     * protected frame = { name: 'editorFrame' };
-     * protected frame = { title: 'Document Editor' };
-     * protected frame = { testId: 'editor-iframe' };
-     * protected frame = { index: 0 };
+     *
+     * // Nested iframes (outer -> inner)
+     * protected frame = ['#appShell', '//iframe[@title="Editor"]'];
+     * protected frame = [
+     *     { id: 'appShell' },
+     *     { name: 'workspaceFrame' },
+     *     { title: 'Document Editor' },
+     *     { index: 0 }
+     * ];
      */
-    protected abstract frame: string | FrameSelector;
+    protected abstract frame: string | FrameSelector | Array<string | FrameSelector>;
 
     private _frameLocator: FrameLocator | null = null;
 
@@ -95,62 +112,109 @@ export abstract class CSFramePage extends CSBasePage {
     }
 
     /**
-     * Get the resolved frame selector string
+     * Get the frame chain as an array of resolved selector strings
+     * (outermost first).
      */
-    public getFrameSelector(): string {
-        return this.resolveFrameSelector(this.frame);
+    public getFrameSelectors(): string[] {
+        const chain: Array<string | FrameSelector> = Array.isArray(this.frame)
+            ? this.frame
+            : [this.frame];
+        return chain.map(f => this.resolveFrameSelector(f));
     }
 
     /**
-     * Get the Playwright FrameLocator for this iframe
+     * Get the resolved frame selector string. For nested frames returns the
+     * chain joined with ' >> ' (display only — use {@link getFrameSelectors}
+     * for programmatic access to each level).
+     */
+    public getFrameSelector(): string {
+        return this.getFrameSelectors().join(' >> ');
+    }
+
+    /**
+     * Get the Playwright FrameLocator for this iframe (or the innermost
+     * FrameLocator for a nested chain).
      */
     public getFrameLocator(): FrameLocator {
         if (!this._frameLocator) {
-            const selector = this.getFrameSelector();
-            this._frameLocator = this.page.frameLocator(selector);
-            CSReporter.debug(`Created FrameLocator for: ${selector}`);
+            const selectors = this.getFrameSelectors();
+            let ctx: any = this.page;
+            for (const sel of selectors) {
+                ctx = ctx.frameLocator(sel);
+            }
+            this._frameLocator = ctx;
+            CSReporter.debug(
+                selectors.length === 1
+                    ? `Created FrameLocator for: ${selectors[0]}`
+                    : `Created nested FrameLocator chain (${selectors.length}): ${selectors.join(' >> ')}`
+            );
         }
         return this._frameLocator;
     }
 
     /**
-     * Wait for the iframe to be ready (present and loaded)
-     * @param timeout - Maximum time to wait in milliseconds (default: 30000)
+     * Wait for the iframe (or every iframe in a nested chain) to be ready,
+     * walking outer -> inner. Each level has the full `timeout` budget.
+     * @param timeout - Maximum time to wait per level in milliseconds
+     *   (default: 30000)
      */
     public async waitForFrameReady(timeout: number = 30000): Promise<void> {
-        const selector = this.getFrameSelector();
-        const iframeSelector = this.getIframeElementSelector();
+        const selectors = this.getFrameSelectors();
+        CSReporter.info(
+            selectors.length === 1
+                ? `Waiting for iframe to be ready: ${selectors[0]}`
+                : `Waiting for nested iframe chain (${selectors.length}): ${selectors.join(' >> ')}`
+        );
 
-        CSReporter.info(`Waiting for iframe to be ready: ${selector}`);
-
-        try {
-            // Wait for iframe element to be present
-            await this.page.waitForSelector(iframeSelector, {
-                state: 'attached',
-                timeout
-            });
-
-            // Wait a bit for iframe content to load
-            await this.page.waitForTimeout(500);
-
-            CSReporter.pass(`Iframe is ready: ${selector}`);
-        } catch (error: any) {
-            CSReporter.fail(`Iframe not ready within ${timeout}ms: ${selector}`);
-            throw new Error(`Iframe not ready: ${error.message}`);
+        let ctx: any = this.page;
+        for (let i = 0; i < selectors.length; i++) {
+            const sel = selectors[i];
+            try {
+                if (i === 0) {
+                    await this.page.waitForSelector(sel, { state: 'attached', timeout });
+                } else {
+                    await ctx.locator(sel).first().waitFor({ state: 'attached', timeout });
+                }
+            } catch (error: any) {
+                CSReporter.fail(
+                    `Iframe level ${i + 1}/${selectors.length} not ready within ${timeout}ms: ${sel}`
+                );
+                throw new Error(
+                    `Iframe not ready at level ${i + 1}/${selectors.length} (${sel}): ${error.message}`
+                );
+            }
+            ctx = ctx.frameLocator(sel);
         }
+
+        // Small settle for content to render inside the innermost frame
+        await this.page.waitForTimeout(500);
+
+        CSReporter.pass(
+            selectors.length === 1
+                ? `Iframe is ready: ${selectors[0]}`
+                : `All ${selectors.length} iframe(s) ready: ${selectors.join(' >> ')}`
+        );
     }
 
     /**
-     * Check if the iframe is currently visible and ready
-     * @param timeout - Maximum time to check in milliseconds (default: 5000)
+     * Check if the iframe (or every iframe in a nested chain) is currently
+     * present. Returns false on any level's timeout.
+     * @param timeout - Maximum time to check per level in milliseconds
+     *   (default: 5000)
      */
     public async isFrameReady(timeout: number = 5000): Promise<boolean> {
+        const selectors = this.getFrameSelectors();
+        let ctx: any = this.page;
         try {
-            const iframeSelector = this.getIframeElementSelector();
-            await this.page.waitForSelector(iframeSelector, {
-                state: 'visible',
-                timeout
-            });
+            for (let i = 0; i < selectors.length; i++) {
+                const sel = selectors[i];
+                if (i === 0) {
+                    await this.page.waitForSelector(sel, { state: 'visible', timeout });
+                } else {
+                    await ctx.locator(sel).first().waitFor({ state: 'visible', timeout });
+                }
+                ctx = ctx.frameLocator(sel);
+            }
             return true;
         } catch {
             return false;
@@ -158,40 +222,22 @@ export abstract class CSFramePage extends CSBasePage {
     }
 
     /**
-     * Wait for the iframe to be hidden/removed
+     * Wait for the outermost iframe to be hidden/removed. For a nested chain,
+     * if the outer iframe goes away, the inner frames are unreachable too, so
+     * checking only the outer is both correct and faster.
      * @param timeout - Maximum time to wait in milliseconds (default: 10000)
      */
     public async waitForFrameHidden(timeout: number = 10000): Promise<void> {
-        const iframeSelector = this.getIframeElementSelector();
-
-        CSReporter.info(`Waiting for iframe to be hidden: ${iframeSelector}`);
+        const outer = this.getFrameSelectors()[0];
+        CSReporter.info(`Waiting for iframe to be hidden: ${outer}`);
 
         try {
-            await this.page.waitForSelector(iframeSelector, {
-                state: 'hidden',
-                timeout
-            });
+            await this.page.waitForSelector(outer, { state: 'hidden', timeout });
             CSReporter.pass('Iframe is hidden');
         } catch (error: any) {
             CSReporter.fail(`Iframe still visible after ${timeout}ms`);
             throw new Error(`Iframe still visible: ${error.message}`);
         }
-    }
-
-    /**
-     * Get the iframe element selector (for waiting/visibility checks)
-     * This converts frameLocator selector to element selector
-     */
-    private getIframeElementSelector(): string {
-        const selector = this.getFrameSelector();
-
-        // Remove xpath= prefix if present
-        if (selector.startsWith('xpath=')) {
-            return selector;
-        }
-
-        // Return as-is for CSS selectors
-        return selector;
     }
 
     /**
