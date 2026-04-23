@@ -3,7 +3,7 @@ import 'reflect-metadata';
 // import { Page } from '@playwright/test';
 type Page = any;
 import { CSBasePage } from './CSBasePage';
-import { CSWebElement } from '../element/CSWebElement';
+import { CSWebElement, FrameSelector } from '../element/CSWebElement';
 import { CSReporter } from '../reporter/CSReporter';
 
 // Decorator for page class
@@ -59,31 +59,33 @@ export interface CSElementOptions {
     // Frame and shadow DOM
     /**
      * Frame selector for elements inside iframes.
-     * Can be a string (auto-detects xpath/css) or object with explicit selector type.
+     * - Single frame: string (auto-detects xpath/css) or FrameSelector object.
+     * - Nested frames: array of strings / FrameSelector objects, outermost first.
+     *   Every entry is resolved independently, so strategies may be freely mixed.
+     *
      * @example
-     * // String (auto-detected)
+     * // Single frame — string (auto-detected)
      * frame: '//iframe[@title="Editor"]'
      * frame: 'iframe#payment'
      * frame: '#myFrame'
      *
-     * // Object (explicit)
+     * // Single frame — object (explicit)
      * frame: { xpath: '//iframe[@title="Editor"]' }
      * frame: { id: 'payment-frame' }
      * frame: { name: 'editorFrame' }
      * frame: { title: 'Document Editor' }
      * frame: { testId: 'editor-iframe' }
      * frame: { index: 0 }
+     *
+     * // Nested frames (outer -> inner), strategies may be mixed freely
+     * frame: ['#appShell', '//iframe[@title="Editor"]']
+     * frame: [
+     *     { id: 'appShell' },
+     *     { name: 'workspaceFrame' },
+     *     { title: 'Document Editor' }
+     * ]
      */
-    frame?: string | {
-        xpath?: string;
-        css?: string;
-        id?: string;
-        name?: string;
-        title?: string;
-        testId?: string;
-        src?: string;
-        index?: number;
-    };
+    frame?: string | FrameSelector | Array<string | FrameSelector>;
     /** @deprecated Use 'frame' instead */
     iframe?: string | number;
     shadowRoot?: string;
