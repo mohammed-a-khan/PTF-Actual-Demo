@@ -162,18 +162,18 @@ ${agent.instructions}
 // ============================================================================
 
 function generateMCPConfig(serverName: string, loop: LoopType): object {
+    // Only the CS Playwright MCP server is registered — it exposes the full
+    // browser automation surface (including browser_generate_locator) plus the
+    // framework-specific tools. External MCPs can be added by the consumer
+    // afterwards if they want additional capabilities.
+    // The -y flag prevents npx from prompting, which would block stdio.
     if (loop === 'vscode') {
         // VS Code format uses "servers" not "mcpServers"
-        // -y flag prevents npx from prompting (which blocks stdio communication)
         return {
             servers: {
                 [serverName]: {
                     command: 'npx',
                     args: ['-y', 'cs-playwright-mcp'],
-                },
-                'playwright': {
-                    command: 'npx',
-                    args: ['-y', '@playwright/mcp@latest'],
                 },
             },
         };
@@ -184,10 +184,6 @@ function generateMCPConfig(serverName: string, loop: LoopType): object {
                 [serverName]: {
                     command: 'npx',
                     args: ['-y', 'cs-playwright-mcp'],
-                },
-                'playwright': {
-                    command: 'npx',
-                    args: ['-y', '@playwright/mcp@latest'],
                 },
             },
         };
