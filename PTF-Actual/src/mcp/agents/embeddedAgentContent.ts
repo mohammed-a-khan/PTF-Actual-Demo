@@ -2392,10 +2392,24 @@ You are a context-isolated subagent. The cs-playwright orchestrator invokes you 
 
 Enriched IR with \`db_ops[]\` entries. Each operation has:
 - \`type\` — select | insert | update | delete
-- \`sql_raw\` — the original string (may contain string-concat pollution)
+- \`sql_raw\` / \`originalSql\` — the original string (may contain string-concat pollution)
+- \`parameterised\` — SQL with \`:1 :2 :3\` positional markers
 - \`params\` — the bind values, parameterised from string concats
 - \`suggested_name\` — a proposed named-query key (you may rename)
 - \`return_shape\` — single-row | list | void
+- \`sourceKind\` — where the SQL came from: \`inline\` | \`properties\` | \`mybatis-xml\` | \`hibernate-xml\` | \`sql-file\`
+- \`verificationNeeded\` — \`false\` for SQL extracted from legacy production code (don't call schema_lookup); \`true\` only for SQL proposed by the LLM (rare)
+
+## Legacy SQL sources
+
+\`extract_db_calls\` auto-handles all of these:
+- **Inline** SQL strings in \`.java\` / \`.cs\` — regex-scanned for quoted SELECT/INSERT/UPDATE/DELETE literals
+- **\`.properties\`** files — key=value entries whose value starts with SELECT/INSERT/UPDATE/DELETE/WITH. Handles line continuations and \`#\`/\`!\` comments. The key becomes the \`suggested_name\` (UPPERCASE).
+- **MyBatis mapper \`.xml\`** — \`<select|insert|update|delete id="...">\` bodies. Converts \`#{name}\` placeholders to \`:1 :2 :3\`.
+- **Hibernate mapping \`.xml\`** — \`<sql-query name="...">\` entries.
+- **\`.sql\`** files — semicolon-split statements.
+
+List additional SQL sources in \`.agent-pipeline.yaml\` under \`sql_sources:\`. The orchestrator will call \`extract_db_calls\` on each during Stage 2.
 
 ## Your job per db_op
 
@@ -2409,19 +2423,19 @@ SELECT ID, NAME FROM USERS WHERE ID = :1
 
 Extract the inline values into \`params: [id]\`.
 
-### 2. Schema-verify every table + column
+### 2. Schema-verify only when needed
 
-Call \`schema_lookup\` for each table referenced. The tool returns one of:
-- \`{ schema, table, columns: [...] }\` — verified
-- \`{ error: "not-found" }\` — the table is not in the project's schema reference document
+**If \`verificationNeeded: false\` on the op → SKIP this step.** The SQL was extracted from legacy production code — it's not fabricated and does not need the guardrail.
 
-**If any table is \`not-found\`:**
-- Do NOT emit a fabricated query
-- Mark the named query as:
-  \`\`\`
-  DB_QUERY_<NAME>=-- SCHEMA REFERENCE NEEDED — table '<NAME>' not found in project schema reference
-  \`\`\`
-- Emit an escalation item to the orchestrator with the missing tables listed
+**If \`verificationNeeded: true\`** (rare — LLM-proposed SQL), call \`schema_lookup\` for each table referenced. Behaviour depends on the project's \`sql_verification\` mode (read from \`.agent-pipeline.yaml\`):
+
+| Mode | schema_lookup miss | What you do |
+|---|---|---|
+| \`strict\` | Returns \`{error: "not-found"}\` | Do NOT emit a fabricated query. Mark as \`-- SCHEMA REFERENCE NEEDED\` and escalate. |
+| \`best-effort\` (default) | Returns \`{found: false, skipped: true, warning}\` | Emit the query with \`-- SCHEMA REFERENCE NEEDED\` comment inline but proceed to ship for review. |
+| \`off\` | Returns \`{found: true, skipped: true}\` immediately | Trust the SQL verbatim — the user has acknowledged they have no schema doc. |
+
+For \`strict\` misses, emit an escalation item listing the missing tables.
 
 ### 3. Add the named query to the env file
 

@@ -289,8 +289,8 @@ function generateAgentPipelineConfig(projectName?: string): string {
     const name = projectName ?? '<project>';
     return `# Per-project pipeline configuration read by the CS Playwright orchestration pipeline.
 # Drop this at the workspace root, alongside package.json. Edit the values below
-# to match this consumer project. All other behaviour is baked into the framework
-# and needs no configuration here.
+# to match your project. All other behaviour is baked into the framework and
+# needs no configuration here.
 
 project_name: ${name}
 
@@ -304,23 +304,60 @@ test_runner_args:
   - "--project=$PROJECT_NAME"
   - "--env=$ENVIRONMENT"
 
-# DB alias used by CSDBUtils for this project's database connections.
+# ============================================================================
+# Database (ALL FIELDS OPTIONAL — delete this whole block if your project has
+# no DB verifications). The pipeline skips DB migration entirely when no SQL
+# is found in your legacy source.
+# ============================================================================
+
+# Alias used by CSDBUtils.executeQuery(alias, ...) for this project.
 db_alias: ${name}
 
-# Named-query env file for this project.
+# Named-query env file where migrated SQL is registered.
 db_queries_file: config/${name}/common/${name}-db-queries.env
 
-# Project schema reference doc — consumed by schema_lookup.
-# Fabrication is prevented at this gate: any table not found here escalates.
+# SQL verification mode — how strict is the fabrication gate:
+#   strict       Every table must appear in schema_reference_doc. Missing
+#                table blocks the commit. Use when you have a reliable schema
+#                doc and want maximum safety.
+#   best-effort  Try schema_reference_doc; missing tables get a
+#                "SCHEMA REFERENCE NEEDED" marker but the pipeline proceeds
+#                and ships for human review. RECOMMENDED DEFAULT.
+#   off          Skip schema_lookup entirely. Use when all your SQL comes
+#                from legacy production code (verbatim ports; nothing to
+#                fabricate) and you don't have a schema doc handy.
+sql_verification: best-effort
+
+# Schema reference doc — consumed by schema_lookup when sql_verification is
+# 'strict' or 'best-effort'. Any markdown format works — headings like
+# "## SCHEMA.TABLE" followed by a markdown table of columns. You can build
+# this from Hibernate .hbm.xml, Prisma, TypeORM, migrations, \`DESC <table>\`
+# output, or just type it by hand.
 schema_reference_doc: docs/${name}-db-schema.md
 
-# Correction-memory scope (per-project).
+# Extra SQL sources to scan during migration (beyond inline SQL in .java/.cs).
+# The pipeline auto-detects:
+#   .properties          Java-style key=sql entries
+#   .xml (MyBatis)       <select|insert|update|delete id="..."> bodies
+#   .xml (Hibernate)     <sql-query name="..."> bodies
+#   .sql                 Raw statements separated by ;
+# List paths here to have extract_db_calls pick them up automatically.
+# All SQL pulled from these files is treated as legacy — verificationNeeded:false.
+sql_sources:
+  # - src/main/resources/sql-queries.properties
+  # - src/main/resources/mappers/UserMapper.xml
+  # - db/migrations/V1__initial.sql
+
+# ============================================================================
+# Heal loop + correction memory
+# ============================================================================
+
 correction_memory_path: .agent-runs/correction-patterns.md
 
 # Whether the orchestrator may call out to the official Playwright MCP
-# for additional browser capabilities (locator generation, DOM inspection).
-# Our own browser tools cover the same surface; leave false unless you
-# specifically need a capability our MCP does not offer.
+# for additional browser capabilities. Our own browser tools cover the same
+# surface; leave false unless you specifically need a capability our MCP
+# does not offer.
 playwright_mcp_enabled: false
 `;
 }

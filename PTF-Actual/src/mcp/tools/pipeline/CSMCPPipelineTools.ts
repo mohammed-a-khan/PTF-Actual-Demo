@@ -237,6 +237,32 @@ const correctionMemoryRecordTool = defineTool()
 // schema_lookup — verify schema.table against project reference
 // ============================================================================
 
+type SqlVerificationMode = 'strict' | 'best-effort' | 'off';
+
+/**
+ * Resolve the sql_verification mode in this priority order:
+ *   1. The explicit `mode` param on the tool call (overrides everything)
+ *   2. `sql_verification:` in `.agent-pipeline.yaml` at workspace root
+ *   3. Default: 'strict'
+ *
+ * The config is read via flat regex — we don't need a full YAML parser for a
+ * single scalar field, and pulling in js-yaml here would be overkill.
+ */
+function resolveSqlVerificationMode(cwd: string, explicit?: string): SqlVerificationMode {
+    if (explicit === 'strict' || explicit === 'best-effort' || explicit === 'off') {
+        return explicit;
+    }
+    try {
+        const cfgPath = path.join(cwd, '.agent-pipeline.yaml');
+        if (fs.existsSync(cfgPath)) {
+            const raw = fs.readFileSync(cfgPath, 'utf-8');
+            const m = raw.match(/^\s*sql_verification\s*:\s*["']?(strict|best-effort|off)["']?\s*$/m);
+            if (m) return m[1] as SqlVerificationMode;
+        }
+    } catch { /* fall through */ }
+    return 'strict';
+}
+
 interface SchemaRefTable { schema: string; table: string; columns: string[]; }
 
 function parseSchemaReference(content: string): SchemaRefTable[] {
@@ -276,13 +302,18 @@ const schemaLookupTool = defineTool()
     .name('schema_lookup')
     .title('Schema Lookup')
     .description(
-        'Look up a table in the project schema reference document. Returns ' +
-        'verified schema + column list, or { error: "not-found" }. Never fabricates.'
+        'Look up a table in the project schema reference document. Respects the ' +
+        'project-level sql_verification mode: strict (default — return error on miss), ' +
+        'best-effort (return { skipped: true } on miss so the pipeline proceeds with ' +
+        'a SCHEMA REFERENCE NEEDED marker), or off (return { skipped: true } without ' +
+        'even reading the doc). Never fabricates schema information.'
     )
     .outputSchema({
         type: 'object',
         properties: {
             found: { type: 'boolean' },
+            skipped: { type: 'boolean' },
+            mode: { type: 'string' },
             schema: { type: 'string' },
             table: { type: 'string' },
             columns: { type: 'array', items: { type: 'object' } },
@@ -292,12 +323,25 @@ const schemaLookupTool = defineTool()
     .stringParam('table', 'Table name to verify', { required: true })
     .stringParam('schema', 'Optional schema hint')
     .stringParam('referenceFile', 'Schema reference doc path (defaults to docs/<project>-db-schema.md)')
+    .stringParam('mode', 'Verification mode', { enum: ['strict', 'best-effort', 'off'] })
     .stringParam('cwd', 'Workspace root')
     .handler(async (params) => {
         const table = (params.table as string).toUpperCase();
         const schemaHint = (params.schema as string | undefined)?.toUpperCase();
         const cwd = (params.cwd as string | undefined) ?? process.cwd();
         const refFile = (params.referenceFile as string | undefined);
+        const mode = resolveSqlVerificationMode(cwd, params.mode as string | undefined);
+
+        if (mode === 'off') {
+            return createJsonResult({
+                found: true,
+                skipped: true,
+                mode,
+                table,
+                schema: schemaHint ?? null,
+                note: 'sql_verification: off — fabrication gate disabled; trusting SQL verbatim.',
+            });
+        }
 
         // Default: scan docs/*-db-schema.md or docs/LIAP_DB_SCHEMA.md style names
         const candidates: string[] = [];
@@ -318,10 +362,21 @@ const schemaLookupTool = defineTool()
             if (got) { content = got; usedFile = c; break; }
         }
         if (!content) {
+            if (mode === 'best-effort') {
+                return createJsonResult({
+                    found: false,
+                    skipped: true,
+                    mode,
+                    table,
+                    schema: schemaHint ?? null,
+                    warning: 'Schema reference doc not found — emit SCHEMA REFERENCE NEEDED marker and proceed.',
+                });
+            }
             return createJsonResult({
                 error: 'schema-reference-not-found',
+                mode,
                 candidatesTried: candidates,
-                hint: 'Create docs/<project>-db-schema.md or pass referenceFile explicitly',
+                hint: 'Create docs/<project>-db-schema.md, pass referenceFile explicitly, or set sql_verification: best-effort / off.',
             });
         }
 
@@ -330,8 +385,21 @@ const schemaLookupTool = defineTool()
             t.table === table && (!schemaHint || t.schema === schemaHint)
         );
         if (matches.length === 0) {
+            if (mode === 'best-effort') {
+                return createJsonResult({
+                    found: false,
+                    skipped: true,
+                    mode,
+                    table,
+                    schema: schemaHint ?? null,
+                    searched: usedFile,
+                    tablesInDoc: parsed.length,
+                    warning: `Table '${table}' not in schema reference — emit SCHEMA REFERENCE NEEDED marker and proceed.`,
+                });
+            }
             return createJsonResult({
                 error: 'not-found',
+                mode,
                 table,
                 schema: schemaHint ?? null,
                 searched: usedFile,
@@ -348,6 +416,9 @@ const schemaLookupTool = defineTool()
         }
         const hit = matches[0];
         return createJsonResult({
+            found: true,
+            skipped: false,
+            mode,
             schema: hit.schema,
             table: hit.table,
             columns: hit.columns,

@@ -564,6 +564,192 @@ interface DbCallPlanEntry {
     suggestedName: string;
     returnShape: 'single-row' | 'list' | 'void';
     table: string;
+    /**
+     * When true, schema_lookup should verify this op's table before ship.
+     * Extracted legacy SQL is `false` by default — it's been running in
+     * production, so there is no fabrication risk. Only LLM-proposed new
+     * SQL should set this to `true`.
+     */
+    verificationNeeded: boolean;
+    /** Where the SQL came from — useful for tracing and the Healer. */
+    sourceKind: 'inline' | 'properties' | 'mybatis-xml' | 'hibernate-xml' | 'sql-file';
+}
+
+function classifySqlType(sql: string): 'select' | 'insert' | 'update' | 'delete' {
+    const s = sql.trim().toLowerCase();
+    if (s.startsWith('select') || s.startsWith('with ')) return 'select';
+    if (s.startsWith('insert')) return 'insert';
+    if (s.startsWith('update')) return 'update';
+    return 'delete';
+}
+
+function extractTable(sql: string): string {
+    const m = sql.match(/FROM\s+([\w.$]+)|INTO\s+([\w.$]+)|UPDATE\s+([\w.$]+)/i);
+    return ((m?.[1] ?? m?.[2] ?? m?.[3] ?? 'UNKNOWN') as string).toUpperCase();
+}
+
+function inferReturnShape(type: string, sql: string): 'single-row' | 'list' | 'void' {
+    if (type !== 'select') return 'void';
+    return /COUNT\(|MAX\(|MIN\(|SUM\(|LIMIT\s+1|ROWNUM\s*<\s*=\s*1/i.test(sql) ? 'single-row' : 'list';
+}
+
+/**
+ * Parse a Java .properties file. Handles line continuations (trailing \),
+ * `#`/`!` comments, keys with dots / dashes / underscores.
+ * Returns entries whose value starts with SELECT|INSERT|UPDATE|DELETE|WITH.
+ */
+function extractSqlFromProperties(content: string, absFile: string): DbCallPlanEntry[] {
+    const plan: DbCallPlanEntry[] = [];
+    const lines = content.split(/\r?\n/);
+    let idx = 0;
+
+    // Join continuation lines
+    const logicalLines: Array<{ text: string; lineNo: number }> = [];
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i];
+        const trimLeft = line.replace(/^\s+/, '');
+        if (!trimLeft || trimLeft.startsWith('#') || trimLeft.startsWith('!')) continue;
+        let lineNo = i + 1;
+        while (line.endsWith('\\') && i + 1 < lines.length) {
+            line = line.slice(0, -1) + lines[++i].replace(/^\s+/, '');
+        }
+        logicalLines.push({ text: line.trim(), lineNo });
+    }
+
+    for (const { text, lineNo } of logicalLines) {
+        const eq = text.search(/[=:]/);
+        if (eq < 0) continue;
+        const key = text.slice(0, eq).trim();
+        const value = text.slice(eq + 1).trim();
+        if (!/^(SELECT|INSERT|UPDATE|DELETE|WITH)\b/i.test(value)) continue;
+
+        const type = classifySqlType(value);
+        const table = extractTable(value);
+        const { parameterised, params } = parameteriseSql(value, value, idx);
+        plan.push({
+            callSite: { file: absFile, line: lineNo },
+            originalSql: value,
+            parameterised,
+            params,
+            suggestedName: key.toUpperCase().replace(/[^A-Z0-9]+/g, '_'),
+            returnShape: inferReturnShape(type, value),
+            table,
+            verificationNeeded: false,
+            sourceKind: 'properties',
+        });
+        idx++;
+    }
+    return plan;
+}
+
+/**
+ * Parse MyBatis XML mapper. Captures <select|insert|update|delete id="...">
+ * bodies. Converts #{name} placeholders to :1 :2 :3 positional markers.
+ */
+function extractSqlFromMyBatisXml(content: string, absFile: string): DbCallPlanEntry[] {
+    const plan: DbCallPlanEntry[] = [];
+    const re = /<(select|insert|update|delete)\b[^>]*\bid\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/\1>/gi;
+    let m: RegExpExecArray | null;
+    let idx = 0;
+    const lineOffsets: number[] = [];
+    { let pos = 0; for (const l of content.split('\n')) { lineOffsets.push(pos); pos += l.length + 1; } }
+
+    while ((m = re.exec(content)) !== null) {
+        const type = m[1].toLowerCase() as 'select' | 'insert' | 'update' | 'delete';
+        const id = m[2];
+        let sql = m[3]
+            .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+
+        const named: string[] = [];
+        sql = sql.replace(/#\{(\w+)[^}]*\}/g, (_, n) => {
+            named.push(n);
+            return `:${named.length}`;
+        });
+
+        let lineNo = 1;
+        for (let i = lineOffsets.length - 1; i >= 0; i--) {
+            if (lineOffsets[i] <= m.index) { lineNo = i + 1; break; }
+        }
+
+        plan.push({
+            callSite: { file: absFile, line: lineNo },
+            originalSql: sql,
+            parameterised: sql,
+            params: named,
+            suggestedName: id.toUpperCase().replace(/[^A-Z0-9]+/g, '_'),
+            returnShape: inferReturnShape(type, sql),
+            table: extractTable(sql),
+            verificationNeeded: false,
+            sourceKind: 'mybatis-xml',
+        });
+        idx++;
+    }
+    return plan;
+}
+
+/**
+ * Parse Hibernate mapping XML — named queries.
+ */
+function extractSqlFromHibernateXml(content: string, absFile: string): DbCallPlanEntry[] {
+    const plan: DbCallPlanEntry[] = [];
+    const re = /<sql-query\b[^>]*\bname\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/sql-query>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) {
+        const name = m[1];
+        let sql = m[2]
+            .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+        const named: string[] = [];
+        sql = sql.replace(/:(\w+)/g, (_, n) => { named.push(n); return `:${named.length}`; });
+        const type = classifySqlType(sql);
+        plan.push({
+            callSite: { file: absFile, line: 1 },
+            originalSql: sql,
+            parameterised: sql,
+            params: named,
+            suggestedName: name.toUpperCase().replace(/[^A-Z0-9]+/g, '_'),
+            returnShape: inferReturnShape(type, sql),
+            table: extractTable(sql),
+            verificationNeeded: false,
+            sourceKind: 'hibernate-xml',
+        });
+    }
+    return plan;
+}
+
+/**
+ * Parse a standalone .sql file — split on `;` at line boundaries,
+ * ignore blank statements and `-- comments`.
+ */
+function extractSqlFromSqlFile(content: string, absFile: string): DbCallPlanEntry[] {
+    const plan: DbCallPlanEntry[] = [];
+    const stripped = content
+        .split('\n')
+        .map(l => l.replace(/--.*$/, '').trimEnd())
+        .join('\n');
+    const statements = stripped.split(/;\s*(?:\n|$)/).map(s => s.trim()).filter(Boolean);
+    let idx = 0;
+    for (const sql of statements) {
+        if (!/^(SELECT|INSERT|UPDATE|DELETE|WITH)\b/i.test(sql)) continue;
+        const type = classifySqlType(sql);
+        plan.push({
+            callSite: { file: absFile, line: 1 },
+            originalSql: sql,
+            parameterised: sql,
+            params: [],
+            suggestedName: `${extractTable(sql)}_${type.toUpperCase()}_${String(++idx).padStart(2, '0')}`,
+            returnShape: inferReturnShape(type, sql),
+            table: extractTable(sql),
+            verificationNeeded: false,
+            sourceKind: 'sql-file',
+        });
+    }
+    return plan;
 }
 
 function parameteriseSql(sql: string, body: string, idx: number): { parameterised: string; params: string[] } {
@@ -592,78 +778,105 @@ function parameteriseSql(sql: string, body: string, idx: number): { parameterise
     return { parameterised, params };
 }
 
+function detectSqlSourceKind(absFile: string, content: string): DbCallPlanEntry['sourceKind'] {
+    const ext = path.extname(absFile).toLowerCase();
+    if (ext === '.properties') return 'properties';
+    if (ext === '.sql') return 'sql-file';
+    if (ext === '.xml') {
+        if (/<mapper\b|<select\b[^>]*\bid\s*=|<insert\b[^>]*\bid\s*=/i.test(content)) return 'mybatis-xml';
+        if (/<sql-query\b|<hibernate-mapping\b/i.test(content)) return 'hibernate-xml';
+        return 'mybatis-xml';
+    }
+    return 'inline';
+}
+
+function extractInlineSql(content: string, absFile: string): DbCallPlanEntry[] {
+    const plan: DbCallPlanEntry[] = [];
+    const re = /"((?:SELECT|INSERT|UPDATE|DELETE)\s[^"]+)"/gi;
+    let m: RegExpExecArray | null;
+    let idx = 0;
+    const lines = content.split('\n');
+    const lineIndex: number[] = [];
+    { let pos = 0; for (let i = 0; i < lines.length; i++) { lineIndex.push(pos); pos += lines[i].length + 1; } }
+
+    while ((m = re.exec(content)) !== null) {
+        const sql = m[1];
+        const offset = m.index;
+        let lineNo = 1;
+        for (let i = lineIndex.length - 1; i >= 0; i--) {
+            if (lineIndex[i] <= offset) { lineNo = i + 1; break; }
+        }
+        const from = Math.max(0, offset - 200);
+        const to = Math.min(content.length, offset + sql.length + 200);
+        const window = content.substring(from, to);
+        const { parameterised, params } = parameteriseSql(sql, window, idx);
+        const type = classifySqlType(sql);
+        const table = extractTable(sql);
+        plan.push({
+            callSite: { file: absFile, line: lineNo },
+            originalSql: sql,
+            parameterised,
+            params,
+            suggestedName: `${table}_${type.toUpperCase()}_${String(++idx).padStart(2, '0')}`,
+            returnShape: inferReturnShape(type, sql),
+            table,
+            verificationNeeded: false,
+            sourceKind: 'inline',
+        });
+    }
+    return plan;
+}
+
 const extractDbCallsTool = defineTool()
     .name('extract_db_calls')
     .title('Extract DB Calls')
     .description(
-        'Scan a legacy source file for inline SQL strings and emit a migration plan: ' +
-        'parameterised query, suggested name, return shape. Never fabricates table names.'
+        'Extract SQL from a legacy source into a migration plan. Supports: ' +
+        'inline SQL in .java/.cs source; key=sql entries in .properties; ' +
+        '<select|insert|update|delete> in MyBatis mapper .xml; <sql-query> in ' +
+        'Hibernate mapping .xml; and raw statements in .sql files. Every ' +
+        'extracted op is tagged verificationNeeded:false — SQL pulled from ' +
+        'production code is not fabricated and does not need schema_lookup.'
     )
     .outputSchema({
         type: 'object',
         properties: {
-            db_ops: { type: 'array', items: { type: 'object' } },
-            page_objects: { type: 'array', items: { type: 'object' } },
+            file: { type: 'string' },
+            sourceKind: { type: 'string' },
+            opCount: { type: 'number' },
+            plan: { type: 'array', items: { type: 'object' } },
+            nextSteps: { type: 'string' },
         },
     })
     .category('audit')
-    .stringParam('file', 'Source file to scan', { required: true })
+    .stringParam('file', 'Source file to scan (.java, .cs, .properties, .xml, .sql)', { required: true })
     .handler(async (params) => {
         const file = params.file as string;
         const absFile = path.isAbsolute(file) ? file : path.resolve(process.cwd(), file);
         const content = readFileSafe(absFile);
         if (content === null) return createErrorResult(`Cannot read file: ${absFile}`);
 
-        const plan: DbCallPlanEntry[] = [];
-        const re = /"((?:SELECT|INSERT|UPDATE|DELETE)\s[^"]+)"/gi;
-        let m: RegExpExecArray | null;
-        let idx = 0;
-        const lines = content.split('\n');
-        const lineIndex: number[] = [];
-        { // precompute line-index for each offset into content
-            let pos = 0;
-            for (let i = 0; i < lines.length; i++) {
-                lineIndex.push(pos);
-                pos += lines[i].length + 1;
-            }
-        }
-        while ((m = re.exec(content)) !== null) {
-            const sql = m[1];
-            const offset = m.index;
-            let lineNo = 1;
-            for (let i = lineIndex.length - 1; i >= 0; i--) {
-                if (lineIndex[i] <= offset) { lineNo = i + 1; break; }
-            }
-            // Pull in a local window for concat detection
-            const from = Math.max(0, offset - 200);
-            const to = Math.min(content.length, offset + sql.length + 200);
-            const window = content.substring(from, to);
-            const { parameterised, params } = parameteriseSql(sql, window, idx);
-            const lower = sql.toLowerCase();
-            const type = lower.startsWith('select') ? 'select' : lower.startsWith('insert') ? 'insert' : lower.startsWith('update') ? 'update' : 'delete';
-            const tableMatch = sql.match(/FROM\s+(\w+)|INTO\s+(\w+)|UPDATE\s+(\w+)/i);
-            const table = (tableMatch?.[1] ?? tableMatch?.[2] ?? tableMatch?.[3] ?? 'UNKNOWN').toUpperCase();
-            const returnShape: 'single-row' | 'list' | 'void' =
-                type === 'select' ? (/COUNT\(|MAX\(|MIN\(|SUM\(|LIMIT\s+1|ROWNUM\s*<\s*=\s*1/i.test(sql) ? 'single-row' : 'list') : 'void';
-
-            plan.push({
-                callSite: { file: absFile, line: lineNo },
-                originalSql: sql,
-                parameterised,
-                params,
-                suggestedName: `${table}_${type.toUpperCase()}_${String(++idx).padStart(2, '0')}`,
-                returnShape,
-                table,
-            });
+        const sourceKind = detectSqlSourceKind(absFile, content);
+        let plan: DbCallPlanEntry[];
+        switch (sourceKind) {
+            case 'properties':    plan = extractSqlFromProperties(content, absFile); break;
+            case 'mybatis-xml':   plan = extractSqlFromMyBatisXml(content, absFile); break;
+            case 'hibernate-xml': plan = extractSqlFromHibernateXml(content, absFile); break;
+            case 'sql-file':      plan = extractSqlFromSqlFile(content, absFile); break;
+            case 'inline':
+            default:              plan = extractInlineSql(content, absFile); break;
         }
 
         return createJsonResult({
             file: absFile,
+            sourceKind,
             opCount: plan.length,
             plan,
             nextSteps: plan.length > 0
-                ? 'For each entry: (1) schema_lookup on table, (2) add to <project>-db-queries.env, (3) generate helper method, (4) replace call-site.'
-                : 'No inline SQL found. No DB migration needed for this file.',
+                ? 'For each entry: (1) add to <project>-db-queries.env as DB_QUERY_<suggestedName>, ' +
+                  '(2) generate helper method, (3) if verificationNeeded=true call schema_lookup first. ' +
+                  'Extracted legacy SQL sets verificationNeeded=false; the fabrication gate is skipped.'
+                : `No SQL found in ${sourceKind} source. No DB migration needed for this file.`,
         });
     })
     .readOnly()
