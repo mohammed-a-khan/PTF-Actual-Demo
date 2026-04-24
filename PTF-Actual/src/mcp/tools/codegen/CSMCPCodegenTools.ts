@@ -412,7 +412,9 @@ export class ${pageName} {
 
 const codegenStart = defineTool()
     .name('codegen_start')
+    .title('Start Codegen Session')
     .description('Start a new code generation recording session. All subsequent browser actions will be recorded.')
+    .openWorld()
     .category('generation')
     .stringParam('baseUrl', 'Base URL for the application being tested')
     .stringParam('language', 'Output language', {
@@ -476,7 +478,9 @@ const codegenStart = defineTool()
 
 const codegenRecordAction = defineTool()
     .name('codegen_record_action')
+    .title('Record Codegen Action')
     .description('Manually record an action to the current codegen session')
+    .openWorld()
     .category('generation')
     .stringParam('type', 'Action type', {
         required: true,
@@ -528,7 +532,9 @@ const codegenRecordAction = defineTool()
 
 const codegenEnd = defineTool()
     .name('codegen_end')
+    .title('End Codegen Session')
     .description('End the current codegen session and generate test code')
+    .openWorld()
     .category('generation')
     .stringParam('sessionId', 'Session ID to end (uses active session if not specified)')
     .stringParam('outputFormat', 'Output format', {
@@ -598,6 +604,7 @@ const codegenEnd = defineTool()
 
 const codegenGetSession = defineTool()
     .name('codegen_get_session')
+    .title('Get Codegen Session')
     .description('Get information about a codegen session')
     .category('generation')
     .stringParam('sessionId', 'Session ID (uses active session if not specified)')
@@ -640,6 +647,7 @@ const codegenGetSession = defineTool()
 
 const codegenToBDD = defineTool()
     .name('codegen_to_bdd')
+    .title('Convert Codegen To BDD')
     .description('Convert recorded actions or Playwright code to BDD/Gherkin format')
     .category('generation')
     .stringParam('sessionId', 'Session ID to convert')
@@ -737,6 +745,7 @@ const codegenToBDD = defineTool()
 
 const codegenClearSessions = defineTool()
     .name('codegen_clear_sessions')
+    .title('Clear Codegen Sessions')
     .description('Clear all codegen sessions')
     .category('generation')
     .booleanParam('keepActive', 'Keep the active session', { default: false })

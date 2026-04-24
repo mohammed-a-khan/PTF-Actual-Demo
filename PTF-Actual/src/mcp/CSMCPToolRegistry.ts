@@ -15,6 +15,7 @@ import {
     ToolCategory,
     MCPSchemaProperty,
     MCPToolInputSchema,
+    MCPToolOutputSchema,
 } from './types/CSMCPTypes';
 
 // ============================================================================
@@ -30,7 +31,8 @@ export class CSMCPToolRegistry {
         const categories: ToolCategory[] = [
             'browser', 'bdd', 'database', 'api', 'network',
             'analytics', 'security', 'cicd', 'environment',
-            'generation', 'multiagent', 'exploration', 'testing'
+            'generation', 'multiagent', 'exploration', 'testing',
+            'audit'
         ];
         for (const category of categories) {
             this.toolsByCategory.set(category, []);
@@ -367,6 +369,18 @@ export class MCPToolBuilder {
     }
 
     /**
+     * Set human-readable title (separate from the machine name).
+     * Displayed by MCP clients like Copilot Chat when the tool is invoked.
+     * Also mirrors into annotations.title for older client compatibility.
+     */
+    public title(title: string): MCPToolBuilder {
+        this.tool.title = title;
+        this.tool.annotations = this.tool.annotations || {};
+        this.tool.annotations.title = title;
+        return this;
+    }
+
+    /**
      * Set tool description
      */
     public description(description: string): MCPToolBuilder {
@@ -523,6 +537,25 @@ export class MCPToolBuilder {
     public idempotent(): MCPToolBuilder {
         this.tool.annotations = this.tool.annotations || {};
         this.tool.annotations.idempotentHint = true;
+        return this;
+    }
+
+    /**
+     * Mark tool as interacting with an open world (external systems, live
+     * websites, remote APIs — behaviour depends on state outside the server).
+     */
+    public openWorld(): MCPToolBuilder {
+        this.tool.annotations = this.tool.annotations || {};
+        this.tool.annotations.openWorldHint = true;
+        return this;
+    }
+
+    /**
+     * Declare the tool's structured output schema. MCP clients use this to
+     * understand the shape of structuredContent in tool results.
+     */
+    public outputSchema(schema: MCPToolOutputSchema): MCPToolBuilder {
+        this.tool.outputSchema = schema;
         return this;
     }
 

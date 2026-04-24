@@ -27,6 +27,9 @@ export { generationTools, registerGenerationTools } from './tools/generation/CSM
 export { explorationTools, registerExplorationTools } from './tools/exploration/CSMCPExplorationTools';
 export { codegenTools, registerCodegenTools } from './tools/codegen/CSMCPCodegenTools';
 export { testingTools, registerTestingTools } from './tools/testing/CSMCPTestingTools';
+export { auditTools, registerAuditTools } from './tools/audit/CSMCPAuditTools';
+export { pipelineTools, registerPipelineTools } from './tools/pipeline/CSMCPPipelineTools';
+export { parseTools, registerParseTools } from './tools/parsers/CSMCPParseTools';
 
 // Export resources and prompts
 export { resourceDefinitions, resourceTemplateDefinitions, registerResources } from './resources/CSMCPResources';
@@ -50,6 +53,9 @@ import { registerGenerationTools } from './tools/generation/CSMCPGenerationTools
 import { registerExplorationTools } from './tools/exploration/CSMCPExplorationTools';
 import { registerCodegenTools } from './tools/codegen/CSMCPCodegenTools';
 import { registerTestingTools } from './tools/testing/CSMCPTestingTools';
+import { registerAuditTools } from './tools/audit/CSMCPAuditTools';
+import { registerPipelineTools } from './tools/pipeline/CSMCPPipelineTools';
+import { registerParseTools } from './tools/parsers/CSMCPParseTools';
 import { registerResources } from './resources/CSMCPResources';
 import { registerPrompts } from './prompts/CSMCPPrompts';
 
@@ -69,7 +75,8 @@ export type ToolCategory =
     | 'generation'
     | 'exploration'
     | 'codegen'
-    | 'testing';
+    | 'testing'
+    | 'audit';
 
 /**
  * Create and configure a fully-loaded MCP server with all tools
@@ -92,6 +99,9 @@ export function createFullMCPServer(config?: CSMCPServerConfig): CSMCPServer {
     registerExplorationTools(registry);
     registerCodegenTools(registry);
     registerTestingTools(registry);
+    registerAuditTools(registry);
+    registerPipelineTools(registry);
+    registerParseTools(registry);
 
     // Register resources and prompts
     registerResources(server);
@@ -124,6 +134,11 @@ export function createMCPServerWithTools(
         exploration: () => registerExplorationTools(registry),
         codegen: () => registerCodegenTools(registry),
         testing: () => registerTestingTools(registry),
+        audit: () => {
+            registerAuditTools(registry);
+            registerPipelineTools(registry);
+            registerParseTools(registry);
+        },
     };
 
     for (const category of toolCategories) {
@@ -153,6 +168,9 @@ export function getTotalToolCount(): number {
         require('./tools/exploration/CSMCPExplorationTools').explorationTools,
         require('./tools/codegen/CSMCPCodegenTools').codegenTools,
         require('./tools/testing/CSMCPTestingTools').testingTools,
+        require('./tools/audit/CSMCPAuditTools').auditTools,
+        require('./tools/pipeline/CSMCPPipelineTools').pipelineTools,
+        require('./tools/parsers/CSMCPParseTools').parseTools,
     ];
     return allTools.reduce((sum, tools) => sum + tools.length, 0);
 }

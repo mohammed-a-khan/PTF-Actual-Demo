@@ -2,7 +2,7 @@
 name: cs-playwright-planner
 title: CS Playwright Planner
 description: Use this agent to explore applications and generate test plans
-model: sonnet
+model: 'Claude Sonnet 4.5'
 color: purple
 tools:
   # Browser - Core

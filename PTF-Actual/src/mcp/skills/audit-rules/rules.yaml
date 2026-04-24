@@ -1,0 +1,249 @@
+# Machine-readable audit rules consumed by the cs-playwright-mcp audit_file tool.
+# Keep in sync with SKILL.md in this folder. Rule IDs are stable.
+#
+# Semantics of `invertMatch`:
+#   - absent / false → required pattern: violation when regex has zero matches.
+#   - true           → anti-pattern:     violation for each regex match.
+#
+# Rules with no `detect` field are semantic-only and are skipped by the
+# regex engine (future TS-AST pass will handle them).
+
+rules:
+  # ========================================================================
+  # Page-object rules (PO)
+  # ========================================================================
+  - id: PO001
+    severity: error
+    appliesTo: page
+    description: "Class decorated with @CSPage('<kebab-case-id>')"
+    detect: 'regex:@CSPage\s*\('
+    violation: "Missing @CSPage decorator on page-object class"
+
+  - id: PO002
+    severity: error
+    appliesTo: page
+    description: "Class extends CSBasePage or CSFramePage"
+    detect: 'regex:extends\s+(CSBasePage|CSFramePage)'
+    violation: "Page class must extend CSBasePage or CSFramePage"
+
+  - id: PO003
+    severity: error
+    appliesTo: page
+    description: "Every CSWebElement field has @CSGetElement decorator (semantic rule)"
+    violation: "CSWebElement field declared without @CSGetElement"
+
+  - id: PO004
+    severity: error
+    appliesTo: page
+    description: "@CSGetElement uses xpath as primary locator (semantic rule)"
+    violation: "@CSGetElement must use xpath as primary (CSS/role variants belong in alternativeLocators)"
+
+  - id: PO005
+    severity: error
+    appliesTo: page
+    description: "Every @CSGetElement has description (semantic rule)"
+    violation: "@CSGetElement is missing description"
+
+  - id: PO006
+    severity: warn
+    appliesTo: page
+    description: "Interactive elements have selfHeal true (semantic rule)"
+    violation: "Interactive element should enable selfHeal"
+
+  - id: PO007
+    severity: error
+    appliesTo: page
+    description: "No raw this.page.locator / click / fill / etc."
+    detect: 'regex:this\.page\.(locator|click|fill|hover|press|check|uncheck|selectOption)\s*\('
+    invertMatch: true
+    violation: "Use decorated CSWebElement + CSWebElement methods, not raw this.page.* calls"
+
+  - id: PO008
+    severity: error
+    appliesTo: page
+    description: "Action methods use *WithTimeout variants (semantic rule)"
+    violation: "Use clickWithTimeout / fillWithTimeout / etc., not bare click() or fill()"
+
+  - id: PO009
+    severity: warn
+    appliesTo: page
+    description: "Navigation-triggering clicks use 30000ms or higher (semantic rule)"
+    violation: "clickWithTimeout on navigation should be >= 30000"
+
+  # ========================================================================
+  # Step-definition rules (SD)
+  # ========================================================================
+  - id: SD001
+    severity: error
+    appliesTo: step
+    description: "Step class decorated with @StepDefinitions"
+    detect: 'regex:@StepDefinitions\b'
+    violation: "Step class missing @StepDefinitions decorator"
+
+  - id: SD002
+    severity: error
+    appliesTo: step
+    description: "Page injection via @Page('<key>'); no new PageName()"
+    detect: 'regex:new\s+[A-Z]\w*Page\s*\('
+    invertMatch: true
+    violation: "Use @Page('<key>') injection, not new PageName()"
+
+  - id: SD003
+    severity: error
+    appliesTo: step
+    description: "Step decorator @CSBDDStepDef"
+    detect: 'regex:@CSBDDStepDef\s*\('
+    violation: "Step missing @CSBDDStepDef decorator"
+
+  - id: SD004
+    severity: warn
+    appliesTo: step
+    description: "Scenario state via CSBDDContext.getInstance() (semantic rule)"
+    violation: "Prefer CSBDDContext.getInstance() for scenario-scoped state; do not store on class fields"
+
+  - id: SD005
+    severity: error
+    appliesTo: step
+    description: "Steps end in pass OR fail+throw — no silent return (semantic rule)"
+    violation: "Step must not silently return; pass or fail+throw required"
+
+  - id: SD006
+    severity: error
+    appliesTo: step
+    description: "Config access via CSValueResolver, not process.env"
+    detect: 'regex:process\.env\.'
+    invertMatch: true
+    violation: "Use CSValueResolver.resolve('{config:KEY}', context), not process.env.KEY"
+
+  # ========================================================================
+  # Feature-file rules (FF)
+  # ========================================================================
+  - id: FF001
+    severity: error
+    appliesTo: feature
+    description: "Feature has project tag plus at least one module tag"
+    detect: 'regex:^@[\w-]+\s+@[\w-]+'
+    violation: "Feature must start with a project tag followed by at least one module tag"
+
+  - id: FF002
+    severity: error
+    appliesTo: feature
+    description: "Data-driven scenarios use JSON-sourced Examples"
+    detect: 'regex:Examples:\s*\{[^}]*"type"\s*:\s*"json"'
+    violation: "Scenario Outline must source Examples from JSON"
+
+  - id: FF003
+    severity: error
+    appliesTo: feature
+    description: "Examples filter includes scenarioId and runFlag=Yes"
+    detect: 'regex:filter[^"]*"[^"]*scenarioId=[^"]*AND\s+runFlag=Yes'
+    violation: "Examples filter must include scenarioId=<id> AND runFlag=Yes"
+
+  - id: FF004
+    severity: warn
+    appliesTo: feature
+    description: "Every scenario has at least three verification steps (semantic rule)"
+    violation: "Thin scenario — fewer than 3 verification Then/And steps"
+
+  # ========================================================================
+  # Data-file rules (DF)
+  # ========================================================================
+  - id: DF001
+    severity: error
+    appliesTo: data
+    description: "Canonical scenarios JSON shape (semantic rule)"
+    violation: "Data file must be an array of objects with scenarioId, scenarioName, and runFlag"
+
+  - id: DF002
+    severity: error
+    appliesTo: data
+    description: "No REPLACE_WITH_* placeholder values"
+    detect: 'regex:REPLACE_WITH_'
+    invertMatch: true
+    violation: "Placeholder REPLACE_WITH_* present; populate the field or set runFlag to No"
+
+  - id: DF003
+    severity: error
+    appliesTo: data
+    description: "Every feature scenarioId has a matching data row (semantic rule)"
+    violation: "scenarioId in feature has no matching data row"
+
+  # ========================================================================
+  # Helper / DB rules (DB)
+  # ========================================================================
+  - id: DB001
+    severity: error
+    appliesTo: helper
+    description: "No inline SQL strings in helpers — use CSDBUtils named queries"
+    detect: 'regex:"\s*(SELECT|INSERT|UPDATE|DELETE)\s'
+    invertMatch: true
+    violation: "Inline SQL in helper/page/step — use CSDBUtils.executeQuery with a named query in the env file"
+
+  - id: DB002
+    severity: error
+    appliesTo: helper
+    description: "Every SQL table must be verified via schema_lookup (semantic rule)"
+    violation: "Unverified table — run schema_lookup; if absent, emit -- SCHEMA REFERENCE NEEDED"
+
+  - id: DB003
+    severity: error
+    appliesTo: helper
+    description: "Helpers are static with typed returns and case-tolerant row access (semantic rule)"
+    violation: "Helper methods must be static, typed, and use r.col ?? r.COL"
+
+  # ========================================================================
+  # Cross-cutting rules (CC)
+  # ========================================================================
+  - id: CC001
+    severity: error
+    appliesTo: ts
+    description: "Plain numeric literals — no underscore separators"
+    detect: 'regex:\b[0-9]+_[0-9]+\b'
+    invertMatch: true
+    violation: "Underscore separator in numeric literal — use plain digits (e.g., 5000 not 5_000)"
+
+  - id: CC002
+    severity: error
+    appliesTo: ts
+    description: "No application-source paths referenced in generated files"
+    detect: 'regex:/WEB-INF/|/src/main/(java|webapp|resources)/|\.jsp["'']|\.jspx["'']|\.hbm\.xml["'']'
+    invertMatch: true
+    violation: "Application-source path reference in generated file (e.g., /WEB-INF/, src/main/java/, *.jsp, *.hbm.xml). Generated test code must not cite upstream app source."
+
+  - id: CC003
+    severity: error
+    appliesTo: ts
+    description: "No console.log"
+    detect: 'regex:\bconsole\.log\s*\('
+    invertMatch: true
+    violation: "console.log present — use CSReporter.info / CSReporter.debug"
+
+  - id: CC004
+    severity: error
+    appliesTo: ts
+    description: "No bare expect() from @playwright/test"
+    detect: 'regex:\bexpect\s*\('
+    invertMatch: true
+    violation: "Bare expect() — use CSReporter.fail then throw new Error, or a framework assertion helper"
+
+  - id: CC005
+    severity: error
+    appliesTo: ts
+    description: "Imports only from framework subpaths or local files (semantic rule)"
+    violation: "Unsanctioned import path — use @mdakhan.mak/cs-playwright-test-framework/* or local relative paths only"
+
+  - id: CC006
+    severity: error
+    appliesTo: ts,feature,data
+    description: "No TODO / FIXME / XXX / HACK / PLACEHOLDER tokens"
+    detect: 'regex:\b(TODO|FIXME|XXX|HACK|PLACEHOLDER)\b'
+    invertMatch: true
+    violation: "Placeholder / TODO token present — resolve before commit"
+
+  - id: CC007
+    severity: error
+    appliesTo: feature
+    description: "No @pending / @skip / @wip / @ignore tags on shipped scenarios"
+    detect: 'regex:@(pending|skip|wip|ignore)\b'
+    invertMatch: true
+    violation: "Skip / pending tag on shipped scenario — use runFlag: No in the data JSON instead"

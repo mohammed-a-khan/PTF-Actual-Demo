@@ -341,12 +341,12 @@ export class CSMCPServer {
         this.initialized = true;
 
         return {
-            protocolVersion: '2024-11-05',
+            protocolVersion: '2025-06-18',
             capabilities: this.config.capabilities as MCPCapabilities,
             serverInfo: {
                 name: this.config.name,
                 version: this.config.version,
-                protocolVersion: '2024-11-05',
+                protocolVersion: '2025-06-18',
             },
         };
     }

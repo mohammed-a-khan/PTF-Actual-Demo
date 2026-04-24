@@ -2,7 +2,7 @@
 name: cs-playwright-assistant
 title: CS Playwright Assistant
 description: General-purpose test automation assistant with access to all CS Playwright tools
-model: sonnet
+model: 'Claude Sonnet 4.5'
 color: blue
 tools:
   # Browser - Core Navigation

@@ -89,6 +89,7 @@ export interface MCPPromptsCapability {
 
 export interface MCPTool {
     name: string;
+    title?: string;
     description: string;
     inputSchema: MCPToolInputSchema;
     outputSchema?: MCPToolOutputSchema;
@@ -462,7 +463,8 @@ export type ToolCategory =
     | 'generation'
     | 'multiagent'
     | 'exploration'
-    | 'testing';
+    | 'testing'
+    | 'audit';
 
 export interface MCPToolDefinition {
     tool: MCPTool;

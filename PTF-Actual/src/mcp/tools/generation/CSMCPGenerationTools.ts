@@ -84,6 +84,7 @@ function escapeForSingleQuote(s: string): string {
 
 const generatePageObjectTool = defineTool()
     .name('generate_page_object')
+    .title('Generate Page Object')
     .description('Generate a Page Object class following PTF-ADO patterns with @CSPage and @CSGetElement decorators')
     .category('generation')
     .stringParam('pageName', 'Page name (e.g., "Login", "Dashboard", "DealDetails")', { required: true })
@@ -328,6 +329,7 @@ ${actionMethods}
 
 const generateStepDefinitionsTool = defineTool()
     .name('generate_step_definitions')
+    .title('Generate Step Definitions')
     .description('Generate step definitions class following PTF-ADO patterns with @StepDefinitions and @CSBDDStepDef decorators')
     .category('generation')
     .stringParam('className', 'Step definitions class name', { required: true })
@@ -548,6 +550,7 @@ ${stepDefinitions}
 
 const generateFeatureFileTool = defineTool()
     .name('generate_feature_file')
+    .title('Generate Feature File')
     .description('Generate a Gherkin feature file following PTF-ADO patterns with Background, comments, and JSON data source integration')
     .category('generation')
     .stringParam('featureName', 'Feature name', { required: true })
@@ -685,6 +688,7 @@ ${scenarioTexts}
 
 const generateSpecTestTool = defineTool()
     .name('generate_spec_test')
+    .title('Generate Spec Test')
     .description('Generate a spec test file (describe/test format) following CS Playwright framework patterns with auto-injected fixtures')
     .category('generation')
     .stringParam('suiteName', 'Test suite name', { required: true })
@@ -807,6 +811,7 @@ ${testCases}
 
 const generateDatabaseHelperTool = defineTool()
     .name('generate_database_helper')
+    .title('Generate Database Helper')
     .description('Generate a database helper class following CS framework patterns. Uses named queries from .env config files via CSDBUtils.')
     .category('generation')
     .stringParam('className', 'Helper class name (e.g., "MyAppDatabaseHelper")', { required: true })
@@ -975,6 +980,7 @@ ${methodDefinitions}
 
 const generateTestDataFileTool = defineTool()
     .name('generate_test_data_file')
+    .title('Generate Test Data File')
     .description('Generate a JSON test data file following PTF-ADO data source patterns. Pass actual records observed during exploration for real test data, or field definitions for synthetic generation.')
     .category('generation')
     .stringParam('fileName', 'Data file name', { required: true })
@@ -1605,6 +1611,7 @@ DB_${aliasUpper}_POOL_IDLE_TIMEOUT=30000
 
 const generateConfigScaffoldTool = defineTool()
     .name('generate_config_scaffold')
+    .title('Generate Config Scaffold')
     .description('Generate config directory structure with sensible defaults for a project. Creates global.env, common/common.env, and environments/{env}.env files. If files exist, only appends missing properties (safe to re-run).')
     .category('generation')
     .stringParam('project', 'Project name (lowercase, e.g., "myapp", "crm")', { required: true })
@@ -1688,6 +1695,7 @@ const generateConfigScaffoldTool = defineTool()
 
 const generateDbQueriesConfigTool = defineTool()
     .name('generate_db_queries_config')
+    .title('Generate DB Queries Config')
     .description('Generate a database queries .env file with DB_QUERY_ prefixed named queries. Creates config/{project}/common/{project}-{module}-db-queries.env. If file exists, only appends missing queries.')
     .category('generation')
     .stringParam('project', 'Project name (lowercase)', { required: true })

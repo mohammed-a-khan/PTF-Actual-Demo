@@ -16,7 +16,29 @@ const path = require('path');
 
 const agentsDir = path.join(__dirname, '..', 'src', 'mcp', 'agents');
 const outputFile = path.join(agentsDir, 'embeddedAgentContent.ts');
-const agentNames = ['planner', 'generator', 'healer', 'assistant'];
+const agentNames = [
+    // Legacy standalone agents (user-invocable)
+    'planner',
+    'generator',
+    'healer',
+    'assistant',
+    // Pipeline orchestrator (user-invocable)
+    'cs-playwright',
+    // Pipeline subagents (user-invocable: false, delegated via runSubagent)
+    'analyzer',
+    'data-ingestor',
+    'db-migrator',
+    'locator-reconciler',
+    'pipeline-generator',
+    'pipeline-healer',
+];
+
+// kebab-case filename → camelCase TS identifier
+function toIdent(name) {
+    return name.split('-').map((part, i) =>
+        i === 0 ? part : part.charAt(0).toUpperCase() + part.slice(1)
+    ).join('');
+}
 
 let output = `/**
  * AUTO-GENERATED FILE - DO NOT EDIT MANUALLY
@@ -43,18 +65,18 @@ for (const name of agentNames) {
             .replace(/\\/g, '\\\\')
             .replace(/`/g, '\\`')
             .replace(/\$\{/g, '\\${');
-        output += `export const ${name}AgentContent = \`${escaped}\`;\n\n`;
+        output += `export const ${toIdent(name)}AgentContent = \`${escaped}\`;\n\n`;
         embeddedCount++;
     } else {
         console.warn(`  Warning: Agent file not found: ${mdPath}`);
-        output += `export const ${name}AgentContent = '';\n\n`;
+        output += `export const ${toIdent(name)}AgentContent = '';\n\n`;
     }
 }
 
 // Export a lookup map for easy access
 output += `export const AGENT_CONTENT: Record<string, string> = {\n`;
 for (const name of agentNames) {
-    output += `    ${name}: ${name}AgentContent,\n`;
+    output += `    '${name}': ${toIdent(name)}AgentContent,\n`;
 }
 output += `};\n\n`;
 
