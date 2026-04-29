@@ -20,7 +20,7 @@ import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
 export class LoginFormPage extends CSBasePage {
 
     @CSGetElement({
-        xpath: '//input[@id="userId"]',
+        xpath: "//input[@id='userId']",
         description: 'User Id input',
         waitForVisible: true,
         selfHeal: true,
@@ -32,7 +32,7 @@ export class LoginFormPage extends CSBasePage {
     public userIdField!: CSWebElement;
 
     @CSGetElement({
-        xpath: '//input[@id="password"]',
+        xpath: "//input[@id='password']",
         description: 'Password input',
         waitForVisible: true,
         selfHeal: true,
@@ -41,7 +41,7 @@ export class LoginFormPage extends CSBasePage {
     public passwordField!: CSWebElement;
 
     @CSGetElement({
-        xpath: '//button[@id="signin-btn"]',
+        xpath: "//button[@id='signin-btn']",
         description: 'Sign In submit button',
         waitForVisible: true,
         selfHeal: true,

@@ -126,8 +126,35 @@ function loadAgentDefinitionFromContent(rawContent: string, sourceName: string):
 // VS Code Chatmode Generator
 // ============================================================================
 
+// Built-in Copilot tool aliases per
+// https://code.visualstudio.com/docs/copilot/customization/custom-agents.
+// These MUST be written bare in the generated tools list. Anything else is
+// treated as an MCP server tool and gets the `<serverName>/` prefix so Copilot
+// can resolve it against the right server. Writing a built-in as
+// `cs-playwright-mcp/read` would mislabel it as a non-existent MCP tool;
+// writing an MCP tool bare as `legacy_parse` leaves Copilot unable to resolve
+// which server owns it.
+const BUILTIN_TOOL_ALIASES = new Set([
+    'execute',
+    'read',
+    'edit',
+    'search',
+    'agent',
+    'web',
+    'todo',
+]);
+
+function qualifyToolName(tool: string, serverName: string): string {
+    // Already a wildcard or explicitly server-qualified — pass through.
+    if (tool.includes('/')) return tool;
+    if (BUILTIN_TOOL_ALIASES.has(tool)) return tool;
+    return `${serverName}/${tool}`;
+}
+
 function generateVSCodeChatmode(agent: AgentDefinition, serverName: string): string {
-    const toolsList = agent.tools.map(t => `- ${serverName}/${t}`).join('\n');
+    const toolsList = agent.tools
+        .map(t => `- ${qualifyToolName(t, serverName)}`)
+        .join('\n');
 
     return `---
 description: ${agent.description}
@@ -144,7 +171,9 @@ ${agent.instructions}
 // ============================================================================
 
 function generateClaudeChatmode(agent: AgentDefinition, serverName: string): string {
-    const toolsList = agent.tools.map(t => `  - ${serverName}/${t}`).join('\n');
+    const toolsList = agent.tools
+        .map(t => `  - ${qualifyToolName(t, serverName)}`)
+        .join('\n');
 
     return `---
 name: ${agent.name}
@@ -163,29 +192,37 @@ ${agent.instructions}
 // ============================================================================
 
 function generateMCPConfig(serverName: string, loop: LoopType): object {
-    // Only the CS Playwright MCP server is registered — it exposes the full
-    // browser automation surface (including browser_generate_locator) plus the
-    // framework-specific tools. External MCPs can be added by the consumer
-    // afterwards if they want additional capabilities.
-    // The -y flag prevents npx from prompting, which would block stdio.
+    // cs-playwright-mcp is a `bin` inside @mdakhan.mak/cs-playwright-test-framework,
+    // NOT a standalone npm package. `npx -y cs-playwright-mcp` would fail — npx
+    // resolves by package name, not by bin name, so it tries to fetch a package
+    // called "cs-playwright-mcp" from the registry (doesn't exist) and dies.
+    //
+    // The canonical form for "run a bin that lives inside a parent package" is:
+    //   npx --package=<parent> <bin-name>
+    // --yes suppresses the install-confirmation prompt that would block stdio.
+    const command = 'npx';
+    // const args = [
+    //     '--yes',
+    //     '--package=@mdakhan.mak/cs-playwright-test-framework',
+    //     'cs-playwright-mcp',
+    // ];
+    const args = [
+        '-y',
+        'cs-playwright-mcp',
+    ];
+
     if (loop === 'vscode') {
         // VS Code format uses "servers" not "mcpServers"
         return {
             servers: {
-                [serverName]: {
-                    command: 'npx',
-                    args: ['-y', 'cs-playwright-mcp'],
-                },
+                [serverName]: { command, args },
             },
         };
     } else {
         // Claude Code and OpenCode use "mcpServers"
         return {
             mcpServers: {
-                [serverName]: {
-                    command: 'npx',
-                    args: ['-y', 'cs-playwright-mcp'],
-                },
+                [serverName]: { command, args },
             },
         };
     }
@@ -353,12 +390,6 @@ sql_sources:
 # ============================================================================
 
 correction_memory_path: .agent-runs/correction-patterns.md
-
-# Whether the orchestrator may call out to the official Playwright MCP
-# for additional browser capabilities. Our own browser tools cover the same
-# surface; leave false unless you specifically need a capability our MCP
-# does not offer.
-playwright_mcp_enabled: false
 `;
 }
 

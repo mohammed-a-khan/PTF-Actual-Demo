@@ -302,11 +302,7 @@ const schemaLookupTool = defineTool()
     .name('schema_lookup')
     .title('Schema Lookup')
     .description(
-        'Look up a table in the project schema reference document. Respects the ' +
-        'project-level sql_verification mode: strict (default — return error on miss), ' +
-        'best-effort (return { skipped: true } on miss so the pipeline proceeds with ' +
-        'a SCHEMA REFERENCE NEEDED marker), or off (return { skipped: true } without ' +
-        'even reading the doc). Never fabricates schema information.'
+        'Verify a table against the project schema reference. Respects sql_verification mode (strict / best-effort / off). Returns schema + columns or skipped:true.'
     )
     .outputSchema({
         type: 'object',
@@ -496,6 +492,131 @@ interface DependencyRef {
     resolvedPath: string | null;
 }
 
+/**
+ * Walk projectRoot once and build a map from path-suffix → absolute path for
+ * every source file. Lets us resolve imports like
+ *   com.example.app.common.BaseTestCase
+ * to any file on disk ending with
+ *   .../com/example/app/common/BaseTestCase.java
+ * regardless of whether the project follows Maven (src/test/java/…),
+ * flat (src/…), or any other layout.
+ *
+ * Directories named node_modules, target, bin, obj, .git, dist, build are
+ * pruned to keep the walk cheap on large repos.
+ */
+interface SourceIndex {
+    // Map of suffix starting at first package segment → absolute path.
+    // E.g. 'com/example/common/BaseTestCase.java' → '/abs/path/...'
+    byPathSuffix: Map<string, string>;
+    // Map of basename → all absolute paths (fallback when import is suffix-truncated).
+    byBasename: Map<string, string[]>;
+    // Map of fully-qualified class / namespace name → absolute path.
+    // Derived from parsing the `package <...>;` or `namespace <...>;` declaration
+    // inside each source file — ground truth regardless of where the file lives.
+    // This makes flat-dumped folders work correctly even with duplicate basenames.
+    byFqcn: Map<string, string>;
+}
+
+/**
+ * Read the first ~40 lines of a source file and return its fully-qualified
+ * class / namespace name (if discoverable), else null. Cheap: we bail as soon
+ * as we see the package declaration. Multi-class-per-file uses the first one.
+ */
+function extractFqcnFromFile(absPath: string): string | null {
+    try {
+        const ext = path.extname(absPath);
+        const buf = fs.readFileSync(absPath, { encoding: 'utf-8' }).slice(0, 4000);
+        if (ext === '.java') {
+            const pkgM = buf.match(/^\s*package\s+([\w.]+)\s*;/m);
+            const clsM = buf.match(/(?:public\s+|abstract\s+|final\s+)*(?:class|interface|enum|record)\s+(\w+)/);
+            if (pkgM && clsM) return `${pkgM[1]}.${clsM[1]}`;
+            if (clsM) return clsM[1]; // default package
+        } else if (ext === '.cs') {
+            const nsM = buf.match(/^\s*namespace\s+([\w.]+)/m);
+            const clsM = buf.match(/(?:public\s+|internal\s+|abstract\s+|sealed\s+|static\s+)*(?:class|interface|struct|enum|record)\s+(\w+)/);
+            if (nsM && clsM) return `${nsM[1]}.${clsM[1]}`;
+            if (clsM) return clsM[1];
+        }
+    } catch { /* swallow */ }
+    return null;
+}
+
+const PRUNED_DIRS = new Set(['node_modules', 'target', 'bin', 'obj', '.git', 'dist', 'build', '.gradle', '.idea', '.vscode']);
+
+function indexSourceFiles(root: string, extensions: string[]): SourceIndex {
+    const idx: SourceIndex = { byPathSuffix: new Map(), byBasename: new Map(), byFqcn: new Map() };
+    if (!fs.existsSync(root)) return idx;
+
+    const isCodeExt = extensions.some(e => e === '.java' || e === '.cs');
+
+    const walk = (dir: string): void => {
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch { return; }
+        for (const e of entries) {
+            if (e.isDirectory()) {
+                if (!PRUNED_DIRS.has(e.name)) walk(path.join(dir, e.name));
+                continue;
+            }
+            const ext = path.extname(e.name);
+            if (!extensions.includes(ext)) continue;
+            const abs = path.join(dir, e.name);
+            const rel = path.relative(root, abs).replace(/\\/g, '/');
+
+            // Index by basename
+            const list = idx.byBasename.get(e.name) ?? [];
+            list.push(abs);
+            idx.byBasename.set(e.name, list);
+
+            // Index by every suffix starting at a '/' boundary so that
+            // 'com/x/y/Bar.java' matches whether the file lives at
+            // 'src/com/x/y/Bar.java' or 'src/test/java/com/x/y/Bar.java'.
+            let i = 0;
+            while (i < rel.length) {
+                idx.byPathSuffix.set(rel.substring(i), abs);
+                const next = rel.indexOf('/', i);
+                if (next < 0) break;
+                i = next + 1;
+            }
+
+            // Index by fully-qualified name parsed from the `package`/`namespace`
+            // declaration inside the file. This is ground truth and handles
+            // flat-dumped folders (no directory hierarchy) correctly even when
+            // multiple files share a basename.
+            if (isCodeExt && (ext === '.java' || ext === '.cs')) {
+                const fqcn = extractFqcnFromFile(abs);
+                if (fqcn) idx.byFqcn.set(fqcn, abs);
+            }
+        }
+    };
+    walk(root);
+    return idx;
+}
+
+function resolveJavaImport(imp: string, idx: SourceIndex): string | null {
+    // 1. Authoritative: match against each file's own `package <...>;` declaration.
+    if (idx.byFqcn.has(imp)) return idx.byFqcn.get(imp)!;
+    // 2. Path-suffix lookup — works for any layout that mirrors the package structure.
+    const suffix = imp.replace(/\./g, '/') + '.java';
+    if (idx.byPathSuffix.has(suffix)) return idx.byPathSuffix.get(suffix)!;
+    // 3. Fallback: unique basename match.
+    const className = imp.split('.').pop() + '.java';
+    const bases = idx.byBasename.get(className);
+    if (bases && bases.length === 1) return bases[0];
+    return null;
+}
+
+function resolveCsharpNamespace(ns: string, idx: SourceIndex): string | null {
+    if (idx.byFqcn.has(ns)) return idx.byFqcn.get(ns)!;
+    const suffix = ns.replace(/\./g, '/') + '.cs';
+    if (idx.byPathSuffix.has(suffix)) return idx.byPathSuffix.get(suffix)!;
+    const className = ns.split('.').pop() + '.cs';
+    const bases = idx.byBasename.get(className);
+    if (bases && bases.length === 1) return bases[0];
+    return null;
+}
+
 function extractJavaReferences(content: string, projectRoot: string): DependencyRef[] {
     const refs: DependencyRef[] = [];
     const imports: string[] = [];
@@ -503,18 +624,20 @@ function extractJavaReferences(content: string, projectRoot: string): Dependency
     let m: RegExpExecArray | null;
     while ((m = importRe.exec(content)) !== null) imports.push(m[1]);
 
+    const srcIndex = indexSourceFiles(projectRoot, ['.java']);
+
     for (const imp of imports) {
         // Skip framework / standard-library imports
         if (/^(java|javax|org\.testng|org\.junit|org\.openqa|io\.cucumber|com\.google|org\.apache|org\.slf4j)\./.test(imp)) {
             continue;
         }
-        const expected = path.join(projectRoot, 'src', 'test', 'java', imp.replace(/\./g, '/') + '.java');
+        const resolved = resolveJavaImport(imp, srcIndex);
         refs.push({
             symbol: imp,
             kind: 'import',
-            expectedPath: expected,
-            found: fs.existsSync(expected),
-            resolvedPath: fs.existsSync(expected) ? expected : null,
+            expectedPath: imp.replace(/\./g, '/') + '.java',
+            found: resolved !== null,
+            resolvedPath: resolved,
         });
     }
 
@@ -522,22 +645,22 @@ function extractJavaReferences(content: string, projectRoot: string): Dependency
     const dataFileRe = /"([\w./\\-]+\.(xlsx|xls|csv|tsv|json|yaml|yml|xml|properties))"/g;
     const dataFiles = new Set<string>();
     while ((m = dataFileRe.exec(content)) !== null) dataFiles.add(m[1]);
+
+    const dataIndex = indexSourceFiles(projectRoot, ['.xlsx', '.xls', '.csv', '.tsv', '.json', '.yaml', '.yml', '.xml', '.properties']);
+
     for (const f of dataFiles) {
-        const candidates = [
-            path.resolve(projectRoot, f),
-            path.join(projectRoot, 'src/test/resources', f),
-            path.join(projectRoot, 'test-data', f),
-            path.join(projectRoot, 'resources', f),
-        ];
-        let found = false, resolved: string | null = null;
-        for (const c of candidates) {
-            if (fs.existsSync(c)) { found = true; resolved = c; break; }
+        const basename = path.basename(f);
+        const suffix = f.replace(/\\/g, '/');
+        let resolved: string | null = dataIndex.byPathSuffix.get(suffix) ?? null;
+        if (!resolved) {
+            const bases = dataIndex.byBasename.get(basename);
+            if (bases && bases.length >= 1) resolved = bases[0];
         }
         refs.push({
             symbol: f,
             kind: 'data-file',
-            expectedPath: candidates[0],
-            found,
+            expectedPath: f,
+            found: resolved !== null,
             resolvedPath: resolved,
         });
     }
@@ -549,17 +672,23 @@ function extractCsharpReferences(content: string, projectRoot: string): Dependen
     const refs: DependencyRef[] = [];
     const usingRe = /^using\s+([A-Z]\w*(?:\.[A-Z]\w*)*);/gm;
     let m: RegExpExecArray | null;
+    const namespaces: string[] = [];
     while ((m = usingRe.exec(content)) !== null) {
         const ns = m[1];
         if (/^(System|Microsoft|NUnit|Moq|Xunit|FluentAssertions)\b/.test(ns)) continue;
-        // Best-effort path: Namespace.Class.cs
-        const expected = path.join(projectRoot, ns.replace(/\./g, '/') + '.cs');
+        namespaces.push(ns);
+    }
+
+    const srcIndex = indexSourceFiles(projectRoot, ['.cs']);
+
+    for (const ns of namespaces) {
+        const resolved = resolveCsharpNamespace(ns, srcIndex);
         refs.push({
             symbol: ns,
             kind: 'import',
-            expectedPath: expected,
-            found: fs.existsSync(expected),
-            resolvedPath: fs.existsSync(expected) ? expected : null,
+            expectedPath: ns.replace(/\./g, '/') + '.cs',
+            found: resolved !== null,
+            resolvedPath: resolved,
         });
     }
     return refs;
@@ -569,9 +698,7 @@ const discoverDependenciesTool = defineTool()
     .name('discover_dependencies')
     .title('Discover Dependencies')
     .description(
-        'Parse a legacy source file (Java or C#) and return the list of referenced ' +
-        'symbols / files / named-queries with a found/missing flag. The orchestrator ' +
-        'uses this to halt migration if any dependency is unresolved.'
+        'Parse a legacy Java/C# file and return referenced symbols/files/named-queries with found/missing flags. Used to halt migration on unresolved dependencies.'
     )
     .outputSchema({
         type: 'object',
@@ -662,8 +789,7 @@ const enumerateTestSuiteTool = defineTool()
     .name('enumerate_test_suite')
     .title('Enumerate Test Suite')
     .description(
-        'Walk a directory (or parse a TestNG suite XML) and list every legacy test file ' +
-        'with its test methods. Used by the orchestrator to present choices to the user.'
+        'List every legacy test file and its methods from a directory or TestNG suite XML. Used for user test selection.'
     )
     .outputSchema({
         type: 'object',
@@ -725,9 +851,7 @@ const classifyFailureTool = defineTool()
     .name('classify_failure')
     .title('Classify Test Failure')
     .description(
-        'Classify a test failure by its error text. LOW (auto-heal), MEDIUM (auto-heal with ' +
-        'caution), HIGH (escalate — auth, DB unreachable, app regression). The Healer uses ' +
-        'this to decide retry vs escalate.'
+        'Classify a test failure by error text: LOW (auto-heal), MEDIUM (cautious heal), HIGH (escalate). Drives Healer retry vs escalate decision.'
     )
     .outputSchema({
         type: 'object',
@@ -793,6 +917,210 @@ const classifyFailureTool = defineTool()
     .build();
 
 // ============================================================================
+// emit_provenance_header — standard provenance block for any generated file
+// ============================================================================
+
+const emitProvenanceHeaderTool = defineTool()
+    .name('emit_provenance_header')
+    .title('Emit Provenance Header')
+    .description(
+        'Return the standard provenance comment block for a generated file. ' +
+        'Every LLM-assisted file should start with this header so reviewers see ' +
+        'what the source was, when the pipeline ran, and that human review is required.'
+    )
+    .outputSchema({
+        type: 'object',
+        properties: { header: { type: 'string' } },
+    })
+    .category('audit')
+    .stringParam('sourcePath', 'Legacy source file path', { required: true })
+    .stringParam('sourceHash', 'sha256 of source file (optional)')
+    .stringParam('projectName', 'Project name', { required: true })
+    .stringParam('pipelineVersion', 'cs-playwright-mcp version', { required: true })
+    .stringParam('correctionPatterns', 'JSON array of patterns applied (optional)')
+    .stringParam('commentStyle', 'Comment style', { enum: ['double-slash', 'hash', 'gherkin'] })
+    .handler(async (params) => {
+        const style = (params.commentStyle as string | undefined) ?? 'double-slash';
+        const prefix = style === 'hash' ? '# ' : style === 'gherkin' ? '# ' : '// ';
+        const ts = new Date().toISOString();
+        const patterns = params.correctionPatterns
+            ? ` (${(JSON.parse(params.correctionPatterns as string) as unknown[]).length} pattern(s))`
+            : '';
+        const lines = [
+            `${prefix}@generated cs-playwright-mcp v${params.pipelineVersion}`,
+            `${prefix}@source-legacy ${params.sourcePath}${params.sourceHash ? ` (sha256: ${params.sourceHash})` : ''}`,
+            `${prefix}@project ${params.projectName}`,
+            `${prefix}@migration-run ${ts}`,
+            `${prefix}@correction-patterns applied${patterns}`,
+            `${prefix}@review-status AI-assisted — human review required before merge`,
+        ];
+        return createJsonResult({ header: lines.join('\n') + '\n' });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// record_skipped_gap — append to dropped-scenarios report
+// ============================================================================
+
+const recordSkippedGapTool = defineTool()
+    .name('record_skipped_gap')
+    .title('Record Skipped Gap')
+    .description(
+        'Append one row to .agent-runs/dropped-<runId>.md under the "Skipped during migration" section. ' +
+        'Called by subagents when the user picks option 3 (skip) on an interactive clarification.'
+    )
+    .outputSchema({
+        type: 'object',
+        properties: { recorded: { type: 'boolean' }, path: { type: 'string' } },
+    })
+    .category('audit')
+    .stringParam('runId', 'Session run id', { required: true })
+    .stringParam('stage', 'Pipeline stage where gap arose', { required: true })
+    .stringParam('gap', 'One-line description of what was missing', { required: true })
+    .stringParam('userChoice', 'User choice', { enum: ['provide', 'suggest', 'skip', 'abort'], required: true })
+    .stringParam('impact', 'What this means downstream if unresolved', { required: true })
+    .stringParam('cwd', 'Workspace root')
+    .handler(async (params) => {
+        const runId = params.runId as string;
+        const cwd = (params.cwd as string | undefined) ?? process.cwd();
+        const target = path.join(agentRunsDir(cwd), `dropped-${runId}.md`);
+
+        let content = readFileSafe(target);
+        if (!content) {
+            content = `# Dropped / skipped during migration — run ${runId}\n\n## Skipped during migration\n\n| Stage | Gap | User choice | Impact if unresolved |\n|---|---|---|---|\n`;
+        }
+
+        const escape = (s: string) => s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+        const row = `| ${escape(params.stage as string)} | ${escape(params.gap as string)} | ${params.userChoice} | ${escape(params.impact as string)} |\n`;
+        content += row;
+
+        try {
+            writeFileSafe(target, content);
+            return createJsonResult({ recorded: true, path: target });
+        } catch (err: any) {
+            return createErrorResult(`Failed to write dropped report: ${err.message}`);
+        }
+    })
+    .build();
+
+// ============================================================================
+// migration_cache_lookup / migration_cache_store — input-hash idempotence
+// ============================================================================
+
+function buildCacheKey(input: { sourceContent: string; projectName: string; pipelineVersion: string; extras?: string }): string {
+    const canonical = JSON.stringify({
+        source: input.sourceContent,
+        project: input.projectName,
+        pipelineVer: input.pipelineVersion,
+        extras: input.extras ?? '',
+    });
+    return crypto.createHash('sha256').update(canonical).digest('hex');
+}
+
+const migrationCacheLookupTool = defineTool()
+    .name('migration_cache_lookup')
+    .title('Migration Cache Lookup')
+    .description(
+        'Check whether a prior migration run produced output for the same input. ' +
+        'Key = sha256(sourceContent + projectName + pipelineVersion + extras). ' +
+        'Returns cached file map if hit, or { hit: false } if miss. ' +
+        'Enables idempotent re-runs: same input produces bit-identical output.'
+    )
+    .outputSchema({
+        type: 'object',
+        properties: {
+            hit: { type: 'boolean' },
+            cacheKey: { type: 'string' },
+            files: { type: 'object' },
+            cachedAt: { type: 'string' },
+        },
+    })
+    .category('audit')
+    .stringParam('sourceFile', 'Absolute path to source file', { required: true })
+    .stringParam('projectName', 'Project name', { required: true })
+    .stringParam('pipelineVersion', 'Pipeline version', { required: true })
+    .stringParam('extras', 'Extra key material (e.g., config hash)')
+    .stringParam('cwd', 'Workspace root')
+    .handler(async (params) => {
+        const cwd = (params.cwd as string | undefined) ?? process.cwd();
+        const sourcePath = params.sourceFile as string;
+        const sourceContent = readFileSafe(sourcePath);
+        if (sourceContent === null) return createErrorResult(`Cannot read source: ${sourcePath}`);
+
+        const key = buildCacheKey({
+            sourceContent,
+            projectName: params.projectName as string,
+            pipelineVersion: params.pipelineVersion as string,
+            extras: params.extras as string | undefined,
+        });
+
+        const cacheDir = path.join(agentRunsDir(cwd), 'cache', key);
+        const metaPath = path.join(cacheDir, 'meta.json');
+        const meta = readFileSafe(metaPath);
+        if (!meta) {
+            return createJsonResult({ hit: false, cacheKey: key });
+        }
+
+        let metaParsed: { cachedAt: string; files: string[] };
+        try { metaParsed = JSON.parse(meta); } catch {
+            return createJsonResult({ hit: false, cacheKey: key });
+        }
+
+        const files: Record<string, string> = {};
+        for (const rel of metaParsed.files) {
+            const p = path.join(cacheDir, 'files', rel);
+            const c = readFileSafe(p);
+            if (c !== null) files[rel] = c;
+        }
+        return createJsonResult({ hit: true, cacheKey: key, files, cachedAt: metaParsed.cachedAt });
+    })
+    .readOnly()
+    .build();
+
+const migrationCacheStoreTool = defineTool()
+    .name('migration_cache_store')
+    .title('Migration Cache Store')
+    .description(
+        'Store the output of a successful migration under the input-hash key for future idempotent replays. ' +
+        'Call this only after Stage 6 (commit-ready gate) passes.'
+    )
+    .outputSchema({
+        type: 'object',
+        properties: { stored: { type: 'boolean' }, cacheKey: { type: 'string' }, path: { type: 'string' } },
+    })
+    .category('audit')
+    .stringParam('cacheKey', 'The key returned by migration_cache_lookup', { required: true })
+    .stringParam('filesJson', 'JSON object { relPath: content } of files to cache', { required: true })
+    .stringParam('cwd', 'Workspace root')
+    .handler(async (params) => {
+        const cwd = (params.cwd as string | undefined) ?? process.cwd();
+        const key = params.cacheKey as string;
+        let files: Record<string, string>;
+        try {
+            files = JSON.parse(params.filesJson as string);
+        } catch (err: any) {
+            return createErrorResult(`filesJson invalid: ${err.message}`);
+        }
+
+        const cacheDir = path.join(agentRunsDir(cwd), 'cache', key);
+        try {
+            for (const [rel, content] of Object.entries(files)) {
+                writeFileSafe(path.join(cacheDir, 'files', rel), content);
+            }
+            const meta = {
+                cachedAt: new Date().toISOString(),
+                files: Object.keys(files),
+            };
+            writeFileSafe(path.join(cacheDir, 'meta.json'), JSON.stringify(meta, null, 2));
+            return createJsonResult({ stored: true, cacheKey: key, path: cacheDir });
+        } catch (err: any) {
+            return createErrorResult(`Failed to write cache: ${err.message}`);
+        }
+    })
+    .build();
+
+// ============================================================================
 // Export + registration
 // ============================================================================
 
@@ -805,6 +1133,10 @@ export const pipelineTools: MCPToolDefinition[] = [
     discoverDependenciesTool,
     enumerateTestSuiteTool,
     classifyFailureTool,
+    emitProvenanceHeaderTool,
+    recordSkippedGapTool,
+    migrationCacheLookupTool,
+    migrationCacheStoreTool,
 ];
 
 export function registerPipelineTools(registry: CSMCPToolRegistry): void {

@@ -2,17 +2,17 @@
 name: locator-reconciler
 title: Locator Reconciler
 description: Verifies every element in the IR against the live DOM, ranks locators by confidence, consults correction memory for prior reconciliations. Emits enriched IR for the Generator. Subagent of cs-playwright.
-model: 'Claude Sonnet 4.5'
+model: 'Claude Sonnet 4.6'
 color: teal
 user-invocable: false
 tools:
-  - cs-playwright-mcp/browser_launch
-  - cs-playwright-mcp/browser_navigate
-  - cs-playwright-mcp/browser_snapshot
-  - cs-playwright-mcp/browser_generate_locator
-  - cs-playwright-mcp/browser_close
-  - cs-playwright-mcp/correction_memory_query
-  - cs-playwright-mcp/locator_diff
+  - browser_launch
+  - browser_navigate
+  - browser_snapshot
+  - browser_generate_locator
+  - browser_close
+  - correction_memory_query
+  - locator_diff
   - read
 ---
 
@@ -104,6 +104,10 @@ If `browser_launch` or `browser_navigate` fails:
 - For navigation-triggering elements, annotate `clickTimeoutHint: 30000` (Generator will apply).
 - Deduplicate: if two IR elements reconcile to the same DOM element, merge them with a warning.
 
+## When you hit a gap — use interactive-clarification
+
+Load the `interactive-clarification` skill. When multiple live-DOM candidates are equally plausible for one IR element, when the live app is unreachable, or when an element's screen context can't be determined, invoke the 4-option elicitation. For option 2 (suggestions), emit the ranked locator candidates by confidence. Log every elicitation.
+
 ## Skill references
 
-Load `po-simple-element`, `po-self-healing-element`, `heal-locator-drift` as needed.
+Load `po-simple-element`, `po-self-healing-element`, `heal-locator-drift`, `interactive-clarification` as needed.

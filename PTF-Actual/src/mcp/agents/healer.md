@@ -2,7 +2,7 @@
 name: cs-playwright-healer
 title: CS Playwright Healer
 description: Use this agent to debug and fix failing Playwright tests
-model: 'Claude Sonnet 4.5'
+model: 'Claude Sonnet 4.6'
 color: red
 tools:
   # Testing - Core

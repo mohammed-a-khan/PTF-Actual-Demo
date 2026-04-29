@@ -493,7 +493,7 @@ function parseTestList(output: string, isCSFramework: boolean = true): Array<{
 const testListTool = defineTool()
     .name('test_list')
     .title('List Tests')
-    .description('List all available tests in the project. Supports CS BDD framework (features/scenarios) and Playwright specs. Returns test IDs for use with test_run and test_debug.')
+    .description('List available tests (BDD features/scenarios and Playwright specs). Returns test IDs for test_run and test_debug.')
     .category('testing')
     .stringParam('project', 'CS framework project name (e.g., "myproject") - maps to test/<project>/')
     .stringParam('format', 'Test format to list', {
@@ -714,7 +714,7 @@ const testListTool = defineTool()
 const testRunTool = defineTool()
     .name('test_run')
     .title('Run Tests')
-    .description('Run tests using CS Playwright framework. Supports BDD features and Playwright specs. Returns pass/fail results with scenario details.')
+    .description('Run tests (BDD features or Playwright specs). Returns pass/fail results with scenario details.')
     .openWorld()
     .category('testing')
     .stringParam('project', 'CS framework project name (e.g., "myproject")')
@@ -1750,6 +1750,7 @@ const testFlakyDetectTool = defineTool()
                 : `All ${testResults.size} tests are stable across ${iterations} runs`,
         });
     })
+    .readOnly()
     .build();
 
 // ============================================================================
@@ -1826,6 +1827,7 @@ const testSnapshotCompareTool = defineTool()
             return createErrorResult(`Snapshot comparison failed: ${error.message}`);
         }
     })
+    .readOnly()
     .build();
 
 // ============================================================================

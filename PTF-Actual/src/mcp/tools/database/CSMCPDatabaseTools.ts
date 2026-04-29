@@ -181,6 +181,7 @@ const dbQueryTool = defineTool()
             return createErrorResult(`Query execution failed: ${(error as Error).message}`);
         }
     })
+    .readOnly()
     .build();
 
 const dbQueryNamedTool = defineTool()
@@ -215,6 +216,7 @@ const dbQueryNamedTool = defineTool()
             return createErrorResult(`Named query '${queryName}' failed: ${(error as Error).message}`);
         }
     })
+    .readOnly()
     .build();
 
 const dbQuerySingleValueTool = defineTool()
@@ -243,6 +245,7 @@ const dbQuerySingleValueTool = defineTool()
             return createErrorResult(`Query failed: ${(error as Error).message}`);
         }
     })
+    .readOnly()
     .build();
 
 const dbQuerySingleRowTool = defineTool()
@@ -271,6 +274,7 @@ const dbQuerySingleRowTool = defineTool()
             return createErrorResult(`Query failed: ${(error as Error).message}`);
         }
     })
+    .readOnly()
     .build();
 
 const dbExecuteTool = defineTool()
@@ -507,6 +511,7 @@ const dbVerifyRowExistsTool = defineTool()
             return createErrorResult(`Verification failed: ${(error as Error).message}`);
         }
     })
+    .readOnly()
     .build();
 
 const dbVerifyRowCountTool = defineTool()
@@ -552,6 +557,7 @@ const dbVerifyRowCountTool = defineTool()
             return createErrorResult(`Verification failed: ${(error as Error).message}`);
         }
     })
+    .readOnly()
     .build();
 
 const dbVerifyValueTool = defineTool()
@@ -591,6 +597,7 @@ const dbVerifyValueTool = defineTool()
             return createErrorResult(`Verification failed: ${(error as Error).message}`);
         }
     })
+    .readOnly()
     .build();
 
 const dbCompareDataTool = defineTool()
@@ -669,6 +676,7 @@ const dbCompareDataTool = defineTool()
             return createErrorResult(`Comparison failed: ${(error as Error).message}`);
         }
     })
+    .readOnly()
     .build();
 
 // ============================================================================
@@ -917,6 +925,7 @@ const dbExportResultTool = defineTool()
             return createErrorResult(`Export failed: ${(error as Error).message}`);
         }
     })
+    .readOnly()
     .build();
 
 const dbImportDataTool = defineTool()

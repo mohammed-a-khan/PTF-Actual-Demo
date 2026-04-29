@@ -709,6 +709,7 @@ const getExplorationStatusTool = defineTool()
             hasResults: !!session.result,
         });
     })
+    .readOnly()
     .build();
 
 // ============================================================================

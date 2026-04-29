@@ -23,7 +23,7 @@ export class PaymentWidgetPage extends CSFramePage {
     protected frame = { title: 'Payment Gateway' };
 
     @CSGetElement({
-        xpath: '//input[@name="cardNumber"]',
+        xpath: "//input[@name='cardNumber']",
         description: 'Card Number input',
         waitForVisible: true,
         selfHeal: true,
@@ -32,7 +32,7 @@ export class PaymentWidgetPage extends CSFramePage {
     public cardNumberInput!: CSWebElement;
 
     @CSGetElement({
-        xpath: '//button[@type="submit"]',
+        xpath: "//button[@type='submit']",
         description: 'Submit payment',
         waitForVisible: true,
         selfHeal: true,
@@ -63,7 +63,7 @@ export class DeepEditorPage extends CSFramePage {
     ];
 
     @CSGetElement({
-        xpath: '//textarea[@id="body"]',
+        xpath: "//textarea[@id='body']",
         description: 'Document body textarea',
         waitForVisible: true,
         selfHeal: true,

@@ -375,6 +375,7 @@ const networkWaitForRequestTool = defineTool()
             return createErrorResult(`Wait for request failed: ${error.message}`);
         }
     })
+    .readOnly()
     .build();
 
 const networkWaitForResponseTool = defineTool()
@@ -439,6 +440,7 @@ const networkWaitForResponseTool = defineTool()
             return createErrorResult(`Wait for response failed: ${error.message}`);
         }
     })
+    .readOnly()
     .build();
 
 const networkGetRequestsTool = defineTool()
@@ -705,6 +707,7 @@ const apiVerifyResponseTool = defineTool()
             return createErrorResult(`Verification failed: ${error.message}`);
         }
     })
+    .readOnly()
     .build();
 
 const apiGraphqlTool = defineTool()

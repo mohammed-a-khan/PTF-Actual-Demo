@@ -20,7 +20,7 @@ import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
 export class ResultsGridPage extends CSBasePage {
 
     @CSGetElement({
-        xpath: '//table[@id="results"]',
+        xpath: "//table[@id='results']",
         description: 'Results grid',
         waitForVisible: true,
     })

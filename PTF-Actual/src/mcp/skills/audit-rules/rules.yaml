@@ -70,6 +70,22 @@ rules:
     description: "Navigation-triggering clicks use 30000ms or higher (semantic rule)"
     violation: "clickWithTimeout on navigation should be >= 30000"
 
+  - id: PO010
+    severity: error
+    appliesTo: page
+    description: "xpath values use double-quote outer strings — no escaped inner single quotes"
+    detect: "regex:xpath\\s*:\\s*'[^']*\\\\'"
+    invertMatch: true
+    violation: "xpath value uses single-quoted outer string with escaped inner single quotes. Use double-quoted outer string: xpath: \"//h1[text()='Foo']\""
+
+  - id: PO011
+    severity: error
+    appliesTo: page
+    description: "Dialog handling via CSBasePage wrappers, not raw page.on('dialog')"
+    detect: "regex:this\\.page\\.on\\s*\\(\\s*['\"]dialog['\"]|\\bdialog\\.(accept|dismiss)\\s*\\("
+    invertMatch: true
+    violation: "Dialog handling uses raw Playwright API. Use this.acceptNextDialog() / this.dismissNextDialog() / this.acceptNextDialogWithText(text) from CSBasePage."
+
   # ========================================================================
   # Step-definition rules (SD)
   # ========================================================================

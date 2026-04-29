@@ -73,11 +73,7 @@ const auditFileTool = defineTool()
     .name('audit_file')
     .title('Audit File')
     .description(
-        'Audit a TypeScript, Gherkin, or JSON file against the MANDATED ' +
-        'framework rules. Optionally also runs tsc and attaches TypeScript ' +
-        'compile errors for the same file. Returns structured violations ' +
-        'with rule IDs, severities, and line numbers. pass=false if any ' +
-        'error-severity rule violation or TS error is present.'
+        'Audit a TS/Gherkin/JSON file against framework rules. Optionally runs tsc. Returns violations with rule IDs, severities, line numbers. pass=false on any error.'
     )
     .outputSchema({
         type: 'object',
@@ -174,9 +170,7 @@ const auditContentTool = defineTool()
     .name('audit_content')
     .title('Audit Content')
     .description(
-        'Audit inline file content before writing it to disk. Use this to ' +
-        'validate proposed content (e.g., a draft page object) against the ' +
-        'MANDATED rules without an intermediate write-and-read cycle.'
+        'Audit inline file content against framework rules before writing to disk. Validates proposed drafts without an intermediate write-and-read cycle.'
     )
     .outputSchema({
         type: 'object',
@@ -467,9 +461,7 @@ const commitReadyCheckTool = defineTool()
     .name('commit_ready_check')
     .title('Commit Ready Check')
     .description(
-        'Run the 9-gate exit bar on a set of generated files. Returns { ready, gates[] } ' +
-        'where ready is true iff every gate passes. Never claims ready with failing tests — ' +
-        'the healerGreen flag must be true (set by pipeline-healer on SUCCESS).'
+        'Run 9-gate exit bar on generated files. Returns { ready, gates[] } where ready=true iff all gates pass. Requires healerGreen=true.'
     )
     .outputSchema({
         type: 'object',
@@ -670,6 +662,112 @@ function readFileSafeLocal(p: string): string | null {
 }
 
 // ============================================================================
+// scan_source_for_pii — redaction gate before sending legacy source to LLM
+// ============================================================================
+
+interface PiiHit {
+    pattern: string;
+    line: number;
+    sample: string;
+    redactedAs: string;
+}
+
+function scanSourceForPii(content: string): { hits: PiiHit[]; redacted: string } {
+    const hits: PiiHit[] = [];
+    const rules: Array<{ name: string; re: RegExp; token: string }> = [
+        { name: 'password-assignment', re: /(password\s*[=:]\s*)["']([^"']{3,})["']/gi, token: '[REDACTED-PWD]' },
+        { name: 'api-key-aws', re: /\bAKIA[A-Z0-9]{16}\b/g, token: '[REDACTED-AWS-KEY]' },
+        { name: 'api-key-stripe-live', re: /\bsk_live_[A-Za-z0-9]{20,}\b/g, token: '[REDACTED-STRIPE]' },
+        { name: 'api-key-github', re: /\bghp_[A-Za-z0-9]{36}\b/g, token: '[REDACTED-GH-TOKEN]' },
+        { name: 'bearer-token', re: /Bearer\s+[A-Za-z0-9\-_.]{20,}/g, token: 'Bearer [REDACTED-BEARER]' },
+        { name: 'credit-card', re: /\b(?:\d[ -]*?){13,16}\b/g, token: '[REDACTED-CC]' },
+        { name: 'ssn-us', re: /\b\d{3}-\d{2}-\d{4}\b/g, token: '[REDACTED-SSN]' },
+        { name: 'email-gmail-like', re: /\b[A-Za-z0-9._%+-]+@(gmail|yahoo|outlook|hotmail|icloud)\.com\b/gi, token: '[REDACTED-EMAIL]' },
+        { name: 'prod-hostname', re: /\b[a-z0-9-]+\.(prod|production|live|prd)\.[a-z0-9.-]+\.(com|net|io|dev|internal|corp|local)\b/gi, token: '[REDACTED-PROD-HOST]' },
+        { name: 'jdbc-url-with-pwd', re: /jdbc:[^"'\s]*(?:password|pwd)=[^;&"'\s]+/gi, token: 'jdbc:[REDACTED-DB-URL]' },
+    ];
+
+    let redacted = content;
+    const lines = content.split('\n');
+
+    for (const rule of rules) {
+        const localRe = new RegExp(rule.re.source, rule.re.flags);
+        let m: RegExpExecArray | null;
+        while ((m = localRe.exec(content)) !== null) {
+            const offset = m.index;
+            let lineNo = 1;
+            let pos = 0;
+            for (let i = 0; i < lines.length; i++) {
+                if (pos + lines[i].length + 1 > offset) { lineNo = i + 1; break; }
+                pos += lines[i].length + 1;
+            }
+            hits.push({
+                pattern: rule.name,
+                line: lineNo,
+                sample: m[0].slice(0, 40) + (m[0].length > 40 ? '…' : ''),
+                redactedAs: rule.token,
+            });
+        }
+        redacted = redacted.replace(localRe, (match, ...groups) => {
+            // For password-assignment, preserve prefix (`password = `) and redact only the value.
+            if (rule.name === 'password-assignment' && groups.length >= 2 && typeof groups[0] === 'string') {
+                return `${groups[0]}"${rule.token}"`;
+            }
+            return rule.token;
+        });
+    }
+
+    return { hits, redacted };
+}
+
+const scanSourceForPiiTool = defineTool()
+    .name('scan_source_for_pii')
+    .title('Scan Source for PII')
+    .description(
+        'Regex-scan a file for secrets / PII (passwords, API keys, credit cards, SSNs, ' +
+        'emails, production hostnames, JDBC URLs with embedded credentials). Returns hits ' +
+        'with line numbers + a redacted copy safe to send to an LLM. Subagents should call ' +
+        'this BEFORE sending any legacy source to Copilot chat.'
+    )
+    .outputSchema({
+        type: 'object',
+        properties: {
+            clean: { type: 'boolean' },
+            hitCount: { type: 'number' },
+            hits: { type: 'array', items: { type: 'object' } },
+            redactedContent: { type: 'string' },
+        },
+    })
+    .category('audit')
+    .stringParam('file', 'File to scan (absolute or relative to cwd)')
+    .stringParam('content', 'Raw content to scan (alternative to file)')
+    .stringParam('cwd', 'Workspace root')
+    .handler(async (params) => {
+        const cwd = (params.cwd as string | undefined) ?? process.cwd();
+        let content: string;
+        if (params.content) {
+            content = params.content as string;
+        } else if (params.file) {
+            const p = path.isAbsolute(params.file as string) ? params.file as string : path.resolve(cwd, params.file as string);
+            const raw = readFileSafeLocal(p);
+            if (raw === null) return createErrorResult(`Cannot read file: ${p}`);
+            content = raw;
+        } else {
+            return createErrorResult('Provide either `file` or `content`.');
+        }
+
+        const { hits, redacted } = scanSourceForPii(content);
+        return createJsonResult({
+            clean: hits.length === 0,
+            hitCount: hits.length,
+            hits,
+            redactedContent: redacted,
+        });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
 // Export + registration
 // ============================================================================
 
@@ -679,6 +777,7 @@ export const auditTools: MCPToolDefinition[] = [
     compileCheckTool,
     detectProjectTool,
     commitReadyCheckTool,
+    scanSourceForPiiTool,
 ];
 
 export function registerAuditTools(registry: CSMCPToolRegistry): void {

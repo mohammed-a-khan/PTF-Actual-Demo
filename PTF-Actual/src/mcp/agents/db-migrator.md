@@ -2,16 +2,16 @@
 name: db-migrator
 title: DB Migrator
 description: Converts legacy inline SQL / JDBC / Hibernate calls into CS Playwright framework pattern — named queries in the env file plus typed helper methods. Never fabricates a table name. Subagent of cs-playwright.
-model: 'Claude Sonnet 4.5'
+model: 'Claude Sonnet 4.6'
 color: yellow
 user-invocable: false
 tools:
-  - cs-playwright-mcp/extract_db_calls
-  - cs-playwright-mcp/schema_lookup
-  - cs-playwright-mcp/generate_database_helper
-  - cs-playwright-mcp/audit_file
-  - cs-playwright-mcp/audit_content
-  - cs-playwright-mcp/compile_check
+  - extract_db_calls
+  - schema_lookup
+  - generate_database_helper
+  - audit_file
+  - audit_content
+  - compile_check
   - read
   - edit
   - search
@@ -151,6 +151,10 @@ Before handing control back:
 - Helpers import from `@mdakhan.mak/cs-playwright-test-framework/database-utils` and `@mdakhan.mak/cs-playwright-test-framework/reporter`.
 - Never perform git operations.
 
+## When you hit a gap — use interactive-clarification
+
+Load the `interactive-clarification` skill. If a table isn't in the schema reference and `sql_verification` is strict, invoke the 4-option elicitation — offer (1) paste the schema, (2) suggest fuzzy matches from schema doc, (3) skip with `-- SCHEMA REFERENCE NEEDED` marker, (4) abort. Same for ambiguous column mappings, unclear return shapes. Log every elicitation.
+
 ## Skill references
 
-Load `db-helper-findby-id`, `db-helper-findall-matching`, `db-helper-case-tolerant`, `named-query-env-entry` as needed.
+Load `db-helper-findby-id`, `db-helper-findall-matching`, `db-helper-case-tolerant`, `named-query-env-entry`, `interactive-clarification` as needed.

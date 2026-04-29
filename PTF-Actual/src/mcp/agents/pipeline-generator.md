@@ -2,19 +2,20 @@
 name: pipeline-generator
 title: Pipeline Generator
 description: Emits commit-ready TypeScript target files from enriched IR — page objects, step definitions, feature files, scenarios JSON, DB helpers. Audit-and-compile-gated internally. Subagent of cs-playwright.
-model: 'Claude Sonnet 4.5'
+model: 'GPT-5.2-Codex'
 color: green
 user-invocable: false
 tools:
-  - cs-playwright-mcp/generate_page_object
-  - cs-playwright-mcp/generate_step_definitions
-  - cs-playwright-mcp/generate_feature_file
-  - cs-playwright-mcp/generate_test_data_file
-  - cs-playwright-mcp/generate_database_helper
-  - cs-playwright-mcp/schema_lookup
-  - cs-playwright-mcp/audit_file
-  - cs-playwright-mcp/audit_content
-  - cs-playwright-mcp/compile_check
+  - legacy_transform
+  - generate_page_object
+  - generate_step_definitions
+  - generate_feature_file
+  - generate_test_data_file
+  - generate_database_helper
+  - schema_lookup
+  - audit_file
+  - audit_content
+  - compile_check
   - edit
   - read
 ---
@@ -39,6 +40,18 @@ Per feature:
 4. **Scenarios JSON** — already written by data-ingestor (verify match)
 
 ## Generation flow
+
+### 0. Deterministic-first draft (ALWAYS run before any LLM generation)
+
+**Call `legacy_transform`** with `{irJson, projectName, featureName, pipelineVersion}`. The tool emits a complete draft file set (page objects + feature + step definitions + scenarios JSON stub) via template-based transformation — zero hallucination, one pass, reproducible.
+
+The result is your starting point. You then:
+- Review each draft file for gaps / stub markers (`// TODO: bind …`)
+- Refine only the portion requiring LLM judgement (custom waits, indirect element refs, complex step-def bindings)
+- Run `audit_content` on each file — if pass, `edit` to write
+- Run `compile_check` at the end
+
+This is the 80/20 split: the transformer handles 80% mechanical; your LLM refinement handles 20% semantic.
 
 ### 1. Page objects
 
@@ -116,6 +129,66 @@ Every file must pass these 30+ MANDATED rules:
 
 **Cross-cutting:** plain numeric literals (no `5_000`), no app-source path references in generated files, no `console.log`, no bare `expect(...)`, imports only from `@mdakhan.mak/cs-playwright-test-framework/*`.
 
+## Mandatory quoting + framework-wrapper rules (the Generator gets these wrong often)
+
+### xpath string quoting
+
+**ALWAYS wrap xpath values in double quotes.** Inner single-quote string literals (`text()='Foo'`, `contains(., 'bar')`) then need no escaping.
+
+```typescript
+// CORRECT — outer double quotes, inner single quotes
+@CSGetElement({
+    xpath: "//h1[text()='User Detail']",
+    description: 'User Detail heading',
+})
+public userDetailHeader!: CSWebElement;
+
+// CORRECT — outer double quotes, attribute value in single quotes
+@CSGetElement({
+    xpath: "//input[@id='userId']",
+    ...
+})
+
+// WRONG — escape hell
+// xpath: '//h1[text()=\'User Detail\']'    ← NEVER
+// xpath: "//h1[text()=\"User Detail\"]"    ← unnecessary escape
+```
+
+If an xpath has BOTH inner single-quote literals AND inner double-quote attribute values, use `concat()` to split the string rather than escaping:
+
+```typescript
+xpath: "//a[contains(@href,'foo') and text()='Bar']"
+```
+
+### Dialog / alert handling — NEVER use raw Playwright
+
+The framework exposes CS wrappers on `CSBasePage`. Use these, not `page.on('dialog')` or `dialog.accept()`.
+
+```typescript
+// CORRECT — inside a page class method
+await this.acceptNextDialog();              // clicks OK / accepts confirm
+await this.dismissNextDialog();             // clicks Cancel / dismisses
+await this.acceptNextDialogWithText('Yes'); // prompts — supplies text
+
+// WRONG — raw Playwright API, forbidden
+// this.page.on('dialog', async d => await d.accept());
+// await dialog.accept();
+```
+
+These wrappers arm the handler for ONE next dialog, then automatically disarm. Call them RIGHT BEFORE the action that triggers the dialog.
+
+### File upload
+
+Use `uploadFileViaChooser(triggerEl, path)` on CSBasePage, not `page.setInputFiles()` or a file-chooser Promise. Triggers + uploads in one call.
+
+### New tab / window
+
+Use `waitForNewPage(async () => { … })` on CSBasePage. Do NOT use `context.waitForEvent('page')`.
+
+### Frame navigation
+
+Use `switchToFrame(selector)` / `switchToMainFrame()`, not `page.frame(…)`.
+
 ## What you never do
 
 - Never write generic Playwright — always CS Playwright framework patterns
@@ -124,3 +197,7 @@ Every file must pass these 30+ MANDATED rules:
 - Never touch scenarios JSON written by data-ingestor (read-only)
 - Never perform git operations
 - Never reference project/product/customer names in generated file comments
+
+## When you hit a gap — use interactive-clarification
+
+Load the `interactive-clarification` skill. When the IR is incomplete (missing step text, unclear assertion target, no locator for a referenced element, ambiguous helper-class name), invoke the 4-option elicitation. Do not invent values. Log every elicitation.

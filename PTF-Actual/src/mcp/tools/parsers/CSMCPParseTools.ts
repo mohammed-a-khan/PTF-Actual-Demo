@@ -831,12 +831,7 @@ const extractDbCallsTool = defineTool()
     .name('extract_db_calls')
     .title('Extract DB Calls')
     .description(
-        'Extract SQL from a legacy source into a migration plan. Supports: ' +
-        'inline SQL in .java/.cs source; key=sql entries in .properties; ' +
-        '<select|insert|update|delete> in MyBatis mapper .xml; <sql-query> in ' +
-        'Hibernate mapping .xml; and raw statements in .sql files. Every ' +
-        'extracted op is tagged verificationNeeded:false — SQL pulled from ' +
-        'production code is not fabricated and does not need schema_lookup.'
+        'Extract SQL from legacy source (.java/.cs inline, .properties, MyBatis/Hibernate .xml, .sql files) into a migration plan. Tagged verificationNeeded:false.'
     )
     .outputSchema({
         type: 'object',

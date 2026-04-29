@@ -30,6 +30,9 @@ export { testingTools, registerTestingTools } from './tools/testing/CSMCPTesting
 export { auditTools, registerAuditTools } from './tools/audit/CSMCPAuditTools';
 export { pipelineTools, registerPipelineTools } from './tools/pipeline/CSMCPPipelineTools';
 export { parseTools, registerParseTools } from './tools/parsers/CSMCPParseTools';
+export { transformTools, registerTransformTools } from './tools/transform/CSMCPTransformTools';
+export { driftTools, registerDriftTools } from './tools/drift/CSMCPDriftTools';
+export { equivalenceTools, registerEquivalenceTools } from './tools/equivalence/CSMCPEquivalenceTools';
 
 // Export resources and prompts
 export { resourceDefinitions, resourceTemplateDefinitions, registerResources } from './resources/CSMCPResources';
@@ -56,6 +59,9 @@ import { registerTestingTools } from './tools/testing/CSMCPTestingTools';
 import { registerAuditTools } from './tools/audit/CSMCPAuditTools';
 import { registerPipelineTools } from './tools/pipeline/CSMCPPipelineTools';
 import { registerParseTools } from './tools/parsers/CSMCPParseTools';
+import { registerTransformTools } from './tools/transform/CSMCPTransformTools';
+import { registerDriftTools } from './tools/drift/CSMCPDriftTools';
+import { registerEquivalenceTools } from './tools/equivalence/CSMCPEquivalenceTools';
 import { registerResources } from './resources/CSMCPResources';
 import { registerPrompts } from './prompts/CSMCPPrompts';
 
@@ -102,6 +108,9 @@ export function createFullMCPServer(config?: CSMCPServerConfig): CSMCPServer {
     registerAuditTools(registry);
     registerPipelineTools(registry);
     registerParseTools(registry);
+    registerTransformTools(registry);
+    registerDriftTools(registry);
+    registerEquivalenceTools(registry);
 
     // Register resources and prompts
     registerResources(server);
@@ -171,6 +180,9 @@ export function getTotalToolCount(): number {
         require('./tools/audit/CSMCPAuditTools').auditTools,
         require('./tools/pipeline/CSMCPPipelineTools').pipelineTools,
         require('./tools/parsers/CSMCPParseTools').parseTools,
+        require('./tools/transform/CSMCPTransformTools').transformTools,
+        require('./tools/drift/CSMCPDriftTools').driftTools,
+        require('./tools/equivalence/CSMCPEquivalenceTools').equivalenceTools,
     ];
     return allTools.reduce((sum, tools) => sum + tools.length, 0);
 }

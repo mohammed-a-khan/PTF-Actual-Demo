@@ -2,34 +2,35 @@
 name: pipeline-healer
 title: Pipeline Healer
 description: Runs in-scope scenarios, classifies failures, edits the generated TypeScript / Gherkin / JSON files to apply memory-first or LLM-proposed fixes, audit-and-compile-gates every fix before apply, cascade-checks against baseline, retries ≤3 per failure / ≤20 global. Returns SUCCESS or ESCALATED. Subagent of cs-playwright.
-model: 'Claude Sonnet 4.5'
+model: 'Claude Opus 4.6'
 color: red
 user-invocable: false
 tools:
   # Test execution
-  - cs-playwright-mcp/test_list
-  - cs-playwright-mcp/test_run
-  - cs-playwright-mcp/test_debug
+  - test_list
+  - test_run
+  - test_debug
   # Live-DOM reproduction
-  - cs-playwright-mcp/browser_launch
-  - cs-playwright-mcp/browser_navigate
-  - cs-playwright-mcp/browser_snapshot
-  - cs-playwright-mcp/browser_generate_locator
-  - cs-playwright-mcp/browser_console_messages
-  - cs-playwright-mcp/browser_network_requests
-  - cs-playwright-mcp/browser_close
+  - browser_launch
+  - browser_navigate
+  - browser_snapshot
+  - browser_generate_locator
+  - browser_console_messages
+  - browser_network_requests
+  - browser_close
   # Failure analysis
-  - cs-playwright-mcp/classify_failure
-  - cs-playwright-mcp/locator_diff
-  - cs-playwright-mcp/schema_lookup
+  - classify_failure
+  - locator_diff
+  - schema_lookup
   # Gates
-  - cs-playwright-mcp/audit_content
-  - cs-playwright-mcp/audit_file
-  - cs-playwright-mcp/compile_check
-  - cs-playwright-mcp/commit_ready_check
+  - audit_content
+  - audit_file
+  - compile_check
+  - commit_ready_check
+  - verify_semantic_equivalence
   # Memory
-  - cs-playwright-mcp/correction_memory_query
-  - cs-playwright-mcp/correction_memory_record
+  - correction_memory_query
+  - correction_memory_record
   # Code editing (the `edit` alias covers creating new files AND modifying existing ones)
   - read
   - edit
@@ -243,6 +244,10 @@ When returning ESCALATED, write `.agent-runs/escalation-<run-id>-<file>.md` with
 - Classification rationale
 - Recommended human actions (e.g., "verify test credentials", "check DB connectivity", "confirm app data expectations")
 
+## When you hit a gap — use interactive-clarification
+
+Load the `interactive-clarification` skill. When a HIGH-class failure requires a decision the pipeline can't make automatically (credentials rotation, test env down, app regression confirmed, flaky vs real bug), invoke the 4-option elicitation. For option 2 (suggestions), offer the options from the classification reason: "retry with longer timeout", "mark scenario as known-failing", "skip this scenario", "flag app regression and escalate to dev team". Log every elicitation.
+
 ## Skill references
 
-Load on demand: `heal-locator-drift`, `heal-timing-flaky`, `heal-cascade-revert`, `audit-rules`, `correction-memory-format`, `ir-and-session-state`.
+Load on demand: `heal-locator-drift`, `heal-timing-flaky`, `heal-cascade-revert`, `audit-rules`, `correction-memory-format`, `ir-and-session-state`, `interactive-clarification`.

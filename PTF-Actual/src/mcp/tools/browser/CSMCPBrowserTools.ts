@@ -821,7 +821,7 @@ const browserReload = defineTool()
 const browserSnapshot = defineTool()
     .name('browser_snapshot')
     .title('Capture Page Snapshot')
-    .description('Capture accessibility snapshot of the current page. Returns element refs like [ref=e1] for use with interaction tools. This is better than screenshot for understanding page structure.')
+    .description('Capture accessibility snapshot. Returns element refs like [ref=e1] for interaction tools. Better than screenshot for page structure.')
     .openWorld()
     .category('browser')
     .stringParam('filename', 'Optional file to save snapshot output')
@@ -1577,6 +1577,7 @@ const browserWaitForElement = defineTool()
             return createErrorResult(`Wait failed: ${error.message}`);
         }
     })
+    .readOnly()
     .build();
 
 const browserWaitForNavigation = defineTool()
@@ -1610,6 +1611,7 @@ const browserWaitForNavigation = defineTool()
             return createErrorResult(`Wait for navigation failed: ${error.message}`);
         }
     })
+    .readOnly()
     .build();
 
 const browserWaitForLoadState = defineTool()
@@ -1637,6 +1639,7 @@ const browserWaitForLoadState = defineTool()
             return createErrorResult(`Wait for load state failed: ${error.message}`);
         }
     })
+    .readOnly()
     .build();
 
 const browserWaitForSpinners = defineTool()
@@ -1662,6 +1665,7 @@ const browserWaitForSpinners = defineTool()
             return createTextResult('Spinner wait completed');
         }
     })
+    .readOnly()
     .build();
 
 const browserWaitFor = defineTool()
@@ -1710,6 +1714,7 @@ const browserWaitFor = defineTool()
             return createErrorResult(`Wait failed: ${error.message}`);
         }
     })
+    .readOnly()
     .build();
 
 // ============================================================================

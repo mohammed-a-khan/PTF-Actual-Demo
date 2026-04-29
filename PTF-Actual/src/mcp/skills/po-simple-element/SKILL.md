@@ -20,14 +20,14 @@ import { CSReporter } from '@mdakhan.mak/cs-playwright-test-framework/reporter';
 export class OrderConfirmationPage extends CSBasePage {
 
     @CSGetElement({
-        xpath: '//h1[@id="order-title"]',
+        xpath: "//h1[@id='order-title']",
         description: 'Order confirmation page title',
         waitForVisible: true,
     })
     public pageTitle!: CSWebElement;
 
     @CSGetElement({
-        xpath: '//span[@data-testid="order-status"]',
+        xpath: "//span[@data-testid='order-status']",
         description: 'Order status badge',
     })
     public orderStatus!: CSWebElement;
@@ -52,6 +52,7 @@ export class OrderConfirmationPage extends CSBasePage {
 ## Rules
 
 - `xpath` is always the primary locator
+- **Wrap xpath values in double quotes** — `"//h1[text()='Foo']"` — so inner single-quote string literals need no escaping. Never write `'//h1[text()=\\'Foo\\']'`.
 - `description` is required (human-readable, appears in logs)
 - `waitForVisible: true` on elements that must be present when the page is considered loaded
 - `selfHeal` is NOT needed for passive elements — save it for interactive ones
