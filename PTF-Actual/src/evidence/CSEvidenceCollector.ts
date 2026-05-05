@@ -9,6 +9,7 @@ import { CSConfigurationManager } from '../core/CSConfigurationManager';
 // import { CSBrowserManager } from '../browser/CSBrowserManager';
 let CSBrowserManager: any = null;
 import { CSReporter } from '../reporter/CSReporter';
+import { CSScreenshotCapture } from '../diagnostics/CSScreenshotCapture';
 
 export interface Evidence {
     id: string;
@@ -171,23 +172,24 @@ export class CSEvidenceCollector {
     }
     
     private async captureScreenshot(): Promise<Buffer | undefined> {
-        try {
-            const page = this.browserManager.getPage();
-            const screenshot = await page.screenshot({ 
-                fullPage: true,
-                type: 'png'
-            });
-            
-            // Apply data masking if configured
-            if (this.config.getBoolean('EVIDENCE_MASK_SENSITIVE_DATA', true)) {
-                return await this.maskSensitiveData(screenshot);
-            }
-            
-            return screenshot;
-        } catch (error: any) {
-            CSReporter.warn(`Failed to capture screenshot: ${error.message}`);
+        // Issue #1: capture from the truly-active page (handles multi-tab/popup)
+        // Issue #3: route through CSScreenshotCapture for multi-strategy fallback
+        // (window.stop() + 5s/2s/1s escalation) so a mid-navigation page
+        // doesn't hang Playwright's default 30s screenshot timeout.
+        const page = await this.browserManager.resolveActivePage();
+        const result = await CSScreenshotCapture.captureSafe(page, undefined, { fullPage: true, mode: 'buffer' });
+        if (!result.ok) {
+            CSReporter.warn(`Failed to capture evidence screenshot (${result.reason})`);
             return undefined;
         }
+        if (result.mode === 'buffer') {
+            // Apply data masking if configured
+            if (this.config.getBoolean('EVIDENCE_MASK_SENSITIVE_DATA', true)) {
+                return await this.maskSensitiveData(result.buffer);
+            }
+            return result.buffer;
+        }
+        return undefined;
     }
     
     private async captureVideo(): Promise<string | undefined> {
@@ -267,8 +269,9 @@ export class CSEvidenceCollector {
         
         try {
             const sharp = require('sharp');
-            const page = this.browserManager.getPage();
-            
+            // Issue #1: must agree with the page that captureScreenshot just snapshotted
+            const page = await this.browserManager.resolveActivePage();
+
             // Find sensitive elements
             const sensitiveSelectors = [
                 'input[type="password"]',

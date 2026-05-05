@@ -25,6 +25,7 @@ type TestScenario = any;
 type TestStep = any;
 import { CSStepValidator } from './CSStepValidator';
 import { CSPageDiagnostics } from '../diagnostics/CSPageDiagnostics';
+import { CSScreenshotCapture } from '../diagnostics/CSScreenshotCapture';
 // Lazy load ADO integration to improve startup performance
 // import { CSADOIntegration } from '../ado/CSADOIntegration';
 let CSADOIntegration: any = null;
@@ -2220,7 +2221,9 @@ export class CSBDDRunner {
 
             if (shouldCaptureScreenshot && this.browserManager) {
                 try {
-                    const page = this.browserManager.getPage();
+                    // Issue #1: resolve the truly-active page (handles popups/new tabs
+                    // even when the test didn't use waitForNewPage/waitForPopup)
+                    const page = await this.browserManager.resolveActivePage();
 
                     // Check if page is still valid and not closed
                     if (!page || page.isClosed()) {
@@ -2239,31 +2242,40 @@ export class CSBDDRunner {
                         const stepName = `${step.keyword}-${stepText}`.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 50);
                         const filename = `step-failure-${stepName}-${timestamp}.png`;
                         const screenshotPath = `${screenshotDir}/${filename}`;
-                        await page.screenshot({
-                            path: screenshotPath,
-                            fullPage: false
-                        });
-                        CSReporter.info(`Step failure screenshot: ${screenshotPath}`);
-                        // Store the full path for artifact collection
-                        this.scenarioContext.addScreenshot(screenshotPath, 'step-failure');
+                        // Issue #3: route through CSScreenshotCapture for multi-strategy fallback
+                        // (window.stop() + 5s/2s/1s escalation) so a mid-navigation page
+                        // doesn't hang Playwright's default 30s screenshot timeout.
+                        const result = await CSScreenshotCapture.captureSafe(page, screenshotPath, { fullPage: false });
+                        if (result.ok && result.mode === 'file') {
+                            CSReporter.info(`Step failure screenshot: ${result.path}`);
+                            // Store the full path for artifact collection
+                            this.scenarioContext.addScreenshot(result.path, 'step-failure');
 
-                        // Attach screenshot to current step using filename only for reports
-                        this.scenarioContext.setCurrentStepScreenshot(filename);
+                            // Attach screenshot to current step using filename only for reports
+                            this.scenarioContext.setCurrentStepScreenshot(filename);
 
-                        // Also add to context for the report (if method exists)
-                        if (typeof (this.context as any).addArtifact === 'function') {
-                            (this.context as any).addArtifact('screenshot', screenshotPath, `Step Failure: ${step.keyword} ${stepText}`);
+                            // Also add to context for the report (if method exists)
+                            if (typeof (this.context as any).addArtifact === 'function') {
+                                (this.context as any).addArtifact('screenshot', result.path, `Step Failure: ${step.keyword} ${stepText}`);
+                            }
+                        } else if (!result.ok) {
+                            CSReporter.warn(`Step failure screenshot capture failed (${result.reason}); see report for failure context only.`);
                         }
                     }
                 } catch (screenshotError) {
-                    CSReporter.debug(`Failed to capture step failure screenshot: ${screenshotError}`);
+                    // Defense-in-depth: captureSafe is designed not to throw, but keep this
+                    // catch as a safety net. Upgraded from debug -> warn so users can see if
+                    // an unexpected error path bypasses the helper's internal handling.
+                    CSReporter.warn(`Failed to capture step failure screenshot: ${screenshotError}`);
                 }
             }
 
             // Collect diagnostic data using Playwright 1.56+ APIs (console logs, page errors, network requests)
             if (this.browserManager) {
                 try {
-                    const page = this.browserManager.getPage();
+                    // Issue #1: same active-page resolution as the screenshot path so
+                    // diagnostics and screenshot reflect the same page
+                    const page = await this.browserManager.resolveActivePage();
                     if (page && !page.isClosed()) {
                         const diagnostics = await CSPageDiagnostics.collectOnFailure(page);
                         if (diagnostics) {
@@ -2428,9 +2440,18 @@ export class CSBDDRunner {
             fs.mkdirSync(dir, { recursive: true });
         }
         
-        await this.context.page.screenshot({ path: filepath, fullPage: true });
-        this.scenarioContext.addScreenshot(filepath, `${type} screenshot`);
-        CSReporter.info(`Screenshot saved: ${filepath}`);
+        // TODO Issue#1: route this through CSBrowserManager.resolveActivePage when
+        // takeScreenshot is refactored to use browserManager (currently reads context.page directly)
+        // Issue #3: route through captureSafe for multi-strategy fallback. Note this still
+        // uses this.context.page rather than browserManager.resolveActivePage; the existing
+        // TODO Issue#1 comment above documents the future refactor.
+        const result = await CSScreenshotCapture.captureSafe(this.context.page, filepath, { fullPage: true });
+        if (result.ok && result.mode === 'file') {
+            this.scenarioContext.addScreenshot(filepath, `${type} screenshot`);
+            CSReporter.info(`Screenshot saved: ${result.path}`);
+        } else if (!result.ok) {
+            CSReporter.warn(`Screenshot capture failed (${result.reason})`);
+        }
     }
     
     private hasLegacyFailures(): boolean {
@@ -2889,9 +2910,10 @@ export class CSBDDRunner {
                     }
                     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
                     const screenshotPath = `${screenshotDir}/failure-${timestamp}.png`;
-                    await page.screenshot({ 
-                        path: screenshotPath, 
-                        fullPage: true 
+                    // Issue#3 deferred - refactor when this code is re-enabled
+                    await page.screenshot({
+                        path: screenshotPath,
+                        fullPage: true
                     });
                     CSReporter.info(`Screenshot captured: ${screenshotPath}`);
                     this.scenarioContext.addScreenshot(screenshotPath, 'failure');
@@ -3052,7 +3074,8 @@ export class CSBDDRunner {
     private async captureStepScreenshot(stepName: string): Promise<void> {
         try {
             if (!this.browserManager) return;
-            const page = this.browserManager.getPage();
+            // Issue #1: capture from the truly-active page (handles multi-tab/popup)
+            const page = await this.browserManager.resolveActivePage();
             if (!page) return;
 
             const dirs = this.resultsManager.getDirectories();
@@ -3061,21 +3084,23 @@ export class CSBDDRunner {
             const filename = `step_${sanitizedStepName}_${timestamp}.png`;
             const filepath = path.join(dirs.screenshots, filename);
 
-            await page.screenshot({
-                path: filepath,
-                fullPage: false  // Step screenshots don't need full page
-            });
+            // Issue #3: route through captureSafe for multi-strategy fallback.
+            // Step-success screenshots are non-critical, so debug-level on skip.
+            const result = await CSScreenshotCapture.captureSafe(page, filepath, { fullPage: false });
+            if (result.ok && result.mode === 'file') {
+                // Add to scenario context for reporting - use basename like in backup framework
+                const currentStep = this.scenarioContext.getCurrentStep();
+                if (currentStep) {
+                    currentStep.screenshot = filename; // Store just filename, not full path
+                }
 
-            // Add to scenario context for reporting - use basename like in backup framework
-            const currentStep = this.scenarioContext.getCurrentStep();
-            if (currentStep) {
-                currentStep.screenshot = filename; // Store just filename, not full path
+                // Also add to scenario context screenshots collection
+                this.scenarioContext.addScreenshot(filename, 'step-success');  // Store just filename for reports
+
+                CSReporter.debug(`Step screenshot captured: ${filename}`);
+            } else if (!result.ok) {
+                CSReporter.debug(`Step screenshot skipped (${result.reason})`);
             }
-
-            // Also add to scenario context screenshots collection
-            this.scenarioContext.addScreenshot(filename, 'step-success');  // Store just filename for reports
-
-            CSReporter.debug(`Step screenshot captured: ${filename}`);
         } catch (error) {
             CSReporter.debug(`Failed to capture step screenshot: ${error}`);
         }
@@ -3087,7 +3112,8 @@ export class CSBDDRunner {
     private async captureScenarioScreenshot(status: 'success' | 'failure'): Promise<void> {
         try {
             if (!this.browserManager) return;
-            const page = this.browserManager.getPage();
+            // Issue #1: capture from the truly-active page (handles multi-tab/popup)
+            const page = await this.browserManager.resolveActivePage();
             if (!page) return;
 
             const dirs = this.resultsManager.getDirectories();
@@ -3097,13 +3123,16 @@ export class CSBDDRunner {
             const filename = `scenario_${sanitizedScenario}_${status}_${timestamp}.png`;
             const filepath = path.join(dirs.screenshots, filename);
 
-            await page.screenshot({ 
-                path: filepath, 
-                fullPage: true  // Scenario screenshots should capture full page
-            });
-
-            this.scenarioContext.addScreenshot(filepath, `${status} screenshot`);
-            CSReporter.info(`Scenario screenshot captured: ${filename}`);
+            // Issue #3: route through captureSafe for multi-strategy fallback.
+            // Scenario screenshots are non-critical (success/failure both flow here),
+            // so debug-level on skip to avoid spamming warn output on transient issues.
+            const result = await CSScreenshotCapture.captureSafe(page, filepath, { fullPage: true });
+            if (result.ok && result.mode === 'file') {
+                this.scenarioContext.addScreenshot(result.path, `${status} screenshot`);
+                CSReporter.info(`Scenario screenshot captured: ${filename}`);
+            } else if (!result.ok) {
+                CSReporter.debug(`Scenario screenshot skipped (${result.reason})`);
+            }
         } catch (error) {
             CSReporter.debug(`Failed to capture scenario screenshot: ${error}`);
         }

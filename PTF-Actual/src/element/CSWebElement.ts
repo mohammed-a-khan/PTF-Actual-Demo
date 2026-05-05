@@ -11,6 +11,7 @@ let CSBrowserManager: any = null;
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSSelfHealingEngine } from '../self-healing/CSSelfHealingEngine';
+import { CSFrameResolver, FrameInput } from './CSFrameResolver';
 
 // Lazy load smart wait engine to avoid circular dependencies
 let CSSmartWaitEngine: any = null;
@@ -344,6 +345,35 @@ export interface ElementOptions {
 }
 
 /**
+ * Options bag accepted by every {@link CSElementFactory} `createX` method
+ * (Issue #2 — options-bag overload). Lets callers configure description,
+ * page, frame context, alternative locators, timeout, self-healing and
+ * retry count without the legacy positional-argument awkwardness.
+ *
+ * Existing positional-form calls continue to work — the runtime
+ * implementation discriminates by inspecting argument shapes.
+ */
+export interface FactoryOptions {
+    /** Human-readable description for logging / reporting. */
+    description?: string;
+    /** Optional Playwright Page instance. Defaults to `CSBrowserManager.getInstance().getPage()`. */
+    page?: Page;
+    /**
+     * Frame context for elements inside iframes. Single value or
+     * outer-to-inner array for nested frames. See {@link ElementOptions.frame}.
+     */
+    frame?: string | FrameSelector | Array<string | FrameSelector>;
+    /** Fallback locators tried in order if the primary fails. */
+    alternativeLocators?: string[];
+    /** Per-element action timeout in milliseconds. */
+    timeout?: number;
+    /** Enable AI-powered self-healing for missing elements. */
+    selfHeal?: boolean;
+    /** Number of retries when an action fails. */
+    retryCount?: number;
+}
+
+/**
  * CSWebElement - Complete wrapper for ALL Playwright Locator API methods
  * Implements all 59+ Playwright methods with 200+ convenience methods
  */
@@ -568,88 +598,26 @@ export class CSWebElement {
      * Get the locator context - either page or a chained FrameLocator if frame
      * is specified. Accepts either a single frame or an outer-to-inner array
      * for nested iframes; each level is resolved independently.
+     *
+     * Delegates to {@link CSFrameResolver} for selector resolution so the
+     * logic stays in lockstep with {@link CSFramePage}.
      */
     private getLocatorContext(): Page | FrameLocator {
         if (!this.options.frame) {
             return this.page;
         }
 
-        const chain: Array<string | FrameSelector> = Array.isArray(this.options.frame)
-            ? this.options.frame
-            : [this.options.frame];
-
+        const resolved = CSFrameResolver.resolveChain(this.options.frame);
         let ctx: any = this.page;
-        const resolved: string[] = [];
-        for (const entry of chain) {
-            const sel = this.resolveFrameSelector(entry);
-            resolved.push(sel);
+        for (const sel of resolved) {
             ctx = ctx.frameLocator(sel);
         }
         CSReporter.debug(
-            chain.length === 1
+            resolved.length === 1
                 ? `Using frame context: ${resolved[0]}`
-                : `Using nested frame context (${chain.length} levels): ${resolved.join(' >> ')}`
+                : `Using nested frame context (${resolved.length} levels): ${resolved.join(' >> ')}`
         );
         return ctx;
-    }
-
-    /**
-     * Resolve frame selector from string or FrameSelector object
-     * Supports auto-detection of xpath vs css for string input
-     */
-    private resolveFrameSelector(frame: string | FrameSelector): string {
-        // String input - auto-detect type
-        if (typeof frame === 'string') {
-            return this.autoDetectFrameSelector(frame);
-        }
-
-        // Object input - explicit type
-        if (frame.xpath) {
-            return `xpath=${frame.xpath}`;
-        }
-        if (frame.css) {
-            return frame.css;
-        }
-        if (frame.id) {
-            return `#${frame.id}`;
-        }
-        if (frame.name) {
-            return `iframe[name="${frame.name}"]`;
-        }
-        if (frame.title) {
-            return `iframe[title="${frame.title}"]`;
-        }
-        if (frame.testId) {
-            return `[data-testid="${frame.testId}"]`;
-        }
-        if (frame.src) {
-            return `iframe[src*="${frame.src}"]`;
-        }
-        if (frame.index !== undefined) {
-            return `iframe >> nth=${frame.index}`;
-        }
-
-        throw new Error('Invalid frame selector: must specify xpath, css, id, name, title, testId, src, or index');
-    }
-
-    /**
-     * Auto-detect frame selector type from string
-     */
-    private autoDetectFrameSelector(selector: string): string {
-        // XPath detection
-        if (selector.startsWith('//') || selector.startsWith('/')) {
-            return `xpath=${selector}`;
-        }
-        // Already has xpath= or css= prefix
-        if (selector.startsWith('xpath=') || selector.startsWith('css=')) {
-            return selector;
-        }
-        // CSS ID selector
-        if (selector.startsWith('#')) {
-            return selector;
-        }
-        // Assume CSS for everything else
-        return selector;
     }
 
     /**
@@ -2544,98 +2512,177 @@ export class CSElementFactory {
     // ============================================
     // DYNAMIC ELEMENT CREATION METHODS
     // ============================================
+    //
+    // Each `createBy*` method has TWO overloads:
+    //   1. Legacy positional form: (selector, description?, page?) — preserved
+    //      for backward compatibility.
+    //   2. Options-bag form: (selector, options) — the new path forward.
+    //      The options bag carries `description`, `page`, `frame`,
+    //      `alternativeLocators`, `timeout`, `selfHeal`, `retryCount` and
+    //      gives users (and the new CSBasePage instance helpers) a single
+    //      uniform place to forward all element configuration.
+    //
+    // The runtime implementation discriminates by inspecting whether the
+    // second argument is an object — keeping a single body per factory.
+    //
+    // CRITICAL: `frame: opts.frame` MUST be set on every constructed
+    // CSWebElement so frame context propagates through the factory.
 
     /**
-     * Create a CSWebElement dynamically with CSS selector
-     * @param selector CSS selector string
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Common options-bag shape accepted by every factory method.
      */
-    public static createByCSS(selector: string, description?: string, page?: Page): CSWebElement {
+    public static readonly _factoryOptionKeys = [
+        'description', 'page', 'frame', 'alternativeLocators',
+        'timeout', 'selfHeal', 'retryCount'
+    ] as const;
+
+    /**
+     * Normalise `description?` + `page?` (legacy positional form) or an
+     * options bag into a uniform options object. Used by every overloaded
+     * factory below.
+     */
+    private static _normaliseFactoryArgs(
+        descOrOptions?: string | FactoryOptions,
+        page?: Page
+    ): FactoryOptions {
+        if (typeof descOrOptions === 'object' && descOrOptions !== null) {
+            return descOrOptions;
+        }
+        return {
+            description: descOrOptions as string | undefined,
+            page
+        };
+    }
+
+    /**
+     * Create a CSWebElement dynamically with CSS selector.
+     */
+    public static createByCSS(selector: string, description?: string, page?: Page): CSWebElement;
+    public static createByCSS(selector: string, options: FactoryOptions): CSWebElement;
+    public static createByCSS(selector: string, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         return new CSWebElement({
             css: selector,
-            description: description || `Dynamic element: ${selector}`
-        }, page);
+            description: opts.description || `Dynamic element: ${selector}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement dynamically with XPath
-     * @param xpath XPath selector string
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Create a CSWebElement dynamically with XPath.
      */
-    public static createByXPath(xpath: string, description?: string, page?: Page): CSWebElement {
+    public static createByXPath(xpath: string, description?: string, page?: Page): CSWebElement;
+    public static createByXPath(xpath: string, options: FactoryOptions): CSWebElement;
+    public static createByXPath(xpath: string, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         return new CSWebElement({
             xpath: xpath,
-            description: description || `Dynamic XPath element`
-        }, page);
+            description: opts.description || `Dynamic XPath element`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement dynamically with text
-     * @param text Text to find
-     * @param exact Whether to match exactly
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Create a CSWebElement dynamically with text. `exact` stays positional
+     * (back-compat); the options bag is the 3rd argument.
      */
-    public static createByText(text: string, exact: boolean = false, description?: string, page?: Page): CSWebElement {
-        const selector = exact ? `text="${text}"` : `text=${text}`;
+    public static createByText(text: string, exact?: boolean, description?: string, page?: Page): CSWebElement;
+    public static createByText(text: string, exact: boolean | undefined, options: FactoryOptions): CSWebElement;
+    public static createByText(text: string, exact: boolean = false, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
+        // Note: legacy code computes `selector` from `exact` but never uses
+        // it (text option is set instead). Preserved for byte-identical
+        // behavior — the var is intentionally unused.
+        void (exact ? `text="${text}"` : `text=${text}`);
         return new CSWebElement({
             text: text,
-            description: description || `Element with text: ${text}`
-        }, page);
+            description: opts.description || `Element with text: ${text}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement dynamically with ID
-     * @param id Element ID
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Create a CSWebElement dynamically with ID.
      */
-    public static createById(id: string, description?: string, page?: Page): CSWebElement {
+    public static createById(id: string, description?: string, page?: Page): CSWebElement;
+    public static createById(id: string, options: FactoryOptions): CSWebElement;
+    public static createById(id: string, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         return new CSWebElement({
             id: id,
-            description: description || `Element with ID: ${id}`
-        }, page);
+            description: opts.description || `Element with ID: ${id}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement dynamically with name attribute
-     * @param name Element name attribute
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Create a CSWebElement dynamically with name attribute.
      */
-    public static createByName(name: string, description?: string, page?: Page): CSWebElement {
+    public static createByName(name: string, description?: string, page?: Page): CSWebElement;
+    public static createByName(name: string, options: FactoryOptions): CSWebElement;
+    public static createByName(name: string, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         return new CSWebElement({
             name: name,
-            description: description || `Element with name: ${name}`
-        }, page);
+            description: opts.description || `Element with name: ${name}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement dynamically with role
-     * @param role ARIA role
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Create a CSWebElement dynamically with role.
      */
-    public static createByRole(role: string, description?: string, page?: Page): CSWebElement {
+    public static createByRole(role: string, description?: string, page?: Page): CSWebElement;
+    public static createByRole(role: string, options: FactoryOptions): CSWebElement;
+    public static createByRole(role: string, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         return new CSWebElement({
             role: role,
-            description: description || `Element with role: ${role}`
-        }, page);
+            description: opts.description || `Element with role: ${role}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement dynamically with test ID
-     * @param testId Test ID attribute value
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Create a CSWebElement dynamically with test ID.
      */
-    public static createByTestId(testId: string, description?: string, page?: Page): CSWebElement {
+    public static createByTestId(testId: string, description?: string, page?: Page): CSWebElement;
+    public static createByTestId(testId: string, options: FactoryOptions): CSWebElement;
+    public static createByTestId(testId: string, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         return new CSWebElement({
             testId: testId,
-            description: description || `Element with testId: ${testId}`
-        }, page);
+            description: opts.description || `Element with testId: ${testId}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
@@ -2734,7 +2781,10 @@ export class CSElementFactory {
      * @example CSWebElement.createWithTemplate('button[data-id="{id}"]', {id: '123'}) // CSS
      * @example CSWebElement.createWithTemplate('//button[@data-id="{id}"]', {id: '123'}) // XPath
      */
-    public static createWithTemplate(template: string, values: Record<string, string>, description?: string, page?: Page): CSWebElement {
+    public static createWithTemplate(template: string, values: Record<string, string>, description?: string, page?: Page): CSWebElement;
+    public static createWithTemplate(template: string, values: Record<string, string>, options: FactoryOptions): CSWebElement;
+    public static createWithTemplate(template: string, values: Record<string, string>, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         let selector = template;
         for (const [key, value] of Object.entries(values)) {
             selector = selector.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
@@ -2747,8 +2797,13 @@ export class CSElementFactory {
 
         return new CSWebElement({
             ...detected.option,
-            description: description || `Dynamic templated element (${detected.type}): ${selector}`
-        }, page);
+            description: opts.description || `Dynamic templated element (${detected.type}): ${selector}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
@@ -2761,11 +2816,14 @@ export class CSElementFactory {
      * @example createMultiple('div.item') // CSS
      * @example createMultiple('//div[@class="item"]') // XPath
      */
-    public static async createMultiple(selector: string, description?: string, page?: Page): Promise<CSWebElement[]> {
+    public static async createMultiple(selector: string, description?: string, page?: Page): Promise<CSWebElement[]>;
+    public static async createMultiple(selector: string, options: FactoryOptions): Promise<CSWebElement[]>;
+    public static async createMultiple(selector: string, descOrOptions?: string | FactoryOptions, page?: Page): Promise<CSWebElement[]> {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         if (!CSBrowserManager) {
             CSBrowserManager = require('../browser/CSBrowserManager').CSBrowserManager;
         }
-        const pageInstance = page || CSBrowserManager.getInstance().getPage();
+        const pageInstance = opts.page || CSBrowserManager.getInstance().getPage();
 
         // Detect selector type
         const detected = this.detectSelectorType(selector);
@@ -2777,18 +2835,29 @@ export class CSElementFactory {
             locatorString = `xpath=${detected.value}`;
         }
 
-        const count = await pageInstance.locator(locatorString).count();
+        // If a frame context is supplied, scope the count + per-element
+        // locators to the resolved FrameLocator chain.
+        const queryRoot: any = opts.frame
+            ? CSFrameResolver.buildContext(pageInstance, opts.frame)
+            : pageInstance;
+
+        const count = await queryRoot.locator(locatorString).count();
         const elements: CSWebElement[] = [];
 
         // Create elements using native Playwright nth() for proper indexing
         for (let i = 0; i < count; i++) {
             const element = new CSWebElement({
                 ...detected.option,
-                description: `${description || 'Dynamic element'} [${i + 1}]`
-            }, page);
+                description: `${opts.description || 'Dynamic element'} [${i + 1}]`,
+                frame: opts.frame,
+                alternativeLocators: opts.alternativeLocators,
+                timeout: opts.timeout,
+                selfHeal: opts.selfHeal,
+                retryCount: opts.retryCount
+            }, opts.page);
 
             // Set the locator to use nth() instead of CSS pseudo-selectors
-            (element as any).locator = pageInstance.locator(locatorString).nth(i);
+            (element as any).locator = queryRoot.locator(locatorString).nth(i);
 
             elements.push(element);
         }
@@ -2805,56 +2874,83 @@ export class CSElementFactory {
      * @param description Optional description for logging
      * @param page Optional page instance
      */
-    public static createTableCell(tableSelector: string, row: number, column: number, description?: string, page?: Page): CSWebElement {
+    public static createTableCell(tableSelector: string, row: number, column: number, description?: string, page?: Page): CSWebElement;
+    public static createTableCell(tableSelector: string, row: number, column: number, options: FactoryOptions): CSWebElement;
+    public static createTableCell(tableSelector: string, row: number, column: number, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         const cellSelector = `${tableSelector} tbody tr:nth-child(${row}) td:nth-child(${column})`;
         return new CSWebElement({
             css: cellSelector,
-            description: description || `Table cell [${row}, ${column}]`
-        }, page);
+            description: opts.description || `Table cell [${row}, ${column}]`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement for a form field by label
-     * @param labelText Label text
-     * @param fieldType Input type (input, select, textarea)
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Create a CSWebElement for a form field by label.
+     * `fieldType` stays positional for back-compat.
      */
-    public static createByLabel(labelText: string, fieldType: string = 'input', description?: string, page?: Page): CSWebElement {
+    public static createByLabel(labelText: string, fieldType?: string, description?: string, page?: Page): CSWebElement;
+    public static createByLabel(labelText: string, fieldType: string | undefined, options: FactoryOptions): CSWebElement;
+    public static createByLabel(labelText: string, fieldType: string = 'input', descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         const selector = `label:has-text("${labelText}") ~ ${fieldType}, label:has-text("${labelText}") ${fieldType}`;
         return new CSWebElement({
             css: selector,
-            description: description || `${fieldType} field with label: ${labelText}`
-        }, page);
+            description: opts.description || `${fieldType} field with label: ${labelText}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement chain for nested elements
-     * @param selectors Array of selectors to chain
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Create a CSWebElement chain for nested elements.
      */
-    public static createChained(selectors: string[], description?: string, page?: Page): CSWebElement {
+    public static createChained(selectors: string[], description?: string, page?: Page): CSWebElement;
+    public static createChained(selectors: string[], options: FactoryOptions): CSWebElement;
+    public static createChained(selectors: string[], descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         const chainedSelector = selectors.join(' ');
         return new CSWebElement({
             css: chainedSelector,
-            description: description || `Chained element: ${chainedSelector}`
-        }, page);
+            description: opts.description || `Chained element: ${chainedSelector}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement with filters
-     * @param baseSelector Base CSS selector
-     * @param filters Filter options (hasText, hasNotText, etc.)
-     * @param description Optional description for logging
-     * @param page Optional page instance
+     * Create a CSWebElement with filters. `filters` stays positional.
      */
     public static createWithFilter(baseSelector: string, filters: {
         hasText?: string;
         hasNotText?: string;
         visible?: boolean;
         enabled?: boolean;
-    }, description?: string, page?: Page): CSWebElement {
+    }, description?: string, page?: Page): CSWebElement;
+    public static createWithFilter(baseSelector: string, filters: {
+        hasText?: string;
+        hasNotText?: string;
+        visible?: boolean;
+        enabled?: boolean;
+    }, options: FactoryOptions): CSWebElement;
+    public static createWithFilter(baseSelector: string, filters: {
+        hasText?: string;
+        hasNotText?: string;
+        visible?: boolean;
+        enabled?: boolean;
+    }, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         let selector = baseSelector;
 
         if (filters.hasText) {
@@ -2872,25 +2968,26 @@ export class CSElementFactory {
 
         return new CSWebElement({
             css: selector,
-            description: description || `Filtered element: ${selector}`
-        }, page);
+            description: opts.description || `Filtered element: ${selector}`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
     }
 
     /**
-     * Create a CSWebElement for nth match of a selector
-     * Supports both CSS and XPath selectors with automatic type detection
-     * @param selector Selector (CSS or XPath)
-     * @param index Index of the element (0-based)
-     * @param description Optional description for logging
-     * @param page Optional page instance
-     * @example createNth('button.submit', 2) // CSS - 3rd submit button
-     * @example createNth('//button[@type="submit"]', 1) // XPath - 2nd submit button
+     * Create a CSWebElement for nth match of a selector. `index` stays positional.
      */
-    public static createNth(selector: string, index: number, description?: string, page?: Page): CSWebElement {
+    public static createNth(selector: string, index: number, description?: string, page?: Page): CSWebElement;
+    public static createNth(selector: string, index: number, options: FactoryOptions): CSWebElement;
+    public static createNth(selector: string, index: number, descOrOptions?: string | FactoryOptions, page?: Page): CSWebElement {
+        const opts = CSElementFactory._normaliseFactoryArgs(descOrOptions, page);
         if (!CSBrowserManager) {
             CSBrowserManager = require('../browser/CSBrowserManager').CSBrowserManager;
         }
-        const pageInstance = page || CSBrowserManager.getInstance().getPage();
+        const pageInstance = opts.page || CSBrowserManager.getInstance().getPage();
 
         // Detect selector type
         const detected = this.detectSelectorType(selector);
@@ -2902,14 +2999,24 @@ export class CSElementFactory {
             locatorString = `xpath=${detected.value}`;
         }
 
+        // Scope to frame context if supplied.
+        const queryRoot: any = opts.frame
+            ? CSFrameResolver.buildContext(pageInstance, opts.frame)
+            : pageInstance;
+
         // Create element with nth() locator
         const element = new CSWebElement({
             ...detected.option,
-            description: description || `${selector} [index: ${index}]`
-        }, page);
+            description: opts.description || `${selector} [index: ${index}]`,
+            frame: opts.frame,
+            alternativeLocators: opts.alternativeLocators,
+            timeout: opts.timeout,
+            selfHeal: opts.selfHeal,
+            retryCount: opts.retryCount
+        }, opts.page);
 
         // Set the locator to use nth() instead of relying on CSS pseudo-selectors
-        (element as any).locator = pageInstance.locator(locatorString).nth(index);
+        (element as any).locator = queryRoot.locator(locatorString).nth(index);
 
         return element;
     }

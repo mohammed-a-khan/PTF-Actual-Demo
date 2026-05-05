@@ -1821,6 +1821,93 @@ export class CSBrowserManager {
         return this.page;
     }
 
+    /**
+     * Resolve the truly-active page by checking which page reports
+     * `document.visibilityState === 'visible'`.
+     *
+     * More reliable than {@link getPage} in multi-tab/popup scenarios where the
+     * test did NOT use {@link CSBasePage.waitForNewPage} or
+     * {@link CSBasePage.waitForPopup} to update the tracked page reference.
+     *
+     * Strategy:
+     * 1. If only one page exists, return it (no ambiguity).
+     * 2. Otherwise probe every page in the context for visibilityState=='visible'
+     *    in parallel, with a short per-page timeout to avoid hangs on a stuck page.
+     * 3. If exactly one page reports visible, return it.
+     * 4. If multiple pages report visible (rare with modern browsers but possible
+     *    on multi-monitor setups), prefer the framework-tracked page if it is among
+     *    them; otherwise return the most recently opened visible page.
+     * 5. If no page reports visible (timeouts or errors), fall back to the
+     *    framework-tracked page.
+     *
+     * Parallel-safe: this method only touches `this.context`/`this.page` (already
+     * per-worker singleton state) and uses page-scoped `page.evaluate()` calls.
+     * Adds zero shared mutable state.
+     *
+     * @param perPageTimeoutMs - Per-page visibilityState check timeout (default: 100ms)
+     * @returns The page that should be used for screenshot/diagnostic capture.
+     */
+    public async resolveActivePage(perPageTimeoutMs: number = 100): Promise<any> {
+        if (!this.context || !this.page) {
+            return this.page;
+        }
+
+        let pages: any[] = [];
+        try {
+            pages = this.context.pages();
+        } catch {
+            return this.page;
+        }
+
+        if (pages.length <= 1) {
+            return this.page;
+        }
+
+        const visibilityResults = await Promise.all(
+            pages.map(async (p: any) => {
+                try {
+                    if (p.isClosed && p.isClosed()) {
+                        return { page: p, visible: false };
+                    }
+                    const visiblePromise = p.evaluate(() => document.visibilityState === 'visible');
+                    const timeoutPromise = new Promise<boolean>((resolve) =>
+                        setTimeout(() => resolve(false), perPageTimeoutMs)
+                    );
+                    const visible = await Promise.race([visiblePromise, timeoutPromise]);
+                    return { page: p, visible };
+                } catch {
+                    return { page: p, visible: false };
+                }
+            })
+        );
+
+        const visiblePages = visibilityResults.filter(r => r.visible).map(r => r.page);
+
+        if (visiblePages.length === 0) {
+            CSReporter.debug(
+                `[BrowserManager] resolveActivePage: no page reported visible among ${pages.length}; falling back to tracked page`
+            );
+            return this.page;
+        }
+
+        if (visiblePages.length === 1) {
+            const found = visiblePages[0];
+            if (found !== this.page) {
+                try {
+                    CSReporter.debug(
+                        `[BrowserManager] resolveActivePage: detected active page differs from tracked (${found.url()} vs ${this.page.url()})`
+                    );
+                } catch { /* url() may fail on torn-down pages */ }
+            }
+            return found;
+        }
+
+        if (visiblePages.includes(this.page)) {
+            return this.page;
+        }
+        return visiblePages[visiblePages.length - 1];
+    }
+
     // =========================================================================
     // MULTI-TAB/WINDOW MANAGEMENT METHODS
     // =========================================================================

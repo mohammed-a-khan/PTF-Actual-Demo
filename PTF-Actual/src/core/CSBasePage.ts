@@ -5,7 +5,8 @@ type Page = any;
 let CSBrowserManager: any = null;
 import { CSConfigurationManager } from './CSConfigurationManager';
 import { CSReporter } from '../reporter/CSReporter';
-import { CSWebElement } from '../element/CSWebElement';
+import { CSWebElement, CSElementFactory, FactoryOptions } from '../element/CSWebElement';
+import { FrameInput } from '../element/CSFrameResolver';
 import { CSCrossDomainNavigationHandler } from '../navigation/CSCrossDomainNavigationHandler';
 import { CSSmartPoller, PollResult } from '../wait/CSSmartPoller';
 
@@ -1270,6 +1271,217 @@ export abstract class CSBasePage {
      */
     public async getAllFrames(): Promise<any[]> {
         return this.page.frames();
+    }
+
+    // =========================================================================
+    // DYNAMIC ELEMENT HELPERS (Issue #2)
+    // -------------------------------------------------------------------------
+    // Convenience instance methods that delegate to CSElementFactory and
+    // auto-inherit `this.frame` when present (set on CSFramePage subclasses,
+    // undefined on plain CSBasePage). This mirrors the behaviour of
+    // @CSGetElement (see CSPageFactory.ts:217-220) so users no longer have
+    // to thread `frame: this.frame` through every dynamic-element call.
+    //
+    // The `(this as any).frame` cast is intentional: `frame` is declared on
+    // CSFramePage, not CSBasePage. Casting picks up the value when present
+    // and yields `undefined` otherwise — without forcing every existing
+    // CSBasePage subclass to declare it.
+    //
+    // Parallel safety: every helper reads `this.page` (instance-scoped) and
+    // `(this as any).frame` (instance-scoped). No shared mutable state.
+    // CSElementFactory itself is parallel-safe (see Issue #2 design doc).
+    // =========================================================================
+
+    /**
+     * Resolve the effective frame context for a dynamic-element helper:
+     * caller override (`opts.frame`) wins, else `this.frame` (from
+     * CSFramePage), else `undefined`.
+     */
+    private _resolveHelperFrame(opts?: { frame?: FrameInput }): FrameInput | undefined {
+        if (opts && opts.frame !== undefined) {
+            return opts.frame;
+        }
+        return (this as any).frame as FrameInput | undefined;
+    }
+
+    /**
+     * Build the FactoryOptions object for a helper call, defaulting `page`
+     * to `this.page` and `frame` to `this.frame`.
+     */
+    private _helperOptions(
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): FactoryOptions {
+        return {
+            description,
+            page: this.page,
+            frame: this._resolveHelperFrame(opts),
+            alternativeLocators: opts?.alternativeLocators,
+            timeout: opts?.timeout,
+            selfHeal: opts?.selfHeal,
+            retryCount: opts?.retryCount
+        };
+    }
+
+    /**
+     * Build a CSWebElement from a templated selector with runtime
+     * substitution. Frame context is auto-inherited from `this.frame` when
+     * called on a CSFramePage subclass.
+     *
+     * @example
+     *   await this.element(
+     *     '//select[contains(@id, "tbl[{idx}]:Field")]',
+     *     { idx: 3 },
+     *     'Custom field row 3'
+     *   ).selectOption({ label: 'X' });
+     */
+    protected element(
+        template: string,
+        values?: Record<string, string | number>,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        const stringValues: Record<string, string> = {};
+        for (const [k, v] of Object.entries(values || {})) {
+            stringValues[k] = String(v);
+        }
+        return CSElementFactory.createWithTemplate(
+            template,
+            stringValues,
+            this._helperOptions(description, opts)
+        );
+    }
+
+    /**
+     * Build a CSWebElement by XPath. Frame auto-inherited from `this.frame`.
+     */
+    protected elementByXPath(
+        xpath: string,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createByXPath(xpath, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build a CSWebElement by CSS selector. Frame auto-inherited.
+     */
+    protected elementByCss(
+        selector: string,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createByCSS(selector, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build a CSWebElement by element id. Frame auto-inherited.
+     */
+    protected elementById(
+        id: string,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createById(id, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build a CSWebElement by `name` attribute. Frame auto-inherited.
+     */
+    protected elementByName(
+        name: string,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createByName(name, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build a CSWebElement by visible text. `exact` stays positional for
+     * parity with the underlying factory. Frame auto-inherited.
+     */
+    protected elementByText(
+        text: string,
+        exact: boolean = false,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createByText(text, exact, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build a CSWebElement by ARIA role. Frame auto-inherited.
+     */
+    protected elementByRole(
+        role: string,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createByRole(role, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build a CSWebElement by data-testid. Frame auto-inherited.
+     */
+    protected elementByTestId(
+        testId: string,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createByTestId(testId, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build a CSWebElement by associated label text. `fieldType` stays
+     * positional. Frame auto-inherited.
+     */
+    protected elementByLabel(
+        labelText: string,
+        fieldType: string = 'input',
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createByLabel(labelText, fieldType, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build an array of CSWebElements matching a selector (CSS or XPath).
+     * Async because it must query the live count from the page. Frame
+     * auto-inherited.
+     */
+    protected async elementsMatching(
+        selector: string,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): Promise<CSWebElement[]> {
+        return CSElementFactory.createMultiple(selector, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build a CSWebElement for the nth match (0-based) of a selector. Frame
+     * auto-inherited.
+     */
+    protected elementNth(
+        selector: string,
+        index: number,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createNth(selector, index, this._helperOptions(description, opts));
+    }
+
+    /**
+     * Build a CSWebElement for a specific table cell. Rows and columns are
+     * 1-indexed (matching the underlying factory). Frame auto-inherited.
+     */
+    protected elementInTable(
+        tableSelector: string,
+        row: number,
+        column: number,
+        description?: string,
+        opts?: Partial<FactoryOptions>
+    ): CSWebElement {
+        return CSElementFactory.createTableCell(tableSelector, row, column, this._helperOptions(description, opts));
     }
 
     // =========================================================================

@@ -51,6 +51,7 @@
 
 import { CSBasePage } from './CSBasePage';
 import { CSReporter } from '../reporter/CSReporter';
+import { CSFrameResolver } from '../element/CSFrameResolver';
 
 // Lazy load types
 type Page = any;
@@ -116,10 +117,7 @@ export abstract class CSFramePage extends CSBasePage {
      * (outermost first).
      */
     public getFrameSelectors(): string[] {
-        const chain: Array<string | FrameSelector> = Array.isArray(this.frame)
-            ? this.frame
-            : [this.frame];
-        return chain.map(f => this.resolveFrameSelector(f));
+        return CSFrameResolver.resolveChain(this.frame);
     }
 
     /**
@@ -238,64 +236,6 @@ export abstract class CSFramePage extends CSBasePage {
             CSReporter.fail(`Iframe still visible after ${timeout}ms`);
             throw new Error(`Iframe still visible: ${error.message}`);
         }
-    }
-
-    /**
-     * Resolve frame selector from string or FrameSelector object
-     */
-    private resolveFrameSelector(frame: string | FrameSelector): string {
-        // String input - auto-detect type
-        if (typeof frame === 'string') {
-            return this.autoDetectFrameSelector(frame);
-        }
-
-        // Object input - explicit type
-        if (frame.xpath) {
-            return `xpath=${frame.xpath}`;
-        }
-        if (frame.css) {
-            return frame.css;
-        }
-        if (frame.id) {
-            return `#${frame.id}`;
-        }
-        if (frame.name) {
-            return `iframe[name="${frame.name}"]`;
-        }
-        if (frame.title) {
-            return `iframe[title="${frame.title}"]`;
-        }
-        if (frame.testId) {
-            return `[data-testid="${frame.testId}"]`;
-        }
-        if (frame.src) {
-            return `iframe[src*="${frame.src}"]`;
-        }
-        if (frame.index !== undefined) {
-            return `iframe >> nth=${frame.index}`;
-        }
-
-        throw new Error('Invalid frame selector: must specify xpath, css, id, name, title, testId, src, or index');
-    }
-
-    /**
-     * Auto-detect frame selector type from string
-     */
-    private autoDetectFrameSelector(selector: string): string {
-        // XPath detection
-        if (selector.startsWith('//') || selector.startsWith('/')) {
-            return `xpath=${selector}`;
-        }
-        // Already has xpath= or css= prefix
-        if (selector.startsWith('xpath=') || selector.startsWith('css=')) {
-            return selector;
-        }
-        // CSS ID selector
-        if (selector.startsWith('#')) {
-            return selector;
-        }
-        // Assume CSS for everything else
-        return selector;
     }
 
     /**
