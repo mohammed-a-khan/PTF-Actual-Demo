@@ -42,6 +42,11 @@ export class CSBrowserManager {
     private traceStarted: boolean = false;
     // Page change listeners - called when page changes (e.g., after browser switch)
     private pageChangeListeners: Array<(newPage: any) => void> = [];
+    // Issue #1 v2: tracks whether the user/framework ever explicitly switched the
+    // active page via setCurrentPage / waitForNewPage / waitForPopup / switchToPage*.
+    // When false AND multiple pages exist, the user has likely opened popups WITHOUT
+    // tracking — resolveActivePage prefers the most recently opened page in that case.
+    private hasExplicitPageSwitch: boolean = false;
 
     private constructor() {
         // Don't store config reference - get it fresh each time to avoid initialization order issues
@@ -1847,7 +1852,28 @@ export class CSBrowserManager {
      * @param perPageTimeoutMs - Per-page visibilityState check timeout (default: 100ms)
      * @returns The page that should be used for screenshot/diagnostic capture.
      */
-    public async resolveActivePage(perPageTimeoutMs: number = 100): Promise<any> {
+    public async resolveActivePage(_perPageTimeoutMs: number = 100): Promise<any> {
+        // Note: _perPageTimeoutMs is preserved as a no-op param for back-compat.
+        // The previous implementation used document.visibilityState as the primary
+        // signal — that proved unreliable in headless Chromium (and even headed
+        // mode for non-focused tabs), where Playwright force-marks every open
+        // page as `visible`. The result was that the resolver always returned
+        // the framework-tracked page even when the user was working on a popup.
+        //
+        // The corrected approach uses an EXPLICIT-SWITCH HEURISTIC:
+        //   - If only one page exists → that page (no ambiguity).
+        //   - If the user/framework ever called setCurrentPage / waitForNewPage /
+        //     waitForPopup / switchToPage*, hasExplicitPageSwitch is true and we
+        //     trust this.page (the test took control of which page is active).
+        //   - If multiple pages exist AND no explicit switch was ever made, the
+        //     user has likely opened popups WITHOUT tracking. In that case the
+        //     most recently opened open page (last in context.pages()) is almost
+        //     always the one the test was just interacting with — return it.
+        //   - Otherwise fall back to this.page.
+        //
+        // Parallel-safety: hasExplicitPageSwitch is a per-instance flag on
+        // CSBrowserManager (which is per-worker via threadInstances map). No
+        // cross-worker pollution.
         if (!this.context || !this.page) {
             return this.page;
         }
@@ -1863,49 +1889,38 @@ export class CSBrowserManager {
             return this.page;
         }
 
-        const visibilityResults = await Promise.all(
-            pages.map(async (p: any) => {
-                try {
-                    if (p.isClosed && p.isClosed()) {
-                        return { page: p, visible: false };
-                    }
-                    const visiblePromise = p.evaluate(() => document.visibilityState === 'visible');
-                    const timeoutPromise = new Promise<boolean>((resolve) =>
-                        setTimeout(() => resolve(false), perPageTimeoutMs)
-                    );
-                    const visible = await Promise.race([visiblePromise, timeoutPromise]);
-                    return { page: p, visible };
-                } catch {
-                    return { page: p, visible: false };
-                }
-            })
-        );
+        // Filter out closed pages
+        const openPages = pages.filter((p: any) => {
+            try { return !(p.isClosed && p.isClosed()); } catch { return false; }
+        });
 
-        const visiblePages = visibilityResults.filter(r => r.visible).map(r => r.page);
+        if (openPages.length === 0) {
+            return this.page;
+        }
+        if (openPages.length === 1) {
+            return openPages[0];
+        }
 
-        if (visiblePages.length === 0) {
-            CSReporter.debug(
-                `[BrowserManager] resolveActivePage: no page reported visible among ${pages.length}; falling back to tracked page`
-            );
+        // If the test took explicit control via setCurrentPage / waitForNewPage /
+        // waitForPopup / switchToPage*, trust this.page.
+        if (this.hasExplicitPageSwitch) {
             return this.page;
         }
 
-        if (visiblePages.length === 1) {
-            const found = visiblePages[0];
-            if (found !== this.page) {
-                try {
-                    CSReporter.debug(
-                        `[BrowserManager] resolveActivePage: detected active page differs from tracked (${found.url()} vs ${this.page.url()})`
-                    );
-                } catch { /* url() may fail on torn-down pages */ }
-            }
-            return found;
+        // Otherwise, the user likely opened popups without tracking. Prefer the
+        // most recently opened page — that's where the test was almost certainly
+        // interacting when the failure occurred.
+        const candidate = openPages[openPages.length - 1];
+        if (candidate !== this.page) {
+            try {
+                CSReporter.warn(
+                    `[BrowserManager] resolveActivePage: ${openPages.length} pages open and no explicit switch tracked; ` +
+                    `using most recently opened page (${candidate.url()}) instead of tracked (${this.page.url()}). ` +
+                    `Tip: wrap the action that opens the popup in waitForNewPage()/waitForPopup() to avoid this fallback.`
+                );
+            } catch { /* url() may fail on torn-down pages */ }
         }
-
-        if (visiblePages.includes(this.page)) {
-            return this.page;
-        }
-        return visiblePages[visiblePages.length - 1];
+        return candidate;
     }
 
     // =========================================================================
@@ -1941,6 +1956,10 @@ export class CSBrowserManager {
             throw new Error('Cannot set null page as current');
         }
         this.page = page;
+        // Issue #1 v2: caller has taken explicit control of which page is active.
+        // From this point on, resolveActivePage trusts this.page even when
+        // additional popups/tabs are open in the context.
+        this.hasExplicitPageSwitch = true;
         this.notifyPageChange();
         try {
             CSReporter.info(`[BrowserManager] Switched to page: ${page.url()}`);
