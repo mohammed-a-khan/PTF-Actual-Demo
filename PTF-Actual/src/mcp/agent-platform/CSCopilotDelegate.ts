@@ -58,6 +58,12 @@ export interface DelegateRequest {
     projectName: string;
     /** Feature slug used for output filenames. */
     featureName: string;
+    /**
+     * Optional module slug. When set, output files are grouped under a
+     * module subdirectory at every artefact root (features, pages,
+     * steps, data). When unset, files land flat under each root.
+     */
+    moduleName?: string;
     /** Files the LLM must read to do the job. */
     sourceFiles: DelegateInputFile[];
     /** Optional draft files (from a deterministic seed) the LLM should refine. */
@@ -191,6 +197,14 @@ export class CSCopilotDelegate {
         lines.push('# Project / feature naming');
         lines.push(`- projectName: ${request.projectName}`);
         lines.push(`- featureName: ${request.featureName}`);
+        if (request.moduleName) {
+            lines.push(`- moduleName: ${request.moduleName}`);
+            lines.push(
+                '  USE the moduleName variant of the file layout (paths under test/<project>/<artefact>/<moduleName>/...).',
+            );
+        } else {
+            lines.push('  No moduleName — use the FLAT file layout (paths under test/<project>/<artefact>/...).');
+        }
         lines.push('');
         lines.push('# Framework conventions (must be matched exactly)');
         lines.push(CSCopilotDelegate.FRAMEWORK_CONVENTIONS);
@@ -264,12 +278,21 @@ export class CSCopilotDelegate {
      */
     private static readonly FRAMEWORK_CONVENTIONS = `
 - File layout — emit WORKSPACE-RELATIVE paths in the files map. The
-  caller writes them under the workspace root, producing the framework's
-  canonical layout:
+  caller writes them under the workspace root.
+
+  FLAT layout (when no moduleName is provided):
     test/<project>/features/<feature>.feature        Gherkin
     test/<project>/pages/<Page>.ts                    Page object class
     test/<project>/steps/<feature>.steps.ts           Step definitions
     test/<project>/data/<feature>-data.json           Scenario fixtures
+
+  MODULE-GROUPED layout (when moduleName IS provided):
+    test/<project>/features/<moduleName>/<feature>.feature
+    test/<project>/pages/<moduleName>/<Page>.ts
+    test/<project>/steps/<moduleName>/<feature>.steps.ts
+    test/<project>/data/<moduleName>/<feature>-data.json
+
+  Pick the layout based on the moduleName field in the prompt header.
   The config/<project>/ scaffold (global.env, common/common.env,
   environments/<env>.env) is generated separately by the orchestrator
   via generate_config_scaffold — DO NOT emit config files in your

@@ -206,6 +206,7 @@ async function dispatchMode(
                 {
                     projectName: ef.projectName,
                     featureName: ef.featureName,
+                    moduleName: ef.moduleName,
                     workspaceRoot: ef.workspaceRoot || ef.outputRoot,
                     projectRoot: ef.projectRoot,
                     environments: ef.environments
@@ -358,7 +359,9 @@ async function buildDryRunPreview(
                             ? `sectionFocus=${ef.sectionFocus ?? 'all'}`
                             : classified.mode === 'source_code_path'
                                 ? `targetSurface=${ef.targetSurface ?? 'ui'}`
-                                : undefined,
+                                : classified.mode === 'legacy_test_code' && ef.moduleName
+                                    ? `moduleName=${ef.moduleName}`
+                                    : undefined,
                     },
                     context,
                 );

@@ -48,6 +48,24 @@ export interface LegacyModeHandlerOptions {
     projectName?: string;
     featureName?: string;
     /**
+     * Optional module name. When provided, output files are grouped under
+     * a module subdirectory at every artefact root. Without it, files
+     * land flat under each artefact root.
+     *
+     *   With moduleName='administration':
+     *     test/<project>/features/administration/<feature>.feature
+     *     test/<project>/pages/administration/<Page>.ts
+     *     test/<project>/steps/administration/<feature>.steps.ts
+     *     test/<project>/data/administration/<feature>-data.json
+     *
+     *   Without moduleName:
+     *     test/<project>/features/<feature>.feature
+     *     test/<project>/pages/<Page>.ts
+     *     test/<project>/steps/<feature>.steps.ts
+     *     test/<project>/data/<feature>-data.json
+     */
+    moduleName?: string;
+    /**
      * Workspace root where output files land. Defaults to `process.cwd()`.
      * The handler writes:
      *   <workspaceRoot>/config/<project>/{global.env, common/common.env, environments/<env>.env}
@@ -130,6 +148,10 @@ export class CSLegacyModeHandler {
             options.featureName ||
             ef.featureName ||
             CSLegacyModeHandler.deriveFeatureName(absSource);
+        // moduleName: opt-in. When set, the LLM emits paths grouped under
+        // test/<project>/<artefact>/<moduleName>/... so a 50-file migration
+        // produces module-organised directories instead of one flat tree.
+        const moduleName = (options.moduleName || ef.moduleName || '').trim() || undefined;
         // workspaceRoot replaces the old outputRoot semantics. Files now land
         // at <workspaceRoot>/config/<project>/ and <workspaceRoot>/test/<project>/
         // — the framework's standard layout.
@@ -212,6 +234,7 @@ export class CSLegacyModeHandler {
                 sourceFile: absSource,
                 projectName,
                 pipelineVersion: CSLegacyModeHandler.PIPELINE_VERSION,
+                extras: moduleName ? `moduleName=${moduleName}` : undefined,
             },
             context,
         );
@@ -279,6 +302,7 @@ export class CSLegacyModeHandler {
                     task: 'legacy_migration',
                     projectName,
                     featureName,
+                    moduleName,
                     sourceFiles,
                     grounding: JSON.stringify(groundingPayload, null, 2),
                     telemetry: options.telemetry,
