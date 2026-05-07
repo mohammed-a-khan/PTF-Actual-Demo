@@ -263,11 +263,17 @@ export class CSCopilotDelegate {
      * into the prompt. Tightened over time as patterns shake out.
      */
     private static readonly FRAMEWORK_CONVENTIONS = `
-- File layout (paths under "test/<project>/"):
-    features/<feature>.feature           Gherkin
-    pages/<Page>.ts                      Page object class per logical page
-    steps/<feature>.steps.ts             Step definitions class
-    data/<feature>-data.json             Scenario fixtures (one row per scenarioId)
+- File layout — emit WORKSPACE-RELATIVE paths in the files map. The
+  caller writes them under the workspace root, producing the framework's
+  canonical layout:
+    test/<project>/features/<feature>.feature        Gherkin
+    test/<project>/pages/<Page>.ts                    Page object class
+    test/<project>/steps/<feature>.steps.ts           Step definitions
+    test/<project>/data/<feature>-data.json           Scenario fixtures
+  The config/<project>/ scaffold (global.env, common/common.env,
+  environments/<env>.env) is generated separately by the orchestrator
+  via generate_config_scaffold — DO NOT emit config files in your
+  output. Stick to the test/ tree only.
 
 - Page objects:
     @CSPage({url: '...'})

@@ -206,7 +206,13 @@ async function dispatchMode(
                 {
                     projectName: ef.projectName,
                     featureName: ef.featureName,
-                    outputRoot: ef.outputRoot,
+                    workspaceRoot: ef.workspaceRoot || ef.outputRoot,
+                    projectRoot: ef.projectRoot,
+                    environments: ef.environments
+                        ? ef.environments.split(',').map((e) => e.trim())
+                        : undefined,
+                    skipDependencyCheck: ef.skipDependencyCheck === 'true',
+                    skipConfigScaffold: ef.skipConfigScaffold === 'true',
                     telemetry,
                 },
                 context,

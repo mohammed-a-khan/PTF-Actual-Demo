@@ -29,6 +29,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { MCPToolContext, MCPToolDefinition, MCPToolResult } from '../types/CSMCPTypes';
 import { parseTools } from '../tools/parsers/CSMCPParseTools';
+import { pipelineTools } from '../tools/pipeline/CSMCPPipelineTools';
+import { generationTools } from '../tools/generation/CSMCPGenerationTools';
 import { CSCopilotDelegate, DelegateInputFile } from './CSCopilotDelegate';
 import { CSMigrationCache } from './CSMigrationCache';
 import { CSTestDataMigrator, MigratedTestData } from './CSTestDataMigrator';
@@ -45,9 +47,26 @@ import { ClassifiedInput } from './types';
 export interface LegacyModeHandlerOptions {
     projectName?: string;
     featureName?: string;
+    /**
+     * Workspace root where output files land. Defaults to `process.cwd()`.
+     * The handler writes:
+     *   <workspaceRoot>/config/<project>/{global.env, common/common.env, environments/<env>.env}
+     *   <workspaceRoot>/test/<project>/{features, pages, steps, data}
+     * Use this instead of the legacy `outputRoot`.
+     */
+    workspaceRoot?: string;
+    /** Where to look for legacy source dependencies. Defaults to dir containing input file. */
+    projectRoot?: string;
+    /** Comma list of envs for the config scaffold. Default: dev,sit,uat. */
+    environments?: string[];
+    /** Skip the discover_dependencies pre-flight when true (dangerous). */
+    skipDependencyCheck?: boolean;
+    /** Skip the generate_config_scaffold step when true. */
+    skipConfigScaffold?: boolean;
+    /** Legacy alias for workspaceRoot — kept for backward compatibility. */
     outputRoot?: string;
     telemetry?: CSCostTelemetry;
-    /** Cap on sibling page-object files included in the prompt. */
+    /** Cap on sibling files included in the prompt. */
     maxSiblingFiles?: number;
 }
 
@@ -111,9 +130,60 @@ export class CSLegacyModeHandler {
             options.featureName ||
             ef.featureName ||
             CSLegacyModeHandler.deriveFeatureName(absSource);
-        const outputRoot = options.outputRoot || CSLegacyModeHandler.DEFAULT_OUTPUT_ROOT;
+        // workspaceRoot replaces the old outputRoot semantics. Files now land
+        // at <workspaceRoot>/config/<project>/ and <workspaceRoot>/test/<project>/
+        // — the framework's standard layout.
+        const workspaceRoot = path.resolve(
+            options.workspaceRoot || options.outputRoot || process.cwd(),
+        );
+        const projectRoot = path.resolve(
+            options.projectRoot || CSLegacyModeHandler.deriveProjectRoot(absSource),
+        );
+        const environments = options.environments && options.environments.length > 0
+            ? options.environments
+            : ['dev', 'sit', 'uat'];
 
-        // -- Step 1: cheap structural grounding via legacy_parse ------------
+        // -- Step 1: discover_dependencies pre-flight ----------------------
+        // If the source has unresolved imports (helpers, base test cases,
+        // DataBean classes, etc.) we BLOCK with a structured reason listing
+        // each missing symbol and three options: paste, skip, abort. The
+        // user re-invokes after deciding.
+        if (!options.skipDependencyCheck) {
+            const depsRaw = await CSLegacyModeHandler.invokeTool(
+                pipelineTools,
+                'discover_dependencies',
+                { file: absSource, projectRoot },
+                context,
+            );
+            if (!depsRaw.isError) {
+                const deps = CSLegacyModeHandler.parseTextJson(depsRaw) as
+                    | { complete: boolean; missing: number; references: Array<Record<string, unknown>> }
+                    | null;
+                if (deps && deps.complete === false && deps.missing > 0) {
+                    const missingRefs = deps.references.filter(
+                        (r) => (r as { found?: boolean }).found !== true,
+                    );
+                    return {
+                        generationResult: null,
+                        sourceFile: absSource,
+                        blockedReason: `CSLegacyModeHandler: ${deps.missing} unresolved dependency reference(s) in ${path.basename(absSource)} — cannot produce a complete migration without them.`,
+                        blockedDetails: {
+                            projectRoot,
+                            missingCount: deps.missing,
+                            missing: missingRefs,
+                            options: [
+                                'paste — add the missing files into projectRoot, then re-invoke',
+                                'skip — re-invoke with skipDependencyCheck=true (Copilot will guess; expect lower trust score)',
+                                'abort — fix the underlying file, then retry',
+                                'change projectRoot — re-invoke with projectRoot pointing at the right tree',
+                            ],
+                        },
+                    };
+                }
+            }
+        }
+
+        // -- Step 1.5: legacy_parse → IR -----------------------------------
         const irRaw = await CSLegacyModeHandler.invokeTool(
             parseTools,
             'legacy_parse',
@@ -232,8 +302,26 @@ export class CSLegacyModeHandler {
             cacheKeyForStore = cacheLookup.cacheKey || undefined;
         }
 
+        // -- Step 2.5: generate config scaffold ----------------------------
+        // Creates <workspaceRoot>/config/<project>/{global.env,
+        // common/common.env, environments/<env>.env}. Idempotent (safe to
+        // re-run). Skipped on cache hit since the user has already accepted
+        // the previous run's config.
+        let configFiles: string[] = [];
+        if (!options.skipConfigScaffold && !cacheHitInfo) {
+            configFiles = await CSLegacyModeHandler.generateConfigScaffold(
+                projectName,
+                environments,
+                workspaceRoot,
+                context,
+            );
+        }
+
         // -- Step 3: write the file map -------------------------------------
-        const filesCreated = CSCopilotDelegate.writeFiles(outputFiles, outputRoot);
+        // Files map keys are workspace-relative paths from the LLM (e.g.
+        // "test/<project>/features/<feature>.feature"). Resolving against
+        // workspaceRoot puts them at the framework's canonical layout.
+        const filesCreated = CSCopilotDelegate.writeFiles(outputFiles, workspaceRoot);
         if (filesCreated.length === 0) {
             return {
                 generationResult: null,
@@ -242,6 +330,11 @@ export class CSLegacyModeHandler {
                 blockedReason: 'CSLegacyModeHandler: nothing was written to disk',
                 delegateNotes,
             };
+        }
+        // Surface scaffold files alongside generated test files so the user
+        // sees the full output set in the result.
+        if (configFiles.length > 0) {
+            filesCreated.push(...configFiles);
         }
 
         // -- Step 5: build the GenerationResult shape downstream consumers
@@ -365,6 +458,112 @@ export class CSLegacyModeHandler {
         const base = path.basename(absSource);
         const dot = base.lastIndexOf('.');
         return dot > 0 ? base.slice(0, dot) : base;
+    }
+
+    /**
+     * Walk up from the source file until we find a likely project root —
+     * the first ancestor containing both a Java source root marker (a `src/`
+     * sibling, or a `pom.xml` / `build.gradle`) and at least one sibling
+     * directory among `page/`, `common/`, `bean/`, `util/`. Falls back to
+     * the source's parent dir.
+     */
+    private static deriveProjectRoot(absSource: string): string {
+        let cur = path.dirname(absSource);
+        for (let i = 0; i < 8; i++) {
+            try {
+                const entries = fs.readdirSync(cur);
+                const hasMarker =
+                    entries.includes('pom.xml') ||
+                    entries.includes('build.gradle') ||
+                    entries.includes('src');
+                if (hasMarker) return cur;
+            } catch {
+                // ignore
+            }
+            const parent = path.dirname(cur);
+            if (parent === cur) break;
+            cur = parent;
+        }
+        return path.dirname(absSource);
+    }
+
+    /**
+     * Best-effort JSON parse of a tool's first text-content block.
+     * Used when the tool surfaces its payload via `content[0].text` rather
+     * than `structuredContent`.
+     */
+    private static parseTextJson(
+        result: MCPToolResult,
+    ): Record<string, unknown> | null {
+        const sc = result.structuredContent as Record<string, unknown> | undefined;
+        if (sc && Object.keys(sc).length > 0) return sc;
+        const text = CSLegacyModeHandler.firstText(result);
+        if (!text) return null;
+        try {
+            const parsed = JSON.parse(text);
+            return typeof parsed === 'object' && parsed !== null
+                ? (parsed as Record<string, unknown>)
+                : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Drive `generate_config_scaffold` so the workspace ends up with the
+     * standard `config/<project>/{global.env, common/common.env,
+     * environments/<env>.env}` layout. Best-effort — non-fatal failures
+     * are logged but don't block the migration.
+     */
+    private static async generateConfigScaffold(
+        projectName: string,
+        environments: string[],
+        workspaceRoot: string,
+        context: MCPToolContext,
+    ): Promise<string[]> {
+        const generated: string[] = [];
+        const originalCwd = process.cwd();
+        try {
+            // generate_config_scaffold uses process.cwd() for its base path,
+            // so we briefly chdir to honour an explicit workspaceRoot.
+            if (path.resolve(workspaceRoot) !== originalCwd) {
+                try {
+                    process.chdir(workspaceRoot);
+                } catch {
+                    // If chdir fails, the scaffold lands at the original cwd.
+                }
+            }
+            const result = await CSLegacyModeHandler.invokeTool(
+                generationTools,
+                'generate_config_scaffold',
+                {
+                    project: projectName,
+                    environments,
+                    adoIntegration: true,
+                },
+                context,
+            );
+            if (!result.isError) {
+                const sc = CSLegacyModeHandler.parseTextJson(result);
+                const fl = sc?.filesGenerated;
+                if (Array.isArray(fl)) {
+                    for (const f of fl) {
+                        if (typeof f === 'string') generated.push(f);
+                    }
+                }
+            }
+        } catch (err) {
+            context.log('warning', 'CSLegacyModeHandler: config scaffold failed', {
+                error: err instanceof Error ? err.message : String(err),
+            });
+        } finally {
+            try {
+                process.chdir(originalCwd);
+            } catch {
+                // best-effort
+            }
+        }
+        return generated;
     }
 
     private static parseIr(irJson: string): LegacyIR | null {
