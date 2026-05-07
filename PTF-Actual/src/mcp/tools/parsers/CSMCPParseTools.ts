@@ -362,8 +362,11 @@ function detectCsharpRunner(content: string): string {
 
 function extractJavaTests(content: string): IRTest[] {
     const tests: IRTest[] = [];
-    // Match @Test(...) optional, followed by method
-    const re = /@Test\b(?:\s*\([^)]*\))?\s*(?:public|protected|private)?\s*\w+\s+(\w+)\s*\(\s*\)\s*(?:throws\s+[\w.,\s]+)?\s*\{([\s\S]*?)^\s*\}/gm;
+    // Match @Test(...) annotation, then method header. Parameter list is
+    // permissive: empty `()`, or any `(<args>)` (TestNG/QAF data-provider
+    // patterns commonly take `Map<String, Object> data`, multiple primitives,
+    // etc.). Method body is non-greedy up to the first balanced closing brace.
+    const re = /@Test\b(?:\s*\([^)]*\))?\s*(?:public|protected|private)?\s*\w+(?:<[^>]*>)?\s+(\w+)\s*\([^)]*\)\s*(?:throws\s+[\w.,\s]+)?\s*\{([\s\S]*?)^\s*\}/gm;
     let m: RegExpExecArray | null;
     while ((m = re.exec(content)) !== null) {
         const name = m[1];
@@ -385,7 +388,10 @@ function extractJavaTests(content: string): IRTest[] {
 
 function extractCsharpTests(content: string): IRTest[] {
     const tests: IRTest[] = [];
-    const re = /\[Test(?:Case[^\]]*)?\](?:\s*\[[^\]]*\])*\s*(?:public|protected|private)?\s*\w+\s+(\w+)\s*\(\s*\)\s*\{([\s\S]*?)^\s*\}/gm;
+    // Same permissive parameter handling as the Java extractor — NUnit
+    // [TestCase(...)], xUnit [Theory] + [InlineData], and MSTest data-row
+    // patterns all use parameterized methods.
+    const re = /\[Test(?:Case[^\]]*)?\](?:\s*\[[^\]]*\])*\s*(?:public|protected|private)?\s*\w+(?:<[^>]*>)?\s+(\w+)\s*\([^)]*\)\s*\{([\s\S]*?)^\s*\}/gm;
     let m: RegExpExecArray | null;
     while ((m = re.exec(content)) !== null) {
         const name = m[1];

@@ -24,6 +24,8 @@ const agentNames = [
     'assistant',
     // Pipeline orchestrator (user-invocable)
     'cs-playwright',
+    // CS-AI-Auto-Assist orchestrator (user-invocable, single-prompt)
+    'cs-ai-auto-assist',
     // Pipeline subagents (user-invocable: false, delegated via runSubagent)
     'analyzer',
     'data-ingestor',
@@ -31,6 +33,8 @@ const agentNames = [
     'locator-reconciler',
     'pipeline-generator',
     'pipeline-healer',
+    // Agent platform subagent (user-invocable: false, delegated by cs_test_agent)
+    'clarification',
 ];
 
 // kebab-case filename → camelCase TS identifier

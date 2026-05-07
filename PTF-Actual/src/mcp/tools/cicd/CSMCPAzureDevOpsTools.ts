@@ -22,6 +22,7 @@ import {
     AzureDevOpsPullRequest,
 } from '../../types/CSMCPTypes';
 import { defineTool, CSMCPToolRegistry } from '../../CSMCPToolRegistry';
+import { CSConfigurationManager } from '../../../core/CSConfigurationManager';
 
 // ============================================================================
 // Azure DevOps API Client
@@ -42,13 +43,18 @@ class AzureDevOpsClient {
     }
 
     /**
-     * Make an API request to Azure DevOps
+     * Make an API request to Azure DevOps.
+     *
+     * `contentType` defaults to `application/json` but JSON Patch endpoints
+     * (work item create / update) MUST use `application/json-patch+json` per
+     * Azure DevOps REST API spec.
      */
     async request(
         method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
         path: string,
         body?: unknown,
-        apiVersion: string = '7.1'
+        apiVersion: string = '7.1',
+        contentType: string = 'application/json'
     ): Promise<AzureDevOpsApiResponse> {
         const url = new URL(`${this.baseUrl}/${this.config.organization}/${this.config.project}/_apis/${path}`);
         url.searchParams.set('api-version', apiVersion);
@@ -59,7 +65,7 @@ class AzureDevOpsClient {
             path: `${url.pathname}${url.search}`,
             method,
             headers: {
-                'Content-Type': 'application/json',
+                'Content-Type': contentType,
                 'Authorization': `Basic ${Buffer.from(`:${this.config.personalAccessToken}`).toString('base64')}`,
             },
         };
@@ -122,10 +128,19 @@ class AzureDevOpsClient {
     }
 
     /**
-     * Make a request to the Work Item Tracking API
+     * Make a request to the Work Item Tracking API.
+     *
+     * Pass `contentType='application/json-patch+json'` when sending a JSON
+     * Patch document (work item create/update). Defaults to `application/json`
+     * for non-patch endpoints like `wiql`.
      */
-    async witRequest(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<AzureDevOpsApiResponse> {
-        return this.request(method, `wit/${path}`, body);
+    async witRequest(
+        method: 'GET' | 'POST' | 'PATCH',
+        path: string,
+        body?: unknown,
+        contentType: string = 'application/json'
+    ): Promise<AzureDevOpsApiResponse> {
+        return this.request(method, `wit/${path}`, body, '7.1', contentType);
     }
 
     /**
@@ -133,6 +148,14 @@ class AzureDevOpsClient {
      */
     async pipelinesRequest(method: 'GET' | 'POST', path: string, body?: unknown): Promise<AzureDevOpsApiResponse> {
         return this.request(method, `pipelines/${path}`, body);
+    }
+
+    /**
+     * Make a request to the Test Plan API (distinct from the legacy Test API).
+     * Used for plans, suites, and the plan-suite-case hierarchy.
+     */
+    async testPlanRequest(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<AzureDevOpsApiResponse> {
+        return this.request(method, `testplan/${path}`, body);
     }
 }
 
@@ -160,16 +183,59 @@ function createErrorResult(message: string): MCPToolResult {
     };
 }
 
+/**
+ * Resolve an ADO config value. Priority:
+ *   1. Tool param (highest — explicit caller intent)
+ *   2. CSConfigurationManager (8-level hierarchy with auto-decryption of
+ *      `ENCRYPTED:...` values; pulls from `process.env` and project/env
+ *      .env files transparently)
+ *   3. Direct `process.env` (defensive fallback when CSConfigurationManager
+ *      has not been initialized — e.g. in unit tests)
+ *
+ * The `ENCRYPTED:` prefix is decrypted automatically by
+ * CSConfigurationManager's `decryptValues()` pass; callers always see the
+ * plaintext.
+ */
+function resolveAdoConfig(
+    paramValue: unknown,
+    configKey: string,
+): string | undefined {
+    const fromParam = typeof paramValue === 'string' ? paramValue.trim() : '';
+    if (fromParam.length > 0) return fromParam;
+    try {
+        const fromCfg = CSConfigurationManager.getInstance().get(configKey, '');
+        if (fromCfg && fromCfg.length > 0) return fromCfg;
+    } catch {
+        // CSConfigurationManager not initialized — fall through to env.
+    }
+    const fromEnv = process.env[configKey];
+    if (typeof fromEnv === 'string' && fromEnv.trim().length > 0) {
+        return fromEnv.trim();
+    }
+    return undefined;
+}
+
 function getClient(params: Record<string, unknown>): AzureDevOpsClient {
+    const organization = resolveAdoConfig(params.organization, 'ADO_ORGANIZATION');
+    const project = resolveAdoConfig(params.project, 'ADO_PROJECT');
+    const personalAccessToken = resolveAdoConfig(params.pat, 'ADO_PAT');
+
     const config: AzureDevOpsConfig = {
-        organization: params.organization as string,
-        project: params.project as string,
-        personalAccessToken: params.pat as string,
+        organization: organization ?? '',
+        project: project ?? '',
+        personalAccessToken: personalAccessToken ?? '',
         baseUrl: params.baseUrl as string | undefined,
     };
 
     if (!config.organization || !config.project || !config.personalAccessToken) {
-        throw new Error('Missing required Azure DevOps configuration: organization, project, and pat are required');
+        const missing: string[] = [];
+        if (!config.organization) missing.push('organization (ADO_ORGANIZATION)');
+        if (!config.project) missing.push('project (ADO_PROJECT)');
+        if (!config.personalAccessToken) missing.push('pat (ADO_PAT)');
+        throw new Error(
+            `Missing required Azure DevOps configuration: ${missing.join(', ')}. ` +
+                'Provide via tool params, set in your project .env, or set as process env vars.',
+        );
     }
 
     return new AzureDevOpsClient(config);
@@ -589,18 +655,23 @@ const adoTestResultsGetFailedTool = adoCommonParams(defineTool())
 const adoWorkItemsGetTool = adoCommonParams(defineTool())
     .name('ado_work_items_get')
     .title('Get Work Item')
-    .description('Get a work item by ID')
+    .description('Get a work item by ID, optionally expanded to include relations/fields/links')
     .openWorld()
     .category('cicd')
-    .numberParam('id', 'Work item ID', { required: true })
-    .arrayParam('fields', 'Specific fields to retrieve', 'string')
+    .numberParam('id', 'Work item ID', { required: true, integer: true })
+    .arrayParam('fields', 'Specific fields to retrieve (comma-joined). Mutually exclusive with $expand.', 'string')
+    .stringParam('expand', 'Expand parameter for work item attributes', {
+        enum: ['none', 'relations', 'fields', 'links', 'all'],
+    })
     .handler(async (params, context) => {
         const client = getClient(params);
         context.log('info', `Getting work item ${params.id}`);
 
         const queryParams: string[] = [];
-        if (params.fields && Array.isArray(params.fields)) {
+        if (params.fields && Array.isArray(params.fields) && (params.fields as string[]).length > 0) {
             queryParams.push(`fields=${(params.fields as string[]).join(',')}`);
+        } else if (params.expand) {
+            queryParams.push(`$expand=${params.expand}`);
         }
 
         const path = `workitems/${params.id}${queryParams.length > 0 ? '?' + queryParams.join('&') : ''}`;
@@ -618,10 +689,10 @@ const adoWorkItemsGetTool = adoCommonParams(defineTool())
 const adoWorkItemsCreateTool = adoCommonParams(defineTool())
     .name('ado_work_items_create')
     .title('Create Work Item')
-    .description('Create a new work item')
+    .description('Create a new work item. Use `fields` to set arbitrary fields like Microsoft.VSTS.TCM.Steps for Test Case work items.')
     .openWorld()
     .category('cicd')
-    .stringParam('type', 'Work item type (e.g., Bug, Task, User Story)', { required: true })
+    .stringParam('type', 'Work item type (e.g., Bug, Task, User Story, Test Case)', { required: true })
     .stringParam('title', 'Work item title', { required: true })
     .stringParam('description', 'Work item description')
     .stringParam('assignedTo', 'User to assign the work item to')
@@ -629,6 +700,7 @@ const adoWorkItemsCreateTool = adoCommonParams(defineTool())
     .stringParam('areaPath', 'Area path')
     .stringParam('iterationPath', 'Iteration path')
     .arrayParam('tags', 'Tags to add', 'string')
+    .objectParam('fields', 'Arbitrary fields map (key = field reference name e.g. "Microsoft.VSTS.TCM.Steps", value = string). Wins over the convenience params on conflict.')
     .handler(async (params, context) => {
         const client = getClient(params);
         context.log('info', `Creating work item of type ${params.type}`);
@@ -655,8 +727,18 @@ const adoWorkItemsCreateTool = adoCommonParams(defineTool())
         if (params.tags && Array.isArray(params.tags)) {
             operations.push({ op: 'add', path: '/fields/System.Tags', value: (params.tags as string[]).join('; ') });
         }
+        if (params.fields && typeof params.fields === 'object') {
+            for (const [key, value] of Object.entries(params.fields as Record<string, unknown>)) {
+                operations.push({ op: 'add', path: `/fields/${key}`, value });
+            }
+        }
 
-        const response = await client.witRequest('POST', `workitems/$${encodeURIComponent(params.type as string)}`, operations);
+        const response = await client.witRequest(
+            'POST',
+            `workitems/$${encodeURIComponent(params.type as string)}`,
+            operations,
+            'application/json-patch+json'
+        );
 
         if (response.statusCode !== 200 && response.statusCode !== 201) {
             return createErrorResult(`Failed to create work item: ${JSON.stringify(response.data)}`);
@@ -672,15 +754,16 @@ const adoWorkItemsCreateTool = adoCommonParams(defineTool())
 const adoWorkItemsUpdateTool = adoCommonParams(defineTool())
     .name('ado_work_items_update')
     .title('Update Work Item')
-    .description('Update an existing work item')
+    .description('Update an existing work item. Use `fields` to replace arbitrary fields like Microsoft.VSTS.TCM.Steps.')
     .openWorld()
     .category('cicd')
-    .numberParam('id', 'Work item ID', { required: true })
+    .numberParam('id', 'Work item ID', { required: true, integer: true })
     .stringParam('title', 'New title')
     .stringParam('description', 'New description')
     .stringParam('assignedTo', 'User to assign to')
     .stringParam('state', 'New state')
-    .stringParam('comment', 'Comment to add')
+    .stringParam('comment', 'Comment to add (appended to System.History)')
+    .objectParam('fields', 'Arbitrary fields map (key = field reference name, value = new value). Wins over the convenience params on conflict.')
     .handler(async (params, context) => {
         const client = getClient(params);
         context.log('info', `Updating work item ${params.id}`);
@@ -702,12 +785,22 @@ const adoWorkItemsUpdateTool = adoCommonParams(defineTool())
         if (params.comment) {
             operations.push({ op: 'add', path: '/fields/System.History', value: params.comment });
         }
+        if (params.fields && typeof params.fields === 'object') {
+            for (const [key, value] of Object.entries(params.fields as Record<string, unknown>)) {
+                operations.push({ op: 'replace', path: `/fields/${key}`, value });
+            }
+        }
 
         if (operations.length === 0) {
             return createErrorResult('No updates specified');
         }
 
-        const response = await client.witRequest('PATCH', `workitems/${params.id}`, operations);
+        const response = await client.witRequest(
+            'PATCH',
+            `workitems/${params.id}`,
+            operations,
+            'application/json-patch+json'
+        );
 
         if (response.statusCode !== 200) {
             return createErrorResult(`Failed to update work item: ${JSON.stringify(response.data)}`);
@@ -722,8 +815,8 @@ const adoWorkItemsUpdateTool = adoCommonParams(defineTool())
 
 const adoWorkItemsQueryTool = adoCommonParams(defineTool())
     .name('ado_work_items_query')
-    .title('Query Work Items')
-    .description('Query work items using WIQL (Work Item Query Language)')
+    .title('Query Work Items (WIQL)')
+    .description('Query work items using WIQL. Note: many enterprise ADO tenants restrict WIQL execution; prefer ado_work_items_get_batch when navigating from a known suite or set of IDs.')
     .openWorld()
     .category('cicd')
     .stringParam('wiql', 'WIQL query string', { required: true })
@@ -742,6 +835,63 @@ const adoWorkItemsQueryTool = adoCommonParams(defineTool())
         }
 
         return createJsonResult(response.data);
+    })
+    .readOnly()
+    .build();
+
+/**
+ * Batch fetch up to 200 work items by ID. WIQL-free alternative used by
+ * Mode A: list a suite's test case refs, then batch-fetch the work items in
+ * a single round-trip with `$expand=fields` to surface
+ * `Microsoft.VSTS.TCM.Steps`.
+ */
+const adoWorkItemsGetBatchTool = adoCommonParams(defineTool())
+    .name('ado_work_items_get_batch')
+    .title('Get Work Items (Batch)')
+    .description('Fetch up to 200 work items by ID in a single call. WIQL-free; use this when you already have IDs (e.g. from ado_test_suite_test_cases_list).')
+    .openWorld()
+    .category('cicd')
+    .arrayParam('ids', 'Work item IDs to fetch (max 200 per call)', 'number', { required: true })
+    .arrayParam('fields', 'Specific fields to retrieve. Omit when using `expand`.', 'string')
+    .stringParam('expand', 'Expand parameter for work item attributes', {
+        enum: ['none', 'relations', 'fields', 'links', 'all'],
+    })
+    .stringParam('errorPolicy', 'How to handle individual ID failures', {
+        enum: ['fail', 'omit'],
+        default: 'omit',
+    })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        const ids = (params.ids as number[]) || [];
+        if (ids.length === 0) {
+            return createErrorResult('ids must contain at least one work item ID');
+        }
+        if (ids.length > 200) {
+            return createErrorResult(`Azure DevOps batch endpoint accepts up to 200 IDs per call; got ${ids.length}`);
+        }
+        context.log('info', `Batch-fetching ${ids.length} work item(s)`);
+
+        const body: Record<string, unknown> = { ids };
+        if (params.fields && Array.isArray(params.fields) && (params.fields as string[]).length > 0) {
+            body.fields = params.fields;
+        } else if (params.expand) {
+            body.$expand = params.expand;
+        }
+        if (params.errorPolicy) {
+            body.errorPolicy = params.errorPolicy;
+        }
+
+        const response = await client.witRequest('POST', 'workitemsbatch', body);
+
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to batch-fetch work items: ${JSON.stringify(response.data)}`);
+        }
+
+        const data = response.data as { value: unknown[]; count: number };
+        return createJsonResult({
+            workItems: data.value,
+            count: data.count || data.value?.length || 0,
+        });
     })
     .readOnly()
     .build();
@@ -901,6 +1051,143 @@ const adoPullRequestsCommentTool = adoCommonParams(defineTool())
     .build();
 
 // ============================================================================
+// Test Plan / Suite / Suite-Case Tools
+// ============================================================================
+
+const adoTestPlansListTool = adoCommonParams(defineTool())
+    .name('ado_test_plans_list')
+    .title('List Test Plans')
+    .description('List Azure DevOps test plans for the configured project')
+    .openWorld()
+    .category('cicd')
+    .stringParam('owner', 'Filter by plan owner (display name or descriptor)')
+    .booleanParam('includePlanDetails', 'Include detailed plan metadata in the response', { default: false })
+    .booleanParam('filterActivePlans', 'Return only active plans', { default: true })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', 'Listing test plans');
+
+        const queryParams: string[] = [];
+        if (params.owner) queryParams.push(`owner=${encodeURIComponent(params.owner as string)}`);
+        if (params.includePlanDetails === true) queryParams.push('includePlanDetails=true');
+        if (params.filterActivePlans === false) queryParams.push('filterActivePlans=false');
+
+        const path = `plans${queryParams.length > 0 ? '?' + queryParams.join('&') : ''}`;
+        const response = await client.testPlanRequest('GET', path);
+
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list test plans: ${JSON.stringify(response.data)}`);
+        }
+
+        const data = response.data as { value: unknown[]; count: number };
+        return createJsonResult({
+            plans: data.value,
+            count: data.count || data.value?.length || 0,
+        });
+    })
+    .readOnly()
+    .build();
+
+const adoTestSuitesListTool = adoCommonParams(defineTool())
+    .name('ado_test_suites_list')
+    .title('List Test Suites')
+    .description('List test suites under a given test plan')
+    .openWorld()
+    .category('cicd')
+    .numberParam('planId', 'Test plan ID', { required: true, integer: true })
+    .stringParam('expand', 'Expand options', { enum: ['none', 'children', 'defaultTesters'] })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', `Listing test suites for plan ${params.planId}`);
+
+        const queryParams: string[] = [];
+        if (params.expand) queryParams.push(`expand=${params.expand}`);
+
+        const path = `Plans/${params.planId}/suites${queryParams.length > 0 ? '?' + queryParams.join('&') : ''}`;
+        const response = await client.testPlanRequest('GET', path);
+
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list test suites: ${JSON.stringify(response.data)}`);
+        }
+
+        const data = response.data as { value: unknown[]; count: number };
+        return createJsonResult({
+            suites: data.value,
+            count: data.count || data.value?.length || 0,
+        });
+    })
+    .readOnly()
+    .build();
+
+const adoTestSuiteTestCasesListTool = adoCommonParams(defineTool())
+    .name('ado_test_suite_test_cases_list')
+    .title('List Test Suite Test Cases')
+    .description('List test cases in a given test suite')
+    .openWorld()
+    .category('cicd')
+    .numberParam('planId', 'Test plan ID', { required: true, integer: true })
+    .numberParam('suiteId', 'Test suite ID', { required: true, integer: true })
+    .stringParam('expand', 'Expand options for the work item references')
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', `Listing test cases for suite ${params.suiteId}`);
+
+        const queryParams: string[] = [];
+        if (params.expand) queryParams.push(`expand=${params.expand}`);
+
+        const path = `Plans/${params.planId}/Suites/${params.suiteId}/TestCase${queryParams.length > 0 ? '?' + queryParams.join('&') : ''}`;
+        const response = await client.testPlanRequest('GET', path);
+
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list test cases: ${JSON.stringify(response.data)}`);
+        }
+
+        const data = response.data as { value: unknown[]; count: number };
+        return createJsonResult({
+            testCases: data.value,
+            count: data.count || data.value?.length || 0,
+        });
+    })
+    .readOnly()
+    .build();
+
+const adoTestSuiteAddTestCasesTool = adoCommonParams(defineTool())
+    .name('ado_test_suite_add_test_cases')
+    .title('Add Test Cases to Suite')
+    .description('Add one or more existing test cases (work items) to a test suite. Only static and requirement-based suites accept manual additions.')
+    .openWorld()
+    .category('cicd')
+    .numberParam('planId', 'Test plan ID', { required: true, integer: true })
+    .numberParam('suiteId', 'Test suite ID', { required: true, integer: true })
+    .arrayParam('testCaseIds', 'Test case work item IDs to add', 'number', { required: true })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        const ids = (params.testCaseIds as number[]) || [];
+        if (ids.length === 0) {
+            return createErrorResult('testCaseIds must contain at least one work item ID');
+        }
+        context.log('info', `Adding ${ids.length} test case(s) to suite ${params.suiteId}`);
+
+        // SuiteTestCaseCreateUpdateParameters[] — { workItem: { id } } per case.
+        const body = ids.map((id) => ({ workItem: { id } }));
+        const path = `Plans/${params.planId}/Suites/${params.suiteId}/TestCase`;
+        const response = await client.testPlanRequest('POST', path, body);
+
+        if (response.statusCode !== 200 && response.statusCode !== 201) {
+            return createErrorResult(`Failed to add test cases to suite: ${JSON.stringify(response.data)}`);
+        }
+
+        return createJsonResult({
+            status: 'test_cases_added',
+            planId: params.planId,
+            suiteId: params.suiteId,
+            testCaseIds: ids,
+            data: response.data,
+        });
+    })
+    .build();
+
+// ============================================================================
 // Repository Tools
 // ============================================================================
 
@@ -980,6 +1267,7 @@ export const azureDevOpsTools: MCPToolDefinition[] = [
 
     // Work Items
     adoWorkItemsGetTool,
+    adoWorkItemsGetBatchTool,
     adoWorkItemsCreateTool,
     adoWorkItemsUpdateTool,
     adoWorkItemsQueryTool,
@@ -989,6 +1277,12 @@ export const azureDevOpsTools: MCPToolDefinition[] = [
     adoPullRequestsGetTool,
     adoPullRequestsCreateTool,
     adoPullRequestsCommentTool,
+
+    // Test Plans / Suites / Suite-Cases
+    adoTestPlansListTool,
+    adoTestSuitesListTool,
+    adoTestSuiteTestCasesListTool,
+    adoTestSuiteAddTestCasesTool,
 
     // Repositories
     adoRepositoriesListTool,

@@ -33,6 +33,13 @@ export { parseTools, registerParseTools } from './tools/parsers/CSMCPParseTools'
 export { transformTools, registerTransformTools } from './tools/transform/CSMCPTransformTools';
 export { driftTools, registerDriftTools } from './tools/drift/CSMCPDriftTools';
 export { equivalenceTools, registerEquivalenceTools } from './tools/equivalence/CSMCPEquivalenceTools';
+export { intelligenceTools, registerIntelligenceTools } from './tools/intelligence/CSMCPIntelligenceTools';
+
+// Export agent platform (master tool: cs_ai_auto_assist)
+export {
+    agentPlatformTools,
+    registerAgentPlatformTools,
+} from './agent-platform';
 
 // Export resources and prompts
 export { resourceDefinitions, resourceTemplateDefinitions, registerResources } from './resources/CSMCPResources';
@@ -62,6 +69,8 @@ import { registerParseTools } from './tools/parsers/CSMCPParseTools';
 import { registerTransformTools } from './tools/transform/CSMCPTransformTools';
 import { registerDriftTools } from './tools/drift/CSMCPDriftTools';
 import { registerEquivalenceTools } from './tools/equivalence/CSMCPEquivalenceTools';
+import { registerIntelligenceTools } from './tools/intelligence/CSMCPIntelligenceTools';
+import { registerAgentPlatformTools } from './agent-platform';
 import { registerResources } from './resources/CSMCPResources';
 import { registerPrompts } from './prompts/CSMCPPrompts';
 
@@ -111,6 +120,8 @@ export function createFullMCPServer(config?: CSMCPServerConfig): CSMCPServer {
     registerTransformTools(registry);
     registerDriftTools(registry);
     registerEquivalenceTools(registry);
+    registerIntelligenceTools(registry);
+    registerAgentPlatformTools(registry);
 
     // Register resources and prompts
     registerResources(server);

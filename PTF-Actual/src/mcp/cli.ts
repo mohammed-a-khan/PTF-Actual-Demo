@@ -14,6 +14,7 @@
 
 import { createFullMCPServer, createMCPServerWithTools, CSMCPServerConfig, ToolCategory } from './index';
 import { generateAgents } from './agents/generateAgents';
+import { CSConfigurationManager } from '../core/CSConfigurationManager';
 
 // ============================================================================
 // CLI Argument Parsing
@@ -262,7 +263,7 @@ Next steps:
 // Main Entry Point
 // ============================================================================
 
-function main(): void {
+async function main(): Promise<void> {
     const args = process.argv.slice(2);
 
     // Check for init-agents command
@@ -283,6 +284,21 @@ function main(): void {
     if (options.version) {
         console.log(`cs-playwright-mcp v${VERSION}`);
         process.exit(0);
+    }
+
+    // Initialize the framework's configuration hierarchy so any tool that
+    // needs config values (e.g. ADO_PAT / ADO_ORGANIZATION / ADO_PROJECT) can
+    // read them via `CSConfigurationManager.getInstance().get(key)`.
+    // The 8-level loader honours `process.env.PROJECT` / `process.env.ENVIRONMENT`
+    // when present and decrypts any `ENCRYPTED:` values automatically.
+    try {
+        await CSConfigurationManager.getInstance().initialize({});
+        console.error('CSConfigurationManager initialized');
+    } catch (err) {
+        console.error(
+            'CSConfigurationManager initialization failed (non-fatal — tool params still work):',
+            err instanceof Error ? err.message : String(err),
+        );
     }
 
     // Configure server
@@ -329,4 +345,7 @@ function main(): void {
 }
 
 // Run if this is the main module
-main();
+main().catch((err) => {
+    console.error('Fatal startup error:', err);
+    process.exit(1);
+});
