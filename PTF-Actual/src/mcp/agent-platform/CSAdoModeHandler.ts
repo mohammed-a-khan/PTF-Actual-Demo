@@ -22,6 +22,8 @@ import {
     GenerationResult,
 } from './CSGenerationOrchestrator';
 import { CSCostTelemetry } from './CSCostTelemetry';
+import { CSElicitation } from './CSElicitation';
+import { CSLiveAppContext, LiveAppContext } from './CSLiveAppContext';
 import { ClassifiedInput } from './types';
 import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 
@@ -55,6 +57,12 @@ export interface AdoModeHandlerOptions {
      * accidentally pulling thousands of cases from a top-level plan.
      */
     maxTestCases?: number;
+    /**
+     * When true (default), elicit URL + creds + nav steps before generation
+     * — most ADO test cases describe manual click paths without recording
+     * the test environment URL. Set false for offline planning runs.
+     */
+    requireLiveApp?: boolean;
 }
 
 /**
@@ -71,6 +79,8 @@ export interface AdoModeHandlerResult {
      */
     blockedReason?: string;
     blockedDetails?: Record<string, unknown>;
+    /** Resolved live-app anchor when requireLiveApp produced one. */
+    liveAppContext?: LiveAppContext;
 }
 
 // ============================================================================
@@ -135,6 +145,25 @@ export class CSAdoModeHandler {
         const maxCases =
             options.maxTestCases ?? CSAdoModeHandler.DEFAULT_MAX_TEST_CASES;
 
+        // -- Live-app context: elicit URL/creds/nav when missing -----------
+        // ADO test cases describe manual click paths but rarely record the
+        // test environment URL. Without one the generated tests have no
+        // anchor for real selectors. Resolve URL + login from input → config
+        // → elicitation; bail if the user declines.
+        let liveAppContext: LiveAppContext | undefined;
+        if (options.requireLiveApp !== false) {
+            const outcome = await CSLiveAppContext.ensure(classified, context);
+            if (outcome.status !== 'ok') {
+                return {
+                    generationResult: null,
+                    testCaseIds: [],
+                    blockedReason: outcome.reason,
+                };
+            }
+            liveAppContext = outcome.context;
+            classified = CSLiveAppContext.merge(classified, liveAppContext);
+        }
+
         // -- Step 1: resolve test case IDs ----------------------------------
         let testCaseIds: number[] = [];
         try {
@@ -158,12 +187,19 @@ export class CSAdoModeHandler {
                         blockedReason: `Invalid plan/suite ids: planId=${ef.planId}, suiteId=${ef.id}`,
                     };
                 }
-                testCaseIds = await CSAdoModeHandler.idsForSuite(
+                testCaseIds = await CSAdoModeHandler.idsForSuiteWithElicitation(
                     adoCommon,
                     planId,
                     suiteId,
                     context,
                 );
+                if (testCaseIds.length === 0) {
+                    return {
+                        generationResult: null,
+                        testCaseIds: [],
+                        blockedReason: `no test cases selected for suite ${suiteId}. Re-invoke and pick at least one case, or use ado_test_case_id mode for a single specific case.`,
+                    };
+                }
             } else if (classified.mode === 'ado_test_plan_id') {
                 const planId = Number(ef.id);
                 if (!Number.isFinite(planId) || planId <= 0) {
@@ -173,12 +209,21 @@ export class CSAdoModeHandler {
                         blockedReason: `Invalid plan id: ${ef.id}`,
                     };
                 }
-                testCaseIds = await CSAdoModeHandler.idsForPlan(
+                testCaseIds = await CSAdoModeHandler.idsForPlanWithElicitation(
                     adoCommon,
                     planId,
                     ef.suiteFilter,
                     context,
                 );
+                // Empty after elicitation = user cancelled the picker.
+                if (testCaseIds.length === 0) {
+                    return {
+                        generationResult: null,
+                        testCaseIds: [],
+                        blockedReason:
+                            `no suites selected for plan ${planId}. Re-invoke and pick at least one suite, or set suiteFilter on the input to narrow without the picker.`,
+                    };
+                }
             } else {
                 return {
                     generationResult: null,
@@ -294,6 +339,7 @@ export class CSAdoModeHandler {
         return {
             generationResult,
             testCaseIds: parsedTestCases.map((tc) => tc.testCaseId),
+            liveAppContext,
         };
     }
 
@@ -389,6 +435,224 @@ export class CSAdoModeHandler {
             }
         }
         return Array.from(allIds);
+    }
+
+    /**
+     * List test cases in a suite with id+title pairs, then ask the user to
+     * pick which to migrate. Falls back to "process all" if the host
+     * doesn't support elicitation or only one case exists.
+     *
+     * The title fetch is a single batched `ado_work_items_get_batch` call
+     * with `fields=System.Title` only — far cheaper than the full
+     * Microsoft.VSTS.TCM.Steps payload, and sufficient for the picker.
+     */
+    private static async idsForSuiteWithElicitation(
+        adoCommon: AdoCommonParams,
+        planId: number,
+        suiteId: number,
+        context: MCPToolContext,
+    ): Promise<number[]> {
+        const allIds = await CSAdoModeHandler.idsForSuite(
+            adoCommon,
+            planId,
+            suiteId,
+            context,
+        );
+        if (allIds.length === 0) return [];
+
+        const supported = typeof context.elicitation?.create === 'function';
+        if (!supported || allIds.length === 1) {
+            return allIds;
+        }
+
+        // Fetch titles for the picker. One batched call with fields filtered
+        // to keep the payload small.
+        const summaries = await CSAdoModeHandler.fetchCaseSummaries(
+            adoCommon,
+            allIds,
+            context,
+        );
+
+        const elicited = await CSElicitation.pickMany(context, {
+            message: `Suite ${suiteId} contains ${summaries.length} test case(s). Pick which to migrate.`,
+            fieldName: 'caseIds',
+            description:
+                'Each TC# is the ADO work item id. Pick at least one; only the picked subset will be migrated and (if enabled) published back to ADO.',
+            options: summaries.map((c) => ({
+                value: String(c.id),
+                title: `TC#${c.id}: ${c.title}`,
+            })),
+            minPicks: 1,
+        });
+
+        if (!elicited.supported || elicited.action !== 'accept') return [];
+
+        const raw = elicited.content.caseIds;
+        const arr = Array.isArray(raw) ? raw : [raw];
+        return arr
+            .map((v) => Number(v))
+            .filter((n) => Number.isFinite(n) && n > 0);
+    }
+
+    /**
+     * Fetch lightweight {id, title} pairs for a list of test case IDs.
+     * Used to build elicitation pickers without paying for the full
+     * Microsoft.VSTS.TCM.Steps payload on each row.
+     */
+    private static async fetchCaseSummaries(
+        adoCommon: AdoCommonParams,
+        ids: number[],
+        context: MCPToolContext,
+    ): Promise<Array<{ id: number; title: string }>> {
+        const out: Array<{ id: number; title: string }> = [];
+        for (let i = 0; i < ids.length; i += CSAdoModeHandler.BATCH_PAGE_SIZE) {
+            const chunk = ids.slice(i, i + CSAdoModeHandler.BATCH_PAGE_SIZE);
+            const result = await CSAdoModeHandler.invokeAdo(
+                'ado_work_items_get_batch',
+                {
+                    ...adoCommon,
+                    ids: chunk,
+                    fields: ['System.Title'],
+                    errorPolicy: 'omit',
+                },
+                context,
+            );
+            if (result.isError) continue;
+            const sc = result.structuredContent as
+                | Record<string, unknown>
+                | undefined;
+            const items = (sc?.value as Array<Record<string, unknown>>) ?? [];
+            for (const wi of items) {
+                const id = typeof wi?.id === 'number' ? wi.id : Number(wi?.id);
+                const fields =
+                    (wi?.fields as Record<string, unknown>) ?? {};
+                const title =
+                    typeof fields['System.Title'] === 'string'
+                        ? String(fields['System.Title'])
+                        : `TC#${id}`;
+                if (Number.isFinite(id) && id > 0) {
+                    out.push({ id, title });
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Same as idsForPlan but with an elicitation gate: list suites, ask the
+     * user to pick which to include, then aggregate IDs from the picked
+     * subset. Falls back to "process all" if the host doesn't support
+     * elicitation (older clients) or `suiteFilter` is supplied (CLI users
+     * who want non-interactive operation).
+     */
+    private static async idsForPlanWithElicitation(
+        adoCommon: AdoCommonParams,
+        planId: number,
+        suiteFilter: string | undefined,
+        context: MCPToolContext,
+    ): Promise<number[]> {
+        const suites = await CSAdoModeHandler.fetchSuiteSummaries(
+            adoCommon,
+            planId,
+            context,
+        );
+
+        // Apply CLI suiteFilter first (substring match on name) so the
+        // elicitation list is already pre-filtered if the user wanted to
+        // narrow non-interactively.
+        const candidates = suiteFilter
+            ? suites.filter((s) =>
+                  s.name.toLowerCase().includes(suiteFilter.toLowerCase()),
+              )
+            : suites;
+
+        if (candidates.length === 0) return [];
+
+        // No elicitation support OR only one candidate → process all.
+        // (Host can't ask the user; degrading gracefully to the existing
+        // non-interactive behaviour preserves portability across clients.)
+        let pickedSuiteIds: number[];
+        const supported = typeof context.elicitation?.create === 'function';
+        if (!supported || candidates.length === 1) {
+            pickedSuiteIds = candidates.map((s) => s.id);
+        } else {
+            const elicited = await CSElicitation.pickMany(context, {
+                message: `Plan ${planId} contains ${candidates.length} suite(s). Pick which to migrate.`,
+                fieldName: 'suiteIds',
+                description:
+                    'Select one or more suites. Test cases from all picked suites will be migrated.',
+                options: candidates.map((s) => ({
+                    value: String(s.id),
+                    title: `${s.name} (id ${s.id})`,
+                })),
+                minPicks: 1,
+            });
+            if (!elicited.supported || elicited.action !== 'accept') {
+                // Decline / cancel = empty → caller surfaces a clean
+                // "user cancelled" block. Do not silently fall back to
+                // "process everything" — that would be exactly the kind
+                // of surprising behaviour the user explicitly opted out of.
+                return [];
+            }
+            const raw = elicited.content.suiteIds;
+            const arr = Array.isArray(raw) ? raw : [raw];
+            pickedSuiteIds = arr
+                .map((v) => Number(v))
+                .filter((n) => Number.isFinite(n) && n > 0);
+        }
+
+        // Aggregate test case IDs from each picked suite.
+        const allIds = new Set<number>();
+        for (const sid of pickedSuiteIds) {
+            try {
+                const ids = await CSAdoModeHandler.idsForSuite(
+                    adoCommon,
+                    planId,
+                    sid,
+                    context,
+                );
+                for (const id of ids) allIds.add(id);
+            } catch (err) {
+                context.log(
+                    'warning',
+                    `CSAdoModeHandler: skipping suite ${sid} after error`,
+                    {
+                        error: err instanceof Error ? err.message : String(err),
+                    },
+                );
+            }
+        }
+        return Array.from(allIds);
+    }
+
+    /**
+     * List suites in a plan with id+name pairs ready for elicitation.
+     * Wraps `ado_test_suites_list`.
+     */
+    private static async fetchSuiteSummaries(
+        adoCommon: AdoCommonParams,
+        planId: number,
+        context: MCPToolContext,
+    ): Promise<Array<{ id: number; name: string }>> {
+        const result = await CSAdoModeHandler.invokeAdo(
+            'ado_test_suites_list',
+            { ...adoCommon, planId },
+            context,
+        );
+        if (result.isError) {
+            throw new Error(`ado_test_suites_list failed for plan ${planId}`);
+        }
+        const sc = result.structuredContent as Record<string, unknown> | undefined;
+        const raw = (sc?.suites as Array<Record<string, unknown>>) ?? [];
+        const out: Array<{ id: number; name: string }> = [];
+        for (const s of raw) {
+            const id = typeof s?.id === 'number' ? s.id : Number(s?.id);
+            const name = typeof s?.name === 'string' ? s.name : `Suite ${id}`;
+            if (Number.isFinite(id) && id > 0) {
+                out.push({ id, name });
+            }
+        }
+        return out;
     }
 
     // ========================================================================

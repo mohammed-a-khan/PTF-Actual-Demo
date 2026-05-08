@@ -21,8 +21,11 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { MCPToolContext } from '../types/CSMCPTypes';
-import { CSCopilotDelegate, DelegateInputFile } from './CSCopilotDelegate';
+import { MCPToolContext, MCPToolDefinition, MCPToolResult } from '../types/CSMCPTypes';
+import { transformTools } from '../tools/transform/CSMCPTransformTools';
+import { CSCopilotDelegate } from './CSCopilotDelegate';
+import { CSDocToIrConverter } from './CSDocToIrConverter';
+import { CSLiveAppContext, LiveAppContext } from './CSLiveAppContext';
 import { CSMigrationCache } from './CSMigrationCache';
 import { CSCostTelemetry } from './CSCostTelemetry';
 import { GenerationResult } from './CSGenerationOrchestrator';
@@ -41,6 +44,13 @@ export interface DocumentModeHandlerOptions {
     telemetry?: CSCostTelemetry;
     /** Optional section filter from the clarification agent. */
     sectionFocus?: string;
+    /**
+     * When true (default), elicit URL + creds + nav steps before generation
+     * so the produced tests can be heal-loop validated against a live app.
+     * Set false only for offline planning runs that explicitly want a
+     * scaffold-only output.
+     */
+    requireLiveApp?: boolean;
 }
 
 export interface DocumentModeHandlerResult {
@@ -49,6 +59,8 @@ export interface DocumentModeHandlerResult {
     blockedReason?: string;
     blockedDetails?: Record<string, unknown>;
     delegateNotes?: string[];
+    /** Resolved live-app anchor when requireLiveApp produced one. */
+    liveAppContext?: LiveAppContext;
 }
 
 // ============================================================================
@@ -78,7 +90,7 @@ export class CSDocumentModeHandler {
             return {
                 generationResult: null,
                 blockedReason:
-                    "CSDocumentModeHandler: missing 'path' in classified input",
+                    "supply the requirements document path. Re-invoke with `path: <absolute or workspace-relative path to .md/.txt>` in the input string.",
             };
         }
         const absSource = path.isAbsolute(sourceFile)
@@ -87,7 +99,7 @@ export class CSDocumentModeHandler {
         if (!fs.existsSync(absSource)) {
             return {
                 generationResult: null,
-                blockedReason: `CSDocumentModeHandler: file not found at ${absSource}`,
+                blockedReason: `correct the document path and re-invoke. The supplied path resolved to ${absSource} which does not exist on disk.`,
             };
         }
 
@@ -96,7 +108,7 @@ export class CSDocumentModeHandler {
             return {
                 generationResult: null,
                 sourceFile: absSource,
-                blockedReason: `CSDocumentModeHandler: ${ext} files are not yet supported in-server. Convert to .md / .txt and re-invoke, or paste the content via natural_language_chat.`,
+                blockedReason: `convert the ${ext} file to .md or .txt and re-invoke — binary formats need pre-extraction. Tools: pandoc (for .docx), pdftotext (for .pdf). Or paste the rules verbatim via natural_language_chat mode.`,
             };
         }
         if (!CSDocumentModeHandler.TEXT_EXTENSIONS.has(ext) && ext !== '') {
@@ -113,13 +125,32 @@ export class CSDocumentModeHandler {
             options.outputRoot || CSDocumentModeHandler.DEFAULT_OUTPUT_ROOT;
         const sectionFocus = options.sectionFocus || ef.sectionFocus || 'all';
 
+        // -- Live-app context: elicit URL/creds/nav when missing -----------
+        // Pure-text doc input cannot anchor real DOM. Resolve URL + login
+        // info from input → config → elicitation. Decline/unsupported is a
+        // hard block — without an anchor the heal loop cannot run, so the
+        // tool does not pretend to produce executable code.
+        let liveAppContext: LiveAppContext | undefined;
+        if (options.requireLiveApp !== false) {
+            const outcome = await CSLiveAppContext.ensure(classified, context);
+            if (outcome.status !== 'ok') {
+                return {
+                    generationResult: null,
+                    sourceFile: absSource,
+                    blockedReason: outcome.reason,
+                };
+            }
+            liveAppContext = outcome.context;
+            classified = CSLiveAppContext.merge(classified, liveAppContext);
+        }
+
         // -- Read the document ---------------------------------------------
         const main = CSCopilotDelegate.readInput(absSource, 'requirements document');
         if (!main) {
             return {
                 generationResult: null,
                 sourceFile: absSource,
-                blockedReason: 'CSDocumentModeHandler: failed to read document',
+                blockedReason: 'the document became unreadable mid-run (permissions or removal). Verify the file is accessible, then re-invoke with the same input.',
             };
         }
         const headings = CSDocumentModeHandler.extractHeadings(main.content, sectionFocus);
@@ -149,35 +180,69 @@ export class CSDocumentModeHandler {
                 ? { cachedAt: cacheLookup.cachedAt }
                 : undefined;
         } else {
-            const sourceFiles: DelegateInputFile[] = [main];
-            const grounding = JSON.stringify(
-                { sourceFile: absSource, sectionFocus, headings },
-                null,
-                2,
-            );
+            // Deterministic doc → IR → legacy_transform path. Same
+            // architecture as legacy mode (Phase 2.1): no sampling, no
+            // host-LLM round-trip. The converter heuristically extracts
+            // scenarios from headings + shall/must/should sentences;
+            // legacy_transform deterministically emits the file map
+            // (feature, steps, scenarios JSON, page-object stubs).
+            //
+            // The output drafts contain `// TODO` markers for any LLM-
+            // judgement step the user wants to refine — those fail the
+            // pre-gate audit and surface to the host LLM (Copilot) for
+            // surgical fixes via apply_patch.
+            const conversion = CSDocToIrConverter.convert(absSource, {
+                sectionFocus,
+            });
+            delegateNotes = [
+                `Converted document to IR: ${conversion.scenarioCount} scenario(s), ${conversion.stepCount} step(s)`,
+                ...conversion.notes,
+            ];
 
-            const delegateResult = await CSCopilotDelegate.delegate(
+            const transformRaw = await CSDocumentModeHandler.invokeTool(
+                transformTools,
+                'legacy_transform',
                 {
-                    task: 'document_to_tests',
+                    irJson: JSON.stringify(conversion.ir),
                     projectName,
                     featureName,
-                    sourceFiles,
-                    grounding,
-                    telemetry: options.telemetry,
+                    pipelineVersion: CSDocumentModeHandler.PIPELINE_VERSION,
                 },
                 context,
             );
-            if (delegateResult.blockedReason) {
+            if (transformRaw.isError) {
                 return {
                     generationResult: null,
                     sourceFile: absSource,
-                    blockedReason: delegateResult.blockedReason,
-                    blockedDetails: { notes: delegateResult.notes },
-                    delegateNotes: delegateResult.notes,
+                    blockedReason:
+                        'the deterministic transformer could not produce a draft from the synthesized IR. Inspect `blockedDetails.detail`, then re-invoke after correcting the source document structure.',
+                    blockedDetails: {
+                        detail: CSDocumentModeHandler.firstText(transformRaw),
+                    },
+                    delegateNotes,
                 };
             }
-            outputFiles = delegateResult.files;
-            delegateNotes = delegateResult.notes;
+            let transformResult: { files: Record<string, string>; notes?: string[] };
+            try {
+                transformResult = JSON.parse(
+                    CSDocumentModeHandler.firstText(transformRaw),
+                );
+            } catch (err) {
+                return {
+                    generationResult: null,
+                    sourceFile: absSource,
+                    blockedReason:
+                        'the transformer returned non-JSON output. Re-invoke once — transient parser errors usually clear.',
+                    blockedDetails: {
+                        error: err instanceof Error ? err.message : String(err),
+                    },
+                    delegateNotes,
+                };
+            }
+            outputFiles = transformResult.files;
+            if (transformResult.notes) {
+                delegateNotes.push(...transformResult.notes);
+            }
             cacheKeyForStore = cacheLookup.cacheKey || undefined;
         }
 
@@ -187,7 +252,7 @@ export class CSDocumentModeHandler {
             return {
                 generationResult: null,
                 sourceFile: absSource,
-                blockedReason: 'CSDocumentModeHandler: nothing was written to disk',
+                blockedReason: 'the deterministic transformer returned an empty file map. This usually means the IR had zero tests — verify the doc has at least one `##` heading or one shall/must/should sentence.',
                 delegateNotes,
             };
         }
@@ -244,6 +309,7 @@ export class CSDocumentModeHandler {
             generationResult,
             sourceFile: absSource,
             delegateNotes,
+            liveAppContext,
         };
     }
 
@@ -292,5 +358,27 @@ export class CSDocumentModeHandler {
         } catch {
             return '';
         }
+    }
+
+    private static firstText(result: MCPToolResult): string {
+        for (const c of result.content ?? []) {
+            if (c.type === 'text') return c.text;
+        }
+        return '';
+    }
+
+    private static async invokeTool(
+        defs: MCPToolDefinition[],
+        toolName: string,
+        params: Record<string, unknown>,
+        context: MCPToolContext,
+    ): Promise<MCPToolResult> {
+        const def = defs.find((d) => d.tool.name === toolName);
+        if (!def) {
+            throw new Error(
+                `CSDocumentModeHandler: required tool not registered: ${toolName}`,
+            );
+        }
+        return def.handler(params, context);
     }
 }

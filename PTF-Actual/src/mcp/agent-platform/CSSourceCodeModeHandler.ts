@@ -23,10 +23,13 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { MCPToolContext } from '../types/CSMCPTypes';
-import { CSCopilotDelegate, DelegateInputFile } from './CSCopilotDelegate';
+import { MCPToolContext, MCPToolDefinition, MCPToolResult } from '../types/CSMCPTypes';
+import { transformTools } from '../tools/transform/CSMCPTransformTools';
+import { CSCopilotDelegate } from './CSCopilotDelegate';
+import { CSLiveAppContext, LiveAppContext } from './CSLiveAppContext';
 import { CSMigrationCache } from './CSMigrationCache';
 import { CSCostTelemetry } from './CSCostTelemetry';
+import { CSSourceToIrConverter } from './CSSourceToIrConverter';
 import { GenerationResult } from './CSGenerationOrchestrator';
 import { ParsedTestCase } from './CSAdoTestCaseParser';
 import { GherkinTranslation } from './CSStepToGherkinTranslator';
@@ -45,6 +48,13 @@ export interface SourceCodeModeHandlerOptions {
     targetSurface?: string;
     /** Cap on sibling files included for context. */
     maxSiblingFiles?: number;
+    /**
+     * When true (default for UI surfaces), elicit URL + creds + nav steps
+     * before generation so the produced tests can be heal-loop validated
+     * against a live app. API-only runs may set false because they exercise
+     * HTTP endpoints rather than rendered DOM.
+     */
+    requireLiveApp?: boolean;
 }
 
 export interface SourceCodeModeHandlerResult {
@@ -53,6 +63,7 @@ export interface SourceCodeModeHandlerResult {
     blockedReason?: string;
     blockedDetails?: Record<string, unknown>;
     delegateNotes?: string[];
+    liveAppContext?: LiveAppContext;
 }
 
 // ============================================================================
@@ -92,7 +103,7 @@ export class CSSourceCodeModeHandler {
             return {
                 generationResult: null,
                 blockedReason:
-                    "CSSourceCodeModeHandler: missing 'path' in classified input",
+                    "supply the source file path. Re-invoke with `path: <absolute or workspace-relative path to .ts/.java/.py source>` in the input string.",
             };
         }
         const absSource = path.isAbsolute(sourceFile)
@@ -101,7 +112,7 @@ export class CSSourceCodeModeHandler {
         if (!fs.existsSync(absSource)) {
             return {
                 generationResult: null,
-                blockedReason: `CSSourceCodeModeHandler: file not found at ${absSource}`,
+                blockedReason: `correct the source file path and re-invoke. The supplied path resolved to ${absSource} which does not exist on disk.`,
             };
         }
 
@@ -114,12 +125,36 @@ export class CSSourceCodeModeHandler {
             options.outputRoot || CSSourceCodeModeHandler.DEFAULT_OUTPUT_ROOT;
         const targetSurface = options.targetSurface || ef.targetSurface || 'ui';
 
+        // -- Live-app context: elicit URL/creds/nav for UI surfaces --------
+        // API-targeted runs hit HTTP endpoints directly; the heal loop runs
+        // request-level assertions and doesn't need DOM. UI / mixed surfaces
+        // must anchor against a real app or they emit guessed selectors.
+        let liveAppContext: LiveAppContext | undefined;
+        const liveAppDefaultRequired =
+            targetSurface === 'ui' || targetSurface === 'both';
+        const requireLiveApp =
+            options.requireLiveApp !== undefined
+                ? options.requireLiveApp
+                : liveAppDefaultRequired;
+        if (requireLiveApp) {
+            const outcome = await CSLiveAppContext.ensure(classified, context);
+            if (outcome.status !== 'ok') {
+                return {
+                    generationResult: null,
+                    sourceFile: absSource,
+                    blockedReason: outcome.reason,
+                };
+            }
+            liveAppContext = outcome.context;
+            classified = CSLiveAppContext.merge(classified, liveAppContext);
+        }
+
         const main = CSCopilotDelegate.readInput(absSource, 'application source');
         if (!main) {
             return {
                 generationResult: null,
                 sourceFile: absSource,
-                blockedReason: 'CSSourceCodeModeHandler: failed to read source file',
+                blockedReason: 'the source file became unreadable mid-run (permissions or removal). Verify the file is accessible, then re-invoke with the same input.',
             };
         }
 
@@ -146,48 +181,65 @@ export class CSSourceCodeModeHandler {
                 ? { cachedAt: cacheLookup.cachedAt }
                 : undefined;
         } else {
-            const siblings = CSSourceCodeModeHandler.collectSiblings(
-                absSource,
-                options.maxSiblingFiles ?? CSSourceCodeModeHandler.DEFAULT_MAX_SIBLINGS,
-            );
+            // Deterministic source → IR → legacy_transform path. Same
+            // pattern as document mode (Phase 5b). The converter detects
+            // CS Playwright page objects (decorators present) and emits
+            // a one-page IR with stub scenarios per public method; falls
+            // back to a placeholder IR + a note for unknown source.
+            const conversion = CSSourceToIrConverter.convert(absSource, {
+                targetSurface: targetSurface as 'ui' | 'api' | 'both',
+            });
+            delegateNotes = [
+                conversion.detectedAsPageObject
+                    ? `Source recognised as a page object — extracted ${conversion.publicMethods.length} public method(s) as scenario stubs`
+                    : `Source did not match the page-object pattern; emitted a placeholder IR — refine before merging`,
+                ...conversion.notes,
+            ];
 
-            const sourceFiles: DelegateInputFile[] = [main, ...siblings];
-
-            const grounding = JSON.stringify(
+            const transformRaw = await CSSourceCodeModeHandler.invokeTool(
+                transformTools,
+                'legacy_transform',
                 {
-                    sourceFile: absSource,
-                    targetSurface,
-                    exportedSymbols: CSSourceCodeModeHandler.extractExportedSymbols(
-                        main.content,
-                        path.extname(absSource).toLowerCase(),
-                    ),
-                },
-                null,
-                2,
-            );
-
-            const delegateResult = await CSCopilotDelegate.delegate(
-                {
-                    task: 'source_to_tests',
+                    irJson: JSON.stringify(conversion.ir),
                     projectName,
                     featureName,
-                    sourceFiles,
-                    grounding,
-                    telemetry: options.telemetry,
+                    pipelineVersion: CSSourceCodeModeHandler.PIPELINE_VERSION,
                 },
                 context,
             );
-            if (delegateResult.blockedReason) {
+            if (transformRaw.isError) {
                 return {
                     generationResult: null,
                     sourceFile: absSource,
-                    blockedReason: delegateResult.blockedReason,
-                    blockedDetails: { notes: delegateResult.notes },
-                    delegateNotes: delegateResult.notes,
+                    blockedReason:
+                        'the deterministic transformer could not produce a draft from the synthesized IR. Inspect `blockedDetails.detail`, then re-invoke after correcting the source structure.',
+                    blockedDetails: {
+                        detail: CSSourceCodeModeHandler.firstText(transformRaw),
+                    },
+                    delegateNotes,
                 };
             }
-            outputFiles = delegateResult.files;
-            delegateNotes = delegateResult.notes;
+            let transformResult: { files: Record<string, string>; notes?: string[] };
+            try {
+                transformResult = JSON.parse(
+                    CSSourceCodeModeHandler.firstText(transformRaw),
+                );
+            } catch (err) {
+                return {
+                    generationResult: null,
+                    sourceFile: absSource,
+                    blockedReason:
+                        'the transformer returned non-JSON output. Re-invoke once — transient parser errors usually clear.',
+                    blockedDetails: {
+                        error: err instanceof Error ? err.message : String(err),
+                    },
+                    delegateNotes,
+                };
+            }
+            outputFiles = transformResult.files;
+            if (transformResult.notes) {
+                delegateNotes.push(...transformResult.notes);
+            }
             cacheKeyForStore = cacheLookup.cacheKey || undefined;
         }
 
@@ -197,7 +249,7 @@ export class CSSourceCodeModeHandler {
                 generationResult: null,
                 sourceFile: absSource,
                 blockedReason:
-                    'CSSourceCodeModeHandler: nothing was written to disk',
+                    'the deterministic transformer returned an empty file map. The source had no extractable structure — verify the file is a CS Playwright page object (decorated with @CSPage / @CSGetElement) or use document_path mode with a paired requirements doc.',
                 delegateNotes,
             };
         }
@@ -262,6 +314,7 @@ export class CSSourceCodeModeHandler {
             generationResult,
             sourceFile: absSource,
             delegateNotes,
+            liveAppContext,
         };
     }
 
@@ -269,81 +322,12 @@ export class CSSourceCodeModeHandler {
     // Helpers
     // ========================================================================
 
-    /**
-     * Collect up to `max` source files from the same directory as the main
-     * file. Skips test files (anything matching `*.test.*` / `*Test.*` /
-     * `__tests__/`) so we feed Copilot only production source. Skips files
-     * with extensions outside `KNOWN_SOURCE_EXTENSIONS`.
-     */
-    private static collectSiblings(
-        absMain: string,
-        max: number,
-    ): DelegateInputFile[] {
-        const dir = path.dirname(absMain);
-        let entries: string[];
-        try {
-            entries = fs.readdirSync(dir);
-        } catch {
-            return [];
-        }
-        const mainBase = path.basename(absMain);
-        const result: DelegateInputFile[] = [];
-        for (const entry of entries) {
-            if (result.length >= max) break;
-            if (entry === mainBase) continue;
-            if (/(?:\.test\.|\.spec\.|Test\.|Tests\.|__tests__)/.test(entry)) {
-                continue;
-            }
-            const ext = path.extname(entry).toLowerCase();
-            if (!CSSourceCodeModeHandler.KNOWN_SOURCE_EXTENSIONS.has(ext)) continue;
-            const full = path.join(dir, entry);
-            try {
-                const stat = fs.statSync(full);
-                if (!stat.isFile()) continue;
-                const fileObj = CSCopilotDelegate.readInput(
-                    full,
-                    'sibling source',
-                );
-                if (fileObj) result.push(fileObj);
-            } catch {
-                // Ignore unreadable entries; the LLM does not require them.
-            }
-        }
-        return result;
-    }
-
-    /**
-     * Cheap regex pass for `export class X` / `public class X` / `def X` /
-     * `function X(` etc. so the delegate's grounding lists the symbols it
-     * should target.
-     */
-    private static extractExportedSymbols(content: string, ext: string): string[] {
-        const out = new Set<string>();
-        const patterns: RegExp[] = [];
-        if (ext === '.ts' || ext === '.tsx' || ext === '.js' || ext === '.jsx') {
-            patterns.push(/\bexport\s+(?:class|function|const|interface|type)\s+(\w+)/g);
-            patterns.push(/\bclass\s+(\w+)/g);
-        } else if (ext === '.java' || ext === '.kt' || ext === '.cs' || ext === '.scala') {
-            patterns.push(/\b(?:public|protected)?\s*(?:abstract\s+)?class\s+(\w+)/g);
-            patterns.push(/\b(?:public|protected)\s+\w[\w<>?,\s]*\s+(\w+)\s*\(/g);
-        } else if (ext === '.py') {
-            patterns.push(/^\s*def\s+(\w+)\s*\(/gm);
-            patterns.push(/^\s*class\s+(\w+)/gm);
-        } else if (ext === '.go') {
-            patterns.push(/\bfunc\s+(\w+)\s*\(/g);
-            patterns.push(/\btype\s+(\w+)\s+/g);
-        } else if (ext === '.rb') {
-            patterns.push(/^\s*def\s+(\w+)/gm);
-            patterns.push(/^\s*class\s+(\w+)/gm);
-        }
-        for (const re of patterns) {
-            let m: RegExpExecArray | null;
-            while ((m = re.exec(content)) !== null) {
-                if (m[1]) out.add(m[1]);
-            }
-        }
-        return Array.from(out).slice(0, 50);
-    }
+    // collectSiblings + extractExportedSymbols were used by the
+    // sampling-based delegate path to bundle sibling source for the
+    // host LLM. The deterministic CSSourceToIrConverter path works
+    // from a single file — the converter detects whether it's a CS
+    // Playwright page object and extracts elements/methods directly.
+    // Both helpers removed in Phase 5c.
 
     private static deriveFeatureName(absSource: string): string {
         const base = path.basename(absSource);
@@ -357,5 +341,27 @@ export class CSSourceCodeModeHandler {
         } catch {
             return '';
         }
+    }
+
+    private static firstText(result: MCPToolResult): string {
+        for (const c of result.content ?? []) {
+            if (c.type === 'text') return c.text;
+        }
+        return '';
+    }
+
+    private static async invokeTool(
+        defs: MCPToolDefinition[],
+        toolName: string,
+        params: Record<string, unknown>,
+        context: MCPToolContext,
+    ): Promise<MCPToolResult> {
+        const def = defs.find((d) => d.tool.name === toolName);
+        if (!def) {
+            throw new Error(
+                `Source-mode handler: required tool not registered: ${toolName}`,
+            );
+        }
+        return def.handler(params, context);
     }
 }

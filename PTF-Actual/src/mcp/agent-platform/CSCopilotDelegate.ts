@@ -1,12 +1,38 @@
 /**
- * Agentic Test Platform — Copilot Delegate
+ * Agentic Test Platform — Copilot Delegate (DEPRECATED — Phase 2 will replace)
  *
- * Single primitive wrapping `context.sampling.createMessage()`. Encodes the
- * platform's "orchestrator + safety harness around Copilot" architecture:
- * we do not re-implement semantic source-code understanding. Instead we
- * bundle the legacy/document/source input + framework conventions, hand
- * the lot to the host LLM (Copilot in VS Code, Claude in terminal, etc.
- * via MCP sampling), and parse the file map it returns.
+ * **DEPRECATED.** This module wraps `context.sampling.createMessage()` to
+ * delegate code generation to the host LLM. Verified via grep against
+ * `microsoft/vscode-copilot-chat` source: GitHub Copilot does NOT
+ * implement the MCP `sampling/createMessage` method, so every call from
+ * this delegate returns "Method not found" in a Copilot deployment.
+ *
+ * That failure is the load-bearing reason the master tool returned a
+ * BLOCKED state for legacy/document/source/chat modes, which in turn
+ * triggered Copilot's documented bail-out behavior (the host LLM reads
+ * the structured BLOCKED payload and decides to "freelance" — write
+ * code inline in chat instead of invoking our tools again).
+ *
+ * **Replacement direction (Phase 2):**
+ *   - Each per-mode handler stops calling this delegate.
+ *   - Instead the handler returns a structured payload (file content +
+ *     edit hints) and an active-imperative result text telling Copilot
+ *     to call its built-in `apply_patch` / `replace_string_in_file` to
+ *     write the file. Copilot's edit tools go through VS Code's
+ *     `WorkspaceEdit` API — preserving the inline diff review UI, undo,
+ *     and avoiding the JSON-string round-trip that produced escaped
+ *     `\'` in earlier output.
+ *   - For steps that genuinely need an LLM call inside the server
+ *     (template fill-in, ambiguity resolution), Phase 2 may add an
+ *     embedded LLM client (Vercel AI SDK pointed at GitHub Models) as
+ *     an optional path. Default remains: orchestration only, no inline
+ *     LLM calls server-side.
+ *
+ * **Why not delete now:** the legacy/document/source/chat handlers
+ * still import this module. Deleting it now would break those
+ * handlers' compile and the smoke harness. Phase 2 replaces the
+ * handlers and removes the import; this file is deleted at the end
+ * of Phase 2.
  *
  * Three task modes share the same primitive:
  *   - `legacy_migration`  Java/C# Selenium / QAF / TestNG → CS Playwright TS
@@ -24,6 +50,8 @@
  * conventions block embedded below is intentionally generic — `<project>` /
  * `<feature>` placeholders, no real business names.
  *
+ * @deprecated Will be removed in Phase 2. Do not extend or take new
+ *   dependencies on this module.
  * @module agent-platform/CSCopilotDelegate
  */
 

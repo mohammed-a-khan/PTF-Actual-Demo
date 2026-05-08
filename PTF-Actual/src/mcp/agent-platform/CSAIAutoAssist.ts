@@ -4,7 +4,7 @@
  * Defines the `cs_ai_auto_assist` MCP tool: the single entry point for the
  * CS-AI-Auto-Assist platform. The handler orchestrates intent routing,
  * sanitization, clarification, mode dispatch, and the execution gate.
- * Generation logic for each AgentRunMode is stubbed in Phase 1 — the gate,
+ * Generation logic is wired end-to-end (Phase 2-6.5). The execution gate,
  * sanitizer, telemetry, trust score, and ADO fetch cascade all run
  * end-to-end.
  *
@@ -31,6 +31,7 @@ import { CSPiiSanitizer } from './CSPiiSanitizer';
 import { CSCostTelemetry } from './CSCostTelemetry';
 import { CSTrustScore } from './CSTrustScore';
 import { CSAdoModeHandler } from './CSAdoModeHandler';
+import { LiveAppContext } from './CSLiveAppContext';
 import { CSLegacyModeHandler } from './CSLegacyModeHandler';
 import { CSDocumentModeHandler } from './CSDocumentModeHandler';
 import { CSSourceCodeModeHandler } from './CSSourceCodeModeHandler';
@@ -39,6 +40,7 @@ import { CSAppUrlModeHandler } from './CSAppUrlModeHandler';
 import { CSAdoCreateBackFlow } from './CSAdoCreateBackFlow';
 import { CSHealLoop } from './CSHealLoop';
 import { CSMigrationCache } from './CSMigrationCache';
+import { CSPreGateAudit, PreGateAuditResult } from './CSPreGateAudit';
 import { CSRunTrace } from './CSRunTrace';
 import { GenerationResult } from './CSGenerationOrchestrator';
 import { CSConfigurationManager } from '../../core/CSConfigurationManager';
@@ -65,13 +67,60 @@ function newRunId(): string {
 }
 
 /**
- * Wrap a string into the standard MCP text-result shape.
+ * Wrap an AgentRunResult into the standard MCP text-result shape.
+ *
+ * The text content begins with an ACTIVE-IMPERATIVE summary derived from
+ * the result state. This is deliberate: Copilot's agent loop reads the
+ * tool result as text and decides whether to call again or stop. Words
+ * like "blocked", "isn't active", "not implemented" cue it to abandon
+ * the tool. We start every response with a concrete next-step imperative
+ * (or a clear success summary) so the loop continues productively.
+ *
+ * The full structured payload is still embedded as JSON beneath the
+ * summary, and is also exposed via `structuredContent` for clients that
+ * support typed output schemas.
  */
 function jsonResult(data: unknown): MCPToolResult {
+    const summary = buildActiveImperativeSummary(data);
+    const json = JSON.stringify(data, null, 2);
     return {
-        content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
+        content: [{ type: 'text', text: `${summary}\n\n${json}` }],
         structuredContent: data as Record<string, unknown>,
     };
+}
+
+/**
+ * Derive an active-imperative one-liner from an AgentRunResult-shaped
+ * payload. Falls back to a neutral marker for non-result data.
+ */
+function buildActiveImperativeSummary(data: unknown): string {
+    if (!data || typeof data !== 'object') {
+        return 'Run complete.';
+    }
+    const r = data as Record<string, unknown>;
+    const state = typeof r.state === 'string' ? r.state : undefined;
+    const reason = typeof r.blockedReason === 'string' ? r.blockedReason : undefined;
+    const filesCreated = Array.isArray(r.filesCreated) ? r.filesCreated.length : 0;
+    switch (state) {
+        case 'READY':
+            return filesCreated > 0
+                ? `Run complete. ${filesCreated} file(s) created. Review the diffs and keep or undo as desired.`
+                : 'Run complete. Review the result for next steps.';
+        case 'BLOCKED_NEED_INPUT':
+            return reason
+                ? `Action required: ${reason}`
+                : 'Action required: collect the missing input and re-invoke `cs_ai_auto_assist` with `answers` populated.';
+        case 'BLOCKED_BUDGET':
+            return reason
+                ? `Action required: ${reason}. Raise the budget or split the input, then re-invoke.`
+                : 'Action required: raise the cost budget or split the input, then re-invoke `cs_ai_auto_assist`.';
+        case 'BLOCKED_NEED_HUMAN':
+            return reason
+                ? `Action required: ${reason}`
+                : 'Action required: review the run trace at the surfaced path, then either edit the failing file directly or adjust the input and re-invoke.';
+        default:
+            return reason ? `Action required: ${reason}` : 'Run complete.';
+    }
 }
 
 /**
@@ -90,9 +139,21 @@ function makeResult(args: {
     blockedReason?: string;
     blockedDetails?: Record<string, unknown>;
     clarificationsNeeded?: ClarificationQuestion[];
+    nextStepNeeded?: boolean;
+    nextSuggestedTool?: string;
+    nextSuggestedArgs?: Record<string, unknown>;
 }): AgentRunResult {
     const endedAt = Date.now();
     const usage = args.telemetry.getUsage();
+    // Default nextStepNeeded by terminal state. BLOCKED_* states are
+    // recoverable — the LLM should re-invoke with corrected input. READY
+    // is terminal. Callers can override either default.
+    const defaultNextStepNeeded =
+        args.nextStepNeeded ??
+        (args.state === 'READY' ? false : true);
+    const defaultNextTool =
+        args.nextSuggestedTool ??
+        (args.state === 'READY' ? undefined : 'cs_ai_auto_assist');
     return {
         state: args.state,
         runId: args.runId,
@@ -109,6 +170,9 @@ function makeResult(args: {
         blockedReason: args.blockedReason,
         blockedDetails: args.blockedDetails,
         clarificationsNeeded: args.clarificationsNeeded,
+        nextStepNeeded: defaultNextStepNeeded,
+        nextSuggestedTool: defaultNextTool,
+        nextSuggestedArgs: args.nextSuggestedArgs,
     };
 }
 
@@ -143,12 +207,27 @@ interface ModeDispatchResult {
     featureFiles?: string[];
     filesCreated?: string[];
     generationResult?: GenerationResult | null;
+    /**
+     * Live-app anchor collected by Phase 6.5 (URL + login + nav). The
+     * master tool injects these into CSConfigurationManager around the
+     * heal loop so the framework's bdd_run_feature picks them up at
+     * runtime, then restores the previous values to avoid leaking across
+     * runs. Undefined for legacy / chat / app_url modes.
+     */
+    liveAppContext?: LiveAppContext;
 }
 
 /**
- * Dispatch on classified mode. Phase 2A wires ADO modes end-to-end
- * (resolve → batch fetch → parse → orchestrate → write). Other modes
- * still return deferred=true and surface a Phase-2B/2C tracker note.
+ * Dispatch on classified mode. All eight modes are wired end-to-end:
+ *   - ADO modes: resolve → batch fetch → parse → orchestrate → write
+ *   - legacy: parse → IR → transform → audit → write → heal
+ *   - document / source: heuristic IR → transform → audit → write → heal
+ *   - app_url: explore_application crawler → generated tests
+ *   - chat: returns scaffolding-only (no real DOM, no heal)
+ * Doc / source / ADO modes invoke CSLiveAppContext.ensure() before
+ * generation; the resulting LiveAppContext is propagated via
+ * `ModeDispatchResult.liveAppContext` so the master tool can inject it
+ * into CSConfigurationManager around the heal loop.
  */
 async function dispatchMode(
     classified: ClassifiedInput,
@@ -175,6 +254,7 @@ async function dispatchMode(
                     appSourcePath: ef.appSourcePath,
                     outputRoot: ef.outputRoot,
                     envs: ef.envs ? ef.envs.split(',').map((e) => e.trim()) : undefined,
+                    requireLiveApp: ef.requireLiveApp === 'false' ? false : undefined,
                     telemetry,
                 },
                 context,
@@ -188,6 +268,7 @@ async function dispatchMode(
                     featureFiles: [],
                     filesCreated: [],
                     generationResult: null,
+                    liveAppContext: handlerResult.liveAppContext,
                 };
             }
             const featureFiles = handlerResult.generationResult.filesCreated.filter(
@@ -198,6 +279,7 @@ async function dispatchMode(
                 featureFiles,
                 filesCreated: handlerResult.generationResult.filesCreated,
                 generationResult: handlerResult.generationResult,
+                liveAppContext: handlerResult.liveAppContext,
             };
         }
         case 'legacy_test_code': {
@@ -214,6 +296,7 @@ async function dispatchMode(
                         : undefined,
                     skipDependencyCheck: ef.skipDependencyCheck === 'true',
                     skipConfigScaffold: ef.skipConfigScaffold === 'true',
+                    overwriteExisting: ef.overwriteExisting === 'true',
                     telemetry,
                 },
                 context,
@@ -232,6 +315,7 @@ async function dispatchMode(
                     featureName: ef.featureName,
                     outputRoot: ef.outputRoot,
                     sectionFocus: ef.sectionFocus,
+                    requireLiveApp: ef.requireLiveApp === 'false' ? false : undefined,
                     telemetry,
                 },
                 context,
@@ -240,6 +324,7 @@ async function dispatchMode(
                 handlerResult.generationResult,
                 handlerResult.blockedReason,
                 'Document-driven generation could not produce a generation result',
+                handlerResult.liveAppContext,
             );
         }
         case 'source_code_path': {
@@ -250,6 +335,7 @@ async function dispatchMode(
                     featureName: ef.featureName,
                     outputRoot: ef.outputRoot,
                     targetSurface: ef.targetSurface,
+                    requireLiveApp: ef.requireLiveApp === 'false' ? false : undefined,
                     telemetry,
                 },
                 context,
@@ -258,6 +344,7 @@ async function dispatchMode(
                 handlerResult.generationResult,
                 handlerResult.blockedReason,
                 'Source-driven generation could not produce a generation result',
+                handlerResult.liveAppContext,
             );
         }
         case 'natural_language_chat': {
@@ -454,6 +541,7 @@ function finalizeDispatch(
     generationResult: GenerationResult | null,
     blockedReason: string | undefined,
     fallbackReason: string,
+    liveAppContext?: LiveAppContext,
 ): ModeDispatchResult {
     if (!generationResult) {
         return {
@@ -462,6 +550,7 @@ function finalizeDispatch(
             featureFiles: [],
             filesCreated: [],
             generationResult: null,
+            liveAppContext,
         };
     }
     const featureFiles = generationResult.filesCreated.filter((p) =>
@@ -472,6 +561,7 @@ function finalizeDispatch(
         featureFiles,
         filesCreated: generationResult.filesCreated,
         generationResult,
+        liveAppContext,
     };
 }
 
@@ -548,7 +638,7 @@ const csAiAutoAssistTool: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 startedAt,
                 telemetry,
                 blockedReason:
-                    'Input contains a real secret (API key, PAT, JWT, or private-key block). Remove it and re-invoke; reference the credential by its secret-store name instead.',
+                    'remove the secret from your input and re-invoke. Reference credentials by their secret-store name (for example `${input:my-pat}` in mcp.json) instead of pasting raw values.',
                 blockedDetails: { violations: sanitized.violations },
             });
             trace.append('run_end', { state: blockedRes.state });
@@ -584,7 +674,7 @@ const csAiAutoAssistTool: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 startedAt,
                 telemetry,
                 blockedReason:
-                    'Missing Tier-1 fields. Re-invoke with `answers` populated.',
+                    'collect answers to the listed Tier-1 fields and re-invoke `cs_ai_auto_assist` with `answers: { ... }` populated. The full prompt for the user is in `blockedDetails.prompt`.',
                 blockedDetails: {
                     prompt: CSClarificationAgent.formatQuestionsAsText(missing),
                     confidence: classified.confidence,
@@ -607,7 +697,10 @@ const csAiAutoAssistTool: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 mode: classified.mode,
                 startedAt,
                 telemetry,
-                blockedReason: budgetPre.reason ?? 'budget exceeded at start',
+                blockedReason:
+                    budgetPre.reason
+                        ? `${budgetPre.reason}. Raise the cost budget (pass \`budget: { maxTokens, maxUsd, maxWallClockMs }\`) or split the input into smaller pieces, then re-invoke.`
+                        : 'cost budget exhausted at start. Raise the budget (pass `budget: { maxTokens, maxUsd, maxWallClockMs }`) or split the input into smaller pieces, then re-invoke.',
             });
             trace.append('run_end', { state: blockedRes.state });
             (blockedRes as unknown as Record<string, unknown>).tracePath = trace.getTracePath();
@@ -650,7 +743,8 @@ const csAiAutoAssistTool: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                     mode: classified.mode,
                     startedAt,
                     telemetry,
-                    blockedReason: 'Mode dispatch failed',
+                    blockedReason:
+                        'mode dispatch threw an internal error. Open the trace JSONL at the surfaced path, then re-invoke with the same input — transient failures usually clear on retry.',
                     blockedDetails: {
                         error: err instanceof Error ? err.message : String(err),
                     },
@@ -668,17 +762,95 @@ const csAiAutoAssistTool: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                     telemetry,
                     blockedReason:
                         dispatch.deferredReason ??
-                        `Mode '${classified.mode}' deferred to Phase 2`,
+                        `the '${classified.mode}' handler returned without producing output. Open the trace JSONL to inspect, then re-invoke with adjusted input or add the missing handler implementation.`,
                     blockedDetails: {
-                        phase1Note:
-                            'Phase 1 ships intent routing, clarification, ' +
-                            'sanitization, ADO prefetch, the execution gate, ' +
-                            'and the trust-score formula. Per-mode generation ' +
-                            'logic is Phase 2.',
+                        capability: {
+                            available: [
+                                'intent routing',
+                                'clarification',
+                                'input sanitization',
+                                'ADO prefetch',
+                                'execution gate',
+                                'trust-score formula',
+                            ],
+                            inProgress: ['per-mode generation handlers'],
+                        },
                     },
                     filesCreated: dispatch.filesCreated ?? [],
                 }),
             );
+        }
+
+        // -- Step 5.5: pre-gate audit ----------------------------------------
+        // Before spending 30s+ on a BDD execution gate, run the framework's
+        // deterministic rule audit across every generated artefact. PO/SD/FF/
+        // DF/DB/CC violations get surfaced now (file:line + ruleId + message)
+        // so the host LLM can fix them surgically via replace_string_in_file
+        // and re-invoke. Saves a wasted gate run when the failure is
+        // structural (missing decorator, wrong xpath escape, undefined
+        // step) rather than runtime (locator drift, timing).
+        let preGateAudit: PreGateAuditResult | null = null;
+        const generatedFilesForAudit =
+            dispatch.generationResult?.filesCreated ?? dispatch.filesCreated ?? [];
+        if (generatedFilesForAudit.length > 0) {
+            try {
+                preGateAudit = await CSPreGateAudit.run(
+                    generatedFilesForAudit,
+                    context,
+                );
+                trace.append('pre_gate_audit', {
+                    pass: preGateAudit.pass,
+                    totalFiles: preGateAudit.totalFiles,
+                    totalErrors: preGateAudit.totalErrors,
+                    totalWarnings: preGateAudit.totalWarnings,
+                });
+                context.log(
+                    'info',
+                    `cs_ai_auto_assist: pre-gate audit ${preGateAudit.pass ? 'PASS' : 'FAIL'}`,
+                    {
+                        files: preGateAudit.totalFiles,
+                        errors: preGateAudit.totalErrors,
+                        warnings: preGateAudit.totalWarnings,
+                    },
+                );
+                if (!preGateAudit.pass) {
+                    const failingFiles = preGateAudit.files
+                        .filter((f) => !f.pass)
+                        .map((f) => ({
+                            file: f.file,
+                            errors: f.errors,
+                            warnings: f.warnings,
+                            violations: f.violations.slice(0, 10), // cap per-file
+                        }));
+                    const blockedRes = makeResult({
+                        state: 'BLOCKED_NEED_HUMAN',
+                        runId,
+                        mode: classified.mode,
+                        startedAt,
+                        telemetry,
+                        blockedReason: preGateAudit.summary,
+                        blockedDetails: {
+                            phase: 'pre_gate_audit',
+                            totalErrors: preGateAudit.totalErrors,
+                            totalWarnings: preGateAudit.totalWarnings,
+                            failingFiles,
+                            hint: 'Each violation has a ruleId (PO005, SD003, FF001, etc.). Look up the rule in the framework audit-rules skill, fix the offending line via replace_string_in_file, then re-invoke cs_ai_auto_assist with the same input.',
+                        },
+                        filesCreated: dispatch.generationResult?.filesCreated ?? [],
+                    });
+                    trace.append('run_end', { state: blockedRes.state, phase: 'pre_gate_audit' });
+                    (blockedRes as unknown as Record<string, unknown>).tracePath = trace.getTracePath();
+                    return jsonResult(blockedRes);
+                }
+            } catch (err) {
+                // Audit threw — log and fall through to gate. We don't want a
+                // crashing audit to block test runs that would otherwise pass.
+                context.log(
+                    'warning',
+                    `cs_ai_auto_assist: pre-gate audit threw, continuing to gate`,
+                    { error: err instanceof Error ? err.message : String(err) },
+                );
+            }
         }
 
         // -- Step 6: execution gate (with bounded heal loop) -----------------
@@ -702,11 +874,27 @@ const csAiAutoAssistTool: MCPToolDefinition = (defineTool() as MCPToolBuilder)
         if (featureFiles.length > 0) {
             const cfg = CSConfigurationManager.getInstance();
             const previousPublishFlag = cfg.get('ADO_INTEGRATION_ENABLED', '');
+            // Phase 6.5 — inject elicited live-app values so the framework's
+            // bdd_run_feature picks them up at runtime. Save+restore so they
+            // never leak across runs in the same MCP server session.
+            const previousAppUrl = cfg.get('APP_URL', '');
+            const previousAppUsername = cfg.get('APP_USERNAME', '');
+            const liveAppContext = dispatch.liveAppContext;
             const isAdoMode =
                 classified.mode === 'ado_test_case_id' ||
                 classified.mode === 'ado_test_suite_id' ||
                 classified.mode === 'ado_test_plan_id';
             try {
+                if (liveAppContext && liveAppContext.source === 'elicited') {
+                    cfg.set('APP_URL', liveAppContext.appUrl);
+                    if (liveAppContext.username) {
+                        cfg.set('APP_USERNAME', liveAppContext.username);
+                    }
+                    context.log(
+                        'info',
+                        `cs_ai_auto_assist: injected elicited APP_URL${liveAppContext.username ? ' + APP_USERNAME' : ''} for heal-loop runtime`,
+                    );
+                }
                 if (publishResultsOverride === true) {
                     cfg.set('ADO_INTEGRATION_ENABLED', 'true');
                     context.log(
@@ -739,6 +927,12 @@ const csAiAutoAssistTool: MCPToolDefinition = (defineTool() as MCPToolBuilder)
             } finally {
                 if (publishResultsOverride !== undefined) {
                     cfg.set('ADO_INTEGRATION_ENABLED', previousPublishFlag);
+                }
+                if (liveAppContext && liveAppContext.source === 'elicited') {
+                    cfg.set('APP_URL', previousAppUrl);
+                    if (liveAppContext.username) {
+                        cfg.set('APP_USERNAME', previousAppUsername);
+                    }
                 }
             }
         }

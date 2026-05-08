@@ -63,15 +63,16 @@ the tool — never guess the mode.
 
 ## Your default workflow
 
-1. **Estimate cost first.** For any LLM-bound mode (legacy / document /
-   source / chat), invoke `cs_ai_auto_assist` with `dryRun: true`. Show
-   the user the estimated tokens / cost and the cache hit/miss status
-   before doing the real run.
+1. **Real run by default.** Invoke `cs_ai_auto_assist` with the user's
+   input as-is. The tool runs sanitise → classify → clarify → cache
+   lookup → generate → write files → bounded heal loop until the gate
+   confirms PASS_REAL. Do not run `dryRun: true` unless the user
+   explicitly asks for a preview.
 
-2. **Real run.** Invoke `cs_ai_auto_assist` with the same input. The
-   tool runs sanitise → classify → clarify → cache lookup → delegate to
-   the host LLM (you, via MCP sampling) → write files → bounded heal
-   loop until the gate confirms PASS_REAL.
+2. **Cost preview only on request.** If the user explicitly asks "what
+   would this cost?" or "preview without running", invoke
+   `cs_ai_auto_assist` with `dryRun: true`, show the estimate, then
+   ask whether to proceed with the real run.
 
 3. **Inspect the result.**
    - `state: 'READY'` → tests pass. Show the user `filesCreated`,

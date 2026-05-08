@@ -112,7 +112,12 @@ export interface MCPToolOutputSchema {
 export interface MCPSchemaProperty {
     type: string;
     description?: string;
+    title?: string;
     enum?: string[];
+    /** Display labels for enum values (parallel array). MCP elicitation extension. */
+    enumNames?: string[];
+    /** oneOf with const-title pairs — alternative to enum + enumNames. */
+    oneOf?: Array<{ const: string | number | boolean; title?: string }>;
     default?: unknown;
     format?: string;
     items?: MCPSchemaProperty;
@@ -122,6 +127,10 @@ export interface MCPSchemaProperty {
     maximum?: number;
     minLength?: number;
     maxLength?: number;
+    /** For array properties — minimum number of items in the multi-select. */
+    minItems?: number;
+    /** For array properties — maximum number of items in the multi-select. */
+    maxItems?: number;
     pattern?: string;
 }
 

@@ -34,6 +34,7 @@ export { transformTools, registerTransformTools } from './tools/transform/CSMCPT
 export { driftTools, registerDriftTools } from './tools/drift/CSMCPDriftTools';
 export { equivalenceTools, registerEquivalenceTools } from './tools/equivalence/CSMCPEquivalenceTools';
 export { intelligenceTools, registerIntelligenceTools } from './tools/intelligence/CSMCPIntelligenceTools';
+export { healLoopTools, registerHealLoopTools } from './tools/heal-loop/CSMCPHealLoopTools';
 
 // Export agent platform (master tool: cs_ai_auto_assist)
 export {
@@ -70,6 +71,7 @@ import { registerTransformTools } from './tools/transform/CSMCPTransformTools';
 import { registerDriftTools } from './tools/drift/CSMCPDriftTools';
 import { registerEquivalenceTools } from './tools/equivalence/CSMCPEquivalenceTools';
 import { registerIntelligenceTools } from './tools/intelligence/CSMCPIntelligenceTools';
+import { registerHealLoopTools } from './tools/heal-loop/CSMCPHealLoopTools';
 import { registerAgentPlatformTools } from './agent-platform';
 import { registerResources } from './resources/CSMCPResources';
 import { registerPrompts } from './prompts/CSMCPPrompts';
@@ -121,6 +123,7 @@ export function createFullMCPServer(config?: CSMCPServerConfig): CSMCPServer {
     registerDriftTools(registry);
     registerEquivalenceTools(registry);
     registerIntelligenceTools(registry);
+    registerHealLoopTools(registry);
     registerAgentPlatformTools(registry);
 
     // Register resources and prompts

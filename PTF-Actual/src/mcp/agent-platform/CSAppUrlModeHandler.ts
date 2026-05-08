@@ -118,7 +118,7 @@ export class CSAppUrlModeHandler {
         if (!url || !/^https?:\/\//i.test(url)) {
             return {
                 generationResult: null,
-                blockedReason: `CSAppUrlModeHandler: invalid or missing URL (got '${url}')`,
+                blockedReason: `supply a valid http(s) URL. Re-invoke with \`url: <https://...>\` in the input — got '${url}' which does not match the URL grammar.`,
             };
         }
 
@@ -133,7 +133,7 @@ export class CSAppUrlModeHandler {
             return {
                 generationResult: null,
                 url,
-                blockedReason: `CSAppUrlModeHandler: unknown entryFlow '${entryFlow}'. Expected one of: ${Array.from(validFlows).join(', ')}`,
+                blockedReason: `set entryFlow to one of: ${Array.from(validFlows).join(', ')}. Got '${entryFlow}'. Use 'no-auth' for public apps, 'basic-login' when the app has a username+password form, 'sso-redirect' for OAuth/SAML behind an IdP, 'multi-step-login' for MFA / multi-page flows.`,
             };
         }
 
@@ -152,14 +152,14 @@ export class CSAppUrlModeHandler {
                 return {
                     generationResult: null,
                     url,
-                    blockedReason: `CSAppUrlModeHandler: entryFlow '${entryFlow}' requires a pre-recorded Playwright storage-state JSON. Set APP_STORAGE_STATE in .env (or pass storageState in answers) pointing at the file.`,
+                    blockedReason: `record a Playwright storage-state JSON for the '${entryFlow}' flow first, then re-invoke. Run 'npx playwright codegen --save-storage=./auth.json <url>' interactively, log in once, save. Then set APP_STORAGE_STATE=./auth.json in your env file (or pass storageState in answers).`,
                 };
             }
             if (!fs.existsSync(storageStatePath)) {
                 return {
                     generationResult: null,
                     url,
-                    blockedReason: `CSAppUrlModeHandler: storageState file not found at ${storageStatePath}. Record one via 'npx playwright codegen --save-storage=<path>' first.`,
+                    blockedReason: `correct the storageState path and re-invoke — the supplied path resolved to ${storageStatePath} which does not exist. Record one via 'npx playwright codegen --save-storage=<path>' first, log in interactively, save.`,
                 };
             }
         }
@@ -195,7 +195,7 @@ export class CSAppUrlModeHandler {
                     generationResult: null,
                     url,
                     blockedReason:
-                        'CSAppUrlModeHandler: entryFlow=basic-login requires APP_USERNAME + APP_PASSWORD in your .env (encrypted with ENCRYPTED: prefix recommended) or username/password in the classified extractedFields.',
+                        'set APP_USERNAME + APP_PASSWORD in your env file before re-invoking — basic-login needs both. Encrypt the password with `npx cs-playwright-framework encrypt-value` and paste the `ENCRYPTED:` result into the env file. Or pass username + password directly through the tool answers (only for one-off runs — do not put plaintext credentials in commits).',
                 };
             }
         }
@@ -207,7 +207,7 @@ export class CSAppUrlModeHandler {
                 return {
                     generationResult: null,
                     url,
-                    blockedReason: `CSAppUrlModeHandler: budget exhausted before exploration: ${budget.reason ?? 'limit reached'}`,
+                    blockedReason: `raise the cost budget before re-invoking — exploration starts already over-cap: ${budget.reason ?? 'limit reached'}. Pass \`budget: { maxTokens, maxUsd, maxWallClockMs }\` with higher values, or scope the exploration tighter via \`maxStates\` and \`maxDurationMinutes\`.`,
                 };
             }
         }
@@ -240,14 +240,15 @@ export class CSAppUrlModeHandler {
             return {
                 generationResult: null,
                 url,
-                blockedReason: `CSAppUrlModeHandler: explore_application threw: ${err instanceof Error ? err.message : String(err)}`,
+                blockedReason: `the exploration crawler threw an error mid-run. Inspect \`blockedDetails.error\`, then re-invoke once — transient browser failures usually clear. If the error mentions network, check that the app URL is reachable from this machine.`,
+                blockedDetails: { error: err instanceof Error ? err.message : String(err) },
             };
         }
         if (result.isError) {
             return {
                 generationResult: null,
                 url,
-                blockedReason: 'explore_application failed',
+                blockedReason: 'the exploration crawler returned an error result. Inspect `blockedDetails.detail` for what went wrong — common causes: app URL unreachable, login form selectors changed, captcha blocking automated access. Fix the underlying issue and re-invoke.',
                 blockedDetails: { detail: CSAppUrlModeHandler.firstText(result) },
             };
         }
@@ -258,7 +259,7 @@ export class CSAppUrlModeHandler {
                 generationResult: null,
                 url,
                 blockedReason:
-                    'CSAppUrlModeHandler: explore_application returned an unparseable payload',
+                    'the exploration crawler returned a payload the handler could not parse. Re-invoke once; if it persists, the explore_application tool may have changed its output shape — open a runtime issue.',
             };
         }
 
@@ -276,7 +277,7 @@ export class CSAppUrlModeHandler {
                 generationResult: null,
                 url,
                 blockedReason:
-                    'CSAppUrlModeHandler: exploration completed but produced no test files',
+                    `the crawler finished but found no testable surface to generate from. Likely causes: (a) the URL is a static landing page with no interactive elements, (b) login succeeded but landed on an empty page, (c) maxStates was hit before any feature could be inferred. Try a deeper start URL (e.g., /dashboard not /), increase maxStates, or set strategy='thorough'.`,
                 blockedDetails: { summary: parsed.summary },
                 statesDiscovered: parsed.summary?.statesDiscovered,
                 apisDiscovered: parsed.summary?.apisDiscovered,

@@ -9,6 +9,661 @@
  */
 
 export const SKILL_CONTENT: Record<string, Record<string, string>> = {
+    'ado-bidirectional-update': {
+        'SKILL.md': `---
+name: ado-bidirectional-update
+description: Use when the user has edited a generated test (changed a step, fixed an assertion, added a verification) and wants to push the change back to the original Azure DevOps test case. The existing \`ado_work_items_update\` tool handles the write — this skill documents the BDD-feature → Microsoft.VSTS.TCM.Steps conversion the LLM needs to perform first.
+---
+
+# Pattern: bidirectional update (code → ADO)
+
+## When to use
+
+The migration originally came FROM ADO (mode \`ado_test_case_id\` /
+\`ado_test_suite_id\` / \`ado_test_plan_id\`). The user has since edited
+the generated \`.feature\` file or step file and wants the change to
+flow back to the ADO test case. The framework's
+\`ado_work_items_update\` MCP tool accepts an arbitrary \`fields\` map,
+including \`Microsoft.VSTS.TCM.Steps\` — but it expects the steps as
+ADO's HTML-XML format, not Gherkin. This skill walks through the
+conversion and the call.
+
+## End-to-end flow
+
+\`\`\`
+1. User edits  test/<project>/features/login.feature
+2. User asks Copilot:
+     "Push the changes for TC#3430 back to ADO"
+3. Copilot:
+   a. Reads the .feature file via read_file
+   b. Locates the @TS_3430 (or @TC#3430) tagged scenario
+   c. Converts the Given/When/Then steps to Microsoft.VSTS.TCM.Steps XML
+   d. Calls ado_work_items_update with id=3430 + fields.Microsoft.VSTS.TCM.Steps=<xml>
+4. ADO test case is updated; revision number bumps; comment appended.
+\`\`\`
+
+## Microsoft.VSTS.TCM.Steps XML format (what ADO expects)
+
+\`\`\`xml
+<steps id="0" last="3">
+  <step id="2" type="ActionStep">
+    <parameterizedString isformatted="true">&lt;P&gt;Navigate to login page&lt;/P&gt;</parameterizedString>
+    <parameterizedString isformatted="true">&lt;P&gt;Login page is shown&lt;/P&gt;</parameterizedString>
+    <description/>
+  </step>
+  <step id="3" type="ActionStep">
+    <parameterizedString isformatted="true">&lt;P&gt;Enter credentials and submit&lt;/P&gt;</parameterizedString>
+    <parameterizedString isformatted="true">&lt;P&gt;Dashboard is shown&lt;/P&gt;</parameterizedString>
+    <description/>
+  </step>
+</steps>
+\`\`\`
+
+Each \`<step>\` has two \`parameterizedString\` elements: action then expected.
+The framework's \`CSAdoTestCaseParser.serializeSteps()\` produces this XML
+shape from a \`ParsedTestCase\`. For programmatic use, convert the BDD
+scenario to a \`ParsedTestCase\` first (action = \`Given/When/X\`, expected
+= the immediately-following \`Then\`), then call \`serializeSteps()\`.
+
+## Tool-call shape
+
+\`\`\`typescript
+// What Copilot actually calls (after reading the feature + converting):
+{
+    tool: 'ado_work_items_update',
+    arguments: {
+        id: 3430,
+        organization: '\${input:adoOrganization}',  // or env-resolved
+        project: '\${input:adoProject}',
+        pat: '\${input:adoPat}',
+        comment: 'Updated via cs-ai-auto-assist after edit to features/login.feature',
+        fields: {
+            'Microsoft.VSTS.TCM.Steps': '<steps id="0" last="3">...</steps>',
+        },
+    }
+}
+\`\`\`
+
+The \`comment\` lands in \`System.History\` so the test case audit log
+shows where the change came from.
+
+## Conversion rules — Gherkin → ADO steps
+
+| Gherkin keyword | ADO step \`parameterizedString[0]\` (action) | ADO step \`parameterizedString[1]\` (expected) |
+|---|---|---|
+| \`Given <text>\` | \`<text>\` | (empty \`<P/>\`) |
+| \`When <text>\` | \`<text>\` | (empty \`<P/>\`) |
+| \`Then <text>\` | (merged into prior step's expected) | \`<text>\` |
+| \`And <text>\` | continues prior keyword's mode | continues prior keyword's mode |
+| \`But <text>\` | continues prior keyword's mode | continues prior keyword's mode |
+
+So a \`When ... Then ...\` pair fills both halves of one ADO step. A
+\`Given\` followed by another \`Given\` produces two ADO steps each
+with empty \`expected\`. Keep this 1-to-1 mapping; ADO testers expect
+each ADO step to have one action + one expected, not freeform prose.
+
+## Conversion rules — Scenario Outline \`Examples:\` blocks
+
+ADO test cases support **shared parameters** via \`<parameters>\` and
+\`Microsoft.VSTS.TCM.LocalDataSource\`. For Phase 3, when pushing a
+Scenario Outline back, prefer to:
+
+1. Push the **template** scenario (with \`<placeholder>\` references) to
+   \`Microsoft.VSTS.TCM.Steps\`
+2. Push the **rows** to a referenced data source (out of scope for
+   v1 — this skill only updates the steps; data-row sync stays
+   manual through the ADO web UI for now)
+
+If the original ADO test case had \`LocalDataSource\` set, leave it
+untouched in the update (don't include it in the \`fields\` map).
+
+## Forbidden patterns
+
+\`\`\`typescript
+// ❌ NEVER push raw Gherkin text into Microsoft.VSTS.TCM.Steps —
+// ADO renders the field as HTML and expects the <steps> XML envelope.
+fields: {
+    'Microsoft.VSTS.TCM.Steps': 'Given I login\\nWhen I click Save\\nThen success',
+}
+
+// ❌ NEVER push without a comment — the audit trail loses the
+// "where did this change come from" context.
+{ id: 3430, fields: { ... } }   // missing comment
+\`\`\`
+
+## Common gotchas
+
+1. **HTML-encoded inner \`<P>\` tags** — ADO expects the inner
+   \`<P>action</P>\` markers to be HTML-encoded inside the
+   \`parameterizedString\` element (\`&lt;P&gt;\`, not raw \`<P>\`).
+   \`CSAdoTestCaseParser.serializeSteps()\` handles this; if you
+   build the XML manually, encode entities first.
+2. **\`last\` attribute** must equal the highest \`step id\` in the doc.
+   Off-by-one errors here cause the ADO web UI to silently drop
+   the last step on save.
+3. **Step \`id\` numbering starts at 2**, not 1. ADO reserves id 1
+   internally. The serializer auto-handles this; manual construction
+   needs the same convention.
+4. **Comment goes in \`System.History\`, not the steps XML.** Use the
+   tool's \`comment\` parameter; never embed it in the XML.
+5. **Revision bump** — every successful update increments the work
+   item's \`System.Rev\`. If you want optimistic concurrency, fetch
+   \`System.Rev\` first and add a \`System.Rev\` field to the update;
+   ADO returns 409 if the revision is stale.
+
+## Existing tooling reference
+
+| Tool | Use |
+|---|---|
+| \`ado_work_items_get\` | Fetch current state before update (e.g., for revision check) |
+| \`ado_work_items_update\` | The actual write — accepts \`fields\` map |
+| \`ado_work_items_get_batch\` | Batch refresh after multiple updates to confirm |
+| \`CSAdoTestCaseParser.parseSteps()\` | XML → ParsedTestCase (the inverse direction) |
+| \`CSAdoTestCaseParser.serializeSteps()\` | ParsedTestCase → XML (this direction) |
+| \`ado_test_runs_list\` / \`ado_test_results_*\` | Verify the test case still has historical results after the update |
+`,
+    },
+    'americas-timezone': {
+        'SKILL.md': `---
+name: americas-timezone
+description: Use whenever generated test code computes a date or time. Use CSDateTimeUtility — the framework default is America/New_York. Never use raw new Date() / Date.now(). Pairs with audit rule DT100.
+---
+
+# Pattern: date/time in Americas timezone
+
+## When to use
+
+Any scenario that generates a unique ID with timestamp, asserts on a
+displayed date / time, computes a future date for a payment, validates
+a "created at" backend record, or formats a date for an input field.
+The framework's \`CSDateTimeUtility\` defaults to \`America/New_York\` —
+the canonical timezone for Americas-only deployments. Tests that emit
+UTC or system-local timestamps produce false negatives when comparing
+against backend records that are stored in Americas time.
+
+## Working example
+
+\`\`\`typescript
+import {
+    CSBasePage, CSElement, CSGetElement, CSPage, CSReporter,
+} from '@mdakhan.mak/cs-playwright-test-framework';
+import { CSDateTimeUtility } from '@mdakhan.mak/cs-playwright-test-framework/utilities';
+
+@CSPage('user-create')
+export class UserCreatePage extends CSBasePage {
+    @CSGetElement({ xpath: "//input[@id='userId']", description: 'User ID input' })
+    private userIdField!: CSElement;
+
+    @CSGetElement({ xpath: "//input[@id='effectiveDate']", description: 'Effective date input (MM/DD/YYYY)' })
+    private effectiveDateField!: CSElement;
+
+    /**
+     * Generate a unique user id with a timestamp suffix. Default tz is
+     * America/New_York — no need to pass it explicitly. The timestamp
+     * is in the same zone every test run, so audit comparisons stay
+     * stable across DST boundaries when you query the backend.
+     */
+    public async fillUniqueUserId(prefix: string): Promise<string> {
+        const ts = CSDateTimeUtility.timestamp();             // ms since epoch (zone-agnostic)
+        const userId = \`\${prefix}-\${ts}\`;
+        await this.userIdField.fillWithTimeout(userId, 5000);
+        CSReporter.info(\`Filled unique userId: \${userId}\`);
+        return userId;
+    }
+
+    /**
+     * Format today's date in MM/DD/YYYY (US format) — the format every
+     * Americas-region UI expects. CSDateTimeUtility uses the default
+     * en-US locale + America/New_York timezone.
+     */
+    public async fillTodayAsEffectiveDate(): Promise<string> {
+        const today = CSDateTimeUtility.toUSDateString(CSDateTimeUtility.now());  // "MM/DD/YYYY"
+        await this.effectiveDateField.fillWithTimeout(today, 5000);
+        CSReporter.info(\`Filled effective date: \${today}\`);
+        return today;
+    }
+
+    /**
+     * Future-date a field by N business days, respecting the Americas
+     * business calendar (skips weekends; doesn't yet skip US federal
+     * holidays — caller's responsibility if needed).
+     */
+    public async fillFutureBusinessDate(daysAhead: number): Promise<string> {
+        const future = CSDateTimeUtility.addBusinessDays(CSDateTimeUtility.now(), daysAhead);
+        const formatted = CSDateTimeUtility.toUSDateString(future);
+        await this.effectiveDateField.fillWithTimeout(formatted, 5000);
+        return formatted;
+    }
+}
+\`\`\`
+
+## Step definition with backend timestamp comparison
+
+\`\`\`typescript
+import { CSBDDStepDef, CSReporter, StepDefinitions, Page } from '@mdakhan.mak/cs-playwright-test-framework';
+import { CSDateTimeUtility } from '@mdakhan.mak/cs-playwright-test-framework/utilities';
+import { CSDBUtils } from '@mdakhan.mak/cs-playwright-test-framework/database-utils';
+
+@StepDefinitions
+export class UserSteps {
+    @CSBDDStepDef('the user record is timestamped within the last {int} seconds')
+    async verifyRecentRecord(seconds: number): Promise<void> {
+        const row = await CSDBUtils.executeSingleRow('APP_DB',
+            'SELECT created_at FROM users WHERE userid = :id', { id: 'TEST-1234' });
+        if (!row?.created_at) {
+            CSReporter.fail('No user record found');
+            throw new Error('User record missing');
+        }
+        const createdAt = CSDateTimeUtility.parse(row.created_at as string);
+        if (!createdAt) {
+            CSReporter.fail(\`Invalid timestamp from DB: \${row.created_at}\`);
+            throw new Error('Invalid DB timestamp');
+        }
+        const diffSec = CSDateTimeUtility.diffInSeconds(CSDateTimeUtility.now(), createdAt);
+        if (Math.abs(diffSec) > seconds) {
+            CSReporter.fail(\`Record timestamp \${createdAt.toISOString()} is \${diffSec}s away (allowed \${seconds}s)\`);
+            throw new Error(\`Timestamp drift exceeded\`);
+        }
+        CSReporter.pass(\`Record created \${diffSec}s ago — within \${seconds}s tolerance\`);
+    }
+}
+\`\`\`
+
+## CSDateTimeUtility cheat sheet
+
+| Need | Call |
+|---|---|
+| Current time | \`CSDateTimeUtility.now()\` (Date in default tz) |
+| Unix ms now | \`CSDateTimeUtility.timestamp()\` |
+| Today as \`YYYY-MM-DD\` | \`CSDateTimeUtility.toDateString(CSDateTimeUtility.now())\` |
+| Today as \`MM/DD/YYYY\` | \`CSDateTimeUtility.toUSDateString(CSDateTimeUtility.now())\` |
+| Today as ISO 8601 | \`CSDateTimeUtility.toISO(CSDateTimeUtility.now())\` |
+| Specific timezone format | \`CSDateTimeUtility.toUSDateStringInTimezone(d, 'America/Chicago')\` |
+| Add days / months / years | \`CSDateTimeUtility.addDays(d, 7)\` etc. |
+| Add N business days | \`CSDateTimeUtility.addBusinessDays(d, 3)\` |
+| Parse loose date string | \`CSDateTimeUtility.parse('2026-05-08')\` |
+| Diff in seconds / minutes / days | \`CSDateTimeUtility.diffInSeconds(d1, d2)\` (also \`diffInMinutes\`, \`diffInHours\`, \`diffInDays\`) |
+| Is weekend / weekday | \`CSDateTimeUtility.isWeekend(d)\`, \`.isWeekday(d)\` |
+| US-style human label | \`CSDateTimeUtility.toHumanString(d)\` → "May 8, 2026" |
+
+## Forbidden patterns (audit rule DT100 fails the file)
+
+\`\`\`typescript
+// ❌ NEVER
+const now = new Date();           // local timezone — non-deterministic across machines
+const ts = Date.now();            // OK as raw number, but don't wrap in Date below
+const today = new Date().toISOString();  // UTC, not Americas
+const formatted = new Date().toLocaleDateString();  // depends on machine locale
+\`\`\`
+
+The audit \`DT100\` rule blocks any \`new Date()\` or \`Date.now()\` call.
+The replacement is \`CSDateTimeUtility.now()\` /
+\`CSDateTimeUtility.timestamp()\` which always honours the framework's
+default timezone.
+
+## When you genuinely need a different timezone
+
+For cross-zone tests (e.g., compare America/New_York display with
+America/Los_Angeles backend), pass the IANA zone explicitly:
+
+\`\`\`typescript
+const lax = CSDateTimeUtility.toUSDateStringInTimezone(
+    CSDateTimeUtility.now(),
+    'America/Los_Angeles',
+);
+\`\`\`
+
+Or change the global default at the start of the run:
+
+\`\`\`typescript
+CSDateTimeUtility.setDefaultTimezone('America/Chicago');  // one-time, persists for the run
+\`\`\`
+
+Never hardcode \`Z\` / UTC suffixes — those are Americas-incorrect.
+`,
+    },
+    'api-call-pattern': {
+        'SKILL.md': `---
+name: api-call-pattern
+description: Use when a step or page object makes an HTTP API call (REST, SOAP, JSON, XML). Always go through CSAPIClient — never import axios, fetch, node-fetch, or got directly. Pairs with audit rule API200.
+---
+
+# Pattern: API call
+
+## When to use
+
+The scenario verifies a backend state via API, sets up test data via
+an admin endpoint, or asserts that a UI action produced the right
+HTTP traffic. The framework's \`CSAPIClient\` wraps Playwright's
+\`APIRequestContext\` plus auth, retry, OAuth, AWS signing, response
+validators, and template-variable resolution — all the cross-cutting
+concerns that raw \`fetch\` / \`axios\` make you reinvent.
+
+## Working example — simple GET / POST
+
+\`\`\`typescript
+import {
+    CSBasePage, CSReporter, CSAPIClient, CSValueResolver,
+} from '@mdakhan.mak/cs-playwright-test-framework';
+
+export class OrdersApiHelper {
+    private static client: CSAPIClient | undefined;
+
+    /** Lazy-init with project base URL from config. */
+    private static getClient(): CSAPIClient {
+        if (!OrdersApiHelper.client) {
+            OrdersApiHelper.client = new CSAPIClient();
+            OrdersApiHelper.client.setBaseUrl(
+                CSValueResolver.resolve('{config:API_BASE_URL}'),
+            );
+            OrdersApiHelper.client.setDefaultHeader('Accept', 'application/json');
+        }
+        return OrdersApiHelper.client;
+    }
+
+    public static async getOrderById(orderId: string): Promise<{ id: string; status: string; total: number }> {
+        const resp = await OrdersApiHelper.getClient().get<{ id: string; status: string; total: number }>(
+            \`/orders/\${orderId}\`,
+            { timeout: 30000 },
+        );
+        if (resp.status !== 200) {
+            CSReporter.fail(\`GET /orders/\${orderId} returned \${resp.status}\`);
+            throw new Error(\`Order fetch failed: \${resp.status}\`);
+        }
+        return resp.body;
+    }
+
+    public static async createOrder(payload: { sku: string; quantity: number }): Promise<string> {
+        const resp = await OrdersApiHelper.getClient().post<{ id: string }>('/orders', payload, {
+            timeout: 30000,
+        });
+        if (resp.status !== 201) {
+            CSReporter.fail(\`POST /orders returned \${resp.status}: \${JSON.stringify(resp.body)}\`);
+            throw new Error(\`Order create failed: \${resp.status}\`);
+        }
+        CSReporter.pass(\`Created order \${resp.body.id}\`);
+        return resp.body.id;
+    }
+}
+\`\`\`
+
+## Working example — fluent builder for complex requests
+
+\`\`\`typescript
+import { CSAPIClient, CSReporter } from '@mdakhan.mak/cs-playwright-test-framework';
+
+const client = new CSAPIClient();
+client.setBaseUrl('{config:API_BASE_URL}');
+
+const resp = await client.builder('/payments/search')
+    .withMethod('POST')
+    .withHeader('Authorization', 'Bearer {input:apiToken}')
+    .withQueryParam('page', '1')
+    .withQueryParam('pageSize', '50')
+    .withJsonBody({ status: 'completed', dateRange: 'last30d' })
+    .withTimeout(45000)
+    .execute();
+
+if (resp.status === 200) {
+    CSReporter.pass(\`Found \${resp.body.results.length} payments\`);
+}
+\`\`\`
+
+## Step definition with response assertion
+
+\`\`\`typescript
+import { CSBDDStepDef, CSReporter, StepDefinitions, Page, CSAPIClient } from '@mdakhan.mak/cs-playwright-test-framework';
+
+@StepDefinitions
+export class OrderApiSteps {
+    @CSBDDStepDef('the API returns order {string} with status {string}')
+    async verifyOrderStatus(orderId: string, expectedStatus: string): Promise<void> {
+        const order = await OrdersApiHelper.getOrderById(orderId);
+        if (order.status !== expectedStatus) {
+            CSReporter.fail(\`Order \${orderId} status: expected \${expectedStatus}, got \${order.status}\`);
+            throw new Error(\`Status mismatch\`);
+        }
+        CSReporter.pass(\`Order \${orderId} has status \${expectedStatus}\`);
+    }
+}
+\`\`\`
+
+## CSAPIClient cheat sheet
+
+| Need | Call |
+|---|---|
+| Simple GET / POST / PUT / PATCH / DELETE | \`client.get(url)\`, \`client.post(url, body)\`, etc. |
+| Fluent builder | \`client.builder(url).withMethod(...).withHeader(...).execute()\` |
+| Default headers | \`client.setDefaultHeader('Authorization', '...')\` |
+| Auth (basic / bearer / OAuth2 / AWS) | \`client.setAuth({ type: 'bearer', token })\` |
+| Proxy | \`client.setProxy({ url: 'http://proxy:8080' })\` |
+| File upload | \`client.uploadFile(url, filePath, fieldName)\` |
+| File download | \`client.downloadFile(url, destPath)\` |
+| Connection test | \`await client.testConnection(url, 5000)\` |
+| Health check | \`await client.healthCheck(url, 200)\` |
+| Variables (template substitution) | \`client.setVariable('orderId', '12345')\` then \`'/orders/{var:orderId}'\` |
+| Extract response field for next call | \`client.extractFromResponse('lastResp', '$.id', 'lastOrderId')\` |
+
+## Auth flows handled out-of-the-box
+
+- **Basic** — \`setAuth({ type: 'basic', username, password })\`
+- **Bearer** — \`setAuth({ type: 'bearer', token })\`
+- **OAuth 2.0 client-credentials / authorization-code** — \`setAuth({ type: 'oauth2', tokenUrl, clientId, clientSecret })\` (auto-refresh + cache)
+- **AWS signature v4** — \`setAuth({ type: 'aws', region, service, accessKey, secretKey })\`
+- **Ping (ping-am)** — \`setAuth({ type: 'ping', ... })\`
+
+## Forbidden patterns (audit rule API200 fails the file)
+
+\`\`\`typescript
+// ❌ NEVER
+import axios from 'axios';
+import { fetch } from 'node-fetch';
+import got from 'got';
+import { request } from 'undici';
+import superagent from 'superagent';
+const fetch = require('node-fetch');
+\`\`\`
+
+The framework's API client provides:
+- Consistent error wrapping (no need to remember which lib throws on
+  4xx vs returns it)
+- Auto-retry with backoff for transient 5xx
+- Auth refresh
+- Request / response logging into \`CSReporter\`
+- Network capture for the test report
+
+Direct imports skip all of this and fail audit \`API200\`.
+
+## Common gotchas
+
+1. **Don't reuse client across scenarios** unless explicitly intended.
+   Stateful headers / cookies leak. Either pass \`freshContext: true\`
+   per call, or instantiate a new \`CSAPIClient\` per scenario.
+2. **Timeout default is 30s.** For long-running async APIs, override
+   per call: \`client.post(url, body, { timeout: 60000 })\`.
+3. **Response body parsing** — \`CSResponse<T>\` returns parsed JSON
+   when \`Content-Type: application/json\`. For other types, use
+   \`client.parseResponse(resp, 'application/xml')\` or read
+   \`resp.text()\`.
+4. **Don't put real PATs in code.** Use \`{config:KEY}\` or \`{input:KEY}\`
+   placeholders so the resolver pulls from env / SecretStorage.
+`,
+    },
+    'app-url-exploration': {
+        'SKILL.md': `---
+name: app-url-exploration
+description: Use when the user provides a live application URL (no source code, no ADO test cases, no requirements doc) and wants tests generated from a crawl. Documents the four entryFlow modes, the env-based credential pattern, and the storageState recording flow for SSO / multi-step / MFA logins.
+---
+
+# Pattern: app_url exploration mode
+
+## When to use
+
+The mode auto-detects from the input — any \`https://...\` or
+\`http://...\` URL with no ID prefix routes to \`app_url\` mode. The
+crawler walks the live app, identifies interactive elements, infers
+features, and emits a generated test suite. Five things to
+configure before the run:
+
+1. The URL itself
+2. The auth flow (\`entryFlow\`)
+3. Credentials (only for \`basic-login\`)
+4. A pre-recorded storage-state JSON (only for \`sso-redirect\` /
+   \`multi-step-login\`)
+5. Crawl bounds (\`maxStates\`, \`maxDurationMinutes\`, \`strategy\`)
+
+## entryFlow values
+
+| Value | When to use | What you must provide |
+|---|---|---|
+| \`no-auth\` | Public app, no login required | nothing |
+| \`basic-login\` | App has a username + password form on landing | \`APP_USERNAME\` + \`APP_PASSWORD\` in env (encrypted) |
+| \`sso-redirect\` | OAuth / SAML / Okta / ADFS — IdP-mediated flow | pre-recorded Playwright storage-state JSON |
+| \`multi-step-login\` | MFA, captcha, multi-page wizards | pre-recorded Playwright storage-state JSON |
+
+## Working examples
+
+### \`no-auth\`
+
+\`\`\`
+Explore https://demo.example.com and generate a smoke suite.
+projectName: demo
+\`\`\`
+
+The crawler starts at the URL, follows links, identifies forms and
+buttons, generates one feature per discovered "page state".
+
+### \`basic-login\`
+
+env file (\`config/myproject/environments/dev.env\`):
+\`\`\`
+APP_URL=https://app.example.com
+APP_USERNAME=admin@example.com
+APP_PASSWORD=ENCRYPTED:base64encryptedstring
+\`\`\`
+
+Encrypt the password once via the framework CLI:
+\`\`\`bash
+npx cs-playwright-framework encrypt-value --value "myActualPassword"
+# Copy the ENCRYPTED:... output into the env file
+\`\`\`
+
+Prompt:
+\`\`\`
+Explore https://app.example.com/login and build login + dashboard smoke tests.
+projectName: myproject
+entryFlow: basic-login
+\`\`\`
+
+The crawler:
+1. Loads the URL
+2. Detects the username + password fields (heuristic: \`input[type=password]\` plus the closest preceding text input)
+3. Submits with the env credentials
+4. Crawls everything reachable post-login
+
+### \`sso-redirect\`
+
+Record the storage state ONCE interactively, save it to disk, then
+let the crawler reuse the saved cookies/tokens:
+
+\`\`\`bash
+# One-time, interactive — opens a browser, you log in manually, save.
+npx playwright codegen --save-storage=./.auth/myproject-sso.json https://app.example.com
+# After login + landing on the post-SSO page, close the browser.
+# The .auth/myproject-sso.json file now has the session cookies.
+\`\`\`
+
+env file:
+\`\`\`
+APP_URL=https://app.example.com
+APP_STORAGE_STATE=./.auth/myproject-sso.json
+\`\`\`
+
+Prompt:
+\`\`\`
+Explore https://app.example.com and build the dashboard regression suite.
+projectName: myproject
+entryFlow: sso-redirect
+\`\`\`
+
+The crawler injects the storage state before the first navigation —
+the app sees the user as already-logged-in and goes straight to the
+post-auth page.
+
+### \`multi-step-login\`
+
+Same pattern as SSO. MFA / captcha / multi-page wizards can't be
+automated generically; record once, reuse the storage state.
+
+## Crawl bounds (cost guards)
+
+\`\`\`
+url: https://app.example.com
+projectName: myproject
+entryFlow: basic-login
+maxDurationMinutes: 15
+maxStates: 50
+strategy: bfs
+\`\`\`
+
+| Bound | Default | Tune up when... | Tune down when... |
+|---|---|---|---|
+| \`maxDurationMinutes\` | 15 | App is large + you want full coverage | You're iterating on a small flow |
+| \`maxStates\` | 50 | App has 50+ distinct pages worth testing | You only need a smoke suite |
+| \`strategy\` | \`bfs\` | (default) | Use \`dfs\` for deep journeys (checkout flow), \`targeted\` when you've supplied a specific entry path |
+
+## After exploration
+
+The crawler generates files at its own output directory (not the
+framework's standard \`test/<project>/\` layout — the explorer owns
+its own scratch space). The result includes:
+
+- \`featureFiles[]\` — one \`.feature\` per discovered "feature" (login, dashboard, settings, etc.)
+- \`stepDefinitions[]\` — \`.steps.ts\` files matched to features
+- \`pageObjects[]\` — \`.page.ts\` files for each discovered page state
+- \`summary\` — \`statesDiscovered\`, \`apisDiscovered\`, \`coverageScore\`, \`crawlDurationMs\`
+
+The master tool then runs the same pre-gate audit + heal loop as
+other modes. The \`needsSourceValidation: true\` flag in the result
+warns the user: *the crawler can find elements but can't infer
+business intent — review every scenario before merging.*
+
+## Forbidden / unsupported
+
+- **Form-mode elicitation of passwords** is forbidden by the MCP spec.
+  Don't expect a password modal — credentials must come from
+  \`ENCRYPTED:\` env values or \`mcp.json\` \`inputs[]\` (which use VS Code
+  SecretStorage).
+- **Captcha-protected apps** can't be auto-crawled. Either use
+  \`multi-step-login\` with a pre-recorded session, or skip auth-bound
+  pages entirely with \`entryFlow: no-auth\` and crawl only the public
+  surface.
+- **Bot-detection-protected apps** (some banking / finance fronts)
+  may flag Playwright as automated. The framework supports stealth
+  plugins via \`CSBrowserManager\` config — set \`stealth: true\` in
+  \`global.env\`.
+
+## Common gotchas
+
+1. **Login form selectors changed** — if the crawler logs an "auth
+   failure" diagnostic, the app's username/password field selectors
+   moved. Fix: pre-record a storage state instead, or override the
+   selector hints via \`loginUrl\` / \`usernameSelector\` /
+   \`passwordSelector\` in tool answers.
+2. **Storage state expires** — SSO sessions typically last 8h to 30d.
+   When the \`.auth/<project>.json\` expires, re-record.
+3. **Generated tests need review** — the crawler infers structure but
+   not intent. A page might be called "dashboard" by the heuristic but
+   actually be the user-profile page. Review every generated scenario.
+4. **maxStates hit before completion** — log shows
+   "exploration completed but produced no test files" → either the
+   app's landing is a static page (try a deeper start URL) or the
+   bound was too tight (raise \`maxStates\` to 100+).
+5. **Encrypted password rotation** — when the password changes,
+   re-encrypt with the CLI and replace the line in env. Don't paste
+   plaintext into git.
+`,
+    },
     'audit-rules': {
         'SKILL.md': `---
 name: audit-rules
@@ -356,6 +1011,99 @@ rules:
     detect: 'regex:@(pending|skip|wip|ignore)\\b'
     invertMatch: true
     violation: "Skip / pending tag on shipped scenario — use runFlag: No in the data JSON instead"
+
+  - id: CC008
+    severity: error
+    appliesTo: ts
+    description: "Imports from @playwright/test forbidden — framework re-exports the needed types"
+    detect: 'regex:from\\s*[\\x27"]@playwright/test[\\x27"]'
+    invertMatch: true
+    violation: "Direct @playwright/test import — use @mdakhan.mak/cs-playwright-test-framework re-exports (Page, expect, etc.) instead"
+
+  - id: CC009
+    severity: error
+    appliesTo: ts
+    description: "Imports from raw playwright forbidden — framework wraps Playwright"
+    detect: 'regex:from\\s*[\\x27"]playwright[\\x27"]'
+    invertMatch: true
+    violation: "Direct playwright import — use @mdakhan.mak/cs-playwright-test-framework wrappers (CSWebElement, CSBasePage) instead"
+
+  # ========================================================================
+  # Framework-wrapper rules — generated test code must use CS* utilities,
+  # never raw libraries or direct Playwright Page methods. Every rule here
+  # has a corresponding skill that documents the wrapper to use instead.
+  # ========================================================================
+  - id: DT100
+    severity: error
+    appliesTo: ts
+    description: "Use CSDateTimeUtility for all date/time, not native Date with no timezone"
+    detect: 'regex:(\\bnew\\s+Date\\s*\\(\\s*\\)|\\bDate\\.now\\s*\\(\\s*\\))'
+    invertMatch: true
+    violation: "Direct new Date() / Date.now() — use CSDateTimeUtility.now() / .timestamp() / .getNowInAmericasTimezone(). Defaults to America/New_York; pass explicit timezone for cross-zone tests."
+
+  - id: DG100
+    severity: error
+    appliesTo: ts
+    description: "Dialog handling via CSBasePage methods, not raw page.on('dialog')"
+    detect: 'regex:page\\.on\\s*\\(\\s*[\\x27"]dialog[\\x27"]'
+    invertMatch: true
+    violation: "Direct page.on('dialog') — use CSBasePage methods: acceptNextDialog() / dismissNextDialog() / acceptNextDialogWithText(text) / alwaysAcceptDialogs() / alwaysDismissDialogs()"
+
+  - id: DL100
+    severity: error
+    appliesTo: ts
+    description: "Downloads must save under CSTestResultsManager.getDownloadsDirectory(), not hardcoded paths"
+    detect: 'regex:download\\.saveAs\\s*\\(\\s*[\\x27"]?(\\/tmp|\\/var|C:\\\\\\\\|D:\\\\\\\\|~|\\.\\.\\/)'
+    invertMatch: true
+    violation: "Hardcoded download save path — write under CSTestResultsManager.getDownloadsDirectory() so the file lands in the per-run test-results folder"
+
+  - id: EX100
+    severity: error
+    appliesTo: ts
+    description: "Excel I/O via CSExcelUtility, not direct xlsx / exceljs imports"
+    detect: 'regex:from\\s*[\\x27"](xlsx|exceljs)[\\x27"]'
+    invertMatch: true
+    violation: "Direct xlsx/exceljs import — use CSExcelUtility (read sheets as JSON, cell-level operations, multi-sheet) from @mdakhan.mak/cs-playwright-test-framework"
+
+  - id: CSV100
+    severity: error
+    appliesTo: ts
+    description: "CSV I/O via CSCsvUtility, not direct csv-parse / papaparse / csv-parser imports"
+    detect: 'regex:from\\s*[\\x27"](csv-parse|papaparse|csv-parser)([\\x27"\\/]|$)'
+    invertMatch: true
+    violation: "Direct CSV library import — use CSCsvUtility from @mdakhan.mak/cs-playwright-test-framework (handles delimiters, encoding, columns)"
+
+  - id: DB200
+    severity: error
+    appliesTo: ts
+    description: "Database via CSDBUtils with named queries, not direct dialect drivers"
+    detect: 'regex:from\\s*[\\x27"](mssql|pg|mysql2|oracledb|mongodb|redis)[\\x27"]'
+    invertMatch: true
+    violation: "Direct DB driver import — use CSDBUtils.executeQuery / executeNamedQuery from @mdakhan.mak/cs-playwright-test-framework/database-utils. Named queries live in env files as DB_QUERY_<KEY>=<SQL>."
+
+  - id: API200
+    severity: error
+    appliesTo: ts
+    description: "HTTP requests via CSAPIClient, not direct fetch / axios / node-fetch"
+    detect: 'regex:from\\s*[\\x27"](axios|node-fetch|got|undici|superagent)[\\x27"]'
+    invertMatch: true
+    violation: "Direct HTTP client import — use CSAPIClient from @mdakhan.mak/cs-playwright-test-framework/api (auth, retry, validators, OAuth all built in)"
+
+  - id: WRAP100
+    severity: error
+    appliesTo: page,step,helper,ts
+    description: "No direct Playwright Page method calls — use @CSGetElement + CSWebElement wrappers"
+    detect: 'regex:\\bthis\\.page\\.(locator|evaluate|waitForSelector|waitForResponse|click|fill|press|type|hover|check|uncheck|selectOption|setInputFiles|dispatchEvent|focus|blur|innerHTML|innerText|textContent)\\s*\\('
+    invertMatch: true
+    violation: "Direct this.page.<method>() call — declare the element with @CSGetElement and call methods on the CSWebElement (click, fill, type, etc.). The wrapper provides self-healing, timing, and reporter integration."
+
+  - id: ENV100
+    severity: error
+    appliesTo: page,step,helper,ts
+    description: "No raw process.env reads — use CSValueResolver.resolve('{config:KEY}', context)"
+    detect: 'regex:\\bprocess\\.env\\.[A-Z_][A-Z0-9_]*'
+    invertMatch: true
+    violation: "Raw process.env access — use CSValueResolver.resolve('{config:KEY}', context) so encrypted values, env precedence, and {input:...} placeholders all resolve correctly"
 `,
     },
     'commit-ready-9-gates': {
@@ -482,6 +1230,109 @@ Over many runs the memory file grows. A maintainer may occasionally:
 - Archive environment-specific entries to \`.agent-runs/correction-patterns-archive.md\`
 
 No tool does this automatically — the Healer only appends.
+`,
+    },
+    'csv-data-driven': {
+        'SKILL.md': `---
+name: csv-data-driven
+description: Use when a feature reads test data from a CSV / TSV / pipe-separated file. Always go through CSCsvUtility — never import csv-parse, papaparse, or csv-parser directly. Pairs with audit rule CSV100.
+---
+
+# Pattern: CSV data-driven tests
+
+## When to use
+
+The legacy data file is \`.csv\`, \`.tsv\`, or a custom delimiter file
+(\`|\`, \`;\`). Same shape as Excel data-driven, just a different format.
+\`CSCsvUtility\` handles delimiter sniffing, quoted fields, embedded
+newlines, and BOMs.
+
+## Working example
+
+\`\`\`typescript
+import {
+    CSBasePage, CSElement, CSGetElement, CSPage, CSReporter,
+} from '@mdakhan.mak/cs-playwright-test-framework';
+import { CSCsvUtility } from '@mdakhan.mak/cs-playwright-test-framework/utilities';
+
+@CSPage('orders')
+export class OrdersPage extends CSBasePage {
+    @CSGetElement({ xpath: "//input[@id='orderRef']", description: 'Order reference input' })
+    private orderRefField!: CSElement;
+
+    /** Read every row, parse into typed objects. */
+    public loadOrders(csvPath: string): Array<{ orderRef: string; amount: string; }> {
+        return CSCsvUtility.readAsJSON(csvPath);
+    }
+
+    /** Pipe-separated file? Pass the delimiter. */
+    public loadPipeSeparated(filePath: string): Array<Record<string, string>> {
+        return CSCsvUtility.readAsJSON(filePath, { delimiter: '|' });
+    }
+
+    /** Filter rows server-side (memory-safe for large files). */
+    public loadActiveOnly(csvPath: string): Array<Record<string, string>> {
+        return CSCsvUtility.findRows(csvPath, (r) => r.runFlag?.toLowerCase() === 'yes');
+    }
+}
+\`\`\`
+
+## CSCsvUtility cheat sheet
+
+| Need | Call |
+|---|---|
+| All rows as JSON | \`CSCsvUtility.readAsJSON(path, options?)\` |
+| All rows as 2D array | \`CSCsvUtility.readAsArray(path, options?)\` |
+| Single column | \`CSCsvUtility.readColumnByName(path, 'orderRef')\` |
+| Single row by index | \`CSCsvUtility.readRowByIndex(path, 0)\` |
+| Headers only | \`CSCsvUtility.getHeaders(path)\` |
+| Filter rows by predicate | \`CSCsvUtility.findRows(path, r => r.x === 'y')\` |
+| Distinct values | \`CSCsvUtility.getDistinctValues(path, 'department')\` |
+| Custom delimiter (TSV / pipe / etc.) | \`CSCsvUtility.readWithDelimiter(path, '\\t')\` |
+| Validate header structure | \`CSCsvUtility.validateStructure(path, ['col1', 'col2'])\` |
+| Convert CSV → JSON file | \`CSCsvUtility.csvToJSON(srcPath, jsonPath)\` |
+| Convert JSON → CSV file | \`CSCsvUtility.jsonToCSV(srcPath, csvPath)\` |
+| Compare two CSVs | \`CSCsvUtility.compareCSVFiles(file1, file2)\` |
+
+Common \`options\` object:
+
+\`\`\`typescript
+{
+    delimiter: ',',         // default
+    columns: true,          // first row is headers (default true for readAsJSON)
+    skipEmptyLines: true,
+    trim: true,
+    encoding: 'utf-8',
+    fromLine: 1,            // skip leading rows
+    toLine: 100,             // read up to this row
+}
+\`\`\`
+
+## Forbidden patterns (audit rule CSV100 fails the file)
+
+\`\`\`typescript
+// ❌ NEVER
+import { parse } from 'csv-parse';
+import * as Papa from 'papaparse';
+import csvParser from 'csv-parser';
+const parser = require('csv-parse');
+\`\`\`
+
+The framework wraps these libraries internally with consistent error
+handling, encoding detection, and BOM stripping. Direct import fails
+audit \`CSV100\` and skips the wrapper guarantees.
+
+## Common gotchas
+
+1. **BOM characters** (\`﻿\` at start of UTF-8 files) silently
+   break header matching. \`CSCsvUtility\` strips them; raw \`csv-parse\`
+   doesn't.
+2. **Quoted fields with embedded commas** — handled correctly by
+   \`CSCsvUtility\`. Don't try to split on \`,\` manually.
+3. **Empty trailing line** — \`skipEmptyLines: true\` (default) handles
+   it. Toggle off only if your data legitimately has empty rows.
+4. **Numeric fields come back as strings.** All CSV parsers do this.
+   Coerce explicitly: \`Number(row.amount)\` after reading.
 `,
     },
     'db-helper-case-tolerant': {
@@ -680,6 +1531,563 @@ DB_QUERY_USER_FIND_BY_EMAIL=SELECT ID, NAME, EMAIL, ROLE FROM USERS WHERE EMAIL 
 - No raw \`console.log\`, no \`any\` return types, no string-concat SQL
 `,
     },
+    'db-state-assertion': {
+        'SKILL.md': `---
+name: db-state-assertion
+description: Use when a step verifies backend database state — count, single value, row contents — after a UI action. Always use CSDBUtils with named queries. Never import a DB driver directly. Pairs with audit rule DB200.
+---
+
+# Pattern: database state assertion
+
+## When to use
+
+The scenario clicks "Submit", "Save", "Approve" — and the test must
+verify the right rows landed in the database with the right column
+values. UI-only assertions miss data-layer bugs (rounding, truncation,
+charset issues, soft-delete behaviour). The framework's \`CSDBUtils\`
+gives a consistent API across MSSQL / Postgres / MySQL / Oracle /
+MongoDB / Redis with named queries stored in the env file.
+
+## Working example — count + single-value + single-row
+
+\`\`\`typescript
+import {
+    CSBDDStepDef, CSReporter, StepDefinitions, Page,
+} from '@mdakhan.mak/cs-playwright-test-framework';
+import { CSDBUtils } from '@mdakhan.mak/cs-playwright-test-framework/database-utils';
+
+@StepDefinitions
+export class OrderDbSteps {
+    @CSBDDStepDef('the database has {int} order(s) for customer {string}')
+    async assertOrderCount(expected: number, customerId: string): Promise<void> {
+        const actual = await CSDBUtils.count('APP_DB',
+            'SELECT COUNT(*) FROM orders WHERE customer_id = :id',
+            { id: customerId },
+        );
+        if (actual !== expected) {
+            CSReporter.fail(\`Order count for \${customerId}: expected \${expected}, got \${actual}\`);
+            throw new Error(\`Order count mismatch\`);
+        }
+        CSReporter.pass(\`Order count for \${customerId}: \${actual}\`);
+    }
+
+    @CSBDDStepDef('the order {string} has total {string}')
+    async assertOrderTotal(orderId: string, expectedTotal: string): Promise<void> {
+        const total = await CSDBUtils.executeSingleValue<string>('APP_DB',
+            'SELECT total FROM orders WHERE id = :id',
+            { id: orderId },
+        );
+        if (String(total) !== expectedTotal) {
+            CSReporter.fail(\`Order \${orderId} total: expected \${expectedTotal}, got \${total}\`);
+            throw new Error(\`Total mismatch\`);
+        }
+        CSReporter.pass(\`Order \${orderId} total = \${total}\`);
+    }
+
+    @CSBDDStepDef('the order {string} record matches')
+    async assertOrderRow(orderId: string): Promise<void> {
+        const row = await CSDBUtils.executeSingleRowOrNull('APP_DB',
+            'SELECT id, status, customer_id, total FROM orders WHERE id = :id',
+            { id: orderId },
+        );
+        if (!row) {
+            CSReporter.fail(\`No order found with id=\${orderId}\`);
+            throw new Error('Order missing');
+        }
+        // case-tolerant access: works with mssql (lowercase), Oracle (uppercase), pg (preserved)
+        const status = (row.status ?? row.STATUS) as string;
+        if (status !== 'COMPLETED') {
+            CSReporter.fail(\`Order \${orderId} status is \${status}, expected COMPLETED\`);
+            throw new Error('Status not COMPLETED');
+        }
+        CSReporter.pass(\`Order \${orderId} fully verified\`);
+    }
+}
+\`\`\`
+
+## Named queries — the preferred shape
+
+Don't inline SQL strings in test code. Store them in the env file
+under the \`DB_QUERY_<KEY>\` prefix and reference by key:
+
+**\`config/myproject/environments/dev.env\`:**
+\`\`\`
+APP_DB_HOST=db.example.com
+APP_DB_USER=app
+APP_DB_PASSWORD=ENCRYPTED:base64encryptedvalue
+APP_DB_NAME=APPDB
+
+DB_QUERY_GET_ORDER_BY_ID=SELECT id, status, customer_id, total FROM orders WHERE id = :id
+DB_QUERY_COUNT_ORDERS_FOR_CUSTOMER=SELECT COUNT(*) FROM orders WHERE customer_id = :id
+DB_QUERY_DELETE_TEST_ORDERS=DELETE FROM orders WHERE customer_id LIKE 'TEST-%'
+\`\`\`
+
+**Step file:**
+\`\`\`typescript
+const order = await CSDBUtils.executeNamedQuery('APP_DB', 'GET_ORDER_BY_ID', { id: orderId });
+const count = await CSDBUtils.count('APP_DB',
+    await CSDBUtils.resolveNamedQuery('COUNT_ORDERS_FOR_CUSTOMER'),
+    { id: customerId },
+);
+\`\`\`
+
+Or load from a SQL file directly:
+
+\`\`\`typescript
+const rows = await CSDBUtils.executeFromFile(
+    'APP_DB',
+    'sql/orders/active-since.sql',
+    { since: '2026-01-01' },
+);
+\`\`\`
+
+## CSDBUtils cheat sheet
+
+| Need | Call |
+|---|---|
+| Run any SQL with params | \`CSDBUtils.executeQuery(alias, sql, params?)\` |
+| Named query by key | \`CSDBUtils.executeNamedQuery(alias, 'QUERY_KEY', params?)\` |
+| First-column-first-row scalar | \`CSDBUtils.executeSingleValue<T>(alias, sql, params)\` |
+| First row | \`CSDBUtils.executeSingleRow(alias, sql, params)\` |
+| First row or null (no throw) | \`CSDBUtils.executeSingleRowOrNull(alias, sql, params)\` |
+| COUNT(*) returning number | \`CSDBUtils.count(alias, sql, params)\` |
+| Row exists (boolean) | \`CSDBUtils.exists(alias, sql, params)\` |
+| One column as array | \`CSDBUtils.extractColumn<T>(alias, sql, 'colName', params)\` |
+| key→value Map | \`CSDBUtils.getMap<K,V>(alias, sql, 'keyCol', 'valCol', params)\` |
+| INSERT/UPDATE/DELETE → affected rows | \`CSDBUtils.executeUpdate(alias, sql, params)\` |
+| Multi-statement transaction | \`CSDBUtils.executeTransaction(alias, [{sql, params}, ...])\` |
+| Stored proc | \`CSDBUtils.executeStoredProcedure(alias, 'sp_name', params)\` |
+| Pagination | \`CSDBUtils.executePaginated(alias, sql, page, pageSize, params)\` |
+| Read SQL from file | \`CSDBUtils.executeFromFile(alias, path, params)\` |
+| Cleanup | \`CSDBUtils.closeAllConnections()\` (call in After hook for long runs) |
+
+## Forbidden patterns (audit rule DB200 fails the file)
+
+\`\`\`typescript
+// ❌ NEVER
+import * as mssql from 'mssql';
+import { Client } from 'pg';
+import mysql from 'mysql2';
+import oracledb from 'oracledb';
+import { MongoClient } from 'mongodb';
+const sql = require('mssql');
+\`\`\`
+
+These bypass the framework's connection pool, named-query resolution,
+case-tolerant column access, and per-test connection lifecycle. Audit
+\`DB200\` fails the file.
+
+## Common gotchas
+
+1. **Case-tolerant column access.** Different drivers return columns
+   in different cases — Oracle uppercases, MSSQL lowercases, Postgres
+   preserves. Always use \`r.col ?? r.COL\` for portability.
+2. **Parameterise — never concatenate.** Always use \`:name\` /
+   \`@name\` / \`?\` placeholders with the params object. String-concat
+   SQL is a SQL-injection vector and fails the framework's safety
+   gate.
+3. **Connection alias** is the env-key prefix. \`APP_DB\` resolves to
+   \`APP_DB_HOST\`, \`APP_DB_USER\`, \`APP_DB_PASSWORD\`, \`APP_DB_NAME\`.
+4. **Cleanup test data.** Tests that INSERT need a corresponding
+   DELETE — use the mutation-cleanup pattern in After hooks. Otherwise
+   the test fails on second run because the row already exists.
+`,
+    },
+    'dialog-handling': {
+        'SKILL.md': `---
+name: dialog-handling
+description: Use when a page object or step needs to interact with browser dialogs (alert, confirm, prompt). Always use CSBasePage's wrapper methods, never page.on('dialog'). Pairs with audit rule DG100.
+---
+
+# Pattern: dialog handling
+
+## When to use
+
+Any flow that triggers a JavaScript \`alert()\`, \`confirm()\`, or \`prompt()\` —
+delete confirmations, save warnings, navigation-away prompts, custom JS
+dialogs. The dialog wrappers live on \`CSBasePage\` itself; page objects
+inherit them automatically.
+
+## Working example
+
+\`\`\`typescript
+import { CSBasePage, CSElement, CSGetElement, CSPage, CSReporter } from '@mdakhan.mak/cs-playwright-test-framework';
+
+@CSPage('users-list')
+export class UsersListPage extends CSBasePage {
+    @CSGetElement({
+        xpath: "//button[normalize-space()='Delete']",
+        description: 'Delete user button',
+        selfHeal: true,
+    })
+    private deleteButton!: CSElement;
+
+    /** Single-shot accept: arms the handler for the next dialog only. */
+    public async deleteAndConfirm(): Promise<void> {
+        await this.acceptNextDialog();             // arm handler before action
+        await this.deleteButton.clickWithTimeout(30000);
+        CSReporter.info(\`Deleted user; dialog accepted: \${this.getLastDialogMessage()}\`);
+    }
+
+    /** Single-shot accept with text (prompts only). */
+    public async deleteAndConfirmWithReason(reason: string): Promise<void> {
+        await this.acceptNextDialogWithText(reason);
+        await this.deleteButton.clickWithTimeout(30000);
+    }
+
+    /** Single-shot dismiss: cancels the next dialog. */
+    public async cancelDelete(): Promise<void> {
+        await this.dismissNextDialog();
+        await this.deleteButton.clickWithTimeout(30000);
+    }
+
+    /** Always-on for entire scenario (call once in Background or Before-step). */
+    public async armAlwaysAccept(): Promise<void> {
+        await this.alwaysAcceptDialogs();
+    }
+}
+\`\`\`
+
+## Available wrapper methods (all on CSBasePage)
+
+| Method | Behavior |
+|---|---|
+| \`acceptNextDialog()\` | Arms once. Next dialog is accepted. |
+| \`dismissNextDialog()\` | Arms once. Next dialog is dismissed. |
+| \`acceptNextDialogWithText(text)\` | For \`prompt()\` dialogs — supplies text and accepts. |
+| \`alwaysAcceptDialogs()\` | Persistent — every dialog this scenario sees is accepted. |
+| \`alwaysDismissDialogs()\` | Persistent — every dialog dismissed. |
+| \`getLastDialogMessage()\` | The text shown in the last dialog the page captured. |
+| \`getLastDialogType()\` | \`alert\` / \`confirm\` / \`prompt\` |
+| \`resetDialogHandler()\` | Clears single-shot and always-on handlers. Call in After hooks. |
+
+## Forbidden patterns (audit rule DG100 fails the file)
+
+\`\`\`typescript
+// ❌ NEVER — direct Playwright dialog API
+this.page.on('dialog', async d => await d.accept());
+this.page.on('dialog', async d => await d.dismiss());
+await dialog.accept();
+await dialog.dismiss();
+\`\`\`
+
+These bypass the framework's dialog tracking, never populate
+\`getLastDialogMessage()\`, leak listeners across scenarios, and fail
+the pre-gate audit (\`DG100: Direct page.on('dialog')\`).
+
+## Common gotchas
+
+1. **Arm before the action.** \`acceptNextDialog()\` registers a handler;
+   it doesn't itself trigger anything. Call it on the line above the
+   click that produces the dialog.
+2. **One dialog per arm.** \`acceptNextDialog()\` consumes itself after
+   the next dialog. Call again before the next dialog-producing action.
+3. **Always-on bleeds.** \`alwaysAcceptDialogs()\` persists for the rest
+   of the scenario. Call \`resetDialogHandler()\` in your After step if
+   later steps shouldn't auto-accept.
+`,
+    },
+    'encrypted-config': {
+        'SKILL.md': `---
+name: encrypted-config
+description: Use when generated test code reads any config value, especially secrets (DB passwords, ADO PAT, API tokens). Always go through CSValueResolver — supports ENCRYPTED: prefix and {input:...} placeholders. Never use raw process.env. Pairs with audit rule ENV100.
+---
+
+# Pattern: encrypted config + value resolution
+
+## When to use
+
+Any place a test reads a value from env / config — login URLs, base
+URLs, DB passwords, API tokens, ADO PATs. The framework's
+\`CSValueResolver\` provides a single resolution mechanism that:
+
+1. Resolves \`{config:KEY}\` from env files (with the 8-level
+   precedence: workspace > common > env-specific > etc.)
+2. Auto-decrypts values prefixed with \`ENCRYPTED:\` via the bundled
+   AES key
+3. Resolves \`{input:KEY}\` from the MCP-server's prompt-string inputs
+   (stored in VS Code SecretStorage)
+4. Resolves nested placeholders recursively
+
+## Working example
+
+\`\`\`typescript
+import {
+    CSBasePage, CSElement, CSGetElement, CSPage, CSReporter,
+    CSValueResolver,
+} from '@mdakhan.mak/cs-playwright-test-framework';
+
+@CSPage('login')
+export class LoginPage extends CSBasePage {
+    @CSGetElement({ xpath: "//input[@id='username']", description: 'Username field' })
+    private usernameField!: CSElement;
+
+    @CSGetElement({ xpath: "//input[@id='password']", description: 'Password field' })
+    private passwordField!: CSElement;
+
+    @CSGetElement({ xpath: "//button[@type='submit']", description: 'Login button', selfHeal: true })
+    private loginButton!: CSElement;
+
+    /** Login using credentials stored in env (password is ENCRYPTED:). */
+    public async loginAs(userKey: string): Promise<void> {
+        // Resolves config keys per project + env hierarchy. Synchronous —
+        // CSValueResolver.resolve() returns the resolved string directly.
+        const username = CSValueResolver.resolve(\`{config:\${userKey}_USERNAME}\`);
+        const password = CSValueResolver.resolve(\`{config:\${userKey}_PASSWORD}\`);
+
+        await this.usernameField.fillWithTimeout(username, 5000);
+        await this.passwordField.fillWithTimeout(password, 5000);
+        await this.loginButton.clickWithTimeout(30000);
+
+        CSReporter.info(\`Logged in as \${userKey}\`);
+        // NOTE: never log the actual password; the framework auto-redacts
+        // ENCRYPTED: values from CSReporter output.
+    }
+
+    /** Navigate to the app's base URL — typical Background step. */
+    public async navigateToHome(): Promise<void> {
+        const baseUrl = CSValueResolver.resolve('{config:APP_URL}');
+        await this.navigate(baseUrl);
+    }
+}
+\`\`\`
+
+## env file structure
+
+**\`config/myproject/environments/dev.env\`:**
+\`\`\`
+APP_URL=https://demo.example.com
+
+# Plain config values
+USER_ADMIN_USERNAME=admin@example.com
+
+# Encrypted values — ENCRYPTED: prefix triggers auto-decrypt at resolve time
+USER_ADMIN_PASSWORD=ENCRYPTED:base64encryptedstring
+ADO_PAT=ENCRYPTED:base64encryptedpat
+
+# DB credentials
+APP_DB_HOST=db.dev.example.com
+APP_DB_USER=app_test
+APP_DB_PASSWORD=ENCRYPTED:base64encryptedstring
+APP_DB_NAME=APPDB
+
+# Named queries
+DB_QUERY_GET_USER=SELECT * FROM users WHERE id = :id
+\`\`\`
+
+## Encrypting a value (one-time, in shell)
+
+\`\`\`bash
+# CSEncryptionUtil exposed via the framework CLI
+npx cs-playwright-framework encrypt-value --value "myActualPassword"
+# Output: ENCRYPTED:<base64-encoded-ciphertext>
+\`\`\`
+
+Paste the output — including the \`ENCRYPTED:\` prefix — into the env file.
+
+## Resolution precedence (when same key appears in multiple files)
+
+1. \`config/<project>/environments/<env>.env\`  (highest priority)
+2. \`config/<project>/common/common.env\`
+3. \`config/<project>/global.env\`
+4. \`config/common/common.env\`
+5. \`config/global.env\`
+6. Process env (\`process.env\`)
+7. Defaults baked into framework
+8. Tool-call \`answers\` parameter (lowest priority — fallback only)
+
+## CSValueResolver cheat sheet
+
+| Need | Call |
+|---|---|
+| Resolve \`{config:KEY}\` (sync) | \`CSValueResolver.resolve('{config:APP_URL}', context?)\` |
+| Multi-placeholder string | \`CSValueResolver.resolve('{config:HOST}:{config:PORT}/api')\` |
+| Resolve every value in an object | \`CSValueResolver.resolveObject(obj, context?)\` |
+| Nested templates | Resolves recursively |
+| Pass scenario state via context | \`CSValueResolver.resolve(template, { getVariable: (k) => ctx.get(k) })\` |
+
+Plain env values without \`ENCRYPTED:\` prefix come back unchanged.
+\`ENCRYPTED:\` values are auto-decrypted via the bundled key. Skip the
+\`{config:...}\` wrapper if you want a literal string.
+
+## Forbidden patterns (audit rule ENV100 fails the file)
+
+\`\`\`typescript
+// ❌ NEVER
+const url = process.env.APP_URL;
+const pwd = process.env.USER_PASSWORD;
+const token = process.env['ADO_PAT'];
+process.env.APP_URL  // anywhere in test code
+\`\`\`
+
+These bypass:
+- ENCRYPTED: auto-decryption
+- Project + env hierarchy
+- Per-run overrides via tool answers
+- Secret-redaction in CSReporter logs (you'd accidentally log raw passwords)
+
+Audit rule \`ENV100\` blocks any \`process.env.<KEY>\` reference in test
+code.
+
+## Common gotchas
+
+1. **\`resolve\` is synchronous** — no \`await\` needed. Returns the
+   resolved string directly. Throws on truly missing keys when the
+   template can't be substituted.
+2. **Template precedence is left-to-right** — \`'{config:A}/{config:B}'\`
+   resolves A first, then B.
+3. **ENCRYPTED: values can't be edited in plain text.** To rotate,
+   encrypt the new value with the CLI and replace the line.
+4. **Secret redaction** — \`CSReporter.info(\\\`pwd=\${password}\\\`)\` will
+   log the encrypted form, not the decrypted one, IF you got the
+   value through \`CSValueResolver.resolve\`. If you assigned the
+   decrypted value to a local variable and logged THAT, the redaction
+   is up to you. Best practice: never log credentials at all.
+`,
+    },
+    'excel-data-driven': {
+        'SKILL.md': `---
+name: excel-data-driven
+description: Use when a feature reads test data from an .xlsx file. Always go through CSExcelUtility — never import xlsx or exceljs directly. Pairs with audit rule EX100.
+---
+
+# Pattern: Excel data-driven tests
+
+## When to use
+
+Legacy tests often consume \`.xlsx\` files via \`@QAFDataProvider\` / \`@DataProvider\`.
+The migrated test should keep XLS as the authoring format if the team
+prefers spreadsheets, or convert to JSON via CSExcelUtility's
+\`excelToJSON\` for more flexibility. Either way, all XLSX I/O goes
+through \`CSExcelUtility\`.
+
+## Working example — read XLSX and use as data source
+
+\`\`\`typescript
+import {
+    CSBasePage, CSElement, CSGetElement, CSPage, CSReporter,
+} from '@mdakhan.mak/cs-playwright-test-framework';
+// Heavy utility — import via the deep path (kept out of the main + /utilities
+// barrel to avoid pulling in xlsx on every framework bootstrap).
+import { CSExcelUtility } from '@mdakhan.mak/cs-playwright-test-framework/dist/utils/CSExcelUtility';
+import * as path from 'path';
+
+@CSPage('user-search')
+export class UserSearchPage extends CSBasePage {
+    @CSGetElement({ xpath: "//input[@id='userId']", description: 'User ID search input' })
+    private userIdField!: CSElement;
+
+    @CSGetElement({ xpath: "//button[normalize-space()='Search']", description: 'Search button' })
+    private searchButton!: CSElement;
+
+    /**
+     * Read all rows from a sheet, return as typed objects keyed by header.
+     */
+    public loadUsers(xlsxPath: string, sheetName?: string): Array<{ userId: string; firstName: string; lastName: string; }> {
+        return CSExcelUtility.readSheetAsJSON(xlsxPath, sheetName);
+    }
+
+    /**
+     * Read a single cell — useful for one-off config values stored in
+     * a spreadsheet cell rather than a full row.
+     */
+    public getCellValue(xlsxPath: string, address: string, sheet?: string): string {
+        return String(CSExcelUtility.readCellValue(xlsxPath, address, sheet));
+    }
+
+    public async searchByUserId(userId: string): Promise<void> {
+        await this.userIdField.fillWithTimeout(userId, 5000);
+        await this.searchButton.clickWithTimeout(30000);
+        CSReporter.info(\`Searched for userId=\${userId}\`);
+    }
+}
+\`\`\`
+
+## Step definition example — XLSX-backed scenario outline
+
+\`\`\`typescript
+import { CSBDDStepDef, CSReporter, StepDefinitions, Page } from '@mdakhan.mak/cs-playwright-test-framework';
+import { CSExcelUtility } from '@mdakhan.mak/cs-playwright-test-framework/dist/utils/CSExcelUtility';
+
+@StepDefinitions
+export class UserSearchSteps {
+    constructor(@Page('user-search') private searchPage: UserSearchPage) {}
+
+    @CSBDDStepDef('I search for every user in {string} sheet {string}')
+    async searchAllUsers(xlsxPath: string, sheetName: string): Promise<void> {
+        const users = CSExcelUtility.readSheetAsJSON<{ userId: string; runFlag: string }>(xlsxPath, sheetName);
+        const active = users.filter(u => u.runFlag?.toLowerCase() === 'yes');
+        for (const u of active) {
+            await this.searchPage.searchByUserId(u.userId);
+            CSReporter.info(\`Searched for \${u.userId}\`);
+        }
+    }
+}
+\`\`\`
+
+## Convert XLSX to JSON during migration (recommended path)
+
+The framework prefers JSON for runtime — JSON parses faster, diffs better
+in PR reviews, and round-trips through \`CSDataProvider\` natively.
+Migrate XLSX → JSON once during the migration, ship the JSON in the
+data file:
+
+\`\`\`typescript
+// In a one-time migration script, NOT in test runtime:
+CSExcelUtility.excelToJSON(
+    'legacy-data/UserData.xlsx',
+    'test/myproject/data/user-data.json',
+    'Users',  // optional sheet name; first sheet if omitted
+);
+\`\`\`
+
+The \`legacy_test_code\` mode handler does this automatically via
+\`CSTestDataMigrator\` — your generated \`*-data.json\` is already
+populated with the real XLS rows.
+
+## CSExcelUtility cheat sheet
+
+| Need | Call |
+|---|---|
+| All sheets to JSON | \`CSExcelUtility.readSheetAsJSON(path, sheetName?)\` |
+| Single cell | \`CSExcelUtility.readCellValue(path, 'A1', sheet?)\` |
+| Range as 2D array | \`CSExcelUtility.readCellRange(path, 'A1:D10', sheet?)\` |
+| Row count / col count | \`CSExcelUtility.getRowCount(path, sheet?)\` / \`getColumnCount\` |
+| Find rows by predicate | \`CSExcelUtility.findRows(path, r => r.runFlag === 'Yes', sheet?)\` |
+| Distinct values in column | \`CSExcelUtility.getDistinctValues(path, 'department', sheet?)\` |
+| Write JSON → XLSX | \`CSExcelUtility.writeJSONToExcel(rows, path, sheet?)\` |
+| Update single cell | \`CSExcelUtility.updateCellValue(path, 'A1', 'newValue', sheet?)\` |
+| Diff two files | \`CSExcelUtility.compareExcelFiles(file1, file2)\` |
+| Sheet metadata | \`CSExcelUtility.getSheetNames(path)\`, \`.getFileMetadata(path)\` |
+
+## Forbidden patterns (audit rule EX100 fails the file)
+
+\`\`\`typescript
+// ❌ NEVER — direct library imports
+import * as XLSX from 'xlsx';
+import { read, utils } from 'xlsx';
+import ExcelJS from 'exceljs';
+const xlsx = require('xlsx');
+\`\`\`
+
+These bypass the framework's logging, error wrapping, and per-run
+caching, and fail the pre-gate audit (\`EX100: Direct xlsx/exceljs
+import\`). Always import \`CSExcelUtility\` from the framework.
+
+## Common gotchas
+
+1. **Empty cells return \`undefined\`, not \`''\`.** Use \`?? ''\` when
+   coercing to string for assertions.
+2. **Header row is row 1.** \`readSheetAsJSON\` treats the first row as
+   keys. If your sheet has a title in row 1, skip it via
+   \`readWorkbookWithOptions\` with \`range: 1\`.
+3. **Date cells.** Excel stores dates as serial numbers. Use
+   \`CSDateTimeUtility.parse(cell)\` to convert; don't trust the raw
+   value.
+4. **Sheet name must match exactly.** Case-sensitive, whitespace
+   sensitive. Use \`getSheetNames(path)\` to confirm.
+`,
+    },
     'ff-scenario-outline': {
         'SKILL.md': `---
 name: ff-scenario-outline
@@ -771,6 +2179,138 @@ Feature: Login — basic smoke
 - No \`Examples:\` block for plain \`Scenario:\`
 - At least 3 Then/And verification steps (per audit rule FF004)
 - Steps match step-definition text exactly
+`,
+    },
+    'file-download-export': {
+        'SKILL.md': `---
+name: file-download-export
+description: Use when a feature triggers a file export (PDF, Excel, CSV) and the test needs to capture the downloaded file under the per-run test-results directory. Pairs with audit rule DL100.
+---
+
+# Pattern: file download / export capture
+
+## When to use
+
+The legacy test clicks an "Export to Excel", "Download PDF", "Save report"
+button and verifies (a) the file arrived, (b) it has expected name /
+size / content. The framework's \`CSTestResultsManager\` owns the
+per-run download directory — every captured file lands under
+\`test-results/<runId>/downloads/\` so reports show them inline and CI
+artefact upload picks them up automatically.
+
+## Working example
+
+\`\`\`typescript
+import {
+    CSBasePage, CSElement, CSGetElement, CSPage, CSReporter,
+    CSTestResultsManager,
+} from '@mdakhan.mak/cs-playwright-test-framework';
+import * as path from 'path';
+
+@CSPage('reports')
+export class ReportsPage extends CSBasePage {
+    @CSGetElement({
+        xpath: "//button[normalize-space()='Export to Excel']",
+        description: 'Export to Excel button',
+        selfHeal: true,
+    })
+    private exportButton!: CSElement;
+
+    /**
+     * Trigger the export, wait for the download, store under the framework's
+     * download directory, and return the absolute path. Use the return value
+     * in the next step to verify content.
+     */
+    public async exportToExcel(): Promise<string> {
+        // Arm Playwright's download promise BEFORE the click that triggers it.
+        const downloadPromise = this.page.waitForEvent('download', { timeout: 30000 });
+        await this.exportButton.clickWithTimeout(30000);
+        const download = await downloadPromise;
+
+        // Save under the framework's per-run downloads dir, preserving suggested name.
+        const trm = CSTestResultsManager.getInstance();
+        const downloadsDir = trm.getDownloadsDirectory();
+        const targetPath = path.join(downloadsDir, download.suggestedFilename());
+        await download.saveAs(targetPath);
+
+        // Register with the framework so the report shows the file inline.
+        trm.addDownloadedFile(targetPath, download.suggestedFilename(), download.suggestedFilename());
+
+        CSReporter.info(\`Exported to \${path.basename(targetPath)} (\${path.dirname(targetPath)})\`);
+        return targetPath;
+    }
+
+    /**
+     * Convenience: get the most recent file the framework captured this run.
+     * Useful in Then steps that verify content without threading the path
+     * through scenario state.
+     */
+    public getLatestExport(): { path: string; name: string } | undefined {
+        return CSTestResultsManager.getInstance().getLatestDownloadedFile();
+    }
+}
+\`\`\`
+
+## Step definition example
+
+\`\`\`typescript
+import { CSBDDStepDef, CSReporter, StepDefinitions, Page } from '@mdakhan.mak/cs-playwright-test-framework';
+import { CSExcelUtility } from '@mdakhan.mak/cs-playwright-test-framework/dist/utils/CSExcelUtility';
+
+@StepDefinitions
+export class ReportsSteps {
+    constructor(@Page('reports') private reportsPage: ReportsPage) {}
+
+    @CSBDDStepDef('I export the report to Excel')
+    async exportReport(): Promise<void> {
+        await this.reportsPage.exportToExcel();
+    }
+
+    @CSBDDStepDef('the exported Excel file has {int} rows')
+    async verifyExportRowCount(expected: number): Promise<void> {
+        const latest = this.reportsPage.getLatestExport();
+        if (!latest) {
+            CSReporter.fail('No exported file captured for this scenario');
+            throw new Error('No exported file captured');
+        }
+        const rows = CSExcelUtility.readSheetAsJSON(latest.path);
+        if (rows.length !== expected) {
+            CSReporter.fail(\`Expected \${expected} rows in export, got \${rows.length}\`);
+            throw new Error(\`Row count mismatch: expected \${expected}, got \${rows.length}\`);
+        }
+        CSReporter.pass(\`Exported file has \${rows.length} rows as expected\`);
+    }
+}
+\`\`\`
+
+## Forbidden patterns (audit rule DL100 fails the file)
+
+\`\`\`typescript
+// ❌ NEVER — hardcoded paths bypass the framework's per-run dir
+await download.saveAs('/tmp/export.xlsx');
+await download.saveAs('C:\\\\downloads\\\\report.csv');
+await download.saveAs('~/Downloads/file.pdf');
+await download.saveAs('../some-relative-path.xlsx');
+\`\`\`
+
+These leak files outside the test-results dir, miss the report
+attachment, and fail audit \`DL100\`. Always go through
+\`CSTestResultsManager.getDownloadsDirectory()\`.
+
+## Common gotchas
+
+1. **Arm \`waitForEvent('download')\` before the click.** If you call
+   it after, the download event already fired and you'll time out.
+2. **\`download.suggestedFilename()\` can collide.** If the same scenario
+   exports twice, suffix the filename with a timestamp from
+   \`CSDateTimeUtility.timestamp()\` to avoid overwrite.
+3. **Verify file content, not just existence.** Read the file via
+   \`CSExcelUtility\` / \`CSCsvUtility\` / Node \`fs.readFileSync\` for PDFs
+   to assert the export is actually correct, not just a 0-byte
+   placeholder.
+4. **\`addDownloadedFile()\` is mandatory** for the test report to
+   surface the file. Skip it and the file exists on disk but doesn't
+   show up in the HTML report.
 `,
     },
     'heal-cascade-revert': {
@@ -895,6 +2435,199 @@ public signInButton!: CSWebElement;
 - **Record on green** — call \`correction_memory_record\` with the signature + fix strategy once the final full-suite re-run is green
 `,
     },
+    'heal-loop-driver': {
+        'SKILL.md': `---
+name: heal-loop-driver
+description: Use after a generated test fails. Documents the end-to-end heal flow the host LLM should drive: run scenario → on fail capture state → inspect live DOM → propose locator/timing fix → apply via replace_string_in_file → re-run until green or hit retry cap.
+---
+
+# Pattern: agent-driven heal loop
+
+## When to use
+
+A generated test failed (compile passed, audit passed, but the test
+itself didn't pass against the real app). Two failure shapes:
+
+1. **Locator drift** — the page object's xpath doesn't match the live
+   DOM (most common; happens when the app's HTML changes between when
+   the test was written and now)
+2. **Timing flake** — element exists but the test doesn't wait long
+   enough, races against an animation, or hits a stale-state read
+
+The host LLM (Copilot) drives the heal loop. The MCP server provides
+two primitives — \`csaa_run_scenario\` and \`csaa_capture_failure_state\`
+— plus the existing \`browser_generate_locator\` tool. The framework's
+runtime self-healing (\`CSSelfHealingEngine\` with 4 strategies) catches
+many drift cases automatically; this loop handles the cases the
+runtime engine can't fix.
+
+## End-to-end flow
+
+\`\`\`
+1. Generate completes (cs_ai_auto_assist returns READY-with-warnings).
+2. User asks: "run the migrated tests and fix anything that fails"
+3. Copilot calls csaa_run_scenario for each scenario id.
+4. For each FAIL:
+   a. csaa_capture_failure_state(scenarioId, project)
+      → returns screenshot, dom snapshot, last URL, console errors
+   b. Copilot reads the artefacts (read_file the screenshot path,
+      open the DOM snapshot if present) and identifies the failed
+      element from the failed step.
+   c. browser_generate_locator(url=lastPageUrl, intent="<failed element>")
+      → returns ranked candidate xpaths from live DOM
+   d. Copilot picks the best candidate, edits the page object via
+      replace_string_in_file.
+   e. csaa_run_scenario again. If still failing and < 3 attempts for
+      this scenario, loop back to step 4a. Else escalate.
+5. Once all scenarios pass, summarize results to user.
+\`\`\`
+
+## Bounded retry policy
+
+- **3 attempts per scenario.** After 3 failed fix attempts on the
+  same scenario, escalate (surface a clear summary to the user; do
+  not loop indefinitely).
+- **20 attempts total per migration run.** Even if individual
+  scenarios are still under their per-scenario cap, stop the loop
+  globally to prevent runaway cost.
+- **Cascade revert.** If a fix to scenario A breaks scenario B that
+  was previously passing, revert the fix and try a different
+  approach. Never trade green for new red.
+
+## Concrete tool sequences
+
+### Sequence 1 — locator drift, one attempt fixes it
+
+\`\`\`
+> csaa_run_scenario { scenarioId: "TS_001", project: "myproject" }
+< { passed: false, failedStep: "I click Save on the form", failureMessage: "Timeout 30000ms exceeded" }
+
+> csaa_capture_failure_state { scenarioId: "TS_001", project: "myproject" }
+< { screenshot: "...", lastPageUrl: "https://app.example.com/users/edit",
+    domSnapshot: "...", artefactDir: "..." }
+
+> read_file { path: "...screenshot.png" }
+< (Copilot sees the page; identifies the Save button moved class names)
+
+> browser_generate_locator { url: "https://app.example.com/users/edit",
+                              intent: "Save button on the user edit form" }
+< { candidates: [
+    { xpath: "//button[normalize-space()='Save Changes']", score: 0.94,
+      reason: "id-anchored, visible, enabled" },
+    { xpath: "//form//button[@type='submit']", score: 0.78 },
+    ...
+  ] }
+
+> replace_string_in_file {
+    file: "test/myproject/pages/user-edit.page.ts",
+    old_string: "xpath: \\"//button[normalize-space()='Save']\\"",
+    new_string: "xpath: \\"//button[normalize-space()='Save Changes']\\""
+  }
+
+> csaa_run_scenario { scenarioId: "TS_001", project: "myproject" }
+< { passed: true }
+\`\`\`
+
+### Sequence 2 — timing flake
+
+\`\`\`
+> csaa_run_scenario { scenarioId: "TS_002", project: "myproject" }
+< { passed: false, failedStep: "I see the success message",
+    failureMessage: "Expected element to be visible" }
+
+> csaa_capture_failure_state { scenarioId: "TS_002", project: "myproject" }
+< { screenshot: shows the message present but partially rendered,
+    lastPageUrl: "...", domSnapshot: "..." }
+
+(The element exists in the DOM but appeared after the test's wait window.
+ Fix: increase the click timeout on the action that triggers the message,
+ or add an explicit wait before the assertion.)
+
+> replace_string_in_file {
+    file: "test/myproject/pages/users.page.ts",
+    old_string: "await this.submitButton.clickWithTimeout(5000);",
+    new_string: "await this.submitButton.clickWithTimeout(30000);"
+  }
+
+> csaa_run_scenario { scenarioId: "TS_002", project: "myproject" }
+< { passed: true }
+\`\`\`
+
+### Sequence 3 — three-attempt escalation
+
+\`\`\`
+attempt 1: csaa_run_scenario → fail. capture → inspect → patch → run → fail
+attempt 2: capture → inspect (different element) → patch → run → fail
+attempt 3: capture → inspect → patch → run → fail
+
+> Surface to user:
+"Scenario TS_005 failed 3 attempts. The action 'I click the Approve button'
+ cannot complete. The button appears in the DOM but is disabled — likely a
+ prerequisite (e.g. fill required fields first) is missing from the
+ scenario. Manual review needed."
+\`\`\`
+
+## When NOT to loop
+
+- **Compile errors** — \`commit_ready_check\` / \`compile_check\` failures
+  must be fixed FIRST via the audit loop. Don't try to heal a test
+  that won't compile.
+- **Audit failures** — pre-gate audit (PO/SD/FF rule violations)
+  must be fixed before the test runs at all. Heal loop is post-audit.
+- **HIGH severity classification** — environment-related failures
+  (DNS, certs, app-down) are not the test's fault. Escalate, don't
+  retry.
+
+## Diagnostic priorities
+
+When \`csaa_capture_failure_state\` returns the artefact paths, read
+in this order:
+
+1. **The screenshot** — fastest signal of "what went wrong visually"
+2. **The console log** — JS errors, network failures, redirects to
+   error pages
+3. **The DOM snapshot** — only if screenshot + console didn't tell
+   you which element drifted
+4. **The trace zip** — only as a last resort; opens in Playwright
+   trace viewer; useful for timing / waterfall analysis
+
+## Forbidden patterns
+
+\`\`\`typescript
+// ❌ NEVER patch the test scenario's GHERKIN to match a buggy app
+//   (changing "I see success" to "I don't see success" hides the bug)
+
+// ❌ NEVER \`@skip\` a failing scenario — use \`runFlag: No\` in the data
+//   JSON if the user explicitly wants to defer
+
+// ❌ NEVER retry the same fix more than once — if the same patch
+//   doesn't pass on attempt 1 and 2, the diagnosis is wrong
+\`\`\`
+
+## Common gotchas
+
+1. **\`csaa_capture_failure_state\` requires the scenario was actually
+   run.** Calling it before \`csaa_run_scenario\` returns "no
+   test-results directory" — surface the active-imperative reason.
+2. **Screenshots are post-failure** — they show the page AFTER the
+   step failed, not what the user expected. The DOM may have moved on
+   to an error page or modal.
+3. **\`browser_generate_locator\` opens a real browser.** It honours
+   \`--headed\` from the framework config. Long-running locator
+   inspections accumulate Playwright contexts — check
+   \`CSBrowserManager\` lifecycle if you suspect leaks.
+4. **Cascade revert is YOUR responsibility, not the framework's.**
+   Run the previously-passing scenarios after each fix to confirm
+   they still pass. The heal loop's per-scenario cap means individual
+   scenarios are bounded, but globally cascading regression must be
+   caught here.
+5. **Ambiguous element intent.** If \`browser_generate_locator\`
+   returns multiple candidates with similar scores (within 0.05 of
+   each other), the intent string was too vague. Re-call with a
+   more specific intent ("Save Changes button on the user edit
+   form, primary submit") and pick the highest-scored result.
+`,
+    },
     'heal-timing-flaky': {
         'SKILL.md': `---
 name: heal-timing-flaky
@@ -975,6 +2708,178 @@ public async submitAndExpectDashboard(): Promise<void> {
 - Raise specific element timeouts rather than blanket increasing the default
 - Prefer waiting for the next meaningful element over waiting for "the page to settle"
 - If flakiness persists after a correct fix, the failure is no longer LOW — reclassify and escalate
+`,
+    },
+    'iframe-nested': {
+        'SKILL.md': `---
+name: iframe-nested
+description: Use when a page object element lives inside an iframe (or nested iframes). Pass the frame chain to @CSGetElement via the \`frame\` option — the framework resolves the chain at runtime. Never use page.frame() or frameLocator() directly.
+---
+
+# Pattern: iframe / nested iframe element
+
+## When to use
+
+The element is inside an \`<iframe>\`. Common in:
+- Embedded payment widgets (Stripe, Adyen)
+- Third-party reporting dashboards
+- Legacy app shells where the app is wrapped in a portal frame
+- Nested frames (admin portal containing a frame containing the form)
+
+The framework's \`@CSGetElement\` decorator accepts a \`frame\` option
+that takes either a single selector or an array of selectors (for
+nested iframes). The \`CSFrameResolver\` walks the chain at runtime,
+re-resolving frames if they re-render.
+
+## Working example — single iframe
+
+\`\`\`typescript
+import { CSBasePage, CSElement, CSGetElement, CSPage, CSReporter } from '@mdakhan.mak/cs-playwright-test-framework';
+
+@CSPage('checkout')
+export class CheckoutPage extends CSBasePage {
+    /**
+     * Card number field lives inside the Stripe iframe. The \`frame\`
+     * option points at the iframe; the framework switches into it
+     * before every element interaction.
+     */
+    @CSGetElement({
+        xpath: "//input[@name='cardnumber']",
+        description: 'Stripe card number input',
+        frame: "iframe[name='__privateStripeFrame']",
+        selfHeal: true,
+    })
+    private cardNumberField!: CSElement;
+
+    @CSGetElement({
+        xpath: "//input[@name='exp-date']",
+        description: 'Stripe card expiry input',
+        frame: "iframe[name='__privateStripeFrame']",
+        selfHeal: true,
+    })
+    private expiryField!: CSElement;
+
+    public async fillCardDetails(card: string, expiry: string): Promise<void> {
+        await this.cardNumberField.fillWithTimeout(card, 5000);
+        await this.expiryField.fillWithTimeout(expiry, 5000);
+        CSReporter.info('Filled Stripe card details');
+    }
+}
+\`\`\`
+
+## Working example — nested iframes
+
+\`\`\`typescript
+@CSPage('legacy-portal')
+export class LegacyPortalPage extends CSBasePage {
+    /**
+     * The legacy admin portal wraps the app in a portal frame which
+     * itself wraps the actual form in another frame. Pass an array
+     * of frame selectors — the framework resolves them in order.
+     */
+    @CSGetElement({
+        xpath: "//input[@id='userId']",
+        description: 'User ID input (inside admin portal → users frame)',
+        frame: [
+            "iframe[name='portalFrame']",          // outer
+            "iframe[id='usersWidgetFrame']",       // inner
+        ],
+        selfHeal: true,
+    })
+    private userIdField!: CSElement;
+
+    /** Frame can also be selected by xpath if the iframe lacks a stable id/name. */
+    @CSGetElement({
+        xpath: "//button[normalize-space()='Save']",
+        description: 'Save button (deeply nested)',
+        frame: [
+            "xpath=//iframe[contains(@src, '/portal/')]",
+            "xpath=//iframe[contains(@src, '/users/')]",
+        ],
+    })
+    private saveButton!: CSElement;
+}
+\`\`\`
+
+## Programmatic frame switching (CSBasePage helpers)
+
+For step-level frame work that doesn't fit a page-object element:
+
+\`\`\`typescript
+import { CSBDDStepDef, StepDefinitions, Page } from '@mdakhan.mak/cs-playwright-test-framework';
+
+@StepDefinitions
+export class PortalSteps {
+    constructor(@Page('legacy-portal') private portal: LegacyPortalPage) {}
+
+    @CSBDDStepDef('I switch to the users portal frame')
+    async switchToUsersFrame(): Promise<void> {
+        // CSBasePage.switchToFrame accepts string OR string[] (nested).
+        await this.portal.switchToFrame([
+            "iframe[name='portalFrame']",
+            "iframe[id='usersWidgetFrame']",
+        ]);
+    }
+
+    @CSBDDStepDef('I switch back to main frame')
+    async switchToMain(): Promise<void> {
+        await this.portal.switchToMainFrame();
+    }
+}
+\`\`\`
+
+## Frame option signature
+
+\`\`\`typescript
+@CSGetElement({
+    xpath: '...',
+    description: '...',
+    frame: 'css-selector-of-iframe',           // single
+    // OR
+    frame: ['outer-iframe', 'inner-iframe'],   // nested chain
+    // OR
+    frame: { name: 'frameName' },              // object form (FrameSelector)
+    // OR
+    frame: [{ name: 'outer' }, { name: 'inner' }],
+})
+\`\`\`
+
+Selector forms supported per frame:
+- Plain CSS: \`"iframe[name='x']"\`
+- xpath: \`"xpath=//iframe[contains(@src, '/admin/')]"\`
+- Object: \`{ name: 'frameName' }\`, \`{ url: /pattern/ }\`, \`{ id: 'frameId' }\`
+
+## Forbidden patterns (audit rule WRAP100 fails the file)
+
+\`\`\`typescript
+// ❌ NEVER — direct Playwright frame APIs
+const frame = this.page.frame('frameName');
+await frame.locator('#userId').fill('value');
+
+const frame = this.page.frameLocator('iframe[name="x"]');
+await frame.locator('#userId').fill('value');
+
+await this.page.mainFrame().locator('...').click();
+\`\`\`
+
+These bypass the framework's frame chain re-resolution (frames that
+re-render mid-test silently fail without it), the self-heal hooks,
+and CSReporter integration. Audit \`WRAP100\` blocks them.
+
+## Common gotchas
+
+1. **Frames re-render** — sometimes the iframe in the DOM is replaced
+   between steps. The framework re-resolves the frame chain on every
+   element call, so \`selfHeal: true\` is even more valuable inside
+   frames than at top-level.
+2. **Frame selector order matters.** Outermost frame first, innermost
+   last. Reverse order = element not found.
+3. **Cross-origin iframes** — if the iframe is from a different origin,
+   browser sandbox rules apply. Some interactions (clipboard, file
+   upload) are restricted. Test in a headed browser to debug.
+4. **Don't mix \`frame:\` with manual \`switchToFrame()\`** — pick one
+   approach per page. Manual switch + decorator-frame conflicts
+   produce confusing "element not found" errors.
 `,
     },
     'interactive-clarification': {
@@ -1548,6 +3453,152 @@ table: USERS
 - Heredoc / multi-line SQL (\`"""..."""\` in Kotlin, verbatim strings in C#) — some may slip through regex extraction
 - Dynamic SQL built via string manipulation — may need manual review and rewrite
 - Stored procedure calls — treat as a separate migration pattern (named SP execution, not a SELECT)
+`,
+    },
+    'mutation-cleanup': {
+        'SKILL.md': `---
+name: mutation-cleanup
+description: Use when a scenario CREATES or MODIFIES backend data — new user, new payment, status change, file upload. Without cleanup the test fails on second run because the data already exists. Pattern: unique IDs + After-step DB cleanup.
+---
+
+# Pattern: mutation cleanup
+
+## When to use
+
+The scenario isn't read-only. It clicks "Create user", "Submit payment",
+"Approve", "Upload" — actions that write to the backend. Two problems
+to solve:
+
+1. **Idempotency:** the test must work on its first run AND every
+   subsequent run. If the first run created \`user-001\`, the second
+   run must either delete \`user-001\` first or use a different ID.
+2. **Test isolation:** parallel scenarios must not collide. Two
+   workers creating "user-001" simultaneously will race.
+
+## Strategy 1 — Unique IDs via timestamp (simplest)
+
+Append a unique suffix to every test-generated identifier. Use
+\`CSDateTimeUtility.timestamp()\` for ms precision, optionally with a
+random suffix for parallel safety.
+
+\`\`\`typescript
+import { CSDateTimeUtility, CSStringUtility } from '@mdakhan.mak/cs-playwright-test-framework/utilities';
+
+const uniqueSuffix = \`\${CSDateTimeUtility.timestamp()}-\${CSStringUtility.random(4)}\`;
+const newUserId = \`TEST-\${uniqueSuffix}\`;
+const newOrderRef = \`ORD-\${uniqueSuffix}\`;
+\`\`\`
+
+This is the lightest pattern — no cleanup needed, every run gets a
+fresh ID. Downside: rows accumulate in the test DB over time.
+Schedule a periodic sweep (Strategy 3 below) to clear them.
+
+## Strategy 2 — After-step cleanup with @CSAfter hook
+
+For scenarios that need a specific ID (e.g., the legacy data file
+hardcodes \`TEST-USER-1\`), clean up in an After hook so the next run
+starts fresh.
+
+\`\`\`typescript
+import {
+    CSBDDStepDef, CSReporter, StepDefinitions, Page,
+    CSAfter,
+} from '@mdakhan.mak/cs-playwright-test-framework';
+import { CSDBUtils } from '@mdakhan.mak/cs-playwright-test-framework/database-utils';
+import { CSDateTimeUtility } from '@mdakhan.mak/cs-playwright-test-framework/utilities';
+
+@StepDefinitions
+export class UserCreateSteps {
+    @CSBDDStepDef('I create a user with id {string}')
+    async createUser(userId: string): Promise<void> {
+        await this.userCreatePage.fillUserId(userId);
+        await this.userCreatePage.submit();
+    }
+
+    @CSAfter()
+    async cleanupCreatedUsers(): Promise<void> {
+        // Delete every TEST- prefixed user this scenario might have made.
+        // Idempotent — DELETE never fails if no rows match.
+        const affected = await CSDBUtils.executeUpdate('APP_DB',
+            "DELETE FROM users WHERE userid LIKE 'TEST-%' AND created_at >= :since",
+            { since: CSDateTimeUtility.toISO(CSDateTimeUtility.startOfDay(CSDateTimeUtility.now())) },
+        );
+        CSReporter.info(\`Cleanup deleted \${affected} test user(s)\`);
+    }
+}
+\`\`\`
+
+## Strategy 3 — Periodic sweep (out-of-band)
+
+For data that's hard to attribute to a specific scenario (e.g.,
+ID generated server-side, no naming convention), schedule a daily
+job that deletes all "TEST-*" rows older than 24 hours. Out of scope
+for individual scenarios but document it in the project README so
+the team knows it exists.
+
+## Strategy 4 — Capture and undo via context
+
+For complex flows where create-and-rollback is the cleanest pattern:
+
+\`\`\`typescript
+import {
+    CSBDDStepDef, StepDefinitions, CSAfter, CSBDDContext,
+    CSReporter,
+} from '@mdakhan.mak/cs-playwright-test-framework';
+import { CSDBUtils } from '@mdakhan.mak/cs-playwright-test-framework/database-utils';
+
+@StepDefinitions
+export class OrderSteps {
+    @CSBDDStepDef('I create an order')
+    async createOrder(): Promise<void> {
+        const orderId = await this.orderCreatePage.submit();
+        // Stash the ID in scenario context for the After hook to delete.
+        CSBDDContext.getInstance().set('createdOrderId', orderId);
+        CSReporter.info(\`Created order \${orderId}\`);
+    }
+
+    @CSAfter()
+    async undoCreatedOrder(): Promise<void> {
+        const orderId = CSBDDContext.getInstance().get<string>('createdOrderId');
+        if (!orderId) return;  // scenario didn't create one — nothing to undo
+        await CSDBUtils.executeUpdate('APP_DB',
+            'DELETE FROM orders WHERE id = :id', { id: orderId });
+        CSReporter.info(\`Cleaned up created order \${orderId}\`);
+    }
+}
+\`\`\`
+
+## Decision flowchart
+
+\`\`\`
+Does the scenario CREATE backend data?
+├─ No (read-only) → no cleanup needed
+└─ Yes
+   ├─ Can the ID be made unique per run?
+   │  └─ Yes → Strategy 1 (timestamp suffix). Plus Strategy 3 sweep.
+   └─ No (must reuse fixed ID) → Strategy 2 (After-hook DELETE).
+   
+Multi-step mutation (create → modify → delete)?
+└─ Yes → Strategy 4 (capture state in CSBDDContext + targeted undo).
+\`\`\`
+
+## Common gotchas
+
+1. **DELETE in After hook is best-effort.** If the After hook itself
+   fails, the data leaks. Keep the DELETE simple — single SQL,
+   parameterised, no joins. Catch and log errors but don't re-throw.
+2. **\`@CSAfter\` runs even on scenario failure** — that's the point.
+   Test failed mid-create? The cleanup still runs.
+3. **Soft-delete columns** — if the schema uses \`deleted_at IS NOT
+   NULL\` semantics, a hard \`DELETE\` may not be what you want. Check
+   the schema; use \`UPDATE ... SET deleted_at = NOW()\` instead if
+   appropriate.
+4. **Foreign keys** — deleting a user cascades to orders, etc. Either
+   delete in the right order or rely on \`ON DELETE CASCADE\`. Check
+   the schema before assuming.
+5. **Don't cleanup global fixture data.** If a row is shared by
+   multiple scenarios (or pre-loaded by a setup script), don't
+   delete it in After. Only clean what THIS scenario created.
 `,
     },
     'named-query-env-entry': {
@@ -2602,4 +4653,4 @@ Output JSON:
     },
 };
 
-export const SKILL_NAMES: readonly string[] = ["audit-rules","commit-ready-9-gates","correction-memory-format","db-helper-case-tolerant","db-helper-findall-matching","db-helper-findby-id","ff-scenario-outline","ff-smoke-scenario","heal-cascade-revert","heal-locator-drift","heal-timing-flaky","interactive-clarification","ir-and-session-state","legacy-example-csharp-nunit","legacy-example-java-testng","legacy-example-jdbc-inline-sql","named-query-env-entry","po-click-action-method","po-dynamic-element","po-fill-action-method","po-frame-element","po-self-healing-element","po-simple-element","po-wait-and-verify-method","reporter-fail-and-throw","reporter-pass-on-success","scenarios-json-row","sd-simple-step","sd-step-with-config","sd-step-with-context","sd-step-with-db-precondition","sd-step-with-params","xlsx-multi-row-per-id","xlsx-sheet-to-scenarios"] as const;
+export const SKILL_NAMES: readonly string[] = ["ado-bidirectional-update","americas-timezone","api-call-pattern","app-url-exploration","audit-rules","commit-ready-9-gates","correction-memory-format","csv-data-driven","db-helper-case-tolerant","db-helper-findall-matching","db-helper-findby-id","db-state-assertion","dialog-handling","encrypted-config","excel-data-driven","ff-scenario-outline","ff-smoke-scenario","file-download-export","heal-cascade-revert","heal-locator-drift","heal-loop-driver","heal-timing-flaky","iframe-nested","interactive-clarification","ir-and-session-state","legacy-example-csharp-nunit","legacy-example-java-testng","legacy-example-jdbc-inline-sql","mutation-cleanup","named-query-env-entry","po-click-action-method","po-dynamic-element","po-fill-action-method","po-frame-element","po-self-healing-element","po-simple-element","po-wait-and-verify-method","reporter-fail-and-throw","reporter-pass-on-success","scenarios-json-row","sd-simple-step","sd-step-with-config","sd-step-with-context","sd-step-with-db-precondition","sd-step-with-params","xlsx-multi-row-per-id","xlsx-sheet-to-scenarios"] as const;

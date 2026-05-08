@@ -63,6 +63,26 @@ export interface AgentRunResult {
     blockedReason?: string;
     blockedDetails?: Record<string, unknown>;
     clarificationsNeeded?: ClarificationQuestion[];
+    /**
+     * Sequential-Thinking-style continuation flag. When true, the host LLM
+     * should call `cs_ai_auto_assist` again with the suggested next input.
+     * When false, the run reached a terminal state (READY or BLOCKED).
+     * The single-boolean contract is what keeps the agent loop from
+     * abandoning the tool after one call.
+     */
+    nextStepNeeded?: boolean;
+    /**
+     * Optional name of the tool the LLM should consider calling next.
+     * Either `cs_ai_auto_assist` (most common — re-invoke with new args)
+     * or a Copilot built-in like `apply_patch` / `read_file` / `run_in_terminal`.
+     */
+    nextSuggestedTool?: string;
+    /**
+     * Optional argument template for the next tool call. Keys are arg names,
+     * values are either concrete values to use or short descriptions of what
+     * the LLM should fill in.
+     */
+    nextSuggestedArgs?: Record<string, unknown>;
 }
 
 // ============================================================================

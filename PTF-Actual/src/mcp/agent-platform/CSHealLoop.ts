@@ -128,6 +128,53 @@ export class CSHealLoop {
         let globalAttempts = 0;
         let escalatedReason: string | undefined;
 
+        // -- Fast-fail when no sampling available ---------------------------
+        // The auto-fix loop's only mechanism for proposing a code patch is
+        // sampling/createMessage on the host LLM. Copilot doesn't implement
+        // sampling, so every retry would call proposeFixViaSampling, fail
+        // with "no sampling client", and burn one of the 20 global retries
+        // doing nothing useful. Detect that condition once and escalate
+        // immediately with the gate's structured failure data — the host
+        // LLM (Copilot in chat) reads it and drives healing through tool
+        // calls (apply_patch, etc.) instead.
+        if (!context.sampling) {
+            // Best-effort: classify each failure and look up correction
+            // memory so the escalation surfaces actionable strategy hints
+            // even though we won't auto-apply them.
+            for (const failure of gate.testsFailedClassified ?? []) {
+                const summary = failure.details.slice(0, CSHealLoop.MAX_FAILURE_DETAIL);
+                const signature = `${failure.failureType}: ${summary.slice(0, 256)}`;
+                const classification = await CSHealLoop.classify(
+                    summary,
+                    failure.testId,
+                    context,
+                );
+                const memoryHit = await CSHealLoop.queryMemory(signature, context);
+                attempts.push({
+                    attemptNumber: 1,
+                    failureType: failure.failureType,
+                    testId: failure.testId,
+                    classification: classification === 'UNKNOWN' ? 'LOW' : classification,
+                    fixSource: 'none',
+                    fixApplied: false,
+                    afterAttemptPassed: false,
+                    notes: memoryHit
+                        ? `host LLM should drive fix; correction memory has prior verified-green strategy: ${memoryHit.fixStrategy}`
+                        : 'host LLM should read gate failure detail and propose a fix via apply_patch on the implicated page object or step file',
+                    signature,
+                    strategy: memoryHit?.fixStrategy,
+                });
+            }
+            return {
+                finalGate: gate,
+                attempts,
+                totalAttempts: 0,
+                perfectlyPassing: false,
+                escalatedReason:
+                    'auto-fix path not active in this host. The host LLM (Copilot) should read `finalGate.testsFailedClassified` and `attempts[].strategy`, drive the fix via apply_patch on the implicated file, then re-invoke `cs_ai_auto_assist` with the same input to re-run the gate.',
+            };
+        }
+
         // -- Heal loop ------------------------------------------------------
         while (globalAttempts < maxGlobal) {
             // Budget guard.

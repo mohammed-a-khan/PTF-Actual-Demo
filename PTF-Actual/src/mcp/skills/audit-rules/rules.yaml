@@ -263,3 +263,96 @@ rules:
     detect: 'regex:@(pending|skip|wip|ignore)\b'
     invertMatch: true
     violation: "Skip / pending tag on shipped scenario — use runFlag: No in the data JSON instead"
+
+  - id: CC008
+    severity: error
+    appliesTo: ts
+    description: "Imports from @playwright/test forbidden — framework re-exports the needed types"
+    detect: 'regex:from\s*[\x27"]@playwright/test[\x27"]'
+    invertMatch: true
+    violation: "Direct @playwright/test import — use @mdakhan.mak/cs-playwright-test-framework re-exports (Page, expect, etc.) instead"
+
+  - id: CC009
+    severity: error
+    appliesTo: ts
+    description: "Imports from raw playwright forbidden — framework wraps Playwright"
+    detect: 'regex:from\s*[\x27"]playwright[\x27"]'
+    invertMatch: true
+    violation: "Direct playwright import — use @mdakhan.mak/cs-playwright-test-framework wrappers (CSWebElement, CSBasePage) instead"
+
+  # ========================================================================
+  # Framework-wrapper rules — generated test code must use CS* utilities,
+  # never raw libraries or direct Playwright Page methods. Every rule here
+  # has a corresponding skill that documents the wrapper to use instead.
+  # ========================================================================
+  - id: DT100
+    severity: error
+    appliesTo: ts
+    description: "Use CSDateTimeUtility for all date/time, not native Date with no timezone"
+    detect: 'regex:(\bnew\s+Date\s*\(\s*\)|\bDate\.now\s*\(\s*\))'
+    invertMatch: true
+    violation: "Direct new Date() / Date.now() — use CSDateTimeUtility.now() / .timestamp() / .getNowInAmericasTimezone(). Defaults to America/New_York; pass explicit timezone for cross-zone tests."
+
+  - id: DG100
+    severity: error
+    appliesTo: ts
+    description: "Dialog handling via CSBasePage methods, not raw page.on('dialog')"
+    detect: 'regex:page\.on\s*\(\s*[\x27"]dialog[\x27"]'
+    invertMatch: true
+    violation: "Direct page.on('dialog') — use CSBasePage methods: acceptNextDialog() / dismissNextDialog() / acceptNextDialogWithText(text) / alwaysAcceptDialogs() / alwaysDismissDialogs()"
+
+  - id: DL100
+    severity: error
+    appliesTo: ts
+    description: "Downloads must save under CSTestResultsManager.getDownloadsDirectory(), not hardcoded paths"
+    detect: 'regex:download\.saveAs\s*\(\s*[\x27"]?(\/tmp|\/var|C:\\\\|D:\\\\|~|\.\.\/)'
+    invertMatch: true
+    violation: "Hardcoded download save path — write under CSTestResultsManager.getDownloadsDirectory() so the file lands in the per-run test-results folder"
+
+  - id: EX100
+    severity: error
+    appliesTo: ts
+    description: "Excel I/O via CSExcelUtility, not direct xlsx / exceljs imports"
+    detect: 'regex:from\s*[\x27"](xlsx|exceljs)[\x27"]'
+    invertMatch: true
+    violation: "Direct xlsx/exceljs import — use CSExcelUtility (read sheets as JSON, cell-level operations, multi-sheet) from @mdakhan.mak/cs-playwright-test-framework"
+
+  - id: CSV100
+    severity: error
+    appliesTo: ts
+    description: "CSV I/O via CSCsvUtility, not direct csv-parse / papaparse / csv-parser imports"
+    detect: 'regex:from\s*[\x27"](csv-parse|papaparse|csv-parser)([\x27"\/]|$)'
+    invertMatch: true
+    violation: "Direct CSV library import — use CSCsvUtility from @mdakhan.mak/cs-playwright-test-framework (handles delimiters, encoding, columns)"
+
+  - id: DB200
+    severity: error
+    appliesTo: ts
+    description: "Database via CSDBUtils with named queries, not direct dialect drivers"
+    detect: 'regex:from\s*[\x27"](mssql|pg|mysql2|oracledb|mongodb|redis)[\x27"]'
+    invertMatch: true
+    violation: "Direct DB driver import — use CSDBUtils.executeQuery / executeNamedQuery from @mdakhan.mak/cs-playwright-test-framework/database-utils. Named queries live in env files as DB_QUERY_<KEY>=<SQL>."
+
+  - id: API200
+    severity: error
+    appliesTo: ts
+    description: "HTTP requests via CSAPIClient, not direct fetch / axios / node-fetch"
+    detect: 'regex:from\s*[\x27"](axios|node-fetch|got|undici|superagent)[\x27"]'
+    invertMatch: true
+    violation: "Direct HTTP client import — use CSAPIClient from @mdakhan.mak/cs-playwright-test-framework/api (auth, retry, validators, OAuth all built in)"
+
+  - id: WRAP100
+    severity: error
+    appliesTo: page,step,helper,ts
+    description: "No direct Playwright Page method calls — use @CSGetElement + CSWebElement wrappers"
+    detect: 'regex:\bthis\.page\.(locator|evaluate|waitForSelector|waitForResponse|click|fill|press|type|hover|check|uncheck|selectOption|setInputFiles|dispatchEvent|focus|blur|innerHTML|innerText|textContent)\s*\('
+    invertMatch: true
+    violation: "Direct this.page.<method>() call — declare the element with @CSGetElement and call methods on the CSWebElement (click, fill, type, etc.). The wrapper provides self-healing, timing, and reporter integration."
+
+  - id: ENV100
+    severity: error
+    appliesTo: page,step,helper,ts
+    description: "No raw process.env reads — use CSValueResolver.resolve('{config:KEY}', context)"
+    detect: 'regex:\bprocess\.env\.[A-Z_][A-Z0-9_]*'
+    invertMatch: true
+    violation: "Raw process.env access — use CSValueResolver.resolve('{config:KEY}', context) so encrypted values, env precedence, and {input:...} placeholders all resolve correctly"

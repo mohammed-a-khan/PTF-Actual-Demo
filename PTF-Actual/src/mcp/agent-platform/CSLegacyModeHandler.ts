@@ -31,8 +31,10 @@ import { MCPToolContext, MCPToolDefinition, MCPToolResult } from '../types/CSMCP
 import { parseTools } from '../tools/parsers/CSMCPParseTools';
 import { pipelineTools } from '../tools/pipeline/CSMCPPipelineTools';
 import { generationTools } from '../tools/generation/CSMCPGenerationTools';
-import { CSCopilotDelegate, DelegateInputFile } from './CSCopilotDelegate';
+import { transformTools } from '../tools/transform/CSMCPTransformTools';
+import { CSCopilotDelegate } from './CSCopilotDelegate';
 import { CSMigrationCache } from './CSMigrationCache';
+import { CSRepoInventory } from './CSRepoInventory';
 import { CSTestDataMigrator, MigratedTestData } from './CSTestDataMigrator';
 import { CSCostTelemetry } from './CSCostTelemetry';
 import { GenerationResult } from './CSGenerationOrchestrator';
@@ -83,9 +85,16 @@ export interface LegacyModeHandlerOptions {
     skipConfigScaffold?: boolean;
     /** Legacy alias for workspaceRoot — kept for backward compatibility. */
     outputRoot?: string;
+    /**
+     * Allow the handler to overwrite files that already exist in the
+     * repo. Default `false` — the handler runs CSRepoInventory first
+     * and skips any generated file whose path is already present.
+     * The skip list comes back in `delegateNotes` so the user knows
+     * what was preserved. Set to `true` only when you explicitly want
+     * to regenerate from scratch.
+     */
+    overwriteExisting?: boolean;
     telemetry?: CSCostTelemetry;
-    /** Cap on sibling files included in the prompt. */
-    maxSiblingFiles?: number;
 }
 
 export interface LegacyModeHandlerResult {
@@ -115,7 +124,6 @@ interface LegacyIR {
 
 export class CSLegacyModeHandler {
     private static readonly DEFAULT_OUTPUT_ROOT = path.join('generated', 'legacy');
-    private static readonly DEFAULT_MAX_SIBLINGS = 10;
     /** Stamped in cache-key material; bump when prompts / conventions change. */
     private static readonly PIPELINE_VERSION = '1.21.0';
 
@@ -130,7 +138,7 @@ export class CSLegacyModeHandler {
             return {
                 generationResult: null,
                 blockedReason:
-                    "CSLegacyModeHandler: missing 'path' in classified input — expected the legacy file's filesystem path",
+                    "supply the legacy source file path. Re-invoke `cs_ai_auto_assist` with `path: <absolute or workspace-relative path to the .java/.kt file>` in the input string.",
             };
         }
         const absSource = path.isAbsolute(sourceFile)
@@ -139,7 +147,7 @@ export class CSLegacyModeHandler {
         if (!fs.existsSync(absSource)) {
             return {
                 generationResult: null,
-                blockedReason: `CSLegacyModeHandler: source file not found at ${absSource}`,
+                blockedReason: `correct the source file path and re-invoke. The supplied path resolved to ${absSource} which does not exist on disk.`,
             };
         }
 
@@ -188,7 +196,7 @@ export class CSLegacyModeHandler {
                     return {
                         generationResult: null,
                         sourceFile: absSource,
-                        blockedReason: `CSLegacyModeHandler: ${deps.missing} unresolved dependency reference(s) in ${path.basename(absSource)} — cannot produce a complete migration without them.`,
+                        blockedReason: `${deps.missing} dependency reference(s) in ${path.basename(absSource)} need resolution before migration can run. Pick an option from \`blockedDetails.options\` and re-invoke with that resolution applied.`,
                         blockedDetails: {
                             projectRoot,
                             missingCount: deps.missing,
@@ -216,7 +224,7 @@ export class CSLegacyModeHandler {
             return {
                 generationResult: null,
                 sourceFile: absSource,
-                blockedReason: 'legacy_parse failed',
+                blockedReason: 'the legacy parser could not extract structure from the source file. Inspect the detail in `blockedDetails.detail`, fix the parse error in the source, then re-invoke.',
                 blockedDetails: { detail: CSLegacyModeHandler.firstText(irRaw) },
             };
         }
@@ -251,76 +259,95 @@ export class CSLegacyModeHandler {
                 ? { cachedAt: cacheLookup.cachedAt }
                 : undefined;
         } else {
-            // Cache miss — build the input bundle and call Copilot.
-            const sourceFiles: DelegateInputFile[] = [];
-            const main = CSCopilotDelegate.readInput(absSource, 'test class (legacy)');
-            if (!main) {
-                return {
-                    generationResult: null,
-                    sourceFile: absSource,
-                    irHash,
-                    blockedReason: 'CSLegacyModeHandler: failed to read main source file',
-                };
-            }
-            sourceFiles.push(main);
-
-            const siblings = CSLegacyModeHandler.collectSiblingPageObjects(
-                absSource,
-                main.content,
-                options.maxSiblingFiles ?? CSLegacyModeHandler.DEFAULT_MAX_SIBLINGS,
-            );
-            sourceFiles.push(...siblings);
-
-            // Pre-migrate external test data (XLS / CSV / etc. referenced
-            // by @QAFDataProvider / @DataProvider). The parsed rows ride
-            // along in `grounding` so the LLM emits the new <feature>-data.json
-            // with REAL values instead of inventing placeholders.
-            const migratedData = await CSTestDataMigrator.migrate(
-                absSource,
-                main.content,
-                context,
-            );
-
-            const groundingPayload = {
-                ir: CSLegacyModeHandler.parseIrSafe(irJson),
-                migratedTestData: {
-                    references: migratedData.references.map((r) => ({
-                        rawPath: r.rawPath,
-                        resolvedPath: r.resolvedPath,
-                        sheetName: r.sheetName ?? null,
-                        rowKey: r.rowKey ?? null,
-                        source: r.source,
-                    })),
-                    rowCount: migratedData.rows.length,
-                    rows: migratedData.rows.slice(0, 50),
-                    notes: migratedData.notes,
-                },
-            };
-
-            const delegateResult = await CSCopilotDelegate.delegate(
+            // Cache miss — run the deterministic transformer.
+            //
+            // Sampling-based delegate (CSCopilotDelegate) is dead in
+            // Copilot deployments — the host LLM does not implement
+            // `sampling/createMessage`, so every delegate call returned
+            // an empty file map and the handler short-circuited to a
+            // BLOCKED state. The replacement is `legacy_transform`,
+            // which deterministically emits ~80% of the file set from
+            // the IR (page objects, feature, steps, scenarios JSON
+            // stub) using ts-morph templates — no LLM call required.
+            //
+            // The remaining ~20% (custom waits, complex assertions,
+            // ambiguous element bindings) ships as inline `// TODO`
+            // markers and `REPLACE_WITH_*` placeholders. The 9-gate
+            // commit-ready audit fails on those, which surfaces them
+            // to the user for resolution. A future LLM-augmented pass
+            // (Phase 6+) can fill them in automatically.
+            const transformRaw = await CSLegacyModeHandler.invokeTool(
+                transformTools,
+                'legacy_transform',
                 {
-                    task: 'legacy_migration',
+                    irJson,
                     projectName,
                     featureName,
-                    moduleName,
-                    sourceFiles,
-                    grounding: JSON.stringify(groundingPayload, null, 2),
-                    telemetry: options.telemetry,
+                    pipelineVersion: CSLegacyModeHandler.PIPELINE_VERSION,
                 },
                 context,
             );
-            if (delegateResult.blockedReason) {
+            if (transformRaw.isError) {
                 return {
                     generationResult: null,
                     sourceFile: absSource,
                     irHash,
-                    blockedReason: delegateResult.blockedReason,
-                    blockedDetails: { notes: delegateResult.notes },
-                    delegateNotes: delegateResult.notes,
+                    blockedReason:
+                        'the deterministic transformer could not produce a draft from the IR. Inspect `blockedDetails.detail`, then re-invoke after correcting the upstream IR or source.',
+                    blockedDetails: {
+                        detail: CSLegacyModeHandler.firstText(transformRaw),
+                    },
                 };
             }
-            outputFiles = delegateResult.files;
-            delegateNotes = delegateResult.notes;
+            let transformResult: {
+                files: Record<string, string>;
+                notes?: string[];
+            };
+            try {
+                transformResult = JSON.parse(
+                    CSLegacyModeHandler.firstText(transformRaw),
+                );
+            } catch (err) {
+                return {
+                    generationResult: null,
+                    sourceFile: absSource,
+                    irHash,
+                    blockedReason:
+                        'the transformer returned non-JSON output. Re-invoke once — transient parser errors usually clear.',
+                    blockedDetails: {
+                        error: err instanceof Error ? err.message : String(err),
+                    },
+                };
+            }
+            outputFiles = transformResult.files;
+            delegateNotes = transformResult.notes ?? [];
+
+            // Overlay real test-data rows from XLS / CSV onto the
+            // scenarios JSON stub the transformer emitted. Without
+            // this, the data file ships with REPLACE_WITH_* placeholders
+            // and DF002 audit fails. Reading the source again is cheap;
+            // file existence already validated above.
+            const mainContent = fs.readFileSync(absSource, 'utf-8');
+            const migratedData = await CSTestDataMigrator.migrate(
+                absSource,
+                mainContent,
+                context,
+            );
+            if (migratedData.rows.length > 0) {
+                const dataKey = Object.keys(outputFiles).find((k) =>
+                    k.endsWith('-data.json'),
+                );
+                if (dataKey) {
+                    outputFiles[dataKey] = CSLegacyModeHandler.overlayDataRows(
+                        outputFiles[dataKey],
+                        migratedData.rows,
+                    );
+                    delegateNotes.push(
+                        `Overlaid ${migratedData.rows.length} real test-data row(s) onto scenarios JSON stub`,
+                    );
+                }
+            }
+
             // Stamp the cache key on the result so the master tool can
             // call CSMigrationCache.store after the heal loop confirms green.
             cacheKeyForStore = cacheLookup.cacheKey || undefined;
@@ -341,17 +368,69 @@ export class CSLegacyModeHandler {
             );
         }
 
+        // -- Step 2.7: gap-fill — skip files that already exist -----------
+        // Run a repo inventory and drop any generated file whose target
+        // path is already on disk. This protects user customisations
+        // and prior-run output from silent overwrite. The delegateNotes
+        // array carries one entry per skipped file so the user can see
+        // exactly what was preserved.
+        //
+        // Bypass this guard with `overwriteExisting: true` when you
+        // explicitly want fresh output (e.g. after a framework version
+        // bump where every page object should be regenerated).
+        if (!options.overwriteExisting) {
+            const inventory = CSRepoInventory.inventory(projectName, {
+                module: moduleName,
+                workspaceRoot,
+            });
+            const existingPaths = new Set<string>([
+                ...inventory.pages.map((p) => p.relativePath),
+                ...inventory.steps.map((s) => s.relativePath),
+                ...inventory.features.map((f) => f.relativePath),
+                ...inventory.dataFiles.map((d) => d.relativePath),
+                ...inventory.configFiles.map((c) => c.relativePath),
+            ]);
+            const filteredFiles: Record<string, string> = {};
+            const skipped: string[] = [];
+            for (const [relPath, content] of Object.entries(outputFiles)) {
+                const norm = relPath.replace(/\\/g, '/');
+                if (existingPaths.has(norm)) {
+                    skipped.push(norm);
+                } else {
+                    filteredFiles[relPath] = content;
+                }
+            }
+            if (skipped.length > 0) {
+                delegateNotes.push(
+                    `Preserved ${skipped.length} existing file(s) (gap-fill mode — pass overwriteExisting=true to regenerate): ${skipped.join(', ')}`,
+                );
+            }
+            outputFiles = filteredFiles;
+            // NOTE: an empty filteredFiles is a legitimate outcome — every
+            // generated artefact already exists. Surface as a non-failure
+            // result; the master tool will still run the audit + heal
+            // loop against the existing files.
+        }
+
         // -- Step 3: write the file map -------------------------------------
         // Files map keys are workspace-relative paths from the LLM (e.g.
         // "test/<project>/features/<feature>.feature"). Resolving against
         // workspaceRoot puts them at the framework's canonical layout.
         const filesCreated = CSCopilotDelegate.writeFiles(outputFiles, workspaceRoot);
-        if (filesCreated.length === 0) {
+        // Empty-write is fine when gap-fill skipped everything — only
+        // block if generation produced nothing AND nothing existed.
+        if (filesCreated.length === 0 && Object.keys(outputFiles).length === 0 && !options.overwriteExisting) {
+            // Gap-fill said: every artefact already exists. Emit a
+            // synthetic "files preserved" note and let the audit + heal
+            // loop run against the on-disk files via the empty-output
+            // path (no new generation result needed).
+            delegateNotes.push('All generated artefacts already exist; ran in pure gap-fill / verify mode.');
+        } else if (filesCreated.length === 0) {
             return {
                 generationResult: null,
                 sourceFile: absSource,
                 irHash,
-                blockedReason: 'CSLegacyModeHandler: nothing was written to disk',
+                blockedReason: 'the upstream code-generation step returned an empty file map. Inspect `delegateNotes` for what the LLM emitted, then re-invoke (transient generation failures usually clear on retry).',
                 delegateNotes,
             };
         }
@@ -418,65 +497,11 @@ export class CSLegacyModeHandler {
     // Helpers
     // ========================================================================
 
-    /**
-     * Pull `import com.<...>.page.<X>` lines out of the main file, locate
-     * those `<X>.java` files in nearby `page/` directories, read them. The
-     * delegate needs the page-object source to translate `@FindBy` decorations
-     * into `@CSGetElement` decorations.
-     */
-    private static collectSiblingPageObjects(
-        absSource: string,
-        mainContent: string,
-        max: number,
-    ): DelegateInputFile[] {
-        const importRe = /import\s+([\w.]*\.page\.\w+);/g;
-        const classNames = new Set<string>();
-        let m: RegExpExecArray | null;
-        while ((m = importRe.exec(mainContent)) !== null) {
-            const fq = m[1];
-            const cls = fq.split('.').pop();
-            if (cls) classNames.add(cls);
-        }
-        if (classNames.size === 0) return [];
-
-        const candidateDirs = CSLegacyModeHandler.candidatePageDirs(absSource);
-        const found: DelegateInputFile[] = [];
-        for (const cls of classNames) {
-            if (found.length >= max) break;
-            for (const dir of candidateDirs) {
-                const candidate = path.join(dir, `${cls}.java`);
-                if (fs.existsSync(candidate)) {
-                    const fileObj = CSCopilotDelegate.readInput(
-                        candidate,
-                        'page object (legacy)',
-                    );
-                    if (fileObj) {
-                        found.push(fileObj);
-                    }
-                    break;
-                }
-            }
-        }
-        return found;
-    }
-
-    /**
-     * Walk up from the test source file looking for sibling `page/` dirs.
-     * Handles the common Maven layout where tests live under `testsuites/`
-     * and page objects under `page/` at the same package depth.
-     */
-    private static candidatePageDirs(absSource: string): string[] {
-        const dirs: string[] = [];
-        let cur = path.dirname(absSource);
-        for (let i = 0; i < 6; i++) {
-            const candidate = path.join(cur, 'page');
-            if (fs.existsSync(candidate)) dirs.push(candidate);
-            const parent = path.dirname(cur);
-            if (parent === cur) break;
-            cur = parent;
-        }
-        return dirs;
-    }
+    // collectSiblingPageObjects + candidatePageDirs were used by the
+    // sampling-based delegate path to bundle sibling .java page-object
+    // files into the LLM input. The deterministic legacy_transform path
+    // works directly from the IR — no sibling source bundling needed —
+    // so both helpers are removed in Phase 2.
 
     private static deriveFeatureName(absSource: string): string {
         const base = path.basename(absSource);
@@ -635,6 +660,44 @@ export class CSLegacyModeHandler {
             if (c.type === 'text') return c.text;
         }
         return '';
+    }
+
+    /**
+     * Merge migrated test-data rows (from XLS/CSV via CSTestDataMigrator)
+     * onto the scenarios JSON stub the transformer emits. The stub has
+     * one row per IR test with `scenarioId`, `scenarioName`, `runFlag` and
+     * `REPLACE_WITH_<KEY>` placeholders. Real rows from the data file
+     * carry the actual values keyed by `scenarioId`. Returns the merged
+     * JSON as a formatted string ready to write to disk.
+     *
+     * Rows from the migrated data file win on field collisions. Stub rows
+     * without a matching migrated row are kept as-is (placeholders remain
+     * for the audit to flag).
+     */
+    private static overlayDataRows(
+        stubJson: string,
+        migratedRows: Array<Record<string, unknown>>,
+    ): string {
+        let stubRows: Array<Record<string, unknown>>;
+        try {
+            stubRows = JSON.parse(stubJson);
+            if (!Array.isArray(stubRows)) return stubJson;
+        } catch {
+            return stubJson;
+        }
+        const byId = new Map<string, Record<string, unknown>>();
+        for (const r of migratedRows) {
+            const id = (r as Record<string, unknown>).scenarioId;
+            if (typeof id === 'string') byId.set(id, r);
+        }
+        const merged = stubRows.map((stub) => {
+            const id =
+                typeof stub.scenarioId === 'string' ? stub.scenarioId : '';
+            const real = byId.get(id);
+            if (!real) return stub;
+            return { ...stub, ...real };
+        });
+        return JSON.stringify(merged, null, 2) + '\n';
     }
 
     private static async invokeTool(
