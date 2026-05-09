@@ -96,6 +96,62 @@ export class CSIntentRouter {
             return CSIntentRouter.makeResult('unknown', 0, {}, rawInput);
         }
 
+        // 0. Structured-prompt extraction. Users write multi-line prompts
+        //    like "Migrate this:\nSource: path/to/X.java\nProject: foo".
+        //    Pull out every `<label>: <value>` line we recognise BEFORE
+        //    falling through to single-line classification. This avoids
+        //    misclassifying a multi-line prompt with a Source: path as
+        //    natural_language_chat just because the whole blob isn't a path.
+        const structured = CSIntentRouter.parseStructuredFields(trimmed);
+        const structuredPath = structured.path || structured.source || structured.file;
+        if (structuredPath && PATH_REGEX.test(structuredPath) || (structuredPath && CSIntentRouter.looksLikePath(structuredPath))) {
+            const classified = CSIntentRouter.classifyPath(structuredPath, rawInput);
+            // Merge other structured fields (projectName, moduleName,
+            // featureName, environments, etc.) so clarification doesn't
+            // re-ask for what the user already supplied.
+            classified.extractedFields = {
+                ...classified.extractedFields,
+                ...structured,
+            };
+            return classified;
+        }
+        const structuredUrl = structured.url || structured.appUrl;
+        if (structuredUrl && URL_REGEX.test(structuredUrl)) {
+            return CSIntentRouter.makeResult(
+                'app_url',
+                0.95,
+                { ...structured, url: structuredUrl, appUrl: structuredUrl },
+                rawInput,
+            );
+        }
+        const structuredTc = structured.tc || structured.testCase || structured.testCaseId;
+        if (structuredTc && /^\d+$/.test(structuredTc)) {
+            return CSIntentRouter.makeResult(
+                'ado_test_case_id',
+                0.99,
+                { ...structured, id: structuredTc },
+                rawInput,
+            );
+        }
+        const structuredTs = structured.ts || structured.testSuite || structured.testSuiteId;
+        if (structuredTs && /^\d+$/.test(structuredTs)) {
+            return CSIntentRouter.makeResult(
+                'ado_test_suite_id',
+                0.99,
+                { ...structured, id: structuredTs },
+                rawInput,
+            );
+        }
+        const structuredTp = structured.tp || structured.testPlan || structured.testPlanId;
+        if (structuredTp && /^\d+$/.test(structuredTp)) {
+            return CSIntentRouter.makeResult(
+                'ado_test_plan_id',
+                0.99,
+                { ...structured, id: structuredTp },
+                rawInput,
+            );
+        }
+
         // 1. Explicit prefixes — high confidence.
         const tcMatch = trimmed.match(PREFIXED_TC_REGEX);
         if (tcMatch) {
@@ -226,6 +282,97 @@ export class CSIntentRouter {
         if (!/[\\/]/.test(s)) return false;
         const ext = path.extname(s).toLowerCase();
         return SOURCE_CODE_EXTS.has(ext) || DOCUMENT_EXTS.has(ext);
+    }
+
+    /**
+     * Parse a multi-line user prompt for `<label>: <value>` and `<label>=<value>`
+     * lines. Returns a flat record of normalised field names → values.
+     *
+     * Recognised labels (case-insensitive, trimmed):
+     *   path / source / file                  → path
+     *   url / appurl / app_url                → appUrl, url
+     *   project / projectname / project_name  → projectName
+     *   module / modulename / module_name     → moduleName
+     *   feature / featurename / feature_name  → featureName
+     *   environments / environment / envs / env → environments
+     *   workspaceroot / workspace             → workspaceRoot
+     *   projectroot                           → projectRoot
+     *   tc / testcase / testcaseid            → tc (digits only)
+     *   ts / testsuite / testsuiteid          → ts (digits only)
+     *   tp / testplan / testplanid            → tp (digits only)
+     *   targetsurface                         → targetSurface
+     *   sectionfocus                          → sectionFocus
+     *   entryflow                             → entryFlow
+     *   username                              → username
+     *   passwordconfigkey / password_key      → passwordConfigKey
+     *   navigationsteps / navsteps            → navigationSteps
+     *   adopat / pat                          → adoPat
+     *   adoorganization / organization / org  → adoOrganization
+     *   adoproject                            → adoProject
+     *
+     * Values are taken verbatim from the rest of the line (after the colon).
+     * Surrounding whitespace and quotes are stripped. Markdown bullets
+     * (`- key: value`, `* key: value`) and bold markers (`**key**: value`)
+     * are tolerated.
+     */
+    private static parseStructuredFields(text: string): Record<string, string> {
+        const out: Record<string, string> = {};
+        if (!text) return out;
+        const labelMap: Record<string, string[]> = {
+            path: ['path', 'source', 'file', 'sourcefile'],
+            appUrl: ['url', 'appurl', 'app_url', 'application_url', 'applicationurl'],
+            projectName: ['project', 'projectname', 'project_name'],
+            moduleName: ['module', 'modulename', 'module_name'],
+            featureName: ['feature', 'featurename', 'feature_name'],
+            environments: ['environments', 'environment', 'envs', 'env'],
+            workspaceRoot: ['workspaceroot', 'workspace_root', 'workspace'],
+            projectRoot: ['projectroot', 'project_root'],
+            tc: ['tc', 'testcase', 'testcaseid', 'test_case_id'],
+            ts: ['ts', 'testsuite', 'testsuiteid', 'test_suite_id'],
+            tp: ['tp', 'testplan', 'testplanid', 'test_plan_id'],
+            targetSurface: ['targetsurface', 'target_surface'],
+            sectionFocus: ['sectionfocus', 'section_focus', 'section'],
+            entryFlow: ['entryflow', 'entry_flow', 'flow'],
+            username: ['username', 'user'],
+            passwordConfigKey: ['passwordconfigkey', 'password_config_key', 'password_key'],
+            navigationSteps: ['navigationsteps', 'navigation_steps', 'navsteps', 'nav_steps'],
+            adoPat: ['adopat', 'ado_pat', 'pat'],
+            adoOrganization: ['adoorganization', 'ado_organization', 'organization', 'org'],
+            adoProject: ['adoproject', 'ado_project'],
+            requireLiveApp: ['requireliveapp', 'require_live_app'],
+            overwriteExisting: ['overwriteexisting', 'overwrite_existing', 'overwrite'],
+            skipDependencyCheck: ['skipdependencycheck', 'skip_dependency_check', 'skipdeps'],
+        };
+        // Reverse lookup: alias → canonical
+        const aliasToCanonical: Record<string, string> = {};
+        for (const [canon, aliases] of Object.entries(labelMap)) {
+            for (const a of aliases) aliasToCanonical[a] = canon;
+        }
+        // Strip leading: blockquote `> `, bullet `- ` / `* `, optional **bold**
+        // wrapping the label. Then capture `<label>: <value>` or `<label>=<value>`.
+        const lineRe = /^\s*(?:>\s*)*(?:[-*]\s+)?(?:\*\*)?([A-Za-z][A-Za-z0-9_ ]*?)(?:\*\*)?\s*[:=]\s*(.+?)\s*$/;
+        for (const rawLine of text.split(/\r?\n/)) {
+            const m = rawLine.match(lineRe);
+            if (!m) continue;
+            const labelKey = m[1].toLowerCase().replace(/\s+/g, '');
+            const canonical = aliasToCanonical[labelKey];
+            if (!canonical) continue;
+            let value = m[2].trim();
+            // Strip leading `**` if the label was wrapped like `**Label:**`
+            // — the closing `**` ends up at the start of the value.
+            value = value.replace(/^\*\*\s*/, '').replace(/\s*\*\*$/, '').trim();
+            // Strip surrounding quotes
+            if (
+                (value.startsWith('"') && value.endsWith('"')) ||
+                (value.startsWith("'") && value.endsWith("'"))
+            ) {
+                value = value.slice(1, -1).trim();
+            }
+            if (!value) continue;
+            // First-wins for repeated keys
+            if (out[canonical] === undefined) out[canonical] = value;
+        }
+        return out;
     }
 
     /**

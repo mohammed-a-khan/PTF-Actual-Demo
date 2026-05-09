@@ -317,9 +317,21 @@ export class CSClarificationAgent {
         //   (a) already in extractedFields (router or prior clarification answer)
         //   (b) resolvable from CSConfigurationManager (e.g. ADO_PAT in .env;
         //       ENCRYPTED:<...> values are auto-decrypted by the manager)
+        //   (c) Tier-1 with a suggestedDefault — auto-apply the default and
+        //       inject it into extractedFields so the handler sees it. This
+        //       prevents the platform from blocking on questions that have
+        //       a sensible default; legacy migration's translationGoal,
+        //       document mode's sectionFocus, and similar fields don't need
+        //       to gate generation.
         const filtered = all.filter((q) => {
             if (input.extractedFields[q.field] !== undefined) return false;
             if (readFieldFromConfig(q.field) !== undefined) return false;
+            if (q.tier === 1 && q.suggestedDefault !== undefined) {
+                // Auto-apply: inject default into extractedFields so
+                // downstream handlers see it as if the user supplied it.
+                input.extractedFields[q.field] = q.suggestedDefault;
+                return false;
+            }
             return true;
         });
 
