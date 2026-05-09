@@ -62,20 +62,29 @@ function readFieldFromConfig(field: string): string | undefined {
  * already present in the classified input's extracted fields.
  */
 const UNIVERSAL_QUESTIONS: ClarificationQuestion[] = [
+    // appUrl is resolved at runtime through the env hierarchy
+    // (CSConfigurationManager → APP_URL key) and via the live-app gate
+    // (Phase 6.5) for doc / source / ADO modes. It is NOT a Tier-1 gate
+    // for legacy migration or chat — those modes either don't need a URL
+    // to generate code, or have their own gate.
     {
-        tier: 1,
+        tier: 2,
         field: 'appUrl',
         question:
             'What is the application URL the tests should run against? ' +
-            '(e.g. <APP_URL>)',
-        required: true,
+            '(skipped if APP_URL is set in your env file)',
+        required: false,
     },
+    // expectedOutcome was an early chat-mode concern. Legacy / ADO / doc /
+    // source migrations don't need it — the source IS the spec. Demoted
+    // so it never blocks generation.
     {
-        tier: 1,
+        tier: 3,
         field: 'expectedOutcome',
         question:
-            'What is the expected high-level outcome the tests must verify?',
-        required: true,
+            'What is the expected high-level outcome the tests must verify? ' +
+            '(optional — informs scenario titles in chat mode)',
+        required: false,
     },
     {
         tier: 2,

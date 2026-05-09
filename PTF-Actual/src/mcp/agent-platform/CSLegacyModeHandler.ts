@@ -175,10 +175,20 @@ export class CSLegacyModeHandler {
 
         // -- Step 1: discover_dependencies pre-flight ----------------------
         // If the source has unresolved imports (helpers, base test cases,
-        // DataBean classes, etc.) we BLOCK with a structured reason listing
-        // each missing symbol and three options: paste, skip, abort. The
-        // user re-invokes after deciding.
-        if (!options.skipDependencyCheck) {
+        // data-bean classes, etc.) we surface a structured warning listing
+        // each missing symbol. Originally this BLOCKED migration — but in
+        // practice users running migrations from a host that doesn't have
+        // the full legacy repo cloned at the right path get a "100 deps
+        // missing" block they can't easily resolve, and the platform falls
+        // back to inline freelancing. Now: only block when projectRoot was
+        // explicitly supplied AND the user opted in via skipDependencyCheck=false.
+        // Default behaviour is to migrate with whatever's available and surface
+        // the missing deps as a non-fatal warning the user can act on later.
+        const projectRootExplicit = !!(options.projectRoot || ef.projectRoot);
+        const skipDeps =
+            options.skipDependencyCheck === true ||
+            !projectRootExplicit;
+        if (!skipDeps) {
             const depsRaw = await CSLegacyModeHandler.invokeTool(
                 pipelineTools,
                 'discover_dependencies',
