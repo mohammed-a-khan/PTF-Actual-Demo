@@ -197,3 +197,59 @@ export interface TrustScoreInputs {
     commitReadyCheckPassed: boolean;
     healCyclesUsed: number;
 }
+
+// ============================================================================
+// Pipeline Output (rebuild architecture)
+// ============================================================================
+
+/**
+ * One scenario in a generated feature file. Minimum surface needed by the
+ * ADO create-back flow and the heal/publish gates. Replaces the previous
+ * heavy `GenerationResult.featureFile.scenarios` shape from the deleted
+ * `CSGenerationOrchestrator`.
+ */
+export interface GeneratedScenarioSummary {
+    /** Scenario identifier (e.g. `TS_<n>`, `<feature>_<n>`, or generated). */
+    id: string;
+    /** Human-readable title — what appears as `Scenario:` text in Gherkin. */
+    title: string;
+    /** Tags above the scenario, including any `@TC_<n>` already attached. */
+    tags: string[];
+    /** When known: ADO test case id this scenario maps to. */
+    tcId?: number;
+}
+
+/**
+ * One generated feature file plus its parsed scenarios. The ADO create-back
+ * flow walks `scenarios` to decide which need new ADO test cases created.
+ */
+export interface GeneratedFeatureSummary {
+    /** Absolute path on disk. */
+    filePath: string;
+    /** Feature file content (Gherkin source). */
+    content: string;
+    /** Scenarios discovered in the feature. */
+    scenarios: GeneratedScenarioSummary[];
+}
+
+/**
+ * Aggregate output of the new pipeline. Distinct from the deleted
+ * `GenerationResult` — this carries only what downstream consumers
+ * (ADO create-back, heal loop, publish, trust score) actually need.
+ *
+ * The full per-run state (analysis report, call trees, retries, timeline)
+ * lives under `Agent-Processing/<ts>_<runId>/` — accessed via
+ * `CSRunContext`, not threaded through return types.
+ */
+export interface PipelineOutput {
+    /** runId of the per-run artifact folder. */
+    runId: string;
+    /** Pipeline version that produced this output. */
+    pipelineVersion: string;
+    /** Every file written, absolute paths. */
+    filesCreated: string[];
+    /** Feature files emitted, parsed for downstream consumption. */
+    featureFiles: GeneratedFeatureSummary[];
+    /** Optional warnings non-fatal to the run. */
+    warnings?: string[];
+}

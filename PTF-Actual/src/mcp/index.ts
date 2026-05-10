@@ -29,18 +29,14 @@ export { codegenTools, registerCodegenTools } from './tools/codegen/CSMCPCodegen
 export { testingTools, registerTestingTools } from './tools/testing/CSMCPTestingTools';
 export { auditTools, registerAuditTools } from './tools/audit/CSMCPAuditTools';
 export { pipelineTools, registerPipelineTools } from './tools/pipeline/CSMCPPipelineTools';
-export { parseTools, registerParseTools } from './tools/parsers/CSMCPParseTools';
-export { transformTools, registerTransformTools } from './tools/transform/CSMCPTransformTools';
 export { driftTools, registerDriftTools } from './tools/drift/CSMCPDriftTools';
 export { equivalenceTools, registerEquivalenceTools } from './tools/equivalence/CSMCPEquivalenceTools';
 export { intelligenceTools, registerIntelligenceTools } from './tools/intelligence/CSMCPIntelligenceTools';
 export { healLoopTools, registerHealLoopTools } from './tools/heal-loop/CSMCPHealLoopTools';
 
-// Export agent platform (master tool: cs_ai_auto_assist)
-export {
-    agentPlatformTools,
-    registerAgentPlatformTools,
-} from './agent-platform';
+// Export agent platform (master tool: cs_ai_auto_assist).
+// Rebuild M1: monolithic generation removed; primitives land in M2-M10.
+export { csAiAutoAssistTools } from './agent-platform';
 
 // Export resources and prompts
 export { resourceDefinitions, resourceTemplateDefinitions, registerResources } from './resources/CSMCPResources';
@@ -66,13 +62,11 @@ import { registerCodegenTools } from './tools/codegen/CSMCPCodegenTools';
 import { registerTestingTools } from './tools/testing/CSMCPTestingTools';
 import { registerAuditTools } from './tools/audit/CSMCPAuditTools';
 import { registerPipelineTools } from './tools/pipeline/CSMCPPipelineTools';
-import { registerParseTools } from './tools/parsers/CSMCPParseTools';
-import { registerTransformTools } from './tools/transform/CSMCPTransformTools';
 import { registerDriftTools } from './tools/drift/CSMCPDriftTools';
 import { registerEquivalenceTools } from './tools/equivalence/CSMCPEquivalenceTools';
 import { registerIntelligenceTools } from './tools/intelligence/CSMCPIntelligenceTools';
 import { registerHealLoopTools } from './tools/heal-loop/CSMCPHealLoopTools';
-import { registerAgentPlatformTools } from './agent-platform';
+import { csAiAutoAssistTools, csaaPrimitiveTools } from './agent-platform';
 import { registerResources } from './resources/CSMCPResources';
 import { registerPrompts } from './prompts/CSMCPPrompts';
 
@@ -118,13 +112,12 @@ export function createFullMCPServer(config?: CSMCPServerConfig): CSMCPServer {
     registerTestingTools(registry);
     registerAuditTools(registry);
     registerPipelineTools(registry);
-    registerParseTools(registry);
-    registerTransformTools(registry);
     registerDriftTools(registry);
     registerEquivalenceTools(registry);
     registerIntelligenceTools(registry);
     registerHealLoopTools(registry);
-    registerAgentPlatformTools(registry);
+    registry.registerTools(csAiAutoAssistTools);
+    registry.registerTools(csaaPrimitiveTools);
 
     // Register resources and prompts
     registerResources(server);
@@ -160,7 +153,6 @@ export function createMCPServerWithTools(
         audit: () => {
             registerAuditTools(registry);
             registerPipelineTools(registry);
-            registerParseTools(registry);
         },
     };
 
@@ -193,8 +185,6 @@ export function getTotalToolCount(): number {
         require('./tools/testing/CSMCPTestingTools').testingTools,
         require('./tools/audit/CSMCPAuditTools').auditTools,
         require('./tools/pipeline/CSMCPPipelineTools').pipelineTools,
-        require('./tools/parsers/CSMCPParseTools').parseTools,
-        require('./tools/transform/CSMCPTransformTools').transformTools,
         require('./tools/drift/CSMCPDriftTools').driftTools,
         require('./tools/equivalence/CSMCPEquivalenceTools').equivalenceTools,
     ];

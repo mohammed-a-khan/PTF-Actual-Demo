@@ -28,7 +28,7 @@
  */
 
 import { CSConfigurationManager } from '../../core/CSConfigurationManager';
-import { agentPlatformTools } from './index';
+import { csAiAutoAssistTools as agentPlatformTools } from './index';
 import {
     MCPToolContext,
     MCPToolDefinition,

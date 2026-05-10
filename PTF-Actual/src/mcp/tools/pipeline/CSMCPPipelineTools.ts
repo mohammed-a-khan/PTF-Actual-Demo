@@ -339,7 +339,7 @@ const schemaLookupTool = defineTool()
             });
         }
 
-        // Default: scan docs/*-db-schema.md or docs/LIAP_DB_SCHEMA.md style names
+        // Default: scan docs/*-db-schema.md or docs/<PROJECT>_DB_SCHEMA.md style names
         const candidates: string[] = [];
         if (refFile) candidates.push(path.resolve(cwd, refFile));
         const docsDir = path.join(cwd, 'docs');

@@ -4,6 +4,12 @@
  * Single import barrel for the agent-platform module. External consumers
  * should import from this file rather than reaching into individual files.
  *
+ * **Rebuild milestone M1.** The previous monolithic generation pipeline
+ * has been removed (legacy_transform, IR converters, six composers, five
+ * mode handlers, the deprecated Copilot delegate). The new architecture
+ * is a toolbox of narrow primitives composed by the `cs-ai-auto-assist`
+ * agent prompt — the new tool definitions land in M2–M10.
+ *
  * @module agent-platform
  */
 
@@ -34,49 +40,10 @@ export {
     ParsedTestStep,
 } from './CSAdoTestCaseParser';
 export {
-    CSGenerationOrchestrator,
-    GenerationResult,
-    GenerationOrchestratorInput,
-} from './CSGenerationOrchestrator';
-export { CSAdoCreateBackFlow, CreateBackResult } from './CSAdoCreateBackFlow';
-export {
-    CSAdoModeHandler,
+    CSAdoCreateBackFlow,
+    CreateBackResult,
     AdoCommonParams,
-    AdoModeHandlerOptions,
-    AdoModeHandlerResult,
-} from './CSAdoModeHandler';
-export {
-    CSLegacyModeHandler,
-    LegacyModeHandlerOptions,
-    LegacyModeHandlerResult,
-} from './CSLegacyModeHandler';
-export {
-    CSCopilotDelegate,
-    DelegateTask,
-    DelegateInputFile,
-    DelegateRequest,
-    DelegateResult,
-} from './CSCopilotDelegate';
-export {
-    CSDocumentModeHandler,
-    DocumentModeHandlerOptions,
-    DocumentModeHandlerResult,
-} from './CSDocumentModeHandler';
-export {
-    CSSourceCodeModeHandler,
-    SourceCodeModeHandlerOptions,
-    SourceCodeModeHandlerResult,
-} from './CSSourceCodeModeHandler';
-export {
-    CSChatModeHandler,
-    ChatModeHandlerOptions,
-    ChatModeHandlerResult,
-} from './CSChatModeHandler';
-export {
-    CSAppUrlModeHandler,
-    AppUrlModeHandlerOptions,
-    AppUrlModeHandlerResult,
-} from './CSAppUrlModeHandler';
+} from './CSAdoCreateBackFlow';
 export {
     CSMigrationCache,
     MigrationCacheLookupRequest,
@@ -95,17 +62,105 @@ export {
     VerifyResult,
 } from './CSProvenanceSigner';
 export {
-    CSTestDataMigrator,
-    DataReference,
-    MigratedTestData,
-} from './CSTestDataMigrator';
-export {
     CSHealLoop,
     HealLoopResult,
     HealLoopOptions,
     HealAttempt,
 } from './CSHealLoop';
 export {
-    agentPlatformTools,
-    registerAgentPlatformTools,
-} from './CSAIAutoAssist';
+    CSElicitation,
+    ElicitOption,
+    ElicitOutcome,
+} from './CSElicitation';
+export {
+    CSLiveAppContext,
+    LiveAppContext,
+    LiveAppContextOutcome,
+    LiveAppEntryFlow,
+} from './CSLiveAppContext';
+export { CSPreGateAudit, PreGateAuditResult } from './CSPreGateAudit';
+export { CSRepoInventory } from './CSRepoInventory';
+
+// Rebuild M2-M4 — per-run artefact context, gate engine, status writer.
+export {
+    CSRunContext,
+    RunPhase,
+    PhaseStatus,
+    PhaseSnapshot,
+    RunSnapshot,
+    TimelineEvent,
+} from './CSRunContext';
+export {
+    CSGateEngine,
+    GateCheckResult,
+    GateResolveResult,
+    GateRunOptions,
+    GateRunOutcome,
+    ResolutionAttempt,
+    ExhaustedDecision,
+    ExhaustedOutcome,
+} from './CSGateEngine';
+export { CSStatusWriter } from './CSStatusWriter';
+
+// Rebuild M5-M10 — discovery, analyzer, semantic reuse, translator, write-with-audit, heal classifier.
+export {
+    CSDiscovery,
+    LegacyInventory,
+    LegacyFile,
+    LegacyFileKind,
+} from './CSDiscovery';
+export {
+    CSLegacyDataReader,
+    LegacyDataResult,
+} from './CSLegacyDataReader';
+export {
+    CSLegacyAnalyzer,
+    AnalysisReport,
+    SourceMeta,
+    ImportInfo,
+    UnresolvedDep,
+    TestAnalysis,
+    TestAnnotations,
+    CallTreeNode,
+    LoginContract,
+    DataReference,
+    ConfigReference,
+    DbReference,
+    PageObjectInfo,
+    PageElement,
+    GapEntry,
+    OutputPlan,
+    PlannedFile,
+    AnalysisSummary,
+} from './CSLegacyAnalyzer';
+export {
+    CSSemanticReuse,
+    ReuseCandidate,
+    PageReuseDecision,
+    StepReuseDecision,
+} from './CSSemanticReuse';
+export {
+    CSBddTranslator,
+    ContentMap,
+    TranslateOptions,
+    LlmTranslator,
+} from './CSBddTranslator';
+export {
+    CSWriteWithAudit,
+    WriteOptions,
+    AuditResult,
+    AuditViolation,
+    FixManifestEntry,
+    WriteResult,
+} from './CSWriteWithAudit';
+export {
+    CSHealClassifier,
+    HealCategory,
+    HealSeverity,
+    HealFailureSignals,
+    VisualEvidenceFlags,
+    HealClassification,
+} from './CSHealClassifier';
+
+export { csAiAutoAssistTools } from './CSAIAutoAssist';
+export { csaaPrimitiveTools } from './CSPrimitiveTools';
