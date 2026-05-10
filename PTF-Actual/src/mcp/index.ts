@@ -162,6 +162,14 @@ export function createMCPServerWithTools(
         }
     }
 
+    // ALWAYS register the agent-platform entry point + its primitives — even
+    // when callers select a narrow subset. The master tool's whole purpose is
+    // to compose downstream csaa_* primitives; if it's present but the
+    // primitives are not, the orchestrator advertises tools the host can't
+    // find. Keep them paired.
+    registry.registerTools(csAiAutoAssistTools);
+    registry.registerTools(csaaPrimitiveTools);
+
     return server;
 }
 

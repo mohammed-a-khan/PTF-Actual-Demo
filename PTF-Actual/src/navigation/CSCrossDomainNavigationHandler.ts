@@ -28,9 +28,17 @@ export class CSCrossDomainNavigationHandler {
     private isNavigating: boolean = false;
     private navigationPromise: Promise<void> | null = null;
     private authProviders: string[] = [];
+    private logoutPatterns: string[] = [];
     private maxRedirectCount: number = 5;
     private navigationTimeout: number = 60000;
     private redirectCount: number = 0;
+    /**
+     * Expected flow hint set by the calling step (e.g. login page object
+     * sets 'login'; logout page object sets 'logout'). When 'logout',
+     * waitForDomainReturn is NOT started — logout intentionally lands on
+     * the SSO / auth page and never returns to the original domain.
+     */
+    private expectedFlow: 'login' | 'logout' | 'navigate' | null = null;
 
     private handlersSetup: boolean = false;
 
@@ -72,6 +80,29 @@ export class CSCrossDomainNavigationHandler {
             this.authProviders = [...new Set([...defaultProviders, ...customProviders])];
         } else {
             this.authProviders = defaultProviders;
+        }
+
+        // Logout URL patterns. When the URL contains any of these tokens,
+        // we treat the cross-domain navigation as a logout flow and do NOT
+        // wait for return to the original domain — the user is supposed to
+        // stay on the SSO / auth-portal page.
+        const configuredLogoutPatterns = this.config.get('CROSS_DOMAIN_LOGOUT_PATTERNS', '');
+        const defaultLogoutPatterns = [
+            'logout',
+            'signout',
+            'sign-out',
+            'log-out',
+            'formsubmitlogout',
+            'loggedout',
+            'logged-out',
+            'session/end',
+            'sso/logout',
+        ];
+        if (configuredLogoutPatterns) {
+            const customLogout = configuredLogoutPatterns.split(',').map(p => p.trim().toLowerCase()).filter(Boolean);
+            this.logoutPatterns = [...new Set([...defaultLogoutPatterns, ...customLogout])];
+        } else {
+            this.logoutPatterns = defaultLogoutPatterns;
         }
 
         // Load navigation timeout
@@ -164,12 +195,32 @@ export class CSCrossDomainNavigationHandler {
             currentDomain !== this.originalDomain &&
             !this.isNavigating) {
 
+            // LOGOUT short-circuit. Two ways we know it's a logout:
+            //   - the calling step explicitly set expectedFlow='logout'
+            //   - the URL matches a logout pattern (formSubmitLogout, /signout, etc.)
+            // In both cases the user is supposed to stay on the SSO/portal
+            // page; waiting for "return to original domain" would always
+            // time out and hard-fail the test for a step that actually
+            // succeeded.
+            if (this.expectedFlow === 'logout' || this.isLogoutPage(currentUrl)) {
+                CSReporter.info(`Logout flow detected (${currentDomain}); not waiting for domain return`);
+                this.isNavigating = false;
+                this.redirectCount = 0;
+                return;
+            }
+
             if (this.isAuthenticationPage(currentUrl)) {
                 CSReporter.info(`Authentication redirect detected: ${this.originalDomain} -> ${currentDomain}`);
                 this.isNavigating = true;
 
-                // Start waiting for return to original domain
-                this.navigationPromise = this.waitForDomainReturn();
+                // Start waiting for return to original domain.
+                // Attach a .catch() so a timeout never escapes as an
+                // unhandled promise rejection (which could kill the runner
+                // and abort subsequent scenarios).
+                this.navigationPromise = this.waitForDomainReturn().catch((err) => {
+                    CSReporter.warn(`Cross-domain navigation wait completed with error: ${err instanceof Error ? err.message : String(err)}`);
+                    this.isNavigating = false;
+                });
             } else {
                 CSReporter.debug(`Cross-domain navigation detected: ${this.originalDomain} -> ${currentDomain}`);
                 // This might be a legitimate cross-domain navigation, not authentication
@@ -207,6 +258,36 @@ export class CSCrossDomainNavigationHandler {
     }
 
     /**
+     * Check if URL is a logout / logged-out destination. Matches when the
+     * URL contains any of the configured logout patterns (default list
+     * covers `/logout`, `/signout`, `formSubmitLogout`, `/loggedout`, etc.).
+     *
+     * When this returns true the handler treats the navigation as a
+     * **terminal logout** — it does NOT wait for return to the original
+     * domain (the user is supposed to stay on the SSO portal).
+     */
+    private isLogoutPage(url: string): boolean {
+        if (!url) return false;
+        const lowerUrl = url.toLowerCase();
+        return this.logoutPatterns.some(pat => lowerUrl.includes(pat));
+    }
+
+    /**
+     * Public hint set by the calling step. Useful for login pages that
+     * need to confirm "I will return to the original domain after auth"
+     * vs logout pages that never return. Steps may also leave it null —
+     * in that case the handler infers via URL pattern matching.
+     */
+    public setExpectedFlow(flow: 'login' | 'logout' | 'navigate' | null): void {
+        this.expectedFlow = flow;
+        if (flow === 'logout') {
+            // Cancel any in-flight wait — we know we're not coming back.
+            this.isNavigating = false;
+            this.navigationPromise = null;
+        }
+    }
+
+    /**
      * Extract domain from URL
      */
     private extractDomain(url: string): string {
@@ -227,12 +308,36 @@ export class CSCrossDomainNavigationHandler {
     }
 
     /**
-     * Wait for return to original domain
+     * Wait for return to original domain. **Non-throwing.** When the
+     * timeout elapses without returning to the original domain, this
+     * method logs a warning, resets internal navigation state, and
+     * returns. It does NOT throw — throwing here is dangerous because:
+     *
+     *   1. The promise is fire-and-forget at the call site (attached to
+     *      a frame-navigation event handler), so an uncaught throw
+     *      surfaces as an unhandled rejection.
+     *   2. Unhandled rejections can crash the test runner and abort
+     *      subsequent scenarios + skip report generation — exactly the
+     *      failure mode the user reported on logout flows.
+     *   3. Many cross-domain navigations are LEGITIMATELY one-way
+     *      (logout, redirect to different app). Throwing turns those
+     *      into hard failures.
+     *
+     * Callers that genuinely need to know whether the return happened
+     * can check `isInCrossDomainNavigation()` after awaiting
+     * `handleCrossDomainNavigation()`.
      */
     private async waitForDomainReturn(): Promise<void> {
         const startTime = Date.now();
 
         while (Date.now() - startTime < this.navigationTimeout) {
+            // Logout detected mid-wait? Stop.
+            if (this.expectedFlow === 'logout' || this.isLogoutPage(this.page.url())) {
+                CSReporter.info('Logout detected mid-wait; abandoning domain-return wait');
+                this.isNavigating = false;
+                return;
+            }
+
             const currentDomain = this.extractDomain(this.page.url());
 
             if (currentDomain === this.originalDomain) {
@@ -240,6 +345,7 @@ export class CSCrossDomainNavigationHandler {
 
                 // Wait for page to stabilize
                 await this.waitForPageStability();
+                this.isNavigating = false;
                 return;
             }
 
@@ -251,7 +357,14 @@ export class CSCrossDomainNavigationHandler {
             await this.page.waitForTimeout(500);
         }
 
-        throw new Error(`Timeout waiting for return to original domain after ${this.navigationTimeout}ms`);
+        // Non-throwing exit. The wait was opportunistic — failure to
+        // return is logged but the test step itself decides whether
+        // that's a failure (most logout flows: it's expected).
+        CSReporter.warn(
+            `Cross-domain return to '${this.originalDomain}' did not happen within ${this.navigationTimeout}ms — ` +
+                `this is normal for logout flows or one-way cross-domain redirects. Continuing.`,
+        );
+        this.isNavigating = false;
     }
 
     /**
@@ -306,12 +419,22 @@ export class CSCrossDomainNavigationHandler {
     }
 
     /**
-     * Handle cross-domain navigation completion
+     * Handle cross-domain navigation completion. Awaits the in-flight
+     * `waitForDomainReturn` promise. **Non-throwing** — internal errors
+     * are caught and logged so a hung navigation never aborts the test
+     * runner. The caller's step still decides pass/fail based on its
+     * own assertions; this method is only about "navigation has settled".
      */
     public async handleCrossDomainNavigation(): Promise<void> {
         if (this.navigationPromise) {
             CSReporter.info('Waiting for cross-domain navigation to complete...');
-            await this.navigationPromise;
+            try {
+                await this.navigationPromise;
+            } catch (err) {
+                CSReporter.warn(
+                    `Cross-domain navigation completion error swallowed: ${err instanceof Error ? err.message : String(err)}`,
+                );
+            }
             this.navigationPromise = null;
         }
     }

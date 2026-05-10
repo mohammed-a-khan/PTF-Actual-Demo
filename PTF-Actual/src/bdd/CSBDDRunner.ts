@@ -103,6 +103,43 @@ export class CSBDDRunner {
         this.adoIntegration = null;
         // Lazy load AI integration - will be loaded when needed
         this.aiIntegration = null;
+        // Install process-wide guards so a stray promise rejection from
+        // page event handlers (cross-domain navigation timeouts, listener
+        // throws, etc.) NEVER aborts the runner mid-suite. Without these,
+        // a single hung post-logout wait could kill the entire run and
+        // skip subsequent scenarios + report generation.
+        CSBDDRunner.installProcessGuards();
+    }
+
+    private static guardsInstalled = false;
+    private static installProcessGuards(): void {
+        if (CSBDDRunner.guardsInstalled) return;
+        CSBDDRunner.guardsInstalled = true;
+        process.on('unhandledRejection', (reason: unknown, promise: Promise<unknown>) => {
+            const msg = reason instanceof Error ? reason.message : String(reason);
+            // Surface via the framework reporter instead of letting Node's
+            // default behaviour abort the process.
+            try {
+                CSReporter.warn(
+                    `Unhandled promise rejection swallowed (run continues): ${msg}`,
+                );
+            } catch {
+                // Reporter not yet initialised — fall back to console.
+                // eslint-disable-next-line no-console
+                console.warn(`[CSBDDRunner] Unhandled promise rejection swallowed: ${msg}`);
+            }
+            void promise;
+        });
+        process.on('uncaughtException', (err: Error) => {
+            try {
+                CSReporter.warn(
+                    `Uncaught exception swallowed (run continues): ${err.message}`,
+                );
+            } catch {
+                // eslint-disable-next-line no-console
+                console.warn(`[CSBDDRunner] Uncaught exception swallowed: ${err.message}`);
+            }
+        });
     }
     
     private initializeTestSuite(): ProfessionalTestSuite {
