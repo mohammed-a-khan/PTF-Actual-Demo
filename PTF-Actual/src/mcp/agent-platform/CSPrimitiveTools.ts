@@ -34,6 +34,13 @@ import { CSRunContext, RunPhase } from './CSRunContext';
 import { CSStatusWriter } from './CSStatusWriter';
 import { CSDiscovery, LegacyInventory } from './CSDiscovery';
 import { CSLegacyDataReader } from './CSLegacyDataReader';
+import {
+    CSLegacySignatureExtractor,
+    type FullSignature,
+    type TestSignature,
+    type PageSignature,
+    type HelperSignature,
+} from './CSLegacySignatureExtractor';
 import { CSSemanticReuse } from './CSSemanticReuse';
 import { CSWriteWithAudit, AuditViolation } from './CSWriteWithAudit';
 import { CSRepoInventory } from './CSRepoInventory';
@@ -120,7 +127,46 @@ const csaa_discover: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 'inventory.json',
                 JSON.stringify(inventory, null, 2),
             );
-            const md = renderInventoryMarkdown(inventory);
+
+            // Build the deterministic legacy signature: per-@Test action
+            // count, per-page-class @FindBy field count, per-helper-method
+            // leaf-action count. This is the floor every downstream gate
+            // compares the LLM output against. Java-only for now — Selenium
+            // is the dominant legacy stack we migrate from.
+            let signature: FullSignature | null = null;
+            const entryForSignature = inventory.entryFile ?? inventory.tests[0];
+            if (entryForSignature && /\.java$/i.test(entryForSignature) && fs.existsSync(entryForSignature)) {
+                try {
+                    signature = CSLegacySignatureExtractor.extract(entryForSignature, {
+                        pages: (inventory.pages ?? []).map((p) => {
+                            const className = path.basename(p as string, '.java');
+                            return { className, path: p as string };
+                        }),
+                        helpers: (inventory.helpers ?? []).map((h) => {
+                            const className = path.basename(h as string, '.java');
+                            return { className, path: h as string };
+                        }),
+                        workspaceRoot: rootPath,
+                    });
+                    ctx.writePhaseArtifact(
+                        'discover',
+                        'signature.json',
+                        JSON.stringify(signature, null, 2),
+                    );
+                } catch (sigErr) {
+                    // Signature extraction is best-effort. Don't fail the
+                    // discover phase if a malformed source file blocks the
+                    // parse — record the error and let downstream gates
+                    // skip when signature.json is absent.
+                    ctx.writePhaseArtifact(
+                        'discover',
+                        'signature-error.txt',
+                        sigErr instanceof Error ? (sigErr.stack ?? sigErr.message) : String(sigErr),
+                    );
+                }
+            }
+
+            const md = renderInventoryMarkdown(inventory, signature);
             const reportPath = CSStatusWriter.writePhaseReport(
                 ctx, 'discover', 'Legacy Project Inventory', md,
             );
@@ -136,6 +182,13 @@ const csaa_discover: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                     language: inventory.language,
                     runFolder: ctx.runFolder,
                     reportPath,
+                    signatureExtracted: signature !== null,
+                    signatureSummary: signature ? {
+                        tests: signature.tests.length,
+                        pages: Object.keys(signature.pages).length,
+                        helpers: Object.keys(signature.helpers).length,
+                        unresolvedReferences: signature.unresolvedReferences.length,
+                    } : undefined,
                     nextStepNeeded: true,
                     nextSuggestedTool: 'csaa_analyze',
                     nextSuggestedArgs: {
@@ -143,7 +196,7 @@ const csaa_discover: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                         entryFile: inventory.entryFile ?? inventory.tests[0],
                     },
                 },
-                `Discover complete: ${inventory.counts.tests} tests / ${inventory.counts.pages} pages / ${inventory.counts.helpers} helpers / ${inventory.counts.dataFiles} data files. Call csaa_analyze next.`,
+                `Discover complete: ${inventory.counts.tests} tests / ${inventory.counts.pages} pages / ${inventory.counts.helpers} helpers / ${inventory.counts.dataFiles} data files. ${signature ? `Signature: ${signature.tests.length} @Test methods, ${Object.keys(signature.pages).length} page classes, ${Object.keys(signature.helpers).length} helper methods extracted.` : ''} Call csaa_analyze next.`,
             );
         } catch (err) {
             ctx.finishPhase('discover', 'blocked_user', {
@@ -158,7 +211,40 @@ const csaa_discover: MCPToolDefinition = (defineTool() as MCPToolBuilder)
     })
     .build();
 
-function renderInventoryMarkdown(inv: LegacyInventory): string {
+function renderInventoryMarkdown(inv: LegacyInventory, sig?: FullSignature | null): string {
+    const sigSection = sig ? [
+        ``,
+        `## Legacy Signature (deterministic floor for verification gates)`,
+        ``,
+        `| @Test method | testCaseId | actions | helper invocations |`,
+        `|---|---|---|---|`,
+        ...sig.tests.map((t) => `| \`${t.methodName}\` | ${t.testCaseId ?? '—'} | ${t.actions.length} | ${t.helperInvocations.length} |`),
+        ``,
+        `### Page-class fields (legacy floor for generated @CSGetElement count)`,
+        ``,
+        `| Class | @FindBy fields | Methods |`,
+        `|---|---|---|`,
+        ...Object.values(sig.pages).map((p) => `| \`${p.className}\` | ${p.fields.length} | ${p.methods.length} |`),
+        ``,
+        ...(Object.keys(sig.helpers).length > 0 ? [
+            `### Helper methods (each invocation in @Test must expand to ≥ N steps)`,
+            ``,
+            `| Helper | Actions |`,
+            `|---|---|`,
+            ...Object.entries(sig.helpers).map(([k, h]) => `| \`${k}\` | ${h.actions.length} |`),
+            ``,
+        ] : []),
+        ...(sig.unresolvedReferences.length > 0 ? [
+            `### Unresolved references (file/class not found in inventory)`,
+            ``,
+            ...sig.unresolvedReferences.slice(0, 20).map((r) => `- \`${r}\``),
+            ``,
+        ] : []),
+    ].join('\n') : '';
+    return originalRenderInventoryMarkdown(inv) + sigSection;
+}
+
+function originalRenderInventoryMarkdown(inv: LegacyInventory): string {
     return [
         `# Legacy Project Inventory`,
         ``,
@@ -317,6 +403,11 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 '',
                 'STEP 0 — READ the framework SKILL files first. Use your `read` tool on `<workspaceRoot>/.github/skills/<name>/SKILL.md` for EVERY entry in `grounding.mandatorySkills`. These document the conventions the audit will enforce. Skipping this step is the #1 source of regenerations.',
                 '',
+                'STEP 0.5 — READ the legacy signature at `<runFolder>/02-discover/signature.json`. This is the deterministic floor: per-@Test action counts (including helper expansion), per-page-class @FindBy field counts. Your analysis MUST cover at least 70% of legacy actions per scenario AND 80% of legacy fields per create-new page object. Below those floors, csaa_record_analysis rejects with specific shortfall details — you cannot pass with thin output. Two deterministic tools are wired specifically for this:',
+                '  • `csaa_expand_helper(runId, helperClass, helperMethod)` — returns the ordered leaf-action list for any helper method. CALL IT FOR EVERY helper invocation in the @Test body. Then emit one Gherkin step per returned action.',
+                '  • `csaa_extract_page_fields(runId, pageClass)` — returns every @FindBy field on a legacy page class. CALL IT FOR EVERY page class referenced by the @Test methods. Your generated page-object analysis entry must list at least 80% of those fields.',
+                'These two tools mean you do NOT have to manually count or guess — the framework gives you the authoritative legacy data and asserts you matched it.',
+                '',
                 'STEP 1 — recursive dependency closure. Use `read` on:',
                 '  (a) `grounding.entryFile` — the test class itself',
                 '  (b) the `extends X` base class file — find it under the discovered source tree (look in inventory.pages and inventory.helpers for path resolution); READ its full body, find @BeforeMethod / @BeforeClass / setUp logic',
@@ -332,9 +423,16 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 '  - `<root>/resources/application.properties` (global)',
                 '  - `<root>/resources/<env>/env.properties` (env-specific URL + credentials)',
                 '  - `<root>/resources/<env>/SQLQueries.properties` (DB queries)',
-                '  READ each one. For EVERY file you read, push `{path, env, keysExtracted: [...], values: {key:value, ...}}` into `configFiles[]`. **The `values` object is critical** — it feeds straight into the generated `config/<project>/environments/<env>.env`. Extract at MINIMUM (when present): `url` / `baseUrl`, `username` / `user`, `password`, `timeout`, `loginUrl`, `dbConnectionString`. Use the original key spelling from the properties file. The scaffold helper accepts any of: url/URL/baseUrl/BASE_URL/appUrl/APP_URL for the URL slot, and username/user/USERNAME/USER/defaultUsername for the username slot. Without populated `values`, the generated config files will contain placeholder URLs like `https://<project>-<env>.example.com` and blank credentials — making the run unrunnable. At minimum env.properties must be read; if you cannot find it, add a high-severity gap.',
+                '  READ each one. For EVERY file you read, push `{path, env, keysExtracted: [...], values: {key:value, ...}}` into `configFiles[]`. **The `values` object is critical** — it feeds straight into the generated `config/<project>/environments/<env>.env`.',
+                '  **BASE_URL MUST BE THE WEB-APP URL, NEVER A DATABASE STRING.** Legacy env.properties files usually have BOTH:',
+                '    - `env.baseurl=https://app.example.com` (web URL — this is what BASE_URL needs)',
+                '    - `db.connection.url=jdbc:oracle:thin:@//host:1521/svc` (JDBC — this is for DB queries, NOT for the browser)',
+                '  Extract BOTH into `values`, but the scaffold prefers keys matching `*baseurl|appurl|webappurl|portalurl|uiurl|siteurl` over any `db.*` / `database.*` / `jdbc.*` / `datasource.*` / `connection.*` keys. The scaffold rejects values whose scheme is `jdbc:`, `mongodb:`, `redis:`, `amqp:`, `kafka:`, `ldap:`, `file:`, `ftp:` — those will NEVER land in BASE_URL. Use the original key spelling from the properties file (e.g. `env.baseurl`).',
+                '  Credentials: extract `username` / `user` / `defaultUsername` and `password` / `pwd` / `defaultPassword`. Without these, environments/<env>.env has blank creds and the run is unrunnable.',
+                '  At minimum env.properties must be read; if you cannot find it, add a high-severity gap.',
                 '',
                 'STEP 4 — read the legacy test-data file. If the inventory contains an .xls / .xlsx / .csv / .xml / .properties data file (see `grounding.dataFiles`), use `csaa_read_legacy_data` to fetch its rows. For EVERY scenario in your analysis, look up the data row by scenarioId and put the ACTUAL row columns (e.g. userName, userId, expectedError) into `scenarios[].dataRow`. Empty dataRows when a data file exists = run rejected.',
+                '  **COLUMN-SHIFT GUARD.** If the returned row has values that equal their own keys (e.g. `{loginKey: "loginKey", aDENTId: "aDENTId"}` — the value IS the column header string), the xls reader picked up the HEADER row as data. This happens with merged cells, frozen panes, or shifted headers. Detect this: if ≥40% of values equal their keys, the row is corrupt. Options: (a) re-read with `csaa_read_legacy_data` using a different row offset / sheet, OR (b) set `dataRow: {}` for that scenario AND add a high-severity gap: `"Data row for scenarioId X is header-shifted in the legacy xls — manual extraction needed"`. Submitting header-shift rows as-is is automatically rejected.',
                 '',
                 'STEP 5 — for each legacy page-object Java class referenced by tests:',
                 '  - READ the full *.java file from the inventory.pages list.',
@@ -345,7 +443,12 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 'STEP 6 — for EVERY @Test method:',
                 '  - Extract scenario id, title, runFlag from @MetaData / @Test annotations.',
                 '  - For every Selenium action line (click, sendKeys, getText, waitFor, assert), produce ONE Gherkin step with `legacyCite` { lineNumber, snippet }.',
-                '  - Follow helper-method calls inline. Cite the helper file + line for each leaf action.',
+                '  - **HELPER-METHOD EXPANSION IS MANDATORY.** When the @Test body contains a helper call like `CTSGSupportMethod.TS_4958(dataBean)` or `xHelper.populateForm(...)` or `xUtil.runFlow(...)`, you MUST:',
+                '      (a) read the helper class file fully (find it in inventory.helpers), add it to dependencyGraph[],',
+                '      (b) for EACH leaf action inside the helper method (`field.sendKeys(...)`, `button.click()`, `assert*`), emit ONE Gherkin step in this scenario\'s steps[] with `legacyCite` pointing at the helper file + the specific line,',
+                '      (c) DO NOT emit a single step like `"Execute shared support flow TS_4958"`, `"Run helper"`, `"Invoke method"`, `"Perform support routine"`, `"Call helper"`, `"Process via helper"`, etc. — every "delegate to helper" verb is rejected by the content gate. The helper has to be EXPANDED. If the helper does 12 actions, your scenario has 12 more steps in addition to the test\'s own actions.',
+                '      (d) Test ids (TS_4958) NEVER appear in user-facing step text — only as `@TS_xxxx` tags or inside the data row.',
+                '  - Disambiguate scenario titles: when two @Test methods have the same `testName` in @MetaData (common when one is SQL-flavor and another is Oracle-flavor), append a disambiguator to the title (e.g. `"New_On_Save_Rules (SQL)"` and `"New_On_Save_Rules (Oracle)"`). Two scenarios in the same feature with identical titles are rejected.',
                 '  - Group locators by page; XPath primary, CSS alternatives.',
                 '  - Reuse pages from `grounding.existingPagesIndex` when class name matches; set role=reuse-existing.',
                 '',
@@ -700,6 +803,202 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                     }
                 }
             } catch { /* non-fatal */ }
+        }
+
+        // 8. Column-shift detection in scenarios[].dataRow.
+        //    The legacy xls extractor sometimes returns the HEADER row as
+        //    data (e.g. {loginKey: "loginKey", aDENTId: "aDENTId"}). The
+        //    LLM faithfully copies these strings instead of flagging them.
+        //    Reject when ≥40% of values in a scenario's dataRow equal their
+        //    own keys — that's a column-shift artifact, not real data.
+        const headerShiftScenarios: Array<{ id: string; matchCount: number; total: number }> = [];
+        for (const s of analysis.scenarios) {
+            const dr = (s as { dataRow?: Record<string, unknown> }).dataRow;
+            if (!dr || typeof dr !== 'object') continue;
+            const entries = Object.entries(dr);
+            const meta = new Set(['scenarioId', 'scenarioName', 'runFlag']);
+            const real = entries.filter(([k]) => !meta.has(k));
+            if (real.length < 3) continue;
+            const headerMatches = real.filter(([k, v]) => typeof v === 'string' && v === k).length;
+            if (headerMatches / real.length >= 0.4) {
+                headerShiftScenarios.push({ id: s.id, matchCount: headerMatches, total: real.length });
+            }
+        }
+        if (headerShiftScenarios.length > 0) {
+            const list = headerShiftScenarios.slice(0, 5).map(
+                (h) => `  - scenario "${h.id}" has ${h.matchCount}/${h.total} dataRow values equal to their own keys`,
+            ).join('\n');
+            semanticErrors.push(
+                `${headerShiftScenarios.length} scenario(s) have column-shifted dataRow — the values are the COLUMN HEADER strings, not real data:\n${list}\n\nThis happens when the legacy xls has merged cells, a frozen pane, or the header row is at a different offset than xlsx assumed. Re-read the data file with csaa_read_legacy_data using a different row offset, OR for each affected scenario set dataRow to {} and add a high-severity gap describing the data extraction problem.`,
+            );
+        }
+
+        // 9. Helper-method expansion. If a scenario step's legacyCite snippet
+        //    invokes a helper class (anything ending in *SupportMethod /
+        //    *Helper / *Util / *Service / *Factory) but the scenario has ≤2
+        //    steps total (login + the helper invocation, with no expansion),
+        //    the helper wasn't expanded. Helpers MUST be opened and their
+        //    leaf actions inlined as Gherkin steps.
+        const HELPER_CLASS_RE = /\b([A-Z][a-zA-Z0-9]*(?:SupportMethod|Helper|Util|Service|Factory|Manager|Provider))\b\s*\.\s*[A-Z_][a-zA-Z0-9_]+\s*\(/;
+        const unexpandedHelpers: Array<{ scenarioId: string; helperRef: string; stepCount: number }> = [];
+        for (const s of analysis.scenarios) {
+            const steps = (s as { steps?: Array<{ legacyCite?: { snippet?: string } }> }).steps ?? [];
+            if (steps.length === 0) continue;
+            const helperRefs = new Set<string>();
+            for (const st of steps) {
+                const snip = st.legacyCite?.snippet;
+                if (!snip) continue;
+                const m = snip.match(HELPER_CLASS_RE);
+                if (m) helperRefs.add(m[1]);
+            }
+            if (helperRefs.size === 0) continue;
+            // Tolerance: if scenario has at least (1 login step + 1 helper-ref + 3 real action steps)
+            // we accept that helpers were partially expanded. Otherwise reject.
+            const nonLoginSteps = steps.filter((st) => {
+                const t = (st as { text?: string }).text ?? '';
+                return !/^\s*(I\s+log\s+in|I\s+am\s+(?:logged\s+in|signed\s+in)|sign\s+in)/i.test(t);
+            }).length;
+            if (nonLoginSteps < 4) {
+                unexpandedHelpers.push({
+                    scenarioId: s.id,
+                    helperRef: Array.from(helperRefs).join(', '),
+                    stepCount: steps.length,
+                });
+            }
+        }
+        if (unexpandedHelpers.length > 0) {
+            const list = unexpandedHelpers.slice(0, 5).map(
+                (u) => `  - scenario "${u.scenarioId}" references helper(s) [${u.helperRef}] but has only ${u.stepCount} step(s)`,
+            ).join('\n');
+            semanticErrors.push(
+                `${unexpandedHelpers.length} scenario(s) reference helper classes but the helper body was NOT expanded inline:\n${list}\n\nWhen a legacy test calls e.g. CTSGSupportMethod.TS_4958(dataBean), that helper does N internal actions (fill firstName, fill lastName, select role, click Save, ...). You MUST: (a) read the helper class file, (b) for each leaf action inside the helper method, emit ONE Gherkin step in this scenario's steps[] with legacyCite pointing at the helper file + line, (c) add the helper file to dependencyGraph. Do NOT emit a single "Execute shared support flow" / "Run helper" / "Invoke method" step — those stubs are rejected. If the helper file is genuinely unreadable, add a high-severity gap explaining why.`,
+            );
+        }
+
+        // 10. Semantic verification against deterministic legacy signature.
+        //     This is the gate that breaks the iteration loop. The LLM can
+        //     no longer pass with thin output — every scenario's step count
+        //     and every page class's presence are compared against the
+        //     extracted signature.json. Threshold is 70% (lenient — the
+        //     legacy extractor undercounts due to regex limits, and some
+        //     legacy actions don't map 1:1 to Gherkin steps).
+        const sigRawForCompare = ctx.readPhaseArtifact('discover', 'signature.json');
+        if (sigRawForCompare) {
+            try {
+                const sig = JSON.parse(sigRawForCompare) as FullSignature;
+                const COVERAGE_THRESHOLD = 0.70;
+
+                // (a) Per-scenario step count vs legacy action count
+                //     (including transitive helper expansion).
+                const stepShortfall: Array<{
+                    scenarioId: string;
+                    legacyMethod: string;
+                    legacyActions: number;
+                    generatedSteps: number;
+                    coverage: number;
+                }> = [];
+                for (const aScn of analysis.scenarios) {
+                    // Match by testCaseId or by legacyMethodName.
+                    const t = sig.tests.find((x) =>
+                        (x.testCaseId && `TS_${x.testCaseId}` === aScn.id) ||
+                        (x.testCaseId && x.testCaseId === aScn.id) ||
+                        (x.testCaseId && aScn.id.endsWith(x.testCaseId)) ||
+                        (x.methodName && (aScn as { legacyMethodName?: string }).legacyMethodName === x.methodName),
+                    );
+                    if (!t) continue;
+                    const expected = CSLegacySignatureExtractor.expectedActionCount(t, sig.helpers);
+                    if (expected < 3) continue; // skip trivially short legacy tests
+                    const generated = ((aScn as { steps?: unknown[] }).steps ?? []).length;
+                    const coverage = generated / expected;
+                    if (coverage < COVERAGE_THRESHOLD) {
+                        stepShortfall.push({
+                            scenarioId: aScn.id,
+                            legacyMethod: t.methodName,
+                            legacyActions: expected,
+                            generatedSteps: generated,
+                            coverage,
+                        });
+                    }
+                }
+                if (stepShortfall.length > 0) {
+                    const list = stepShortfall.slice(0, 6).map(
+                        (s) => `  - scenario "${s.scenarioId}" (${s.legacyMethod}): ${s.generatedSteps}/${s.legacyActions} steps (${Math.round(s.coverage * 100)}% — floor 70%)`,
+                    ).join('\n');
+                    semanticErrors.push(
+                        `${stepShortfall.length} scenario(s) have FAR fewer Gherkin steps than the legacy @Test does leaf actions (after helper expansion). The deterministic signature extractor counted the legacy floor:\n${list}\n\nThis is the #1 cause of "30% works" output. Fix by:\n  1. For each shortfall scenario, call csaa_expand_helper(runId, helperClass, helperMethod) for EVERY helper invocation in the legacy @Test body — it returns the ordered leaf actions inside the helper.\n  2. Emit ONE Gherkin step per returned action (cite the helper file + line in legacyCite).\n  3. Add all element interactions, validations, multi-step error paths the legacy test does.\n  4. Re-record analysis (or re-append affected scenarios via csaa_append_analysis_scenario).`,
+                    );
+                }
+
+                // (b) Page-class coverage: every page class the entry file
+                //     references must appear in analysis.pages[]. Missing
+                //     pages = silent omission (e.g. UserSecurityPage skipped).
+                const referencedPages = new Set<string>();
+                for (const t of sig.tests) {
+                    for (const c of t.pageClassesUsed) referencedPages.add(c);
+                }
+                for (const c of Object.keys(sig.pages)) referencedPages.add(c);
+                const analysedPageClassNames = new Set(
+                    (analysis.pages ?? []).map((p) => (p as { className: string }).className),
+                );
+                const missingPages: string[] = [];
+                for (const c of referencedPages) {
+                    // Tolerate suffix/case variation — the LLM sometimes
+                    // renames AdministrationMaintainSQLUsersPage to
+                    // MaintainSqlUsersPage. Check by stripping "Page" and
+                    // lower-casing.
+                    const normalised = (s: string) => s.toLowerCase().replace(/page$/i, '');
+                    const target = normalised(c);
+                    const hit = Array.from(analysedPageClassNames).some(
+                        (a) => normalised(a) === target,
+                    );
+                    if (!hit) missingPages.push(c);
+                }
+                if (missingPages.length > 0) {
+                    semanticErrors.push(
+                        `Analysis omitted ${missingPages.length} page class(es) the legacy entry file references: ${missingPages.slice(0, 10).map((p) => `"${p}"`).join(', ')}${missingPages.length > 10 ? `, …${missingPages.length - 10} more` : ''}.\n\nEvery legacy page class used by the @Test methods must appear in analysis.pages[] — either as role=create-new (with elements pulled from the legacy file) or as role=reuse-existing (pointing at an already-translated .ts under test/<project>/pages/). For each missing class, call csaa_extract_page_fields(runId, pageClass) to get the authoritative field list, then add the page entry.`,
+                    );
+                }
+
+                // (c) Per-page-object field-count floor for create-new pages.
+                //     Each page declared in the analysis with role=create-new
+                //     must have ≥80% of the legacy field count. The looser
+                //     threshold acknowledges that some Java fields (labels,
+                //     headers) translate to assertions not standalone elements.
+                const fieldShortfall: Array<{
+                    pageClass: string;
+                    legacyFields: number;
+                    generatedFields: number;
+                    coverage: number;
+                }> = [];
+                for (const p of analysis.pages ?? []) {
+                    const role = (p as { role?: string }).role;
+                    if (role !== 'create-new') continue;
+                    const className = (p as { className: string }).className;
+                    // Match against signature.pages by class name (case-insensitive).
+                    const sigPage = Object.values(sig.pages).find(
+                        (sp) => sp.className.toLowerCase() === className.toLowerCase(),
+                    );
+                    if (!sigPage || sigPage.fields.length < 5) continue;
+                    const elements = ((p as { elements?: unknown[] }).elements ?? []).length;
+                    const coverage = elements / sigPage.fields.length;
+                    if (coverage < 0.80) {
+                        fieldShortfall.push({
+                            pageClass: className,
+                            legacyFields: sigPage.fields.length,
+                            generatedFields: elements,
+                            coverage,
+                        });
+                    }
+                }
+                if (fieldShortfall.length > 0) {
+                    const list = fieldShortfall.slice(0, 6).map(
+                        (f) => `  - page "${f.pageClass}": ${f.generatedFields}/${f.legacyFields} elements (${Math.round(f.coverage * 100)}% — floor 80%)`,
+                    ).join('\n');
+                    semanticErrors.push(
+                        `${fieldShortfall.length} page object(s) have far fewer elements than the legacy class declares. Floor is 80% of legacy @FindBy count:\n${list}\n\nFor each shortfall page, call csaa_extract_page_fields(runId, pageClass) to get the authoritative @FindBy field list and emit a matching @CSGetElement for each one.`,
+                    );
+                }
+            } catch { /* malformed signature — ignore, downstream still functional */ }
         }
 
         if (semanticErrors.length > 0) {
@@ -1223,7 +1522,13 @@ const csaa_translate: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 ' - No duplicate `import { X }` lines.',
                 ' - No duplicate `@Page("key")` decorators.',
                 '',
-                'STEP 3 — call `csaa_record_translation(runId, payload)`. The record tool runs schema validation, content gates (placeholder / dup imports / wrong subpath / empty body / step-def coverage / stub bodies / Scenario Outline misuse / Examples envelope shape / helper-class leak), plus a `tsc --noEmit` compile check against the consumer\'s tsconfig. If ANY gate fails you receive the specific violations — fix and re-call up to 3 times.',
+                'STEP 3 — submit the translation. Two protocols, choose by file count:',
+                '  (A) **≤2 files total** → call `csaa_record_translation(runId, payload: { files: [...], notes?: [...] })` ONCE with the full file list.',
+                '  (B) **3+ files OR ≥4 analysis scenarios** → STREAM to avoid blowing LLM-host per-message output caps. Loop: for EACH generated file call `csaa_append_translation_file(runId, file: { relativePath, kind, content })` — one feature, one steps.ts, N pages (one per analysis page with role=create-new), one data.json. Each call is small (~1–5 KB). When every file is staged, call `csaa_finalize_translation(runId)` which re-dispatches through csaa_record_translation so EVERY gate fires identically (schema validation + content gates + file-kind coverage + scenario-data column coverage + page-coverage signature gate + compile_check). The scratch file survives conversation compaction — if the LLM-host summarises mid-flow, just continue appending or call finalize.',
+                '',
+                '**CRITICAL — do NOT narrate file contents in chat.** Emitting "Now writing page object..." / "Adding element locators..." / "Defining the page class..." in your reply burns output tokens. Compose tool calls SILENTLY. The user reads STATUS.md for progress, not your narration. Inlining feature/steps/page content as visible markdown is the #1 cause of "response hit the length limit" on this phase.',
+                '',
+                'The record tool runs schema validation, content gates (placeholder / dup imports / wrong subpath / empty body / step-def coverage / stub bodies / Scenario Outline misuse / Examples envelope shape / helper-class leak / duplicate scenario title / orphan step def / duplicate step-def bodies / generic-placeholder step text / Java identifier leak), the page-coverage signature gate (generated @CSGetElement count vs legacy @FindBy count ≥ 80%), the step-coverage signature gate (Gherkin steps per scenario vs legacy actions ≥ 70%), and `tsc --noEmit` against the consumer\'s tsconfig. If ANY gate fails you receive the specific violations — fix and re-call up to 3 times.',
             ].join('\n'),
             responseSchema: TRANSLATION_SCHEMA,
             grounding: {
@@ -1462,6 +1767,135 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
             } catch { /* malformed analysis — schema gate caught upstream */ }
         }
 
+        // Gate 2.8: generated page-object field-count vs legacy signature.
+        //            Counts @CSGetElement decorators in each generated page
+        //            file and compares to the legacy floor (80%). Catches
+        //            "thin page object" — the 4-field page when legacy has
+        //            27 — that passes every form-level gate today.
+        const sigForTranslate = ctx.readPhaseArtifact('discover', 'signature.json');
+        if (sigForTranslate) {
+            try {
+                const sig = JSON.parse(sigForTranslate) as FullSignature;
+                const pageFiles = translation.files.filter((f) => f.kind === 'page');
+                const pageShortfall: Array<{
+                    file: string;
+                    pageClass: string;
+                    legacyFields: number;
+                    generatedFields: number;
+                    coverage: number;
+                }> = [];
+                for (const pf of pageFiles) {
+                    const fileName = path.basename(pf.relativePath, path.extname(pf.relativePath));
+                    // Match against legacy page class names (case-insensitive,
+                    // suffix-tolerant).
+                    const normalised = (s: string) => s.toLowerCase().replace(/page$/i, '');
+                    const target = normalised(fileName);
+                    const sigPage = Object.values(sig.pages).find(
+                        (sp) => normalised(sp.className) === target,
+                    );
+                    if (!sigPage || sigPage.fields.length < 5) continue;
+                    const decorators = (pf.content.match(/@CSGetElement\s*\(/g) ?? []).length;
+                    const coverage = decorators / sigPage.fields.length;
+                    if (coverage < 0.80) {
+                        pageShortfall.push({
+                            file: pf.relativePath,
+                            pageClass: sigPage.className,
+                            legacyFields: sigPage.fields.length,
+                            generatedFields: decorators,
+                            coverage,
+                        });
+                    }
+                }
+                if (pageShortfall.length > 0) {
+                    const list = pageShortfall.slice(0, 6).map(
+                        (p) => `  - ${p.file} (matches legacy "${p.pageClass}"): ${p.generatedFields}/${p.legacyFields} @CSGetElement decorators (${Math.round(p.coverage * 100)}% — floor 80%)`,
+                    ).join('\n');
+                    return jsonResult(
+                        {
+                            state: 'AWAITING_LLM_RETRY',
+                            runId,
+                            phase: 'translate',
+                            pageShortfall,
+                            nextStepNeeded: true,
+                            nextSuggestedTool: 'csaa_record_translation',
+                            feedback: `Page-coverage gate failed. Generated page object(s) have FAR fewer @CSGetElement decorators than the legacy class has @FindBy fields:\n${list}\n\nFor EACH shortfall page, call csaa_extract_page_fields(runId, pageClass) to retrieve the authoritative field list, then emit a matching @CSGetElement for every one (XPath primary, alternativeLocators[] for CSS fallbacks). The legacy field count is the floor — you may add more, never fewer.`,
+                        },
+                        `Page-coverage gate: ${pageShortfall.length} page(s) below 80% legacy field count. Retry.`,
+                    );
+                }
+
+                // Also gate per-scenario step coverage at translate time —
+                // catches the case where analysis was sufficient but the
+                // translator dropped steps when emitting the feature file.
+                const featureFile = translation.files.find((f) => f.kind === 'feature');
+                if (featureFile) {
+                    // Count Gherkin steps per scenario tag.
+                    const stepsPerScenario = new Map<string, number>();
+                    let currentTag: string | null = null;
+                    let currentSteps = 0;
+                    for (const ln of featureFile.content.split(/\r?\n/)) {
+                        const t = ln.trim();
+                        const tagMatch = t.match(/^@(TS_\d+|tc_\d+|case[-_]?\w+)/i);
+                        if (tagMatch) {
+                            currentTag = tagMatch[1];
+                            continue;
+                        }
+                        if (/^Scenario(\s+Outline)?\s*:/i.test(t)) {
+                            if (currentTag) {
+                                stepsPerScenario.set(currentTag, currentSteps);
+                            }
+                            currentSteps = 0;
+                            continue;
+                        }
+                        if (/^(Given|When|Then|And|But)\b/i.test(t)) {
+                            currentSteps++;
+                        }
+                    }
+                    if (currentTag) stepsPerScenario.set(currentTag, currentSteps);
+
+                    const scenarioShortfall: Array<{
+                        scenarioTag: string;
+                        legacyMethod: string;
+                        legacyActions: number;
+                        gherkinSteps: number;
+                    }> = [];
+                    for (const t of sig.tests) {
+                        const tag = t.testCaseId ? `TS_${t.testCaseId}` : null;
+                        if (!tag) continue;
+                        const expected = CSLegacySignatureExtractor.expectedActionCount(t, sig.helpers);
+                        if (expected < 3) continue;
+                        const gherkin = stepsPerScenario.get(tag) ??
+                                       stepsPerScenario.get(t.testCaseId ?? '') ?? 0;
+                        if (gherkin > 0 && gherkin / expected < 0.70) {
+                            scenarioShortfall.push({
+                                scenarioTag: tag,
+                                legacyMethod: t.methodName,
+                                legacyActions: expected,
+                                gherkinSteps: gherkin,
+                            });
+                        }
+                    }
+                    if (scenarioShortfall.length > 0) {
+                        const list = scenarioShortfall.slice(0, 6).map(
+                            (s) => `  - @${s.scenarioTag} (legacy ${s.legacyMethod}): ${s.gherkinSteps} Gherkin steps vs ${s.legacyActions} legacy actions (${Math.round(100 * s.gherkinSteps / s.legacyActions)}% — floor 70%)`,
+                        ).join('\n');
+                        return jsonResult(
+                            {
+                                state: 'AWAITING_LLM_RETRY',
+                                runId,
+                                phase: 'translate',
+                                scenarioShortfall,
+                                nextStepNeeded: true,
+                                nextSuggestedTool: 'csaa_record_translation',
+                                feedback: `Step-coverage gate failed at translate. Scenarios in the feature file have far fewer Gherkin steps than the legacy @Test has leaf actions (after helper expansion):\n${list}\n\nThe feature file dropped legacy actions during translation. Re-emit the feature file with one step per legacy leaf action — expand every helper invocation via csaa_expand_helper, then include each returned action as its own step.`,
+                            },
+                            `Step-coverage gate: ${scenarioShortfall.length} scenario(s) below 70% legacy action coverage. Retry.`,
+                        );
+                    }
+                }
+            } catch { /* malformed signature — gate skips */ }
+        }
+
         // Gate 3: scenarios.json column coverage.
         // The recorded analysis has scenarios[].dataRow with real columns from
         // the legacy data file. The translation's *_scenarios.json must
@@ -1669,6 +2103,202 @@ function renderTranslateMarkdown(translation: {
     lines.push('');
     return lines.join('\n');
 }
+
+// ============================================================================
+// csaa_append_translation_file — chunked translate recording (one file at a time)
+// ============================================================================
+// Symmetric to csaa_append_analysis_scenario. Large migrations (3+ page
+// objects + feature + steps + data = 5+ files, often 30-50 KB total) blow
+// the LLM-host per-message output cap when submitted as a single
+// csaa_record_translation payload. This tool accepts ONE TranslationFile
+// per call (~1-5 KB each), stages it to `05-translate/scratch-files.json`,
+// and lets the LLM stream the full translation in N small turns. After
+// every file is appended, csaa_finalize_translation re-dispatches through
+// csaa_record_translation so every existing gate (placeholder, dup imports,
+// wrong subpath, page-coverage signature, compile_check) still fires.
+//
+// The scratch file survives conversation compaction.
+
+const csaa_append_translation_file: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_append_translation_file')
+    .title('CS-AI-Auto-Assist — Append one translation file (chunked)')
+    .description(
+        'Streams ONE generated file (feature / steps / page / data) into the translate scratch. ' +
+            'Use this whenever the full translation payload would exceed the LLM-host per-message ' +
+            'output cap (3+ files OR ≥4 scenarios is a safe threshold). Each call carries one ' +
+            '{ relativePath, kind, content } object — small enough to never blow the message budget. ' +
+            'When every file has been appended, call csaa_finalize_translation to run gates and ' +
+            'persist the content map. The scratch file survives conversation compaction.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .objectParam(
+        'file',
+        'REQUIRED. One translation file object: { relativePath, kind, content }. relativePath relative to consumer workspace (e.g. test/<project>/features/<module>/x.feature). kind is one of: "feature" | "steps" | "page" | "data". content is the full file body. Optional: reuseDecision for reuse-existing pages.',
+        undefined,
+        { required: true },
+    )
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+
+        const file = params.file;
+        if (typeof file !== 'object' || file === null) {
+            return errorResult('file must be an object', runId);
+        }
+        const f = file as { relativePath?: unknown; kind?: unknown; content?: unknown };
+        if (typeof f.relativePath !== 'string' || !f.relativePath) {
+            return errorResult('file.relativePath required (string)', runId);
+        }
+        if (typeof f.kind !== 'string' || !['feature', 'steps', 'page', 'data'].includes(f.kind)) {
+            return errorResult(`file.kind required, one of: feature | steps | page | data (got '${String(f.kind)}')`, runId);
+        }
+        if (typeof f.content !== 'string') {
+            return errorResult('file.content required (string)', runId);
+        }
+        if (f.content.length > 256 * 1024) {
+            return errorResult(`file.content is ${f.content.length} bytes — exceeds 256 KB per-file limit. Split the file or escalate as a gap.`, runId);
+        }
+
+        const scratchRaw = ctx.readPhaseArtifact('translate', 'scratch-files.json');
+        const list: Array<{ relativePath: string; kind: string; content: string; reuseDecision?: string }> =
+            scratchRaw ? JSON.parse(scratchRaw) : [];
+
+        // Reject duplicate paths — would shadow the prior file silently.
+        if (list.some((x) => x.relativePath === f.relativePath)) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    phase: 'translate',
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_append_translation_file',
+                    feedback: `File "${f.relativePath}" was already appended in this run. To replace it, call csaa_finalize_translation first (so the scratch is consumed), then re-start translate. Or proceed to finalize if every file is staged.`,
+                },
+                `Duplicate file path "${f.relativePath}".`,
+            );
+        }
+
+        list.push({
+            relativePath: f.relativePath,
+            kind: f.kind as 'feature' | 'steps' | 'page' | 'data',
+            content: f.content,
+            ...(typeof (f as { reuseDecision?: unknown }).reuseDecision === 'string' ?
+                { reuseDecision: (f as { reuseDecision: string }).reuseDecision } : {}),
+        });
+        ctx.writePhaseArtifact(
+            'translate',
+            'scratch-files.json',
+            JSON.stringify(list, null, 2),
+        );
+
+        const kindCounts = list.reduce<Record<string, number>>((acc, x) => {
+            acc[x.kind] = (acc[x.kind] ?? 0) + 1;
+            return acc;
+        }, {});
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                phase: 'translate',
+                filesCollected: list.length,
+                kindCounts,
+                lastAppended: f.relativePath,
+                nextStepNeeded: true,
+                nextSuggestedTool: 'csaa_append_translation_file',
+                recoveryHint: 'If the conversation was compacted, your staged files live at translate/scratch-files.json under the run folder. Continue appending the remaining files (one feature + one steps + N pages + one data), then call csaa_finalize_translation.',
+            },
+            `File "${f.relativePath}" appended (${list.length} staged: ${Object.entries(kindCounts).map(([k, v]) => `${k}=${v}`).join(', ')}).`,
+        );
+    })
+    .build();
+
+// ============================================================================
+// csaa_finalize_translation — close-out of streamed translation recording
+// ============================================================================
+
+const csaa_finalize_translation: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_finalize_translation')
+    .title('CS-AI-Auto-Assist — Finalize streamed translation (Phase 5 completion)')
+    .description(
+        'Companion to csaa_append_translation_file. Reads every staged file from the scratch ' +
+            'and re-dispatches into csaa_record_translation so the full gate pipeline runs ' +
+            '(schema validation + content gates + file-kind coverage + anti-collapse + ' +
+            'data column coverage + page-coverage signature gate + compile_check). ' +
+            'Optional `notes[]` carries free-form translator notes.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .objectParam(
+        'notes',
+        'Optional translator notes array, e.g. { items: ["note 1", "note 2"] }. Pass undefined to omit.',
+        undefined,
+    )
+    .handler(async (params: Record<string, unknown>, toolCtx: MCPToolContext) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+
+        const scratchRaw = ctx.readPhaseArtifact('translate', 'scratch-files.json');
+        if (!scratchRaw) {
+            return errorResult(
+                `No files staged. Call csaa_append_translation_file at least once before csaa_finalize_translation, OR use csaa_record_translation with a single full-payload call.`,
+                runId,
+            );
+        }
+        let files: Array<{ relativePath: string; kind: string; content: string; reuseDecision?: string }>;
+        try {
+            files = JSON.parse(scratchRaw);
+        } catch {
+            return errorResult(
+                `Scratch translation file is corrupt at translate/scratch-files.json. Delete it and re-append, or call csaa_record_translation directly.`,
+                runId,
+            );
+        }
+        if (!Array.isArray(files) || files.length === 0) {
+            return errorResult(
+                `Scratch translation file is empty. Call csaa_append_translation_file at least once first.`,
+                runId,
+            );
+        }
+
+        const notesParam = params.notes;
+        const notesList: string[] = [];
+        if (notesParam && typeof notesParam === 'object') {
+            const items = (notesParam as { items?: unknown }).items;
+            if (Array.isArray(items)) {
+                for (const it of items) if (typeof it === 'string') notesList.push(it);
+            }
+        }
+
+        const fullPayload = {
+            files,
+            ...(notesList.length > 0 ? { notes: notesList } : {}),
+        };
+
+        // Re-dispatch through csaa_record_translation. Single source of truth
+        // for every gate.
+        const res = await csaa_record_translation.handler(
+            { runId, payload: fullPayload },
+            toolCtx,
+        );
+
+        // Clean the scratch on success so a follow-up append doesn't re-use it.
+        const sc = res.structuredContent as { state?: string } | undefined;
+        if (sc?.state === 'RUNNING') {
+            try {
+                const scratchPath = path.join(
+                    ctx.runFolder,
+                    CSRunContext.phaseFolder('translate'),
+                    'scratch-files.json',
+                );
+                if (fs.existsSync(scratchPath)) fs.unlinkSync(scratchPath);
+            } catch { /* non-fatal */ }
+        }
+        return res;
+    })
+    .build();
 
 // ============================================================================
 // csaa_audit — Phase 6: audit_file across content map
@@ -2492,22 +3122,79 @@ async function scaffoldFrameworkConfig(
     // Match values keys broadly: legacy properties files often use dotted
     // keys (env.baseurl, app.url, db.user) — we accept any key whose
     // lower-cased form matches one of the synonyms below.
+    //
+    // CRITICAL: BASE_URL must be the WEB APP URL, not a DB connection
+    // string. Legacy env.properties files commonly carry both:
+    //   env.baseurl = https://app.example.com
+    //   db.connection.url = jdbc:oracle:thin:@//host:1521/service
+    // The previous matcher accepted the FIRST key whose normalized form
+    // ended in "url" — which happened to be the JDBC string for some
+    // files, so BASE_URL landed at `jdbc:oracle:thin:@//...`. We now
+    // prefer web-URL keys (web/app/ui/portal/base/host with `url`/`host`
+    // suffix) AND reject non-http schemes outright.
     const pick = (
         values: Record<string, string>,
         synonyms: string[],
+        forbidSchemes: string[] = [],
     ): string | undefined => {
-        for (const [k, val] of Object.entries(values)) {
-            if (!val) continue;
-            const norm = k.toLowerCase().replace(/[._-]/g, '');
-            if (synonyms.some((s) => norm === s || norm.endsWith(s))) return val;
+        // Two-pass: first prefer keys whose normalized form is exactly a
+        // synonym; fall back to suffix match. Within each pass, reject any
+        // value whose scheme is in forbidSchemes.
+        const passes: Array<(norm: string, syn: string) => boolean> = [
+            (n, s) => n === s,
+            (n, s) => n.endsWith(s),
+        ];
+        for (const test of passes) {
+            for (const [k, val] of Object.entries(values)) {
+                if (!val) continue;
+                const norm = k.toLowerCase().replace(/[._-]/g, '');
+                if (!synonyms.some((s) => test(norm, s))) continue;
+                if (forbidSchemes.length > 0) {
+                    const lower = val.toLowerCase().trim();
+                    if (forbidSchemes.some((sch) => lower.startsWith(sch))) continue;
+                }
+                return val;
+            }
         }
         return undefined;
     };
+    // Web URL synonyms — DO NOT include bare `url` first because db.url /
+    // dbconnectionurl will match it. Web-specific tokens come first.
+    const URL_SYNONYMS = [
+        'baseurl', 'appurl', 'webappurl', 'webhost', 'apphost',
+        'portalurl', 'uiurl', 'siteurl', 'serviceurl',
+        // bare 'url' / 'host' only matches if it's not a db.* key (the
+        // dotted-key check above strips dots but db. prefix is captured by
+        // the synonym not matching dbconnectionurl etc.)
+        'url', 'host',
+    ];
+    const FORBIDDEN_URL_SCHEMES = ['jdbc:', 'mongodb:', 'redis:', 'amqp:', 'kafka:', 'ldap:', 'ldaps:', 'file:', 'ftp:'];
     for (const c of analysis.configFiles ?? []) {
         if (c.env) envs.add(c.env);
         const v = (c as { values?: Record<string, string> }).values;
         if (!v) continue;
-        const url = pick(v, ['baseurl', 'url', 'appurl', 'apphost', 'host', 'webapphost', 'webappurl']);
+        // Filter out db.* / database.* / jdbc.* keys before URL matching —
+        // otherwise db.url etc. wins the suffix match.
+        const webOnly: Record<string, string> = {};
+        for (const [k, val] of Object.entries(v)) {
+            if (/^(?:db|database|jdbc|datasource|connection)\b/i.test(k)) continue;
+            webOnly[k] = val;
+        }
+        let url = pick(webOnly, URL_SYNONYMS, FORBIDDEN_URL_SCHEMES);
+        // Additional sanity: require http(s) scheme. If the picked value is
+        // somehow still non-http (e.g. a hostname without scheme), prepend
+        // https://. If it's a known-bad scheme, discard.
+        if (url) {
+            const lower = url.toLowerCase().trim();
+            if (FORBIDDEN_URL_SCHEMES.some((sch) => lower.startsWith(sch))) {
+                url = undefined;
+            } else if (!/^https?:\/\//i.test(url) && /^[a-z0-9.-]+(:\d+)?(\/|$)/i.test(url)) {
+                // Hostname-only value → assume https.
+                url = `https://${url.replace(/^\/+/, '')}`;
+            } else if (!/^https?:\/\//i.test(url)) {
+                url = undefined;
+            }
+        }
         const user = pick(v, ['username', 'user', 'defaultusername', 'loginusername', 'testusername', 'appuser']);
         const pwd = pick(v, ['password', 'pwd', 'pass', 'defaultpassword', 'loginpassword', 'testpassword', 'apppassword']);
         if (c.env) {
@@ -2607,6 +3294,208 @@ async function scaffoldFrameworkConfig(
 }
 
 // ============================================================================
+// csaa_expand_helper — Deterministic helper-method body extraction
+// ============================================================================
+// The LLM calls this during analyze to get the authoritative leaf-action list
+// inside a helper method (e.g. CTSGSupportMethods.TS_4958). It MUST then emit
+// one Gherkin step per returned action — no more "Execute shared support
+// flow TS_4958" stubs.
+
+const csaa_expand_helper: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_expand_helper')
+    .title('CS-AI-Auto-Assist — Expand legacy helper method body')
+    .description(
+        'Returns the ordered leaf-action list for a single helper method in a legacy Java ' +
+            'source file. The LLM MUST call this for every helper invocation it encounters ' +
+            'in a @Test body (e.g. CTSGSupportMethods.TS_4958(dataBean)), then emit one Gherkin ' +
+            'step per returned action. Resolves the helper file from the discover inventory ' +
+            'or by searching the workspace.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .stringParam('helperClass', 'Java class name (e.g. CTSGSupportMethods)', { required: true })
+    .stringParam('helperMethod', 'Method name (e.g. TS_4958)', { required: true })
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+        const helperClass = getStr(params, 'helperClass');
+        const helperMethod = getStr(params, 'helperMethod');
+        if (!helperClass || !helperMethod) {
+            return errorResult('helperClass + helperMethod required', runId);
+        }
+
+        // Try the cached signature first.
+        const sigRaw = ctx.readPhaseArtifact('discover', 'signature.json');
+        if (sigRaw) {
+            try {
+                const sig = JSON.parse(sigRaw) as FullSignature;
+                const cached = sig.helpers[`${helperClass}.${helperMethod}`];
+                if (cached) {
+                    return jsonResult(
+                        {
+                            state: 'RUNNING',
+                            runId,
+                            helperClass,
+                            helperMethod,
+                            filePath: cached.filePath,
+                            actionCount: cached.actions.length,
+                            actions: cached.actions,
+                        },
+                        `Expanded ${helperClass}.${helperMethod}: ${cached.actions.length} leaf action(s).`,
+                    );
+                }
+            } catch { /* fall through */ }
+        }
+
+        // Cache miss → resolve and extract on the fly.
+        const inventoryRaw = ctx.readPhaseArtifact('discover', 'inventory.json');
+        if (!inventoryRaw) {
+            return errorResult('no inventory — run csaa_discover first', runId);
+        }
+        const inv = JSON.parse(inventoryRaw) as LegacyInventory;
+        const helpers = (inv.helpers ?? []).map((h) => ({
+            className: path.basename(h as string, path.extname(h as string)),
+            path: h as string,
+        }));
+        const pages = (inv.pages ?? []).map((p) => ({
+            className: path.basename(p as string, path.extname(p as string)),
+            path: p as string,
+        }));
+        const all = [...helpers, ...pages];
+        const found = all.find((x) => x.className === helperClass);
+        if (!found) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    error: `helper class '${helperClass}' not found in inventory (${inv.helpers?.length ?? 0} helpers + ${inv.pages?.length ?? 0} pages scanned)`,
+                    suggestion: 'Verify the class name spelling. If OCR / fuzzy-match is needed, check inventory.json under 02-discover for the closest match.',
+                },
+                `Helper class '${helperClass}' not in inventory.`,
+            );
+        }
+        const hSig = CSLegacySignatureExtractor.extractHelperSignature(
+            found.path, helperClass, helperMethod,
+        );
+        if (!hSig) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    error: `method '${helperMethod}' not found in ${found.path}`,
+                    suggestion: 'Open the file and verify the exact method name (case-sensitive).',
+                },
+                `Method '${helperMethod}' not found in ${helperClass}.`,
+            );
+        }
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                helperClass,
+                helperMethod,
+                filePath: hSig.filePath,
+                actionCount: hSig.actions.length,
+                actions: hSig.actions,
+            },
+            `Expanded ${helperClass}.${helperMethod}: ${hSig.actions.length} leaf action(s).`,
+        );
+    })
+    .build();
+
+// ============================================================================
+// csaa_extract_page_fields — Deterministic page-object field extraction
+// ============================================================================
+// The LLM calls this for each page-object class it intends to generate. Returns
+// every @FindBy / By.* field declaration. The generated page object MUST have
+// AT LEAST that many @CSGetElement fields — the page-coverage gate in
+// csaa_record_translation enforces this floor.
+
+const csaa_extract_page_fields: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_extract_page_fields')
+    .title('CS-AI-Auto-Assist — Extract legacy page-object fields')
+    .description(
+        'Returns every @FindBy / @FindBys / By.* field on a legacy Java page-object class. ' +
+            'The LLM MUST call this for every page class referenced by the @Test methods, then ' +
+            'emit a generated page object with AT LEAST as many @CSGetElement fields covering ' +
+            'the same locators. The page-coverage gate in csaa_record_translation rejects ' +
+            'page objects below the legacy floor.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .stringParam('pageClass', 'Java page-object class name', { required: true })
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+        const pageClass = getStr(params, 'pageClass');
+        if (!pageClass) return errorResult('pageClass required', runId);
+
+        // Try the cached signature first.
+        const sigRaw = ctx.readPhaseArtifact('discover', 'signature.json');
+        if (sigRaw) {
+            try {
+                const sig = JSON.parse(sigRaw) as FullSignature;
+                const cached = sig.pages[pageClass];
+                if (cached) {
+                    return jsonResult(
+                        {
+                            state: 'RUNNING',
+                            runId,
+                            pageClass,
+                            filePath: cached.filePath,
+                            fieldCount: cached.fields.length,
+                            methodCount: cached.methods.length,
+                            fields: cached.fields,
+                            methods: cached.methods,
+                        },
+                        `Extracted ${pageClass}: ${cached.fields.length} field(s), ${cached.methods.length} method(s).`,
+                    );
+                }
+            } catch { /* fall through */ }
+        }
+
+        // Cache miss → resolve and extract.
+        const inventoryRaw = ctx.readPhaseArtifact('discover', 'inventory.json');
+        if (!inventoryRaw) {
+            return errorResult('no inventory — run csaa_discover first', runId);
+        }
+        const inv = JSON.parse(inventoryRaw) as LegacyInventory;
+        const candidates = (inv.pages ?? []).map((p) => ({
+            className: path.basename(p as string, path.extname(p as string)),
+            path: p as string,
+        }));
+        const found = candidates.find((x) => x.className === pageClass);
+        if (!found) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    error: `page class '${pageClass}' not found in inventory (${candidates.length} pages scanned)`,
+                    suggestion: 'Verify the class name. If you suspect OCR drift, check inventory.json for the closest match (e.g. SQL vs OQL).',
+                },
+                `Page class '${pageClass}' not in inventory.`,
+            );
+        }
+        const pSig = CSLegacySignatureExtractor.extractPageSignature(found.path);
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                pageClass,
+                filePath: pSig.filePath,
+                fieldCount: pSig.fields.length,
+                methodCount: pSig.methods.length,
+                fields: pSig.fields,
+                methods: pSig.methods,
+            },
+            `Extracted ${pageClass}: ${pSig.fields.length} field(s), ${pSig.methods.length} method(s).`,
+        );
+    })
+    .build();
+
+// ============================================================================
 // Public registry
 // ============================================================================
 
@@ -2619,6 +3508,8 @@ export const csaaPrimitiveTools: MCPToolDefinition[] = [
     csaa_plan,
     csaa_translate,
     csaa_record_translation,
+    csaa_append_translation_file,
+    csaa_finalize_translation,
     csaa_audit,
     csaa_write,
     csaa_execute,
@@ -2626,4 +3517,6 @@ export const csaaPrimitiveTools: MCPToolDefinition[] = [
     csaa_publish,
     csaa_query_existing_pages,
     csaa_read_legacy_data,
+    csaa_expand_helper,
+    csaa_extract_page_fields,
 ];

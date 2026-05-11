@@ -14,7 +14,9 @@ tools:
   - csaa_finalize_analysis         # chunked recording: close out after all scenarios are appended
   - csaa_plan
   - csaa_translate
-  - csaa_record_translation # partner to csaa_translate — submit LLM-produced files
+  - csaa_record_translation # partner to csaa_translate — submit LLM-produced files (≤2 files)
+  - csaa_append_translation_file   # chunked recording: stream ONE file at a time
+  - csaa_finalize_translation      # chunked recording: close out after all files are appended
   - csaa_audit
   - csaa_write
   - csaa_execute
@@ -23,6 +25,8 @@ tools:
   # Companion primitives:
   - csaa_query_existing_pages
   - csaa_read_legacy_data
+  - csaa_expand_helper          # deterministic helper-method body extractor
+  - csaa_extract_page_fields    # deterministic page-object @FindBy extractor
   # Quality gates + caches:
   - audit_content
   - audit_file
@@ -105,6 +109,55 @@ fires. To avoid this **always stream when scenario count ≥ 4**:
 For small files (≤3 scenarios) `csaa_record_analysis` with one full
 payload is still fine.
 
+## TRANSLATION RECORDING — chunked protocol for large file sets
+
+`csaa_translate` returns an envelope, then YOU produce the file set. A
+realistic Administration-sized migration emits **1 feature + 1 steps.ts
++ 5+ page objects + 1 data.json = 8+ files, 30-50 KB total**. Submitting
+that as a single `csaa_record_translation(payload: { files: [...] })`
+blows the LLM-host per-message output cap and you get
+`Sorry, the response hit the length limit`.
+
+To avoid this **always stream when files ≥ 3 OR analysis recorded ≥ 4
+scenarios**:
+
+1. For EACH generated file (feature first, then steps, then one page
+   object per analysis page with role=create-new, then data) call
+   `csaa_append_translation_file(runId, file: { relativePath, kind,
+   content })` with just that one file. Each call is small (~1–5 KB).
+   The scratch under `<runFolder>/05-translate/scratch-files.json`
+   survives conversation compaction.
+2. When every file is staged, call `csaa_finalize_translation(runId)`.
+   That re-dispatches through `csaa_record_translation` so every gate
+   (schema + content gates + page-coverage signature gate + compile_check)
+   fires identically — no shortcut.
+
+For tiny migrations (≤2 files total) `csaa_record_translation` with one
+full payload is still fine.
+
+## SILENCE RULE — no chat narration of generated content
+
+When composing tool calls for `csaa_append_translation_file` or
+`csaa_record_translation`, **DO NOT narrate the file contents in your
+chat reply**. Phrases like:
+
+- "Now writing the page object class..."
+- "Adding element locators with self-healing..."
+- "Defining the page class with decorators..."
+- "Writing page object imports... Writing page object methods..."
+
+burn output tokens the LLM host counts toward the per-message cap. Two
+or three such page objects narrated and you hit
+`Sorry, the response hit the length limit` mid-flow.
+
+**Compose tool calls SILENTLY.** Your chat reply should contain only:
+1. A one-line "submitting feature/steps/page X..." status (or nothing).
+2. The tool call itself.
+
+The user reads `STATUS.md` for progress and the persisted artefacts for
+content. Visible markdown narration of generated file content is the #1
+cause of `length limit` aborts on the translate phase.
+
 ## CONVERSATION COMPACTION RECOVERY
 
 If VS Code summarises the conversation mid-flow, the responseSchema
@@ -116,8 +169,9 @@ recover:
    it contains the full instruction + responseSchema verbatim.
 2. Check the scratch files for partial progress:
    - `03-analyze/scratch-scenarios.json` — scenarios already staged
-3. Continue from the next un-submitted scenario, or call
-   `csaa_finalize_analysis`/`csaa_record_translation` if everything
+   - `05-translate/scratch-files.json` — translation files already staged
+3. Continue from the next un-submitted scenario/file, or call
+   `csaa_finalize_analysis`/`csaa_finalize_translation` if everything
    was already staged.
 
 Never reset the runId or re-issue `cs_ai_auto_assist` after compaction

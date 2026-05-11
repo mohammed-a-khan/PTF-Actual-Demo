@@ -81,6 +81,56 @@ export class CSContentValidator {
             }
         }
 
+        // Cross-file gate 0a: duplicate scenario titles in the same feature.
+        // Legacy test methods sometimes share `testName` in @MetaData (the
+        // suite path disambiguates them in Java). Once collapsed into a
+        // single feature file the duplicate titles confuse reports and tag
+        // filters. Require a disambiguator (legacy method name suffix is
+        // typical).
+        for (const featureFile of files.filter((f) => f.kind === 'feature')) {
+            const titleCounts = new Map<string, number>();
+            const blocks = CSContentValidator.splitScenarios(featureFile.content);
+            for (const b of blocks) titleCounts.set(b.title, (titleCounts.get(b.title) ?? 0) + 1);
+            for (const [title, count] of titleCounts.entries()) {
+                if (count >= 2) {
+                    all.push({
+                        relativePath: featureFile.relativePath,
+                        ruleId: 'duplicate-scenario-title',
+                        severity: 'error',
+                        message: `${count} scenarios share the title "${title}". Each Scenario in a feature must have a unique title — disambiguate by appending the legacy method name or the variant (e.g. "${title} — SQL flavor" vs "${title} — Oracle flavor"). Report grouping and @<tag> filters break when titles collide.`,
+                    });
+                }
+            }
+        }
+
+        // Cross-file gate 0b: orphan @CSBDDStepDef. Steps file declares a
+        // pattern that no feature step matches → dead code. Inverse of the
+        // existing unmatched-feature-step gate.
+        if (declaredScenarios.size > 0 && stepDefTexts.size > 0) {
+            const featureStepTexts = new Set<string>();
+            for (const declared of declaredScenarios) {
+                const t = declared.split('::')[1] ?? declared;
+                featureStepTexts.add(t);
+            }
+            const orphans: string[] = [];
+            for (const stepDef of stepDefTexts) {
+                const re = CSContentValidator.cucumberToRegex(stepDef);
+                const matched = Array.from(featureStepTexts).some((ft) => re.test(ft));
+                if (!matched) orphans.push(stepDef);
+            }
+            if (orphans.length > 0) {
+                const stepsFile = files.find((f) => f.kind === 'steps');
+                if (stepsFile) {
+                    all.push({
+                        relativePath: stepsFile.relativePath,
+                        ruleId: 'orphan-step-def',
+                        severity: 'error',
+                        message: `${orphans.length} @CSBDDStepDef pattern(s) have no matching feature step (dead code): ${orphans.slice(0, 5).map((p) => `"${p}"`).join(', ')}${orphans.length > 5 ? ` and ${orphans.length - 5} more` : ''}. Delete the unused step defs or add the matching scenario step.`,
+                    });
+                }
+            }
+        }
+
         // Cross-file gate 1: every scenario step keyword+text must have a
         // matching @CSBDDStepDef. Catches the 12-undefined-steps failure
         // class — partial coverage that the coarse check missed.
@@ -429,6 +479,26 @@ export class CSContentValidator {
                     re: /^(Given|When|Then|And|But)\s+(?:I\s+)?(?:complete|finish|wrap\s+up)\s+the\s+(?:flow|process|operation)\b/i,
                     hint: 'vague "complete the flow" step — name the final action and assertion explicitly.',
                 },
+                {
+                    // Catches: "Execute shared support flow TS_4958", "Run helper method foo",
+                    // "Invoke shared helper", "Trigger support routine", "Process via helper" — every
+                    // variant of "delegate to internal helper" the LLM uses to dodge writing real
+                    // steps. The verb list is broad on purpose: every rephrase still has a verb +
+                    // helper/flow/support/routine token combo.
+                    re: /^(Given|When|Then|And|But)\s+(execute|run|invoke|perform|trigger|call|process|delegate)\s+(?:the\s+|a\s+|shared\s+|legacy\s+|common\s+)?(?:support\s+)?(?:flow|helper|method|routine|procedure|operation|step|util)\b/i,
+                    hint: '"execute/run/invoke <flow|helper|method>" hides what the helper actually does. The helper must be EXPANDED into its leaf actions inline: read the helper file, emit one Gherkin step per click/fill/select inside it, cite each step with the helper file + line number.',
+                },
+                {
+                    // Catches: "Execute shared support flow TS_4958" — a helper-id appears anywhere
+                    // in user-facing step text. Test-case ids (`@TS_xxx` tag) are fine; helper-method
+                    // ids inside step text are not.
+                    re: /^(Given|When|Then|And|But)\s+.*\b(?:TS_\d{2,}|AAA[-_]\d{2,}|H[-_]\d{2,})\b/i,
+                    hint: 'Step text references an internal helper/test id (TS_xxxx / AAA-xxxx). Those ids belong in @tags or the data row, never in user-facing Gherkin. Rewrite the step to describe what the helper does (e.g. "Given a SQL user is staged with valid AD-ENT id").',
+                },
+                {
+                    re: /^(Given|When|Then|And|But)\s+(?:I\s+)?prepare\s+test\s+data(?:\s+from\b|\s*$)/i,
+                    hint: '"Prepare test data" is a data-loading concern handled by the Examples envelope. Either remove this step or convert it to a precondition that actually asserts something (e.g. "Given a user with login <loginKey> exists in the test environment").',
+                },
             ];
             lines.forEach((ln, i) => {
                 const t = ln.trim();
@@ -477,11 +547,16 @@ export class CSContentValidator {
             }
             void methodPattern; // reserved for future use
 
-            // Rule 6g: identical step-def bodies. The LLM tends to copy/paste
-            // one verifyVisible() call across every step instead of writing
-            // the real action per step. Reject when ≥50% of bodies share an
-            // identical normalized form (stripping whitespace, comments,
-            // CSReporter.* calls — keep only the meaningful element calls).
+            // Rule 6g: identical step-def bodies. Two failure modes:
+            //   (1) Bulk laziness — ≥50% of bodies share the same body.
+            //   (2) Trivial-stub laziness — ANY 2+ methods share an identical
+            //       body when that body is short (≤80 chars normalized) AND
+            //       has ≤2 meaningful method calls. The user observed two
+            //       step defs (executeSupportTS4958/4960) with identical
+            //       `waitForVisible(...)` bodies; the 50% threshold missed
+            //       them because the steps file had 26 methods. Trivial-stub
+            //       detection catches that case without false-positiving on
+            //       legitimate similar-but-distinct steps in a large file.
             const norm = new Map<string, string[]>();
             for (const b of bodies) {
                 const stripped = b.body
@@ -495,23 +570,48 @@ export class CSContentValidator {
                 norm.get(stripped)!.push(b.method);
             }
             const total = bodies.length;
-            if (total >= 3) {
-                let dupedCount = 0;
-                const reported: Array<{ body: string; methods: string[] }> = [];
+            // Count distinct meaningful method calls in a body (await this.x.y(),
+            // CSDBUtils.q(), etc). Used to classify "trivial" vs "rich" bodies.
+            const countCalls = (body: string): number => {
+                const matches = body.match(/\b(?:await\s+)?[a-zA-Z_$][\w$]*\.[a-zA-Z_$][\w$]*\s*\(/g) ?? [];
+                return new Set(matches.map((m) => m.replace(/\s+/g, ''))).size;
+            };
+            if (total >= 2) {
+                let bulkDuped = 0;
+                const trivialDupes: Array<{ body: string; methods: string[] }> = [];
+                const bulkDupes: Array<{ body: string; methods: string[] }> = [];
                 for (const [body, methods] of norm.entries()) {
-                    if (methods.length >= 2) {
-                        dupedCount += methods.length;
-                        reported.push({ body, methods });
+                    if (methods.length < 2) continue;
+                    bulkDuped += methods.length;
+                    if (body.length <= 80 && countCalls(body) <= 2) {
+                        trivialDupes.push({ body, methods });
+                    } else {
+                        bulkDupes.push({ body, methods });
                     }
                 }
-                if (dupedCount >= Math.max(2, Math.floor(total * 0.5))) {
-                    const example = reported[0];
+                // (1) Trivial-stub: any 2+ methods sharing a short low-call body.
+                if (trivialDupes.length > 0) {
+                    const offending = trivialDupes.flatMap((d) => d.methods);
+                    const sample = trivialDupes[0];
                     violations.push({
                         relativePath: file.relativePath,
                         ruleId: 'duplicate-step-def-bodies',
                         severity: 'error',
-                        message: `${dupedCount}/${total} @CSBDDStepDef methods share the same body (after normalizing whitespace + CSReporter calls). Each step must do its OWN action — "click Search" steps click Search, "fill user id" steps fill the user id field, "verify error" steps verify the specific error. Identical bodies signal one stub was reused for every step. Methods sharing a body: [${example.methods.join(', ')}] all do: \`${example.body.slice(0, 120)}${example.body.length > 120 ? '…' : ''}\``,
+                        message: `${offending.length} @CSBDDStepDef method(s) share a trivial body (${trivialDupes.length} group(s)). Each step must do its OWN action — sharing a short waitForVisible/click body across multiple steps signals a stub that wasn't filled in. Methods: [${offending.slice(0, 8).join(', ')}] all do: \`${sample.body.slice(0, 120)}${sample.body.length > 120 ? '…' : ''}\`. Implement each step body with its real action sequence.`,
                     });
+                }
+                // (2) Bulk laziness — kept at the 50% threshold to avoid false
+                // positives on intentionally similar non-trivial bodies.
+                if (total >= 3 && bulkDuped >= Math.max(2, Math.floor(total * 0.5))) {
+                    const example = bulkDupes[0] ?? trivialDupes[0];
+                    if (example && !trivialDupes.includes(example)) {
+                        violations.push({
+                            relativePath: file.relativePath,
+                            ruleId: 'duplicate-step-def-bodies',
+                            severity: 'error',
+                            message: `${bulkDuped}/${total} @CSBDDStepDef methods share the same body (after normalizing whitespace + CSReporter calls). Each step must do its OWN action. Methods sharing a body: [${example.methods.join(', ')}] all do: \`${example.body.slice(0, 120)}${example.body.length > 120 ? '…' : ''}\``,
+                        });
+                    }
                 }
             }
         }
