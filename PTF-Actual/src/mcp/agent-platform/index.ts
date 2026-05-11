@@ -114,37 +114,12 @@ export {
     LegacyDataResult,
 } from './CSLegacyDataReader';
 export {
-    CSLegacyAnalyzer,
-    AnalysisReport,
-    SourceMeta,
-    ImportInfo,
-    UnresolvedDep,
-    TestAnalysis,
-    TestAnnotations,
-    CallTreeNode,
-    LoginContract,
-    DataReference,
-    ConfigReference,
-    DbReference,
-    PageObjectInfo,
-    PageElement,
-    GapEntry,
-    OutputPlan,
-    PlannedFile,
-    AnalysisSummary,
-} from './CSLegacyAnalyzer';
-export {
     CSSemanticReuse,
     ReuseCandidate,
     PageReuseDecision,
     StepReuseDecision,
+    PageObjectInfo,
 } from './CSSemanticReuse';
-export {
-    CSBddTranslator,
-    ContentMap,
-    TranslateOptions,
-    LlmTranslator,
-} from './CSBddTranslator';
 export {
     CSWriteWithAudit,
     WriteOptions,
@@ -152,15 +127,21 @@ export {
     AuditViolation,
     FixManifestEntry,
     WriteResult,
+    ContentMap,
 } from './CSWriteWithAudit';
+
+// LLM-delegation infrastructure (v1.34.0+).
+// csaa_analyze / csaa_translate return envelopes the LLM fulfils, then
+// the result is validated + content-gated by csaa_record_* partners.
 export {
-    CSHealClassifier,
-    HealCategory,
-    HealSeverity,
-    HealFailureSignals,
-    VisualEvidenceFlags,
-    HealClassification,
-} from './CSHealClassifier';
+    ANALYSIS_SCHEMA,
+    TRANSLATION_SCHEMA,
+    FORBIDDEN_PLACEHOLDER_PATTERNS,
+    JsonSchema,
+} from './CSDelegationSchemas';
+export { DelegationEnvelope } from './CSDelegationEnvelope';
+export { CSSchemaValidator, ValidationError } from './CSSchemaValidator';
+export { CSContentValidator, ContentViolation } from './CSContentValidator';
 
 export { csAiAutoAssistTools } from './CSAIAutoAssist';
 export { csaaPrimitiveTools } from './CSPrimitiveTools';

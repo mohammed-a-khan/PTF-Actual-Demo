@@ -15,7 +15,19 @@
  */
 
 import { CSRepoInventory, PageInventoryEntry, StepInventoryEntry } from './CSRepoInventory';
-import { PageObjectInfo } from './CSLegacyAnalyzer';
+
+/**
+ * Minimal shape required to compare a legacy/candidate page against
+ * existing pages. Was previously imported from the deleted
+ * CSLegacyAnalyzer; now declared locally so callers can construct
+ * it from any analysis source (LLM-produced or otherwise).
+ */
+export interface PageObjectInfo {
+    className: string;
+    sourcePath?: string;
+    elements: Array<{ name?: string; locator?: string }>;
+    publicMethods: string[];
+}
 
 // ============================================================================
 // Public Types
@@ -131,7 +143,7 @@ export class CSSemanticReuse {
         );
         // Element-name overlap (50%)
         const legacyElems = new Set(
-            legacy.elements.map((e) => CSSemanticReuse.normaliseName(e.fieldName)),
+            legacy.elements.map((e) => CSSemanticReuse.normaliseName(e.name ?? '')),
         );
         const targetElems = new Set(
             target.elements.map((e) => CSSemanticReuse.normaliseName(e.name)),
@@ -147,7 +159,7 @@ export class CSSemanticReuse {
     ): string {
         const lcommon = CSSemanticReuse.commonTokens(legacy.className, target.className);
         const overlap = CSSemanticReuse.jaccard(
-            new Set(legacy.elements.map((e) => CSSemanticReuse.normaliseName(e.fieldName))),
+            new Set(legacy.elements.map((e) => CSSemanticReuse.normaliseName(e.name ?? ''))),
             new Set(target.elements.map((e) => CSSemanticReuse.normaliseName(e.name))),
         );
         return `name(${legacy.className} ↔ ${target.className})=${(0.5 + 0.5 * lcommon).toFixed(2)}; element-overlap=${overlap.toFixed(2)}; score=${score.toFixed(2)}`;

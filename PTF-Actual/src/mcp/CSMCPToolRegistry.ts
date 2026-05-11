@@ -500,12 +500,25 @@ export class MCPToolBuilder {
         requiredProps?: string[];
     }): MCPToolBuilder {
         this.ensureInputSchema();
-        this.tool.inputSchema!.properties![name] = {
+        // When no inner properties are supplied, set `additionalProperties: true`
+        // so MCP clients (notably VS Code Copilot) understand the param accepts
+        // an arbitrary JSON object. Without this hint, the tool-list renderer
+        // treats the parameter as indeterminate and may hide it from the
+        // model — forcing the model to guess the parameter name from the
+        // description prose.
+        const schema: MCPSchemaProperty = {
             type: 'object',
             description,
-            properties,
-            required: options?.requiredProps,
         };
+        if (properties && Object.keys(properties).length > 0) {
+            schema.properties = properties;
+        } else {
+            (schema as MCPSchemaProperty & { additionalProperties?: boolean }).additionalProperties = true;
+        }
+        if (options?.requiredProps) {
+            schema.required = options.requiredProps;
+        }
+        this.tool.inputSchema!.properties![name] = schema;
         if (options?.required) {
             this.tool.inputSchema!.required = this.tool.inputSchema!.required || [];
             this.tool.inputSchema!.required.push(name);

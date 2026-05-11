@@ -620,4 +620,31 @@ export class CSCrossDomainNavigationHandler {
     public areHandlersActive(): boolean {
         return this.handlersSetup;
     }
+
+    /**
+     * Release all listeners attached to the underlying Page and clear handler
+     * state. Called on `page.on('close')` by CSBasePage so the handler doesn't
+     * hold the Page object alive after browser context teardown.
+     *
+     * Best-effort — if a particular `page.off(...)` fails (page already torn
+     * down by Playwright), we swallow the error and continue with state reset.
+     */
+    public dispose(): void {
+        try {
+            if (this.handlersSetup && this.page) {
+                try { this.page.removeAllListeners('framenavigated'); } catch { /* ignore */ }
+                try { this.page.removeAllListeners('load'); } catch { /* ignore */ }
+                try { this.page.removeAllListeners('response'); } catch { /* ignore */ }
+            }
+        } finally {
+            this.handlersSetup = false;
+            this.originalDomain = '';
+            this.targetDomain = '';
+            this.isNavigating = false;
+            this.navigationPromise = null;
+            this.redirectCount = 0;
+            // Allow the page reference to be dropped by the field's owner.
+            this.page = null as unknown as Page;
+        }
+    }
 }

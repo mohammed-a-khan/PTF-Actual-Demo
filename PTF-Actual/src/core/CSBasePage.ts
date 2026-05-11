@@ -15,7 +15,14 @@ export abstract class CSBasePage {
     protected browserManager: any; // CSBrowserManager - lazy loaded
     protected url: string = '';
     protected elements: Map<string, CSWebElement> = new Map();
-    private static crossDomainHandlers: Map<any, CSCrossDomainNavigationHandler> = new Map();
+    // WeakMap keyed by the Playwright `Page` instance. Before v1.35.2 this was
+    // a plain `Map<any, Handler>` which retained every Page object that had
+    // ever been used for the entire process lifetime — preventing V8 from GCing
+    // closed pages + their internal frame/listener trees. With WeakMap the
+    // entry is dropped automatically once the Page is otherwise unreferenced,
+    // and we additionally register a `page.on('close')` cleanup hook to dispose
+    // the handler proactively.
+    private static crossDomainHandlers: WeakMap<object, CSCrossDomainNavigationHandler> = new WeakMap();
 
     // Capture of the most recent browser dialog (alert/confirm/prompt/beforeunload)
     // observed by any of the acceptNext*/dismissNext*/alwaysAccept*/alwaysDismiss*
@@ -55,11 +62,29 @@ export abstract class CSBasePage {
      */
     private initializeCrossDomainHandler(): void {
         if (this.config.getBoolean('CROSS_DOMAIN_NAVIGATION_ENABLED', true)) {
+            const pageRef = this.page;
             // Reuse existing handler for the same page instance
-            if (!CSBasePage.crossDomainHandlers.has(this.page)) {
-                const handler = new CSCrossDomainNavigationHandler(this.page);
-                CSBasePage.crossDomainHandlers.set(this.page, handler);
+            if (!CSBasePage.crossDomainHandlers.has(pageRef)) {
+                const handler = new CSCrossDomainNavigationHandler(pageRef);
+                CSBasePage.crossDomainHandlers.set(pageRef, handler);
                 CSReporter.debug('Cross-domain navigation handler initialized');
+                // Proactive cleanup on page close — drops the WeakMap entry and
+                // calls handler.dispose() so its internal listeners go away
+                // before we wait for GC. Safe to attach once per page: WeakMap
+                // guarantees we won't double-init.
+                if (typeof pageRef.on === 'function') {
+                    try {
+                        pageRef.on('close', () => {
+                            try {
+                                const h = CSBasePage.crossDomainHandlers.get(pageRef);
+                                if (h && typeof (h as { dispose?: () => void }).dispose === 'function') {
+                                    (h as { dispose: () => void }).dispose();
+                                }
+                                CSBasePage.crossDomainHandlers.delete(pageRef);
+                            } catch { /* non-fatal */ }
+                        });
+                    } catch { /* page may not support on('close') in some test doubles */ }
+                }
             }
         }
     }

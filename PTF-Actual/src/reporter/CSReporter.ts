@@ -405,26 +405,56 @@ export class CSReporter {
         this.log('INFO', `HTML report generated: ${htmlPath}`);
     }
 
+    /**
+     * Memory bound for per-step action storage. Bulk runs (160+ scenarios)
+     * with verbose step bodies otherwise produce unbounded action arrays
+     * that exhaust V8 heap before the report writer gets a chance to run.
+     * Tunable via `CS_REPORTER_MAX_ACTIONS_PER_STEP` env var.
+     */
+    private static readonly MAX_ACTIONS_PER_STEP =
+        Number(process.env.CS_REPORTER_MAX_ACTIONS_PER_STEP) > 0
+            ? Number(process.env.CS_REPORTER_MAX_ACTIONS_PER_STEP)
+            : 500;
+
     private static log(level: string, message: string): void {
         const timestamp = new Date().toISOString();
         const logMessage = `[${timestamp}] [${level}] ${message}`;
 
-        // Store in log buffer
+        // Store in log buffer (single push; the second push below the level-check
+        // was a double-write bug that doubled buffer size for every at-or-above-
+        // threshold log — main contributor to OOM in long bulk runs).
         this.logBuffer.push(logMessage);
 
         // Add to current step if it exists (exclude DEBUG logs from step-level display)
-        // DEBUG logs are still captured in console-logs.txt via logBuffer
+        // DEBUG logs are still captured in console-logs.txt via logBuffer.
+        // Bounded by MAX_ACTIONS_PER_STEP — when exceeded, a single truncation
+        // marker is appended and further pushes are dropped. Report rendering
+        // sees the marker as a normal action entry.
         if (this.currentStep && level !== 'STEP' && level !== 'TEST' && level !== 'FEATURE' && level !== 'DEBUG') {
-            // Add detailed log entry to current step
             if (!this.currentStep.actions) {
                 this.currentStep.actions = [];
             }
-            this.currentStep.actions.push({
-                action: message,
-                status: level === 'PASS' ? 'pass' : level === 'FAIL' || level === 'ERROR' ? 'fail' : 'pass',
-                duration: 0,
-                timestamp: timestamp
-            });
+            const max = CSReporter.MAX_ACTIONS_PER_STEP;
+            const len = this.currentStep.actions.length;
+            if (len < max) {
+                this.currentStep.actions.push({
+                    action: message,
+                    status: level === 'PASS' ? 'pass' : level === 'FAIL' || level === 'ERROR' ? 'fail' : 'pass',
+                    duration: 0,
+                    timestamp: timestamp
+                });
+            } else if (len === max) {
+                // Push truncation marker exactly once per step. Use 'pass'
+                // status so it renders without alarm — the marker text itself
+                // signals the truncation.
+                this.currentStep.actions.push({
+                    action: `[truncated: action capture exceeded ${max} entries per step — full log in console-logs.txt]`,
+                    status: 'pass',
+                    duration: 0,
+                    timestamp: timestamp,
+                });
+            }
+            // len > max → silently drop
         }
 
         // Check log level hierarchy
@@ -455,7 +485,9 @@ export class CSReporter {
         const reset = '\x1b[0m';
 
         console.log(`${color}${logMessage}${reset}`);
-        this.logBuffer.push(logMessage);
+        // (Removed duplicate logBuffer.push — first push happens unconditionally
+        // at top of method, so a second push here doubled buffer size for every
+        // at-or-above-threshold log. Single push only.)
     }
 
     private static generateSimpleHTML(): string {

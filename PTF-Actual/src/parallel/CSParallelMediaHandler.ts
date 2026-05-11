@@ -143,7 +143,17 @@ export class CSParallelMediaHandler {
     }
 
     /**
-     * Capture console logs for a page (browser console)
+     * Capture console logs for a page (browser console).
+     *
+     * **Closure-capture bug fix (v1.35.2):** previous code captured `logs` as
+     * a const at registration time. When `saveConsoleLogs` later did
+     * `consoleLogs.set(workerId, [])`, the listeners kept writing to the
+     * stale array (held alive by their closures) while the new array stayed
+     * empty. We now look up the current array via `appendLog()` on every
+     * event so the Map's current entry is always the target.
+     *
+     * Also registers `page.on('close')` to drop listeners proactively so the
+     * Page can be GCed once Playwright tears down the context.
      */
     public setupConsoleLogCapture(page: Page): void {
         const workerId = this.getCurrentWorkerId();
@@ -152,43 +162,53 @@ export class CSParallelMediaHandler {
             this.consoleLogs.set(workerId, []);
         }
 
-        const logs = this.consoleLogs.get(workerId)!;
+        const append = (entry: string): void => {
+            const arr = this.consoleLogs.get(workerId);
+            if (arr) arr.push(entry);
+        };
 
-        // Capture browser console messages
-        page.on('console', msg => {
+        const onConsole = (msg: import('@playwright/test').ConsoleMessage): void => {
             const timestamp = new Date().toISOString();
             const logEntry = `[${timestamp}] [BROWSER-${msg.type().toUpperCase()}] ${msg.text()}`;
-            logs.push(logEntry);
-
-            // Also log to debug if enabled
+            append(logEntry);
             if (this.config.getBoolean('DEBUG_CONSOLE_LOGS', false)) {
                 CSReporter.debug(`[Worker ${workerId}] Browser Console: ${logEntry}`);
             }
-        });
-
-        // Capture page errors
-        page.on('pageerror', error => {
+        };
+        const onPageError = (error: Error): void => {
             const timestamp = new Date().toISOString();
             const errorEntry = `[${timestamp}] [ERROR] ${error.message}\n${error.stack}`;
-            logs.push(errorEntry);
+            append(errorEntry);
             CSReporter.warn(`[Worker ${workerId}] Page error: ${error.message}`);
-        });
-
-        // Capture request failures
-        page.on('requestfailed', request => {
+        };
+        const onRequestFailed = (request: import('@playwright/test').Request): void => {
             const timestamp = new Date().toISOString();
             const failureEntry = `[${timestamp}] [REQUEST_FAILED] ${request.url()} - ${request.failure()?.errorText}`;
-            logs.push(failureEntry);
-        });
-
-        // Capture responses with errors
-        page.on('response', response => {
+            append(failureEntry);
+        };
+        const onResponse = (response: import('@playwright/test').Response): void => {
             if (response.status() >= 400) {
                 const timestamp = new Date().toISOString();
                 const responseEntry = `[${timestamp}] [RESPONSE_ERROR] ${response.url()} - Status: ${response.status()}`;
-                logs.push(responseEntry);
+                append(responseEntry);
             }
-        });
+        };
+
+        page.on('console', onConsole);
+        page.on('pageerror', onPageError);
+        page.on('requestfailed', onRequestFailed);
+        page.on('response', onResponse);
+
+        // Proactive listener removal so the listener closures don't keep the
+        // Page object alive past its useful life.
+        try {
+            page.on('close', () => {
+                try { page.off('console', onConsole); } catch { /* ignore */ }
+                try { page.off('pageerror', onPageError); } catch { /* ignore */ }
+                try { page.off('requestfailed', onRequestFailed); } catch { /* ignore */ }
+                try { page.off('response', onResponse); } catch { /* ignore */ }
+            });
+        } catch { /* some test doubles don't implement on('close') */ }
     }
 
     /**

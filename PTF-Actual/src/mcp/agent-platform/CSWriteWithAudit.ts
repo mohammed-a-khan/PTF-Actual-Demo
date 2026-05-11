@@ -20,7 +20,16 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { ContentMap } from './CSBddTranslator';
+
+/**
+ * Minimal shape the writer needs. The producer of this shape is the
+ * LLM-fulfilled translation persisted by csaa_record_translation.
+ */
+export interface ContentMap {
+    files: Record<string, string>;
+    confidence: Record<string, number>;
+    notes: string[];
+}
 
 // ============================================================================
 // Public Types
