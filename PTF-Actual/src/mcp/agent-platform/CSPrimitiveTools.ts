@@ -86,6 +86,53 @@ function getCtx(runId: string): CSRunContext | null {
     return CSRunContext.get(runId);
 }
 
+/**
+ * Recursive BFS walk of `root` looking for a file whose basename matches
+ * `targetBaseName` (case-insensitive) AND whose absolute path contains the
+ * env name as a path segment (e.g. `.../sit/...`). Used by
+ * csaa_resolve_data_file when the direct path doesn't exist but a similarly
+ * named file lives under a per-env folder somewhere in the tree.
+ *
+ * Walks with Node fs.readdir (does NOT consult .gitignore), so it finds
+ * files under legacy folders that VS Code Copilot's `search` would miss.
+ */
+function commonPrefixLen(a: string, b: string): number {
+    let i = 0;
+    const max = Math.min(a.length, b.length);
+    while (i < max && a[i] === b[i]) i++;
+    return i;
+}
+
+function findFileWithEnvInPath(
+    root: string,
+    targetBaseName: string,
+    env: string,
+    maxDepth = 12,
+): string | null {
+    const targetLower = targetBaseName.toLowerCase();
+    const envLower = env.toLowerCase();
+    const envSegment = new RegExp(`(^|[\\\\/])${envLower}([\\\\/]|$)`, 'i');
+    const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+    while (queue.length > 0) {
+        const { dir, depth } = queue.shift()!;
+        if (depth > maxDepth) continue;
+        let entries: import('fs').Dirent[];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+        catch { continue; }
+        for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isFile() && e.name.toLowerCase() === targetLower && envSegment.test(full)) {
+                return full;
+            }
+            if (e.isDirectory() && !e.name.startsWith('.') &&
+                e.name !== 'node_modules' && e.name !== 'dist' && e.name !== 'build') {
+                queue.push({ dir: full, depth: depth + 1 });
+            }
+        }
+    }
+    return null;
+}
+
 function getStr(p: Record<string, unknown>, k: string): string | undefined {
     const v = p[k];
     return typeof v === 'string' ? v : undefined;
@@ -431,8 +478,12 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 '  Credentials: extract `username` / `user` / `defaultUsername` and `password` / `pwd` / `defaultPassword`. Without these, environments/<env>.env has blank creds and the run is unrunnable.',
                 '  At minimum env.properties must be read; if you cannot find it, add a high-severity gap.',
                 '',
-                'STEP 4 — read the legacy test-data file. If the inventory contains an .xls / .xlsx / .csv / .xml / .properties data file (see `grounding.dataFiles`), use `csaa_read_legacy_data` to fetch its rows. For EVERY scenario in your analysis, look up the data row by scenarioId and put the ACTUAL row columns (e.g. userName, userId, expectedError) into `scenarios[].dataRow`. Empty dataRows when a data file exists = run rejected.',
-                '  **COLUMN-SHIFT GUARD.** If the returned row has values that equal their own keys (e.g. `{loginKey: "loginKey", aDENTId: "aDENTId"}` — the value IS the column header string), the xls reader picked up the HEADER row as data. This happens with merged cells, frozen panes, or shifted headers. Detect this: if ≥40% of values equal their keys, the row is corrupt. Options: (a) re-read with `csaa_read_legacy_data` using a different row offset / sheet, OR (b) set `dataRow: {}` for that scenario AND add a high-severity gap: `"Data row for scenarioId X is header-shifted in the legacy xls — manual extraction needed"`. Submitting header-shift rows as-is is automatically rejected.',
+                'STEP 4 — read the legacy test-data file.',
+                '  **DO NOT use your built-in `search` / `file_search` tool to find xls/xlsx/csv files.** VS Code Copilot\'s search respects the workspace\'s `.gitignore` and `files.exclude` settings — legacy reference folders (LegacySeleniumCodeForConversion/, vendor/, third_party/) are often gitignored for read-only clones, so the search returns "no matches" for files that physically exist on disk. The framework gives you two deterministic alternatives that walk fs directly (no gitignore):',
+                '  • The complete list of discovered data files is in `grounding.dataFiles[]` (absolute paths) — pass any of those directly to `csaa_read_legacy_data(filePath, sheet?)`.',
+                '  • If the legacy `@QAFDataProvider(dataFile = "resources/${environment.name}/testdata/X.xls", ...)` uses placeholders, call `csaa_resolve_data_file(runId, annotationValue, environments?)` — it expands the placeholders against each env and returns absolute paths. Then read the resolved path with `csaa_read_legacy_data`.',
+                '  For EVERY scenario in your analysis, look up the data row by scenarioId and put the ACTUAL row columns (e.g. userName, userId, expectedError) into `scenarios[].dataRow`. Empty dataRows when a data file exists = run rejected. If the resolver returns no matches across every env (foundCount=0), inspect `inventoryCandidates` — sometimes the on-disk basename differs slightly from the annotation. If still nothing, set `dataRow: {}` and add a high-severity gap; do NOT invent data.',
+                '  **COLUMN-SHIFT GUARD.** If the returned row has values that equal their own keys (e.g. `{loginKey: "loginKey", aDENTId: "aDENTId"}` — the value IS the column header string), the xls reader picked up the HEADER row as data. This happens with merged cells, frozen panes, or shifted headers. Detect this: if ≥40% of values equal their keys, the row is corrupt. Options: (a) re-read with `csaa_read_legacy_data` using a different sheet name (the legacy file often has multiple sheets — try the sheet name from the @QAFDataProvider `sheetName` parameter), OR (b) set `dataRow: {}` for that scenario AND add a high-severity gap. Submitting header-shift rows as-is is automatically rejected.',
                 '',
                 'STEP 5 — for each legacy page-object Java class referenced by tests:',
                 '  - READ the full *.java file from the inventory.pages list.',
@@ -1522,9 +1573,12 @@ const csaa_translate: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 ' - No duplicate `import { X }` lines.',
                 ' - No duplicate `@Page("key")` decorators.',
                 '',
-                'STEP 3 — submit the translation. Two protocols, choose by file count:',
-                '  (A) **≤2 files total** → call `csaa_record_translation(runId, payload: { files: [...], notes?: [...] })` ONCE with the full file list.',
-                '  (B) **3+ files OR ≥4 analysis scenarios** → STREAM to avoid blowing LLM-host per-message output caps. Loop: for EACH generated file call `csaa_append_translation_file(runId, file: { relativePath, kind, content })` — one feature, one steps.ts, N pages (one per analysis page with role=create-new), one data.json. Each call is small (~1–5 KB). When every file is staged, call `csaa_finalize_translation(runId)` which re-dispatches through csaa_record_translation so EVERY gate fires identically (schema validation + content gates + file-kind coverage + scenario-data column coverage + page-coverage signature gate + compile_check). The scratch file survives conversation compaction — if the LLM-host summarises mid-flow, just continue appending or call finalize.',
+                'STEP 3 — submit the translation. **DEFAULT: STREAMING.** Use `csaa_append_translation_file` for EVERY file then `csaa_finalize_translation` to close out. This is the path for any real migration.',
+                '  Why: `csaa_record_translation` enforces a HARD CAP (4 files OR 12 KB total content) on single-call submissions. Above that, it rejects with `state=AWAITING_LLM_RETRY` and forces you to retry via streaming. Even if you "think" your translation will fit (it won\'t — 5+ pages averaging 1-3 KB each easily blows it), composing the payload triggers "Sorry, the response hit the length limit" before the tool call lands. Skip the failed attempt; stream from the start.',
+                '  Streaming loop (mandatory above the cap, recommended otherwise):',
+                '    1. For EACH file in your translation, call `csaa_append_translation_file(runId, file: { relativePath, kind, content })`. One file per call (~1-5 KB). Order: feature first, then steps.ts, then one page object per analysis page with role=create-new, then data.json. Stages to `05-translate/scratch-files.json` — survives compaction.',
+                '    2. When every file is appended, call `csaa_finalize_translation(runId, notes?)`. It re-dispatches through `csaa_record_translation` with the bypass flag set, so EVERY gate fires identically (schema + content + page-coverage signature + step-coverage signature + compile_check). No shortcut, no quality compromise.',
+                '  Single-call path: only when total content < 12 KB AND files ≤ 4. Typically only "smoke fixture" sized inputs. Real migrations always need streaming.',
                 '',
                 '**CRITICAL — do NOT narrate file contents in chat.** Emitting "Now writing page object..." / "Adding element locators..." / "Defining the page class..." in your reply burns output tokens. Compose tool calls SILENTLY. The user reads STATUS.md for progress, not your narration. Inlining feature/steps/page content as visible markdown is the #1 cause of "response hit the length limit" on this phase.',
                 '',
@@ -1597,6 +1651,48 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
         const payload = params.payload;
         if (typeof payload !== 'object' || payload === null) {
             return errorResult(`payload must be an object`, runId);
+        }
+
+        // Gate 0: HARD payload size cap. The single-call path
+        // (csaa_record_translation with all files in one payload) is a
+        // convenience for tiny migrations only. Real test migrations have
+        // 5-15 files (~30-50 KB total content), which blows the LLM-host's
+        // per-message output cap mid-composition and the agent never even
+        // emits the tool call — it hits "Sorry, the response hit the
+        // length limit" while building the JSON in its head.
+        //
+        // Force the streaming path (csaa_append_translation_file +
+        // csaa_finalize_translation) whenever the payload exceeds the cap.
+        // Finalize bypasses this gate via _bypassSizeGate=true so the
+        // accumulated scratch can re-dispatch through here without looping.
+        const bypassSizeGate = params._bypassSizeGate === true;
+        if (!bypassSizeGate) {
+            const filesArr = (payload as { files?: unknown }).files;
+            if (Array.isArray(filesArr)) {
+                const totalBytes = filesArr.reduce<number>((sum, f) => {
+                    const c = (f as { content?: unknown })?.content;
+                    return sum + (typeof c === 'string' ? c.length : 0);
+                }, 0);
+                const MAX_FILES_PER_CALL = 4;
+                const MAX_BYTES_PER_CALL = 12 * 1024;
+                if (filesArr.length > MAX_FILES_PER_CALL || totalBytes > MAX_BYTES_PER_CALL) {
+                    return jsonResult(
+                        {
+                            state: 'AWAITING_LLM_RETRY',
+                            runId,
+                            phase: 'translate',
+                            payloadFiles: filesArr.length,
+                            payloadBytes: totalBytes,
+                            maxFiles: MAX_FILES_PER_CALL,
+                            maxBytes: MAX_BYTES_PER_CALL,
+                            nextStepNeeded: true,
+                            nextSuggestedTool: 'csaa_append_translation_file',
+                            feedback: `csaa_record_translation rejected: payload too large for single-call submission (${filesArr.length} files, ${totalBytes} bytes — caps ${MAX_FILES_PER_CALL} files / ${MAX_BYTES_PER_CALL} bytes). This cap exists because composing a 5-15 file translation in one JSON payload blows the LLM-host per-message output budget — you hit "response hit the length limit" mid-composition and the tool call never lands. \n\nUse the streaming protocol instead:\n  1. For EACH file in your translation, call csaa_append_translation_file(runId, file: { relativePath, kind, content }). One file per call (~1-5 KB each). Stages to 05-translate/scratch-files.json — survives compaction.\n  2. When every file is appended, call csaa_finalize_translation(runId). It runs EVERY gate (schema + content + page-coverage signature + step-coverage signature + compile_check) identical to single-call. No shortcut, no quality compromise.\n\nDo NOT retry csaa_record_translation with the same payload — you'll get the same rejection. The streaming path is mandatory above the cap.`,
+                        },
+                        `csaa_record_translation rejected: ${filesArr.length} files / ${totalBytes} bytes exceeds single-call cap. Use csaa_append_translation_file + csaa_finalize_translation.`,
+                    );
+                }
+            }
         }
 
         // Gate 1: schema validation
@@ -2278,9 +2374,11 @@ const csaa_finalize_translation: MCPToolDefinition = (defineTool() as MCPToolBui
         };
 
         // Re-dispatch through csaa_record_translation. Single source of truth
-        // for every gate.
+        // for every gate. `_bypassSizeGate` lets the accumulated scratch (which
+        // can be 5-15+ files) skip the per-call payload-size cap that exists
+        // to force the streaming path on direct callers.
         const res = await csaa_record_translation.handler(
-            { runId, payload: fullPayload },
+            { runId, payload: fullPayload, _bypassSizeGate: true },
             toolCtx,
         );
 
@@ -3039,6 +3137,184 @@ const csaa_read_legacy_data: MCPToolDefinition = (defineTool() as MCPToolBuilder
     })
     .build();
 
+// ============================================================================
+// csaa_resolve_data_file — deterministic data-file path resolver
+// ============================================================================
+// VS Code Copilot's built-in `search` tool respects `.gitignore` and
+// `files.exclude`. If the consumer's legacy code folder is gitignored — which
+// is common for read-only reference copies — then `search` returns no
+// matches even for files that physically exist on disk. The LLM then
+// concludes "the xls file isn't in the workspace" and either invents data
+// rows or escalates as a gap, both of which produce a bad migration.
+//
+// This tool sidesteps `search` entirely: it walks the inventory + workspace
+// with Node's fs (no gitignore), expands Java-style annotation patterns
+// like `resources/${environment.name}/testdata/<file>.xls` against each
+// declared env, and returns the absolute path(s) the data file actually
+// lives at. The LLM then passes those paths to `csaa_read_legacy_data`.
+
+const csaa_resolve_data_file: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_resolve_data_file')
+    .title('CS-AI-Auto-Assist — Resolve legacy data file path')
+    .description(
+        'Resolves a Java-style data-file annotation (e.g. ' +
+            '`resources/${environment.name}/testdata/CTSGatewayData.xls`) to absolute paths on ' +
+            'disk, one per requested environment. Walks the inventory + workspace with Node fs ' +
+            '— does NOT respect .gitignore — so legacy folders that the LLM\'s built-in search ' +
+            'tool cannot see are still found. Use this whenever the @QAFDataProvider / similar ' +
+            'annotation references a data file and you need its actual path before calling ' +
+            'csaa_read_legacy_data.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .stringParam(
+        'annotationValue',
+        'The dataFile annotation value as written in the legacy Java/C# (e.g. "resources/${environment.name}/testdata/CTSGatewayData.xls"). ' +
+            'Supports placeholders ${environment.name}, ${env}, ${envName}.',
+        { required: true },
+    )
+    .stringParam(
+        'environments',
+        'Comma-separated env names to expand (e.g. "sit,uat,dev"). Defaults to the env list extracted by csaa_discover, or "sit" if absent.',
+    )
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+        const annotationValue = getStr(params, 'annotationValue');
+        if (!annotationValue) return errorResult('annotationValue required', runId);
+
+        // Load inventory to learn workspace root + known data file paths.
+        const inventoryRaw = ctx.readPhaseArtifact('discover', 'inventory.json');
+        if (!inventoryRaw) {
+            return errorResult('no inventory — run csaa_discover before csaa_resolve_data_file', runId);
+        }
+        let inv: LegacyInventory;
+        try { inv = JSON.parse(inventoryRaw); }
+        catch { return errorResult('inventory.json is corrupt — re-run csaa_discover', runId); }
+
+        // Determine env list.
+        let envList: string[] = [];
+        const envParam = getStr(params, 'environments');
+        if (envParam) {
+            envList = envParam.split(',').map((s) => s.trim()).filter(Boolean);
+        } else {
+            // Look at directory names under resources/ in the inventory.
+            const envSet = new Set<string>();
+            for (const c of inv.propertiesFiles ?? []) {
+                const m = (c as string).match(/[\/\\]resources[\/\\]([^\/\\]+)[\/\\]/i);
+                if (m && m[1] !== 'sit' && m[1] !== 'dev' && m[1] !== 'uat' && m[1] !== 'qa' && m[1] !== 'prod') {
+                    // ignore weird folders; below we add the common defaults
+                }
+                if (m) envSet.add(m[1]);
+            }
+            envList = envSet.size > 0 ? [...envSet] : ['sit'];
+        }
+
+        // Workspace root: the inventory's rootPath.
+        const workspaceRoot = inv.rootPath;
+        if (!workspaceRoot || !fs.existsSync(workspaceRoot)) {
+            return errorResult(`inventory rootPath '${workspaceRoot}' missing on disk`, runId);
+        }
+
+        // Expand placeholders for each env, then resolve.
+        const placeholderRe = /\$\{(?:environment\.name|env|envName)\}/gi;
+        const resolved: Array<{
+            env: string;
+            relativePath: string;
+            absolutePath: string;
+            exists: boolean;
+            fileSize?: number;
+        }> = [];
+        const baseName = path.basename(annotationValue);
+        const fallbacksTried = new Set<string>();
+
+        for (const env of envList) {
+            const expanded = annotationValue.replace(placeholderRe, env);
+            // Direct join.
+            const direct = path.resolve(workspaceRoot, expanded);
+            const directExists = fs.existsSync(direct);
+            if (directExists) {
+                resolved.push({
+                    env,
+                    relativePath: expanded,
+                    absolutePath: direct,
+                    exists: true,
+                    fileSize: fs.statSync(direct).size,
+                });
+                continue;
+            }
+            // Fallback: walk workspace for any file matching basename with the
+            // env name in its path. Caches results across envs to avoid
+            // re-walking.
+            const cacheKey = `${env}::${baseName}`;
+            if (fallbacksTried.has(cacheKey)) {
+                resolved.push({ env, relativePath: expanded, absolutePath: direct, exists: false });
+                continue;
+            }
+            fallbacksTried.add(cacheKey);
+            const found = findFileWithEnvInPath(workspaceRoot, baseName, env);
+            if (found) {
+                resolved.push({
+                    env,
+                    relativePath: path.relative(workspaceRoot, found),
+                    absolutePath: found,
+                    exists: true,
+                    fileSize: fs.statSync(found).size,
+                });
+            } else {
+                resolved.push({
+                    env,
+                    relativePath: expanded,
+                    absolutePath: direct,
+                    exists: false,
+                });
+            }
+        }
+
+        // Also check inventory.dataFiles for any match — sometimes the
+        // annotation pattern differs from the actual on-disk name (e.g.
+        // CTSGatewayData.xls vs CTSGateway_Data.xls). Surface candidates.
+        const inventoryCandidates: Array<{ path: string; basename: string }> = [];
+        const targetStem = baseName.toLowerCase().replace(/\.[a-z0-9]+$/, '');
+        for (const d of inv.dataFiles ?? []) {
+            const p = String(d);
+            const b = path.basename(p).toLowerCase();
+            const bStem = b.replace(/\.[a-z0-9]+$/, '');
+            // Exact match, OR either name contains the other's stem, OR
+            // they share a long common prefix (≥5 chars or ≥60% of the
+            // shorter). Catches OrdersDataFile.xls vs OrdersData.xls in
+            // either direction.
+            const prefixLen = commonPrefixLen(bStem, targetStem);
+            const minLen = Math.min(bStem.length, targetStem.length);
+            const enoughPrefix = prefixLen >= 5 || (minLen > 0 && prefixLen / minLen >= 0.6);
+            if (b === baseName.toLowerCase() ||
+                bStem.includes(targetStem) || targetStem.includes(bStem) ||
+                enoughPrefix) {
+                inventoryCandidates.push({ path: p, basename: path.basename(p) });
+            }
+        }
+
+        const foundCount = resolved.filter((r) => r.exists).length;
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                annotationValue,
+                workspaceRoot,
+                requestedEnvs: envList,
+                resolved,
+                inventoryCandidates,
+                foundCount,
+                missingCount: resolved.length - foundCount,
+            },
+            foundCount > 0
+                ? `Resolved ${foundCount}/${resolved.length} env(s) for "${baseName}". Pass any of the absolute paths to csaa_read_legacy_data.`
+                : `No env resolved "${baseName}". Inventory has ${inventoryCandidates.length} similar file(s) — try those, or escalate as a high-severity gap.`,
+        );
+    })
+    .build();
+
 /**
  * Generate the framework config scaffold for the current run. Pulls
  * project name, environments, and DB aliases from the recorded analysis
@@ -3517,6 +3793,7 @@ export const csaaPrimitiveTools: MCPToolDefinition[] = [
     csaa_publish,
     csaa_query_existing_pages,
     csaa_read_legacy_data,
+    csaa_resolve_data_file,
     csaa_expand_helper,
     csaa_extract_page_fields,
 ];

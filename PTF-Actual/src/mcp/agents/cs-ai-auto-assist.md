@@ -25,6 +25,7 @@ tools:
   # Companion primitives:
   - csaa_query_existing_pages
   - csaa_read_legacy_data
+  - csaa_resolve_data_file      # deterministic resolver for legacy data-file paths (bypasses gitignore)
   - csaa_expand_helper          # deterministic helper-method body extractor
   - csaa_extract_page_fields    # deterministic page-object @FindBy extractor
   # Quality gates + caches:
