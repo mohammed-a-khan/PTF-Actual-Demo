@@ -85,9 +85,9 @@ export interface PageSignature {
 }
 
 export interface HelperSignature {
-    /** Helper class name (e.g. CTSGSupportMethods). */
+    /** Helper class name (e.g. SomeSupportMethods). */
     className: string;
-    /** Helper method name (e.g. TS_4958). */
+    /** Helper method name (e.g. someMethod). */
     methodName: string;
     /** Absolute path to the source file. */
     filePath: string;
@@ -133,7 +133,7 @@ const ACTION_PATTERNS: Array<{ kind: LeafAction['kind']; re: RegExp; targetIdx?:
 ];
 
 // Helper invocation: ClassName.methodName(...) where ClassName matches a
-// known helper suffix. This catches CTSGSupportMethods.TS_4958, FooHelper.bar,
+// known helper suffix. This catches FooSupportMethods.someMethod, FooHelper.bar,
 // etc.
 const HELPER_INVOCATION_RE = /\b([A-Z][A-Za-z0-9]*(?:SupportMethod|SupportMethods|Helper|Helpers|Util|Utils|Utility|Service|Factory|Manager|Provider))\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
 
@@ -234,7 +234,7 @@ export class CSLegacySignatureExtractor {
         // Resolve + parse each helper invocation's class file, then extract
         // the specific method body's actions. Also walk the helper file
         // for transitive page-class references — page objects only used by
-        // helpers (e.g. LoginPage used inside OrdersHelper.TS_5001) would
+        // helpers (e.g. LoginPage used inside OrdersHelper.setupLogin) would
         // otherwise never appear in the analysis.
         const seenHelperKeys = new Set<string>();
         const helperPagesToInclude = new Set<string>();

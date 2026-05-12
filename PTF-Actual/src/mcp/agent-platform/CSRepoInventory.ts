@@ -71,7 +71,7 @@ export interface StepInventoryEntry {
 }
 
 export interface FeatureScenarioEntry {
-    /** Tag like `@TS_88898` if present, else null. */
+    /** Tag like `@TC_0001` if present, else null. */
     id: string | null;
     /** Scenario or Scenario Outline name. */
     name: string;

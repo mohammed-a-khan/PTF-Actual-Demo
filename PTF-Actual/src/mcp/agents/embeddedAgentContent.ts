@@ -2514,56 +2514,67 @@ phases** — the phase-to-phase progression is your job, not the user's.
 watching STATUS.md update — they don't need a permission prompt
 interrupting the flow.
 
-## ANALYSIS RECORDING — chunked protocol for large legacy files
+## ITERATOR MODE — the system drives the loop, you produce one item per turn
 
-\`csaa_analyze\` returns an envelope, then YOU produce the analysis JSON.
-For legacy files with **≥4 @Test methods or deep step lists** the
-combined JSON often exceeds VS Code Copilot's per-message output cap —
-the agent then says "submitting now" but the actual tool call never
-fires. To avoid this **always stream when scenario count ≥ 4**:
+When \`csaa_discover\` extracts a Java signature successfully, both
+\`csaa_analyze\` and \`csaa_translate\` switch into **iterator mode** —
+they return a delegation envelope that asks you to produce **just one
+scenario** (or **just one file**) per tool call. The per-message
+output cap of the LLM host (≈32 KB on VS Code Copilot Sonnet) is then
+structurally unreachable because each turn carries ~1–3 KB.
 
-1. For EACH legacy \`@Test\` method, call \`csaa_append_analysis_scenario\`
-   with ONLY that one scenario object (matches
-   \`ANALYSIS_SCHEMA.scenarios[]\`). One scenario per tool call, ~1–3 KB
-   each. Repeat until every legacy test is recorded. The scratch file
-   under \`<runFolder>/03-analyze/scratch-scenarios.json\` survives
-   conversation compaction.
-2. When all scenarios are appended, call \`csaa_finalize_analysis\` with
-   the **non-scenario** portion of the analysis: \`source\`, \`feature\`,
-   \`pages\`, \`dependencyGraph\`, \`configFiles\`, \`loginContract\`, \`gaps\`,
-   \`readinessScore\`. **Do NOT include \`scenarios\`** — they come from
-   the scratch file. Finalize runs every gate (semantic + readiness +
-   locator-source + reuse-existing + count-match + fabricated-row +
-   fuzzy-match) and persists \`analysis-report.json\`.
+How it works:
 
-For small files (≤3 scenarios) \`csaa_record_analysis\` with one full
-payload is still fine.
+1. \`csaa_analyze\` → envelope \`{ task: 'produce-one-scenario', recordWith:
+   'csaa_append_analysis_scenario', grounding.currentItem: {…},
+   grounding.queue: { current, total, remaining } }\`. The envelope
+   targets ONE legacy \`@Test\`.
+2. You compose \`csaa_append_analysis_scenario(runId, scenario: {…})\`
+   matching the per-scenario \`responseSchema\` for that one method.
+3. The append response carries the NEXT item's envelope (same shape)
+   plus \`iteratorMode: true\` and \`queueAdvanced: true\`. **Just keep
+   looping until the response carries a finalize envelope** (\`task:
+   'produce-analysis-meta'\`).
+4. The finalize envelope's \`responseSchema\` asks for the non-scenario
+   fields (source, feature, pages, dependencyGraph, configFiles,
+   loginContract, gaps, readinessScore). Submit via
+   \`csaa_finalize_analysis(runId, payload: {…})\`.
 
-## TRANSLATION RECORDING — chunked protocol for large file sets
+Translate works identically:
 
-\`csaa_translate\` returns an envelope, then YOU produce the file set. A
-realistic Administration-sized migration emits **1 feature + 1 steps.ts
-+ 5+ page objects + 1 data.json = 8+ files, 30-50 KB total**. Submitting
-that as a single \`csaa_record_translation(payload: { files: [...] })\`
-blows the LLM-host per-message output cap and you get
-\`Sorry, the response hit the length limit\`.
+1. \`csaa_translate\` → envelope \`{ task: 'produce-one-file',
+   recordWith: 'csaa_append_translation_file', grounding.currentItem:
+   { kind: 'feature'|'steps'|'page'|'data', relativePath, … } }\`.
+2. Submit \`csaa_append_translation_file(runId, file: { relativePath,
+   kind, content })\` with that one file.
+3. Response carries the next file's envelope. Repeat until the
+   response carries \`task: 'finalize-translation'\`, then call
+   \`csaa_finalize_translation(runId)\`.
 
-To avoid this **always stream when files ≥ 3 OR analysis recorded ≥ 4
-scenarios**:
+**Iterator state survives compaction.** The queue lives at
+\`<runFolder>/queue.json\`. If VS Code summarises the conversation
+mid-flow, the next tool call still reads the persisted position and
+returns the correct next envelope.
 
-1. For EACH generated file (feature first, then steps, then one page
-   object per analysis page with role=create-new, then data) call
-   \`csaa_append_translation_file(runId, file: { relativePath, kind,
-   content })\` with just that one file. Each call is small (~1–5 KB).
-   The scratch under \`<runFolder>/05-translate/scratch-files.json\`
-   survives conversation compaction.
-2. When every file is staged, call \`csaa_finalize_translation(runId)\`.
-   That re-dispatches through \`csaa_record_translation\` so every gate
-   (schema + content gates + page-coverage signature gate + compile_check)
-   fires identically — no shortcut.
+**Fallback path (queue empty).** If \`csaa_discover\` did not extract a
+signature (non-Java legacy, or fixture without \`@Test\`), the queue is
+empty and the older bulk envelope flows. In that mode use the chunked
+streaming protocol below — same scratch files, no per-call envelope.
 
-For tiny migrations (≤2 files total) \`csaa_record_translation\` with one
-full payload is still fine.
+### Streaming fallback (queue empty)
+
+For runs without a seeded queue, large analyses or file sets still
+need streaming to dodge the per-message cap:
+
+- Analyze: call \`csaa_append_analysis_scenario\` once per legacy \`@Test\`,
+  then \`csaa_finalize_analysis\` with the non-scenario fields.
+- Translate: call \`csaa_append_translation_file\` once per output file
+  (feature first, then steps, then one page object per create-new
+  analysis page, then data), then \`csaa_finalize_translation(runId)\`.
+- The scratch files at \`<runFolder>/03-analyze/scratch-scenarios.json\`
+  and \`<runFolder>/05-translate/scratch-files.json\` survive compaction.
+- For tiny inputs (≤2 files OR ≤3 scenarios) the bulk record tools
+  (\`csaa_record_analysis\` / \`csaa_record_translation\`) still work.
 
 ## SILENCE RULE — no chat narration of generated content
 

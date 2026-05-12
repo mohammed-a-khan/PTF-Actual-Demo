@@ -41,6 +41,11 @@ import {
     type PageSignature,
     type HelperSignature,
 } from './CSLegacySignatureExtractor';
+import {
+    CSWorkQueue,
+    type AnalyzeQueueItem,
+    type TranslateQueueItem,
+} from './CSWorkQueue';
 import { CSSemanticReuse } from './CSSemanticReuse';
 import { CSWriteWithAudit, AuditViolation } from './CSWriteWithAudit';
 import { CSRepoInventory } from './CSRepoInventory';
@@ -200,6 +205,52 @@ const csaa_discover: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                         'signature.json',
                         JSON.stringify(signature, null, 2),
                     );
+
+                    // v1.38 Phase 2 — seed the analyze queue. The
+                    // iterator architecture turns each @Test method into
+                    // a single queue item; downstream csaa_analyze /
+                    // csaa_append_analysis_scenario tools pop items one
+                    // at a time so the LLM is given the spec for
+                    // exactly one scenario per turn. This is the only
+                    // way to keep tool-response payloads small enough
+                    // to never blow the LLM-host per-message output
+                    // budget on multi-scenario migrations.
+                    try {
+                        // Local const so the callback closure sees a
+                        // definitely-non-null value (the outer `let
+                        // signature` could theoretically be reassigned).
+                        const sig = signature;
+                        const queue = CSWorkQueue.load(ctx);
+                        const items: AnalyzeQueueItem[] = sig.tests.map((t) => ({
+                            kind: 'analyze-scenario',
+                            id: t.testCaseId
+                                ? (t.testCaseId.startsWith('TC_') || t.testCaseId.startsWith('TS_')
+                                    ? t.testCaseId
+                                    : `TC_${t.testCaseId}`)
+                                : `TC_${t.methodName}`,
+                            methodName: t.methodName,
+                            legacyFile: entryForSignature,
+                            legacyLineRange: [t.startLine, t.endLine],
+                            helpersToExpand: t.helperInvocations.map((h) => ({
+                                helperClass: h.helperClass,
+                                helperMethod: h.helperMethod,
+                            })),
+                            expectedActionCount: CSLegacySignatureExtractor.expectedActionCount(
+                                t,
+                                sig.helpers,
+                            ),
+                        }));
+                        queue.seedAnalyze(items);
+                    } catch (queueErr) {
+                        // Queue seeding is best-effort. If it fails the
+                        // pipeline still works (downstream tools fall
+                        // back to the v1.37.4 hard-cap streaming flow).
+                        ctx.writePhaseArtifact(
+                            'discover',
+                            'queue-seed-error.txt',
+                            queueErr instanceof Error ? (queueErr.stack ?? queueErr.message) : String(queueErr),
+                        );
+                    }
                 } catch (sigErr) {
                     // Signature extraction is best-effort. Don't fail the
                     // discover phase if a malformed source file blocks the
@@ -236,6 +287,8 @@ const csaa_discover: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                         helpers: Object.keys(signature.helpers).length,
                         unresolvedReferences: signature.unresolvedReferences.length,
                     } : undefined,
+                    analyzeQueueSeeded: signature !== null && signature.tests.length > 0,
+                    analyzeQueueLength: signature !== null ? signature.tests.length : 0,
                     nextStepNeeded: true,
                     nextSuggestedTool: 'csaa_analyze',
                     nextSuggestedArgs: {
@@ -331,6 +384,154 @@ function originalRenderInventoryMarkdown(inv: LegacyInventory): string {
 // for every leaf call — anything it can't ground gets escalated as a
 // gap, never as a stub.
 // ============================================================================
+
+// ============================================================================
+// Iterator-mode envelope builders (v1.38)
+// ============================================================================
+// One scenario per turn: keeps tool-response payloads small and the LLM's
+// per-message output cap unreachable. Built lazily from queue.peekNext() so
+// each tool call carries the spec for exactly one piece of work.
+
+interface AnalyzeIteratorCommonGrounding {
+    runId: string;
+    project: string;
+    module?: string;
+    entryFile: string;
+    inventoryPath: string;
+    skillsPath: string;
+}
+
+/**
+ * Build the per-scenario envelope. Used by csaa_analyze when the queue has
+ * items, and by csaa_append_analysis_scenario after a successful advance
+ * to hand the LLM the spec for the NEXT scenario.
+ */
+function buildAnalyzeScenarioEnvelope(
+    item: AnalyzeQueueItem,
+    progress: { completed: number; total: number },
+    common: AnalyzeIteratorCommonGrounding,
+): DelegationEnvelope {
+    const scenarioIdx = progress.completed + 1; // 1-indexed for display
+    const helpersList = item.helpersToExpand.length > 0
+        ? item.helpersToExpand.map((h) => `${h.helperClass}.${h.helperMethod}`).join(', ')
+        : '(none)';
+    return {
+        task: 'produce-one-scenario',
+        instruction: [
+            `You are producing ONE scenario (${scenarioIdx}/${progress.total}). The framework owns the iteration — submit this one, the next item's spec will be in my reply. Do NOT try to produce more than one scenario per turn; the per-scenario submit tool rejects multi-scenario payloads.`,
+            '',
+            `Scenario id: ${item.id}`,
+            `Legacy @Test method: ${item.methodName} (in ${item.legacyFile}, lines ${item.legacyLineRange[0]}–${item.legacyLineRange[1]})`,
+            `Expected leaf-action count (signature floor, including helper expansion): ≥${Math.max(3, Math.round(item.expectedActionCount * 0.7))} steps`,
+            `Helper invocations in this method that you MUST expand inline: ${helpersList}`,
+            '',
+            'Steps:',
+            '  1. READ lines ' + item.legacyLineRange[0] + '–' + item.legacyLineRange[1] + ' of the legacy file via your `read` tool. Identify every leaf action (click / sendKeys / fill / select / getText / assert / verify).',
+            '  2. For EACH helper invocation listed above, call `csaa_expand_helper(runId, helperClass, helperMethod)` to get the ordered leaf-action list inside that helper. Inline those actions as Gherkin steps in this scenario.',
+            '  3. If the @Test uses @QAFDataProvider with a placeholder data file (e.g. `resources/${environment.name}/testdata/X.xls`), call `csaa_resolve_data_file(runId, annotationValue, environments)` then `csaa_read_legacy_data(filePath, sheet)` and place the actual row columns into `dataRow`. Do NOT use your built-in `search` tool — it misses gitignored legacy folders.',
+            '  4. Build ONE scenario object matching the responseSchema (id, title, runFlag, tags, dataRow, steps[]).',
+            '     - title: use legacyMethodName as-is OR add a disambiguator if another @Test shares the same title.',
+            '     - steps[]: one entry per leaf action. legacyCite.lineNumber must be the actual line in the helper or @Test body.',
+            '     - dataRow: actual columns from the legacy xls (loginKey, userId, expectedError, etc.). If 40%+ of values match their own keys (column-shift artifact), set dataRow:{} and reflect this via a follow-up gap during finalize.',
+            '  5. Submit via `csaa_append_analysis_scenario(runId, scenario: { ... })`. My response will tell you what scenario to produce next, or to call csaa_finalize_analysis.',
+            '',
+            'STRICT RULES (gates will reject violations):',
+            ' - Generated step count for this scenario ≥ 70% of the legacy floor above. Submitting fewer steps rejects with shortfall numbers.',
+            ' - NEVER emit "Execute shared support flow X", "Run helper", "Invoke method" stubs — the helper has to be expanded.',
+            ' - NEVER reference internal Java class names (e.g. TestDataRow, FooHelper) or helper ids in user-facing Gherkin step text.',
+            ' - Source-ground every step: legacyCite { lineNumber, snippet } pointing at the file + line.',
+            '',
+            'SILENCE RULE: do NOT narrate file contents in your chat reply ("now writing scenario..."). Compose the tool call directly; the user reads STATUS.md for progress.',
+        ].join('\n'),
+        responseSchema: (ANALYSIS_SCHEMA as {
+            properties?: { scenarios?: { items?: Record<string, unknown> } };
+        }).properties?.scenarios?.items ?? {},
+        grounding: {
+            runId: common.runId,
+            project: common.project,
+            module: common.module,
+            entryFile: common.entryFile,
+            inventoryPath: common.inventoryPath,
+            skillsPath: common.skillsPath,
+            currentItem: {
+                kind: item.kind,
+                id: item.id,
+                methodName: item.methodName,
+                legacyFile: item.legacyFile,
+                legacyLineRange: item.legacyLineRange,
+                helpersToExpand: item.helpersToExpand,
+                expectedActionCount: item.expectedActionCount,
+                dataFileHint: item.dataFileHint,
+            },
+            queue: {
+                current: scenarioIdx,
+                total: progress.total,
+                remaining: Math.max(0, progress.total - progress.completed - 1),
+            },
+        },
+        recordWith: 'csaa_append_analysis_scenario',
+        recordArgs: { runId: common.runId },
+    };
+}
+
+/**
+ * Built when the analyze queue is drained. Tells the LLM to produce the
+ * non-scenario portion of the analysis (source / feature / pages /
+ * dependencyGraph / configFiles / loginContract / gaps / readinessScore)
+ * and submit via csaa_finalize_analysis. Scenarios are already in the
+ * scratch file — they must NOT be repeated in this payload.
+ */
+function buildAnalyzeFinalizeEnvelope(
+    scenariosStaged: number,
+    common: AnalyzeIteratorCommonGrounding,
+): DelegationEnvelope {
+    return {
+        task: 'produce-analysis-meta',
+        instruction: [
+            `All ${scenariosStaged} scenario(s) are staged in 03-analyze/scratch-scenarios.json. Now produce the non-scenario portion of the analysis and call csaa_finalize_analysis. This is the final step before the analyze phase closes.`,
+            '',
+            'Required fields (responseSchema below):',
+            '  - source: { absolutePath, relativePath, sha256 } — the entry test file.',
+            '  - feature: { name, slug, tags } — the Gherkin feature header.',
+            '  - dependencyGraph: array of { path, kind } — entry + base class + every page object + every helper file you read. Floor is ≥3 entries.',
+            '  - configFiles: array of { path, env?, keysExtracted, values } — at minimum the env.properties file (with web BASE_URL + credentials extracted into `values`). DB url goes into `values` separately under a `db.*`-prefixed key but NEVER as the web BASE_URL.',
+            '  - pages: array of { className, role, elements[] } — one per page class referenced. role is "create-new" or "reuse-existing". For role=create-new pages, call `csaa_extract_page_fields(runId, pageClass)` first and list ≥80% of the legacy @FindBy fields.',
+            '  - loginContract: { detected, pattern, gherkinStep, loginPageFile?, url?, credentialFields? }',
+            '  - gaps: array of { severity, detail, suggestedFuzzyMatch? } — any unresolved issues.',
+            '  - readinessScore: number 0..1. Below 0.7 the run halts.',
+            '',
+            'Submit via `csaa_finalize_analysis(runId, payload: { source, feature, dependencyGraph, configFiles, pages, loginContract, gaps, readinessScore })`. **Do NOT include `scenarios` in this payload** — they come from the scratch file. finalize re-dispatches into csaa_record_analysis so every gate fires identically (schema + semantic + signature-coverage + readiness).',
+            '',
+            'SILENCE RULE: compose the tool call directly, do not narrate the payload contents in chat.',
+        ].join('\n'),
+        // Minimal subset schema — finalize re-validates via the full ANALYSIS_SCHEMA after merging in scenarios from scratch.
+        responseSchema: {
+            type: 'object',
+            required: ['source', 'feature', 'dependencyGraph', 'configFiles', 'pages', 'loginContract', 'gaps', 'readinessScore'],
+            properties: {
+                source: { type: 'object' },
+                feature: { type: 'object' },
+                dependencyGraph: { type: 'array' },
+                configFiles: { type: 'array' },
+                pages: { type: 'array' },
+                loginContract: { type: 'object' },
+                gaps: { type: 'array' },
+                readinessScore: { type: 'number' },
+            },
+        },
+        grounding: {
+            runId: common.runId,
+            project: common.project,
+            module: common.module,
+            entryFile: common.entryFile,
+            inventoryPath: common.inventoryPath,
+            skillsPath: common.skillsPath,
+            scenariosStaged,
+        },
+        recordWith: 'csaa_finalize_analysis',
+        recordArgs: { runId: common.runId },
+    };
+}
 
 const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
     .name('csaa_analyze')
@@ -443,6 +644,64 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
             'inventory.json',
         );
 
+        // v1.38 Phase 3 — iterator mode. When the queue has items
+        // (Java legacy that went through signature extraction during
+        // discover), return a per-scenario envelope so the LLM receives
+        // the spec for ONE scenario at a time. The bulk envelope below
+        // remains for the backward-compat path (non-Java legacy where
+        // signature extraction skipped, or runs that bypassed discover).
+        const queue = CSWorkQueue.load(ctx);
+        if (!queue.isEmpty('analyze')) {
+            const item = queue.peekNext('analyze') as AnalyzeQueueItem;
+            const common: AnalyzeIteratorCommonGrounding = {
+                runId,
+                project,
+                module,
+                entryFile,
+                inventoryPath,
+                skillsPath: '.github/skills/',
+            };
+            const iteratorEnvelope = buildAnalyzeScenarioEnvelope(
+                item,
+                { completed: queue.completed('analyze'), total: queue.total('analyze') },
+                common,
+            );
+
+            // Persist intake + envelope same as legacy path so
+            // downstream phases find the project/module + recover after
+            // compaction.
+            ctx.writePhaseArtifact(
+                'analyze',
+                'delegation-envelope.json',
+                JSON.stringify(iteratorEnvelope, null, 2),
+            );
+            ctx.writePhaseArtifact(
+                'intake',
+                'run-params.json',
+                JSON.stringify({ project, module, entryFile }, null, 2),
+            );
+            CSStatusWriter.write(ctx);
+
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_FULFILMENT',
+                    runId,
+                    phase: 'analyze',
+                    delegation: iteratorEnvelope,
+                    queue: {
+                        current: queue.completed('analyze') + 1,
+                        total: queue.total('analyze'),
+                        progress: queue.progress('analyze'),
+                    },
+                    iteratorMode: true,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_append_analysis_scenario',
+                    nextSuggestedArgs: { runId },
+                },
+                `Iterator mode: produce scenario ${queue.completed('analyze') + 1}/${queue.total('analyze')} (${item.id}). Submit via csaa_append_analysis_scenario.`,
+            );
+        }
+
         const envelope: DelegationEnvelope = {
             task: 'analyze-legacy-test-file',
             instruction: [
@@ -479,11 +738,11 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 '  At minimum env.properties must be read; if you cannot find it, add a high-severity gap.',
                 '',
                 'STEP 4 — read the legacy test-data file.',
-                '  **DO NOT use your built-in `search` / `file_search` tool to find xls/xlsx/csv files.** VS Code Copilot\'s search respects the workspace\'s `.gitignore` and `files.exclude` settings — legacy reference folders (LegacySeleniumCodeForConversion/, vendor/, third_party/) are often gitignored for read-only clones, so the search returns "no matches" for files that physically exist on disk. The framework gives you two deterministic alternatives that walk fs directly (no gitignore):',
+                '  **DO NOT use your built-in `search` / `file_search` tool to find xls/xlsx/csv files.** VS Code Copilot\'s search respects the workspace\'s `.gitignore` and `files.exclude` settings — legacy reference folders (legacy/, vendor/, third_party/, archive/) are often gitignored for read-only clones, so the search returns "no matches" for files that physically exist on disk. The framework gives you two deterministic alternatives that walk fs directly (no gitignore):',
                 '  • The complete list of discovered data files is in `grounding.dataFiles[]` (absolute paths) — pass any of those directly to `csaa_read_legacy_data(filePath, sheet?)`.',
                 '  • If the legacy `@QAFDataProvider(dataFile = "resources/${environment.name}/testdata/X.xls", ...)` uses placeholders, call `csaa_resolve_data_file(runId, annotationValue, environments?)` — it expands the placeholders against each env and returns absolute paths. Then read the resolved path with `csaa_read_legacy_data`.',
                 '  For EVERY scenario in your analysis, look up the data row by scenarioId and put the ACTUAL row columns (e.g. userName, userId, expectedError) into `scenarios[].dataRow`. Empty dataRows when a data file exists = run rejected. If the resolver returns no matches across every env (foundCount=0), inspect `inventoryCandidates` — sometimes the on-disk basename differs slightly from the annotation. If still nothing, set `dataRow: {}` and add a high-severity gap; do NOT invent data.',
-                '  **COLUMN-SHIFT GUARD.** If the returned row has values that equal their own keys (e.g. `{loginKey: "loginKey", aDENTId: "aDENTId"}` — the value IS the column header string), the xls reader picked up the HEADER row as data. This happens with merged cells, frozen panes, or shifted headers. Detect this: if ≥40% of values equal their keys, the row is corrupt. Options: (a) re-read with `csaa_read_legacy_data` using a different sheet name (the legacy file often has multiple sheets — try the sheet name from the @QAFDataProvider `sheetName` parameter), OR (b) set `dataRow: {}` for that scenario AND add a high-severity gap. Submitting header-shift rows as-is is automatically rejected.',
+                '  **COLUMN-SHIFT GUARD.** If the returned row has values that equal their own keys (e.g. `{loginKey: "loginKey", userId: "userId"}` — the value IS the column header string), the xls reader picked up the HEADER row as data. This happens with merged cells, frozen panes, or shifted headers. Detect this: if ≥40% of values equal their keys, the row is corrupt. Options: (a) re-read with `csaa_read_legacy_data` using a different sheet name (the legacy file often has multiple sheets — try the sheet name from the @QAFDataProvider `sheetName` parameter), OR (b) set `dataRow: {}` for that scenario AND add a high-severity gap. Submitting header-shift rows as-is is automatically rejected.',
                 '',
                 'STEP 5 — for each legacy page-object Java class referenced by tests:',
                 '  - READ the full *.java file from the inventory.pages list.',
@@ -494,11 +753,11 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 'STEP 6 — for EVERY @Test method:',
                 '  - Extract scenario id, title, runFlag from @MetaData / @Test annotations.',
                 '  - For every Selenium action line (click, sendKeys, getText, waitFor, assert), produce ONE Gherkin step with `legacyCite` { lineNumber, snippet }.',
-                '  - **HELPER-METHOD EXPANSION IS MANDATORY.** When the @Test body contains a helper call like `CTSGSupportMethod.TS_4958(dataBean)` or `xHelper.populateForm(...)` or `xUtil.runFlow(...)`, you MUST:',
+                '  - **HELPER-METHOD EXPANSION IS MANDATORY.** When the @Test body contains a helper call like `XHelper.populateForm(...)`, `XSupportMethod.someMethod(args)`, or `XUtil.runFlow(...)`, you MUST:',
                 '      (a) read the helper class file fully (find it in inventory.helpers), add it to dependencyGraph[],',
                 '      (b) for EACH leaf action inside the helper method (`field.sendKeys(...)`, `button.click()`, `assert*`), emit ONE Gherkin step in this scenario\'s steps[] with `legacyCite` pointing at the helper file + the specific line,',
-                '      (c) DO NOT emit a single step like `"Execute shared support flow TS_4958"`, `"Run helper"`, `"Invoke method"`, `"Perform support routine"`, `"Call helper"`, `"Process via helper"`, etc. — every "delegate to helper" verb is rejected by the content gate. The helper has to be EXPANDED. If the helper does 12 actions, your scenario has 12 more steps in addition to the test\'s own actions.',
-                '      (d) Test ids (TS_4958) NEVER appear in user-facing step text — only as `@TS_xxxx` tags or inside the data row.',
+                '      (c) DO NOT emit a single step like `"Execute shared support flow X"`, `"Run helper"`, `"Invoke method"`, `"Perform support routine"`, `"Call helper"`, `"Process via helper"`, etc. — every "delegate to helper" verb is rejected by the content gate. The helper has to be EXPANDED. If the helper does 12 actions, your scenario has 12 more steps in addition to the test\'s own actions.',
+                '      (d) Test ids (e.g. TC_0001) NEVER appear in user-facing step text — only as `@TC_xxxx` tags or inside the data row.',
                 '  - Disambiguate scenario titles: when two @Test methods have the same `testName` in @MetaData (common when one is SQL-flavor and another is Oracle-flavor), append a disambiguator to the title (e.g. `"New_On_Save_Rules (SQL)"` and `"New_On_Save_Rules (Oracle)"`). Two scenarios in the same feature with identical titles are rejected.',
                 '  - Group locators by page; XPath primary, CSS alternatives.',
                 '  - Reuse pages from `grounding.existingPagesIndex` when class name matches; set role=reuse-existing.',
@@ -601,6 +860,45 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
         const payload = params.payload;
         if (typeof payload !== 'object' || payload === null) {
             return errorResult(`payload must be an object`, runId);
+        }
+
+        // Gate 0: HARD payload size cap (symmetric with csaa_record_translation
+        // in v1.37.3). The single-call analysis path is for tiny migrations
+        // only. Real legacy files have 4+ @Test methods; trying to submit
+        // the full analysis JSON in one tool call blows the LLM-host
+        // per-message output budget (~32 KB at Sonnet 4.6 output limit)
+        // mid-composition and the agent hits "Sorry, the response hit the
+        // length limit" before the tool call lands.
+        //
+        // Force the streaming path: csaa_append_analysis_scenario per
+        // scenario, then csaa_finalize_analysis. Finalize bypasses this
+        // gate via _bypassSizeGate=true.
+        const bypassSizeGate = params._bypassSizeGate === true;
+        if (!bypassSizeGate) {
+            const scenarios = (payload as { scenarios?: unknown }).scenarios;
+            if (Array.isArray(scenarios)) {
+                let totalBytes = 0;
+                try { totalBytes = JSON.stringify(payload).length; } catch { /* ignore */ }
+                const MAX_SCENARIOS_PER_CALL = 3;
+                const MAX_BYTES_PER_CALL = 16 * 1024;
+                if (scenarios.length > MAX_SCENARIOS_PER_CALL || totalBytes > MAX_BYTES_PER_CALL) {
+                    return jsonResult(
+                        {
+                            state: 'AWAITING_LLM_RETRY',
+                            runId,
+                            phase: 'analyze',
+                            payloadScenarios: scenarios.length,
+                            payloadBytes: totalBytes,
+                            maxScenarios: MAX_SCENARIOS_PER_CALL,
+                            maxBytes: MAX_BYTES_PER_CALL,
+                            nextStepNeeded: true,
+                            nextSuggestedTool: 'csaa_append_analysis_scenario',
+                            feedback: `csaa_record_analysis rejected: payload too large for single-call (${scenarios.length} scenarios, ${totalBytes} bytes — caps ${MAX_SCENARIOS_PER_CALL} scenarios / ${Math.round(MAX_BYTES_PER_CALL / 1024)} KB). Composing a 4+ scenario analysis in one JSON payload blows the LLM-host per-message output budget — you hit "response hit the length limit" mid-composition and the tool call never lands.\n\nUse the streaming protocol:\n  1. For EACH legacy @Test method, call csaa_append_analysis_scenario(runId, scenario: {...}). One scenario per call (~1-3 KB). Stages to 03-analyze/scratch-scenarios.json — survives compaction.\n  2. When every scenario is appended, call csaa_finalize_analysis(runId, payload: { source, feature, pages, dependencyGraph, configFiles, loginContract, gaps, readinessScore }) — DO NOT include scenarios in the finalize payload (they come from the scratch). Finalize runs every gate (semantic + signature-coverage + readiness) identically.\n\nDo NOT retry csaa_record_analysis with the same payload — same rejection. Streaming is mandatory above the cap.`,
+                        },
+                        `csaa_record_analysis rejected: ${scenarios.length} scenarios / ${totalBytes} bytes exceeds single-call cap. Use csaa_append_analysis_scenario + csaa_finalize_analysis.`,
+                    );
+                }
+            }
         }
 
         const errors = CSSchemaValidator.validate(payload, ANALYSIS_SCHEMA);
@@ -858,7 +1156,7 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
 
         // 8. Column-shift detection in scenarios[].dataRow.
         //    The legacy xls extractor sometimes returns the HEADER row as
-        //    data (e.g. {loginKey: "loginKey", aDENTId: "aDENTId"}). The
+        //    data (e.g. {loginKey: "loginKey", userId: "userId"}). The
         //    LLM faithfully copies these strings instead of flagging them.
         //    Reject when ≥40% of values in a scenario's dataRow equal their
         //    own keys — that's a column-shift artifact, not real data.
@@ -890,7 +1188,9 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
         //    steps total (login + the helper invocation, with no expansion),
         //    the helper wasn't expanded. Helpers MUST be opened and their
         //    leaf actions inlined as Gherkin steps.
-        const HELPER_CLASS_RE = /\b([A-Z][a-zA-Z0-9]*(?:SupportMethod|Helper|Util|Service|Factory|Manager|Provider))\b\s*\.\s*[A-Z_][a-zA-Z0-9_]+\s*\(/;
+        // Method name can be either camelCase (foo) or PascalCase or
+        // SHOUTING_SNAKE_CASE (legacy test-id style). Accept all three.
+        const HELPER_CLASS_RE = /\b([A-Z][a-zA-Z0-9]*(?:SupportMethod|SupportMethods|Helper|Helpers|Util|Utils|Utility|Service|Factory|Manager|Provider))\b\s*\.\s*([A-Za-z_][a-zA-Z0-9_]*)\s*\(/;
         const unexpandedHelpers: Array<{ scenarioId: string; helperRef: string; stepCount: number }> = [];
         for (const s of analysis.scenarios) {
             const steps = (s as { steps?: Array<{ legacyCite?: { snippet?: string } }> }).steps ?? [];
@@ -922,7 +1222,7 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 (u) => `  - scenario "${u.scenarioId}" references helper(s) [${u.helperRef}] but has only ${u.stepCount} step(s)`,
             ).join('\n');
             semanticErrors.push(
-                `${unexpandedHelpers.length} scenario(s) reference helper classes but the helper body was NOT expanded inline:\n${list}\n\nWhen a legacy test calls e.g. CTSGSupportMethod.TS_4958(dataBean), that helper does N internal actions (fill firstName, fill lastName, select role, click Save, ...). You MUST: (a) read the helper class file, (b) for each leaf action inside the helper method, emit ONE Gherkin step in this scenario's steps[] with legacyCite pointing at the helper file + line, (c) add the helper file to dependencyGraph. Do NOT emit a single "Execute shared support flow" / "Run helper" / "Invoke method" step — those stubs are rejected. If the helper file is genuinely unreadable, add a high-severity gap explaining why.`,
+                `${unexpandedHelpers.length} scenario(s) reference helper classes but the helper body was NOT expanded inline:\n${list}\n\nWhen a legacy test calls e.g. SomeHelper.someMethod(args), that helper does N internal actions (fill field A, fill field B, select option, click Save, ...). You MUST: (a) read the helper class file, (b) for each leaf action inside the helper method, emit ONE Gherkin step in this scenario's steps[] with legacyCite pointing at the helper file + line, (c) add the helper file to dependencyGraph. Do NOT emit a single "Execute shared support flow" / "Run helper" / "Invoke method" step — those stubs are rejected. If the helper file is genuinely unreadable, add a high-severity gap explaining why.`,
             );
         }
 
@@ -994,9 +1294,9 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 const missingPages: string[] = [];
                 for (const c of referencedPages) {
                     // Tolerate suffix/case variation — the LLM sometimes
-                    // renames AdministrationMaintainSQLUsersPage to
-                    // MaintainSqlUsersPage. Check by stripping "Page" and
-                    // lower-casing.
+                    // renames a class like FooBarBazPage to FooBarBaz when
+                    // emitting analysis entries. Check by stripping "Page"
+                    // and lower-casing.
                     const normalised = (s: string) => s.toLowerCase().replace(/page$/i, '');
                     const target = normalised(c);
                     const hit = Array.from(analysedPageClassNames).some(
@@ -1137,6 +1437,62 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
 
         ctx.finishPhase('analyze', 'done', { reportPath });
         CSStatusWriter.write(ctx);
+
+        // v1.38 Phase 4 — seed the translate queue. Same architecture
+        // as the analyze queue: one item per generated file (feature +
+        // steps + N pages + data). Downstream csaa_translate /
+        // csaa_append_translation_file return per-file envelopes so
+        // the LLM never composes a multi-file payload.
+        let translateQueueSeeded = false;
+        let translateQueueLength = 0;
+        try {
+            // Load run-params for project/module — needed to build
+            // canonical test/<project>/<...>/<module>/x paths.
+            let project = 'default';
+            let module = 'default';
+            const rp = ctx.readPhaseArtifact('intake', 'run-params.json');
+            if (rp) {
+                try {
+                    const p = JSON.parse(rp) as { project?: string; module?: string };
+                    project = p.project ?? project;
+                    module = p.module ?? p.project ?? module;
+                } catch { /* ignore */ }
+            }
+
+            // Optional: pull per-page field-count floor from signature so
+            // the page-coverage gate has the right minFieldCount.
+            const sigRaw = ctx.readPhaseArtifact('discover', 'signature.json');
+            let sigPages: Record<string, { fields?: unknown[] }> = {};
+            if (sigRaw) {
+                try {
+                    const sig = JSON.parse(sigRaw) as { pages?: Record<string, { fields?: unknown[] }> };
+                    sigPages = sig.pages ?? {};
+                } catch { /* ignore */ }
+            }
+
+            const items = buildTranslateQueueItems({
+                project,
+                module,
+                analysis: analysis as unknown as {
+                    scenarios: Array<{ id: string; steps?: Array<{ text?: string }> }>;
+                    pages: Array<{ className: string; role?: string }>;
+                },
+                sigPages,
+            });
+            const queue = CSWorkQueue.load(ctx);
+            queue.seedTranslate(items);
+            translateQueueSeeded = items.length > 0;
+            translateQueueLength = items.length;
+        } catch (qErr) {
+            // Best-effort. If seeding fails, csaa_translate falls back
+            // to the legacy bulk envelope.
+            ctx.writePhaseArtifact(
+                'analyze',
+                'translate-queue-seed-error.txt',
+                qErr instanceof Error ? (qErr.stack ?? qErr.message) : String(qErr),
+            );
+        }
+
         return jsonResult(
             {
                 state: 'RUNNING',
@@ -1148,14 +1504,91 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 gapCount: (analysis.gaps ?? []).length,
                 runFolder: ctx.runFolder,
                 reportPath,
+                translateQueueSeeded,
+                translateQueueLength,
                 nextStepNeeded: true,
                 nextSuggestedTool: 'csaa_plan',
                 nextSuggestedArgs: { runId },
             },
-            `Analysis recorded: ${analysis.scenarios.length} scenarios, ${analysis.pages.length} pages, readiness ${readinessScore.toFixed(2)}. Call csaa_plan next.`,
+            `Analysis recorded: ${analysis.scenarios.length} scenarios, ${analysis.pages.length} pages, readiness ${readinessScore.toFixed(2)}. Translate queue: ${translateQueueLength} items. Call csaa_plan next.`,
         );
     })
     .build();
+
+/**
+ * Build the translate-queue items from a recorded analysis. Items shape:
+ *   1× feature (lists every scenarioId so the feature file has one
+ *      `Scenario:` block per legacy @Test)
+ *   1× steps (collects unique step-def texts from analysis.scenarios.steps)
+ *   N× page (one per analysis.pages[] with role === 'create-new'; reuse-existing
+ *      pages are skipped — the consumer already has them)
+ *   1× data (lists every scenarioId so the JSON has one row per scenario)
+ */
+function buildTranslateQueueItems(opts: {
+    project: string;
+    module: string;
+    analysis: {
+        scenarios: Array<{ id: string; steps?: Array<{ text?: string }> }>;
+        pages: Array<{ className: string; role?: string }>;
+    };
+    sigPages: Record<string, { fields?: unknown[] }>;
+}): TranslateQueueItem[] {
+    const { project, module, analysis, sigPages } = opts;
+    const items: TranslateQueueItem[] = [];
+
+    const scenarioIds = analysis.scenarios.map((s) => s.id);
+    const baseDir = (kind: 'features' | 'steps' | 'pages' | 'data') =>
+        `test/${project}/${kind}/${module}`;
+
+    // 1× feature
+    items.push({
+        kind: 'feature',
+        relativePath: `${baseDir('features')}/${module}.feature`,
+        scenarioIds,
+    });
+
+    // 1× steps — collect unique Gherkin step texts so the LLM knows
+    // exactly which step-def patterns to implement.
+    const stepDefTexts = new Set<string>();
+    for (const s of analysis.scenarios) {
+        for (const st of s.steps ?? []) {
+            if (typeof st.text === 'string' && st.text.trim()) {
+                stepDefTexts.add(st.text.trim());
+            }
+        }
+    }
+    items.push({
+        kind: 'steps',
+        relativePath: `${baseDir('steps')}/${module}.steps.ts`,
+        stepDefTexts: [...stepDefTexts],
+    });
+
+    // N× page — one per create-new analysis page. Reuse-existing pages
+    // already exist in the consumer's test/<project>/pages/ tree.
+    for (const p of analysis.pages) {
+        if (p.role !== 'create-new') continue;
+        const sig = sigPages[p.className];
+        const legacyFieldCount = Array.isArray(sig?.fields) ? sig!.fields!.length : 0;
+        // 80% floor from the page-coverage gate; minimum 1 so even an
+        // empty signature page produces an item.
+        const minFieldCount = Math.max(1, Math.ceil(legacyFieldCount * 0.8));
+        items.push({
+            kind: 'page',
+            relativePath: `${baseDir('pages')}/${p.className}.ts`,
+            legacyClassName: p.className,
+            minFieldCount,
+        });
+    }
+
+    // 1× data
+    items.push({
+        kind: 'data',
+        relativePath: `${baseDir('data')}/${module}-scenarios.json`,
+        scenarioIds,
+    });
+
+    return items;
+}
 
 // ============================================================================
 // csaa_append_analysis_scenario — chunked recording (one scenario at a time)
@@ -1248,6 +1681,122 @@ const csaa_append_analysis_scenario: MCPToolDefinition = (defineTool() as MCPToo
             JSON.stringify(list, null, 2),
         );
 
+        // v1.38 Phase 3 — advance the iterator queue (if seeded) and
+        // return the NEXT item's envelope. The LLM never has to "decide"
+        // what to produce next: this response either carries the spec
+        // for scenario N+1 or the spec for the finalize meta call.
+        // Fallback: queue not seeded (non-Java legacy or run that
+        // bypassed signature extraction) → return the legacy
+        // RUNNING shape so the LLM's recoveryHint guides them.
+        const queue = CSWorkQueue.load(ctx);
+        if (queue.total('analyze') > 0) {
+            // Find this scenario's position in the queue. The id format
+            // may be normalised by the queue seeder (TC_-prefixed) so
+            // match permissively.
+            const itemsBefore = queue.snapshot().analyze.items;
+            const cur = queue.peekNext('analyze') as AnalyzeQueueItem | null;
+            let advanced = false;
+            if (cur && itemMatchesScenarioId(cur, id)) {
+                queue.advance('analyze');
+                advanced = true;
+            }
+
+            // Read intake/run-params.json + signature.json (best-effort) so
+            // the next-item envelope carries the same common grounding.
+            let project = 'default';
+            let module: string | undefined;
+            let entryFile = '';
+            const rpRaw = ctx.readPhaseArtifact('intake', 'run-params.json');
+            if (rpRaw) {
+                try {
+                    const rp = JSON.parse(rpRaw) as { project?: string; module?: string; entryFile?: string };
+                    project = rp.project ?? project;
+                    module = rp.module;
+                    entryFile = rp.entryFile ?? '';
+                } catch { /* ignore */ }
+            }
+            const inventoryPath = path.join(
+                ctx.runFolder,
+                CSRunContext.phaseFolder('discover'),
+                'inventory.json',
+            );
+            const common: AnalyzeIteratorCommonGrounding = {
+                runId,
+                project,
+                module,
+                entryFile,
+                inventoryPath,
+                skillsPath: '.github/skills/',
+            };
+
+            const nextItem = queue.peekNext('analyze') as AnalyzeQueueItem | null;
+            if (nextItem) {
+                const env = buildAnalyzeScenarioEnvelope(
+                    nextItem,
+                    { completed: queue.completed('analyze'), total: queue.total('analyze') },
+                    common,
+                );
+                ctx.writePhaseArtifact(
+                    'analyze',
+                    'delegation-envelope.json',
+                    JSON.stringify(env, null, 2),
+                );
+                return jsonResult(
+                    {
+                        state: 'AWAITING_LLM_FULFILMENT',
+                        runId,
+                        phase: 'analyze',
+                        scenariosCollected: list.length,
+                        lastAppended: id,
+                        delegation: env,
+                        queue: {
+                            current: queue.completed('analyze') + 1,
+                            total: queue.total('analyze'),
+                            progress: queue.progress('analyze'),
+                        },
+                        iteratorMode: true,
+                        queueAdvanced: advanced,
+                        nextStepNeeded: true,
+                        nextSuggestedTool: 'csaa_append_analysis_scenario',
+                        nextSuggestedArgs: { runId },
+                    },
+                    `Scenario "${id}" staged (${list.length}/${queue.total('analyze')}). Next: produce scenario ${queue.completed('analyze') + 1}/${queue.total('analyze')} (${nextItem.id}). Submit via csaa_append_analysis_scenario.`,
+                );
+            }
+            // Queue drained — emit the finalize envelope.
+            const finalizeEnv = buildAnalyzeFinalizeEnvelope(list.length, common);
+            ctx.writePhaseArtifact(
+                'analyze',
+                'delegation-envelope.json',
+                JSON.stringify(finalizeEnv, null, 2),
+            );
+            // Suppress unused-var warning when fallback above doesn't fire.
+            void itemsBefore;
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_FULFILMENT',
+                    runId,
+                    phase: 'analyze',
+                    scenariosCollected: list.length,
+                    lastAppended: id,
+                    delegation: finalizeEnv,
+                    queue: {
+                        current: queue.total('analyze'),
+                        total: queue.total('analyze'),
+                        progress: queue.progress('analyze'),
+                    },
+                    iteratorMode: true,
+                    queueAdvanced: advanced,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_finalize_analysis',
+                    nextSuggestedArgs: { runId },
+                },
+                `All ${list.length} scenario(s) staged. Now produce the analysis meta payload and call csaa_finalize_analysis.`,
+            );
+        }
+
+        // Backward compat: queue not seeded. Return the original
+        // RUNNING shape so the legacy recoveryHint guides the LLM.
         return jsonResult(
             {
                 state: 'RUNNING',
@@ -1263,6 +1812,19 @@ const csaa_append_analysis_scenario: MCPToolDefinition = (defineTool() as MCPToo
         );
     })
     .build();
+
+/**
+ * Match a queue item against a submitted scenario id. The queue seeder
+ * normalises testCaseId via `TC_<id>` (or preserves `TS_<id>` from legacy
+ * @MetaData) but the LLM may submit the bare id. Match permissively.
+ */
+function itemMatchesScenarioId(item: AnalyzeQueueItem, submittedId: string): boolean {
+    if (item.id === submittedId) return true;
+    if (item.id === `TC_${submittedId}`) return true;
+    if (`TC_${item.id}` === submittedId) return true;
+    if (item.id.replace(/^(TC|TS)_/, '') === submittedId.replace(/^(TC|TS)_/, '')) return true;
+    return false;
+}
 
 // ============================================================================
 // csaa_finalize_analysis — close-out of streamed analysis recording
@@ -1300,7 +1862,7 @@ const csaa_finalize_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilde
         const scratchRaw = ctx.readPhaseArtifact('analyze', 'scratch-scenarios.json');
         if (!scratchRaw) {
             return errorResult(
-                `No scenarios staged. Call csaa_append_analysis_scenario at least once before csaa_finalize_analysis, OR use csaa_record_analysis with a single full-payload call.`,
+                `No scenarios staged. Call csaa_append_analysis_scenario at least once before csaa_finalize_analysis. (Do NOT try csaa_record_analysis with the full payload — for any non-trivial analysis it will be rejected by the single-call cap.)`,
                 runId,
             );
         }
@@ -1309,7 +1871,7 @@ const csaa_finalize_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilde
             scenarios = JSON.parse(scratchRaw);
         } catch {
             return errorResult(
-                `Scratch scenario file is corrupt at analyze/scratch-scenarios.json. Delete it and re-append, or call csaa_record_analysis directly with a full payload.`,
+                `Scratch scenario file is corrupt at analyze/scratch-scenarios.json. Read the file, identify which scenario(s) are malformed, delete only the corrupt entries, and re-append them. Do NOT fall back to csaa_record_analysis with full payload — that path is capped for the same reason streaming exists.`,
                 runId,
             );
         }
@@ -1334,9 +1896,12 @@ const csaa_finalize_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilde
         // Re-dispatch through csaa_record_analysis so gate logic stays
         // single-sourced. On success it writes analysis-report.json and the
         // scratch file becomes obsolete — clean it up so a re-run doesn't
-        // accidentally re-use it.
+        // accidentally re-use it. `_bypassSizeGate` lets the accumulated
+        // scratch (which can be 4+ scenarios) skip the per-call payload-size
+        // cap on csaa_record_analysis that exists to force the streaming
+        // path on direct callers.
         const res = await csaa_record_analysis.handler(
-            { runId, payload: fullPayload },
+            { runId, payload: fullPayload, _bypassSizeGate: true },
             toolCtx,
         );
         const sc = res.structuredContent as { state?: string } | undefined;
@@ -1489,6 +2054,191 @@ const csaa_plan: MCPToolDefinition = (defineTool() as MCPToolBuilder)
 // csaa_translate — Phase 5: delegate translation to the host LLM
 // ============================================================================
 
+// ============================================================================
+// Translate-side iterator envelope builders (v1.38 Phase 5)
+// ============================================================================
+// Symmetric to buildAnalyzeScenarioEnvelope / buildAnalyzeFinalizeEnvelope.
+// Per-file specs keep each tool-response payload small (~1-3 KB) so the
+// LLM never holds the multi-file picture in its head.
+
+interface TranslateIteratorCommonGrounding {
+    runId: string;
+    project: string;
+    module?: string;
+    frameworkPkg: string;
+    analysisReportPath: string;
+    skillsPath: string;
+}
+
+/**
+ * Per-file responseSchema for the iterator submit — matches the
+ * csaa_append_translation_file `file` param shape exactly.
+ */
+const PER_FILE_RESPONSE_SCHEMA: Record<string, unknown> = {
+    type: 'object',
+    required: ['relativePath', 'kind', 'content'],
+    properties: {
+        relativePath: { type: 'string' },
+        kind: { type: 'string', enum: ['feature', 'steps', 'page', 'data'] },
+        content: { type: 'string' },
+        reuseDecision: { type: 'string' },
+    },
+};
+
+function buildTranslateFileEnvelope(
+    item: TranslateQueueItem,
+    progress: { completed: number; total: number },
+    common: TranslateIteratorCommonGrounding,
+): DelegationEnvelope {
+    const fileIdx = progress.completed + 1; // 1-indexed
+    let instructionBody: string[];
+
+    switch (item.kind) {
+        case 'feature':
+            instructionBody = [
+                `Produce ONE file: the Gherkin feature (${fileIdx}/${progress.total}).`,
+                '',
+                `Target path: ${item.relativePath}`,
+                `Scenarios to declare (${item.scenarioIds.length}): ${item.scenarioIds.join(', ')}`,
+                '',
+                'Requirements:',
+                '  - One `Scenario:` block (or `Scenario Outline:` if every step references `<placeholder>`) per scenarioId above. Tag each with @<scenarioId>.',
+                '  - Step text comes from analysis.scenarios[id].steps — read the analysis at grounding.analysisReportPath via your `read` tool. Step text MUST match exactly across the feature and the steps-defs you will emit next.',
+                '  - NEVER reference Java class names or helper ids (e.g. SomeHelper, TC_xxx) in step text. Use plain English user actions.',
+                '  - If you use Scenario Outline, Examples block MUST be the JSON envelope: `Examples: {"type":"json","source":"test/<project>/data/<module>/<module>-scenarios.json","path":"$","filter":"scenarioId=<id> AND runFlag=Yes"}`. Plain Gherkin tables are rejected.',
+                '  - Two scenarios cannot share the same title — disambiguate where needed.',
+                '',
+                'Submit via `csaa_append_translation_file(runId, file: { relativePath, kind: "feature", content })`. My response will tell you which file to produce next.',
+                '',
+                'SILENCE RULE: compose the tool call directly. Do NOT narrate file content in chat — that burns the per-message output budget.',
+            ];
+            break;
+        case 'steps':
+            instructionBody = [
+                `Produce ONE file: the step-defs (${fileIdx}/${progress.total}).`,
+                '',
+                `Target path: ${item.relativePath}`,
+                `Required step-def patterns (${item.stepDefTexts.length}):`,
+                ...item.stepDefTexts.slice(0, 50).map((t) => `  - "${t}"`),
+                ...(item.stepDefTexts.length > 50
+                    ? [`  …and ${item.stepDefTexts.length - 50} more (see analysis.scenarios[].steps[].text)`]
+                    : []),
+                '',
+                'Requirements:',
+                `  - Use framework imports: CSBDDStepDef / StepDefinitions / Page from "${common.frameworkPkg}/bdd", CSReporter from "${common.frameworkPkg}/reporting", CSBasePage / CSPage / CSGetElement from "${common.frameworkPkg}/core", CSWebElement from "${common.frameworkPkg}/element", CSValueResolver from "${common.frameworkPkg}/utilities", CSDBUtils from "${common.frameworkPkg}/database-utils".`,
+                '  - One @CSBDDStepDef per step-def text above. The pattern in @CSBDDStepDef MUST match the feature step text exactly.',
+                '  - Every step-def body MUST do at least one element interaction (this.somePage.someMethod() or this.someElement.click/fill/etc., or CSDBUtils call). Empty/stub bodies are rejected.',
+                '  - Class properties decorated with @Page or @CSGetElement use the `!` non-null assertion.',
+                '  - `@StepDefinitions` (no parens) on the class. `@CSBDDStepDef(...)` (with parens) on each method.',
+                '  - Method signatures: `(message: string)` for {string}, `(value: number)` for {int}. NO `(ctx, ...)`.',
+                '',
+                'Submit via `csaa_append_translation_file(runId, file: { relativePath, kind: "steps", content })`.',
+                '',
+                'SILENCE RULE: compose the tool call directly, no chat narration of code.',
+            ];
+            break;
+        case 'page':
+            instructionBody = [
+                `Produce ONE file: a page object (${fileIdx}/${progress.total}).`,
+                '',
+                `Target path: ${item.relativePath}`,
+                `Legacy page class: ${item.legacyClassName}`,
+                `Minimum @CSGetElement count: ${item.minFieldCount} (80% floor from legacy @FindBy count)`,
+                '',
+                'Steps:',
+                `  1. Call csaa_extract_page_fields(runId, pageClass: "${item.legacyClassName}") to get the authoritative @FindBy list from the legacy file.`,
+                '  2. Emit ONE @CSGetElement per legacy field. XPath primary, alternativeLocators[] for CSS variants if available.',
+                '  3. Property name should mirror the legacy field name (camelCased if needed).',
+                '  4. Class decorator: `@CSPage("<page-key>")`. Class extends `CSBasePage`.',
+                '',
+                'Requirements:',
+                `  - Imports: CSBasePage / CSPage / CSGetElement from "${common.frameworkPkg}/core", CSWebElement from "${common.frameworkPkg}/element".`,
+                `  - At least ${item.minFieldCount} @CSGetElement decorators — submitting fewer triggers the page-coverage rejection.`,
+                '  - All element properties typed `CSWebElement` with `!` non-null assertion.',
+                '',
+                'Submit via `csaa_append_translation_file(runId, file: { relativePath, kind: "page", content })`.',
+                '',
+                'SILENCE RULE: compose the tool call directly. No narration of locator strings or imports.',
+            ];
+            break;
+        case 'data':
+            instructionBody = [
+                `Produce ONE file: the data JSON (${fileIdx}/${progress.total}).`,
+                '',
+                `Target path: ${item.relativePath}`,
+                `Scenario rows to include (${item.scenarioIds.length}): ${item.scenarioIds.join(', ')}`,
+                '',
+                'Requirements:',
+                '  - JSON array of row objects. One row per scenarioId above.',
+                '  - Each row MUST include: scenarioId, scenarioName, runFlag, plus EVERY column from analysis.scenarios[id].dataRow.',
+                '  - If the analysis recorded an empty dataRow for a scenario (data file missing or column-shift), still emit the row with metadata fields only — but the data-coverage gate will flag it.',
+                '  - Values from analysis.scenarios[id].dataRow are AUTHORITATIVE — copy verbatim, do not invent.',
+                '',
+                'Submit via `csaa_append_translation_file(runId, file: { relativePath, kind: "data", content })`. After this submit, the queue drains and my response will tell you to call csaa_finalize_translation.',
+                '',
+                'SILENCE RULE: compose the tool call directly.',
+            ];
+            break;
+    }
+
+    return {
+        task: 'produce-one-file',
+        instruction: instructionBody.join('\n'),
+        responseSchema: PER_FILE_RESPONSE_SCHEMA,
+        grounding: {
+            runId: common.runId,
+            project: common.project,
+            module: common.module,
+            frameworkPkg: common.frameworkPkg,
+            analysisReportPath: common.analysisReportPath,
+            skillsPath: common.skillsPath,
+            currentItem: item,
+            queue: {
+                current: fileIdx,
+                total: progress.total,
+                remaining: Math.max(0, progress.total - progress.completed - 1),
+            },
+        },
+        recordWith: 'csaa_append_translation_file',
+        recordArgs: { runId: common.runId },
+    };
+}
+
+function buildTranslateFinalizeEnvelope(
+    filesStaged: number,
+    common: TranslateIteratorCommonGrounding,
+): DelegationEnvelope {
+    return {
+        task: 'finalize-translation',
+        instruction: [
+            `All ${filesStaged} file(s) are staged in 05-translate/scratch-files.json. Now call csaa_finalize_translation to run every content + signature + compile gate against the assembled file set.`,
+            '',
+            'Optional `notes` parameter — pass `{ items: ["<note>", ...] }` if you have any caveats the user should see, otherwise omit.',
+            '',
+            'Submit via `csaa_finalize_translation(runId, notes?)`. The tool re-dispatches through csaa_record_translation with the size-cap bypass flag set, so every gate fires identically (schema + content + page-coverage signature + step-coverage signature + compile_check).',
+            '',
+            'SILENCE RULE: compose the tool call directly.',
+        ].join('\n'),
+        responseSchema: {
+            type: 'object',
+            properties: {
+                notes: { type: 'object' },
+            },
+        },
+        grounding: {
+            runId: common.runId,
+            project: common.project,
+            module: common.module,
+            frameworkPkg: common.frameworkPkg,
+            analysisReportPath: common.analysisReportPath,
+            skillsPath: common.skillsPath,
+            filesStaged,
+        },
+        recordWith: 'csaa_finalize_translation',
+        recordArgs: { runId: common.runId },
+    };
+}
+
 const csaa_translate: MCPToolDefinition = (defineTool() as MCPToolBuilder)
     .name('csaa_translate')
     .title('CS-AI-Auto-Assist — Translate (Phase 5)')
@@ -1523,6 +2273,54 @@ const csaa_translate: MCPToolDefinition = (defineTool() as MCPToolBuilder)
             getStr(params, 'frameworkPkg') ?? '@mdakhan.mak/cs-playwright-test-framework';
 
         ctx.startPhase('translate');
+
+        // v1.38 Phase 5 — iterator mode. When the translate queue was
+        // seeded by csaa_record_analysis success, return the per-file
+        // envelope so the LLM produces ONE file per turn. The bulk
+        // envelope below remains as the backward-compat fallback for
+        // runs that bypassed signature+queue seeding.
+        const tQueue = CSWorkQueue.load(ctx);
+        if (!tQueue.isEmpty('translate')) {
+            const tItem = tQueue.peekNext('translate') as TranslateQueueItem;
+            const tCommon: TranslateIteratorCommonGrounding = {
+                runId,
+                project,
+                module,
+                frameworkPkg,
+                analysisReportPath,
+                skillsPath: '.github/skills/',
+            };
+            const tIterEnv = buildTranslateFileEnvelope(
+                tItem,
+                { completed: tQueue.completed('translate'), total: tQueue.total('translate') },
+                tCommon,
+            );
+            ctx.writePhaseArtifact(
+                'translate',
+                'delegation-envelope.json',
+                JSON.stringify(tIterEnv, null, 2),
+            );
+            CSStatusWriter.write(ctx);
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_FULFILMENT',
+                    runId,
+                    phase: 'translate',
+                    delegation: tIterEnv,
+                    queue: {
+                        current: tQueue.completed('translate') + 1,
+                        total: tQueue.total('translate'),
+                        progress: tQueue.progress('translate'),
+                    },
+                    iteratorMode: true,
+                    runFolder: ctx.runFolder,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_append_translation_file',
+                    nextSuggestedArgs: { runId },
+                },
+                `Iterator mode: produce file ${tQueue.completed('translate') + 1}/${tQueue.total('translate')} (${tItem.kind} → ${tItem.relativePath}). Submit via csaa_append_translation_file.`,
+            );
+        }
 
         const envelope: DelegationEnvelope = {
             task: 'translate-analysis-to-bdd',
@@ -2293,6 +3091,122 @@ const csaa_append_translation_file: MCPToolDefinition = (defineTool() as MCPTool
             acc[x.kind] = (acc[x.kind] ?? 0) + 1;
             return acc;
         }, {});
+
+        // v1.38 Phase 5 — advance the iterator queue (if seeded) and
+        // return the NEXT item's envelope. Symmetric to the analyze
+        // iterator wiring in Phase 3.
+        const tFileQueue = CSWorkQueue.load(ctx);
+        if (tFileQueue.total('translate') > 0) {
+            const curItem = tFileQueue.peekNext('translate') as TranslateQueueItem | null;
+            let advanced = false;
+            if (curItem && fileMatchesTranslateItem(curItem, f.relativePath, f.kind as TranslateQueueItem['kind'])) {
+                tFileQueue.advance('translate');
+                advanced = true;
+            }
+
+            // Look up project/module/frameworkPkg from prior delegation
+            // grounding so the next envelope has the same common context.
+            let project = 'default';
+            let module: string | undefined;
+            let frameworkPkg = '@mdakhan.mak/cs-playwright-test-framework';
+            const rpRaw = ctx.readPhaseArtifact('intake', 'run-params.json');
+            if (rpRaw) {
+                try {
+                    const rp = JSON.parse(rpRaw) as { project?: string; module?: string };
+                    project = rp.project ?? project;
+                    module = rp.module;
+                } catch { /* ignore */ }
+            }
+            // Carry forward frameworkPkg from the prior envelope if present.
+            const prevEnvRaw = ctx.readPhaseArtifact('translate', 'delegation-envelope.json');
+            if (prevEnvRaw) {
+                try {
+                    const prev = JSON.parse(prevEnvRaw) as { grounding?: { frameworkPkg?: string } };
+                    if (prev.grounding?.frameworkPkg) frameworkPkg = prev.grounding.frameworkPkg;
+                } catch { /* ignore */ }
+            }
+            const tCommon: TranslateIteratorCommonGrounding = {
+                runId,
+                project,
+                module,
+                frameworkPkg,
+                analysisReportPath: path.join(
+                    ctx.runFolder,
+                    CSRunContext.phaseFolder('analyze'),
+                    'analysis-report.json',
+                ),
+                skillsPath: '.github/skills/',
+            };
+
+            const nextItem = tFileQueue.peekNext('translate') as TranslateQueueItem | null;
+            if (nextItem) {
+                const env = buildTranslateFileEnvelope(
+                    nextItem,
+                    { completed: tFileQueue.completed('translate'), total: tFileQueue.total('translate') },
+                    tCommon,
+                );
+                ctx.writePhaseArtifact(
+                    'translate',
+                    'delegation-envelope.json',
+                    JSON.stringify(env, null, 2),
+                );
+                return jsonResult(
+                    {
+                        state: 'AWAITING_LLM_FULFILMENT',
+                        runId,
+                        phase: 'translate',
+                        filesCollected: list.length,
+                        kindCounts,
+                        lastAppended: f.relativePath,
+                        delegation: env,
+                        queue: {
+                            current: tFileQueue.completed('translate') + 1,
+                            total: tFileQueue.total('translate'),
+                            progress: tFileQueue.progress('translate'),
+                        },
+                        iteratorMode: true,
+                        queueAdvanced: advanced,
+                        nextStepNeeded: true,
+                        nextSuggestedTool: 'csaa_append_translation_file',
+                        nextSuggestedArgs: { runId },
+                    },
+                    `File "${f.relativePath}" staged (${list.length}/${tFileQueue.total('translate')}). Next: produce file ${tFileQueue.completed('translate') + 1}/${tFileQueue.total('translate')} (${nextItem.kind} → ${nextItem.relativePath}).`,
+                );
+            }
+            // Queue drained — emit the finalize envelope.
+            const finalizeEnv = buildTranslateFinalizeEnvelope(list.length, tCommon);
+            ctx.writePhaseArtifact(
+                'translate',
+                'delegation-envelope.json',
+                JSON.stringify(finalizeEnv, null, 2),
+            );
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_FULFILMENT',
+                    runId,
+                    phase: 'translate',
+                    filesCollected: list.length,
+                    kindCounts,
+                    lastAppended: f.relativePath,
+                    delegation: finalizeEnv,
+                    queue: {
+                        current: tFileQueue.total('translate'),
+                        total: tFileQueue.total('translate'),
+                        progress: tFileQueue.progress('translate'),
+                    },
+                    iteratorMode: true,
+                    queueAdvanced: advanced,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_finalize_translation',
+                    nextSuggestedArgs: { runId },
+                },
+                `All ${list.length} file(s) staged. Call csaa_finalize_translation to run gates + persist content map.`,
+            );
+        }
+
+        // Backward compat — no queue seeded (e.g. record_analysis was
+        // bypassed, or non-Java legacy). Return the legacy RUNNING
+        // shape so the recoveryHint still guides the LLM.
         return jsonResult(
             {
                 state: 'RUNNING',
@@ -2309,6 +3223,25 @@ const csaa_append_translation_file: MCPToolDefinition = (defineTool() as MCPTool
         );
     })
     .build();
+
+/**
+ * Match a submitted file against a queue item. The queue uses canonical
+ * paths (`test/<project>/<kind-folder>/<module>/<base>`) but the LLM may
+ * submit a slightly different basename casing (e.g. FooPage.ts vs fooPage.ts).
+ * Match permissively on (a) kind + (b) basename stem (case-insensitive)
+ * OR (a) kind + (b) exact path.
+ */
+function fileMatchesTranslateItem(
+    item: TranslateQueueItem,
+    submittedPath: string,
+    submittedKind: TranslateQueueItem['kind'],
+): boolean {
+    if (item.kind !== submittedKind) return false;
+    if (item.relativePath === submittedPath) return true;
+    const stem = (p: string) =>
+        path.basename(p).toLowerCase().replace(/\.[a-z0-9]+$/, '');
+    return stem(item.relativePath) === stem(submittedPath);
+}
 
 // ============================================================================
 // csaa_finalize_translation — close-out of streamed translation recording
@@ -3158,7 +4091,7 @@ const csaa_resolve_data_file: MCPToolDefinition = (defineTool() as MCPToolBuilde
     .title('CS-AI-Auto-Assist — Resolve legacy data file path')
     .description(
         'Resolves a Java-style data-file annotation (e.g. ' +
-            '`resources/${environment.name}/testdata/CTSGatewayData.xls`) to absolute paths on ' +
+            '`resources/${environment.name}/testdata/TestData.xls`) to absolute paths on ' +
             'disk, one per requested environment. Walks the inventory + workspace with Node fs ' +
             '— does NOT respect .gitignore — so legacy folders that the LLM\'s built-in search ' +
             'tool cannot see are still found. Use this whenever the @QAFDataProvider / similar ' +
@@ -3169,7 +4102,7 @@ const csaa_resolve_data_file: MCPToolDefinition = (defineTool() as MCPToolBuilde
     .stringParam('runId', 'Run ID', { required: true })
     .stringParam(
         'annotationValue',
-        'The dataFile annotation value as written in the legacy Java/C# (e.g. "resources/${environment.name}/testdata/CTSGatewayData.xls"). ' +
+        'The dataFile annotation value as written in the legacy Java/C# (e.g. "resources/${environment.name}/testdata/TestData.xls"). ' +
             'Supports placeholders ${environment.name}, ${env}, ${envName}.',
         { required: true },
     )
@@ -3274,7 +4207,7 @@ const csaa_resolve_data_file: MCPToolDefinition = (defineTool() as MCPToolBuilde
 
         // Also check inventory.dataFiles for any match — sometimes the
         // annotation pattern differs from the actual on-disk name (e.g.
-        // CTSGatewayData.xls vs CTSGateway_Data.xls). Surface candidates.
+        // TestData.xls vs Test_Data.xls). Surface candidates.
         const inventoryCandidates: Array<{ path: string; basename: string }> = [];
         const targetStem = baseName.toLowerCase().replace(/\.[a-z0-9]+$/, '');
         for (const d of inv.dataFiles ?? []) {
@@ -3573,9 +4506,9 @@ async function scaffoldFrameworkConfig(
 // csaa_expand_helper — Deterministic helper-method body extraction
 // ============================================================================
 // The LLM calls this during analyze to get the authoritative leaf-action list
-// inside a helper method (e.g. CTSGSupportMethods.TS_4958). It MUST then emit
+// inside a helper method (e.g. SomeHelper.someMethod). It MUST then emit
 // one Gherkin step per returned action — no more "Execute shared support
-// flow TS_4958" stubs.
+// flow X" stubs.
 
 const csaa_expand_helper: MCPToolDefinition = (defineTool() as MCPToolBuilder)
     .name('csaa_expand_helper')
@@ -3583,14 +4516,14 @@ const csaa_expand_helper: MCPToolDefinition = (defineTool() as MCPToolBuilder)
     .description(
         'Returns the ordered leaf-action list for a single helper method in a legacy Java ' +
             'source file. The LLM MUST call this for every helper invocation it encounters ' +
-            'in a @Test body (e.g. CTSGSupportMethods.TS_4958(dataBean)), then emit one Gherkin ' +
+            'in a @Test body (e.g. SomeHelper.someMethod(args)), then emit one Gherkin ' +
             'step per returned action. Resolves the helper file from the discover inventory ' +
             'or by searching the workspace.',
     )
     .category('multiagent')
     .stringParam('runId', 'Run ID', { required: true })
-    .stringParam('helperClass', 'Java class name (e.g. CTSGSupportMethods)', { required: true })
-    .stringParam('helperMethod', 'Method name (e.g. TS_4958)', { required: true })
+    .stringParam('helperClass', 'Java class name (e.g. SomeSupportMethods)', { required: true })
+    .stringParam('helperMethod', 'Method name (e.g. setupAndLogin)', { required: true })
     .handler(async (params: Record<string, unknown>) => {
         const runId = String(params.runId ?? '');
         const ctx = getCtx(runId);

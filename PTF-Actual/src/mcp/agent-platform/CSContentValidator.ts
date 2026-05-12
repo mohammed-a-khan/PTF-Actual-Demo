@@ -480,7 +480,7 @@ export class CSContentValidator {
                     hint: 'vague "complete the flow" step — name the final action and assertion explicitly.',
                 },
                 {
-                    // Catches: "Execute shared support flow TS_4958", "Run helper method foo",
+                    // Catches: "Execute shared support flow XYZ", "Run helper method foo",
                     // "Invoke shared helper", "Trigger support routine", "Process via helper" — every
                     // variant of "delegate to internal helper" the LLM uses to dodge writing real
                     // steps. The verb list is broad on purpose: every rephrase still has a verb +
@@ -489,7 +489,7 @@ export class CSContentValidator {
                     hint: '"execute/run/invoke <flow|helper|method>" hides what the helper actually does. The helper must be EXPANDED into its leaf actions inline: read the helper file, emit one Gherkin step per click/fill/select inside it, cite each step with the helper file + line number.',
                 },
                 {
-                    // Catches: "Execute shared support flow TS_4958" — a helper-id appears anywhere
+                    // Catches: "Execute shared support flow XYZ" — a helper-id appears anywhere
                     // in user-facing step text. Test-case ids (`@TS_xxx` tag) are fine; helper-method
                     // ids inside step text are not.
                     re: /^(Given|When|Then|And|But)\s+.*\b(?:TS_\d{2,}|AAA[-_]\d{2,}|H[-_]\d{2,})\b/i,
