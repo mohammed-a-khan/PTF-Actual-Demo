@@ -707,6 +707,34 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 runId,
             );
         }
+
+        // v1.38.3 — POST-FINALIZE SEAL (analyze side, symmetric to
+        // translate). analysis-report.json existence means csaa_record_analysis
+        // or csaa_finalize_analysis succeeded. Re-entering csaa_analyze after
+        // that would fall through to the bulk envelope (queue is empty —
+        // drained on success) and trigger the LLM to compose all scenarios in
+        // a single message → length limit. Seal early.
+        const analysisReportPath = path.join(
+            ctx.runFolder,
+            CSRunContext.phaseFolder('analyze'),
+            'analysis-report.json',
+        );
+        if (fs.existsSync(analysisReportPath)) {
+            return jsonResult(
+                {
+                    state: 'ANALYZE_SEALED',
+                    runId,
+                    phase: 'analyze',
+                    blockedReason: 'Analyze phase already finalized (analysis-report.json exists). DO NOT re-enter analyze. For corrections, edit analysis-report.json directly via csaa_write or start a NEW run via cs_ai_auto_assist. For low readiness, resolve gaps in the existing report and call csaa_plan to continue.',
+                    analysisReportPath,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_plan',
+                    nextSuggestedArgs: { runId },
+                },
+                'Analyze sealed — analysis-report.json already exists. Use csaa_plan to continue or start a new run.',
+            );
+        }
+
         const inventory = JSON.parse(inventoryRaw) as LegacyInventory;
 
         // Project-name consistency gate.
@@ -1531,6 +1559,20 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
             ctx, 'analyze', 'Analysis Report', md,
         );
 
+        // v1.38.3 — seed the translate queue BEFORE the readiness gate.
+        // The translate queue items depend only on analysis.scenarios and
+        // analysis.pages (which are present at this point regardless of
+        // readiness score). Putting seeding before the gate guarantees the
+        // iterator path is available even on BLOCKED_NEED_HUMAN — the user
+        // may resolve gaps via fuzzy-match suggestions and proceed without
+        // re-recording the full analysis.
+        const seedResult = seedTranslateQueue(ctx, analysis as unknown as {
+            scenarios: Array<{ id: string; steps?: Array<{ text?: string }> }>;
+            pages: Array<{ className: string; role?: string }>;
+        });
+        // Surface seeding errors in the response (was silently swallowed
+        // before — invisible failure dropped the LLM into the bulk path).
+
         // Gate: readinessScore < 0.7 OR ≥3 high-severity gaps → halt for user.
         if (readinessScore < 0.7 || highSeverityGaps >= 3) {
             ctx.finishPhase('analyze', 'blocked_user', {
@@ -1571,6 +1613,9 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                     fuzzyMatchSuggestions: gapsWithSuggestions.map((g) => g.suggestedFuzzyMatch),
                     runFolder: ctx.runFolder,
                     reportPath,
+                    translateQueueSeeded: seedResult.seeded,
+                    translateQueueLength: seedResult.length,
+                    translateQueueSeedError: seedResult.error,
                     nextStepNeeded: true,
                     blockedReason: `Readiness ${readinessScore.toFixed(2)} below 0.7 threshold or ${highSeverityGaps} high-severity gaps. Resolve in source / provide missing files, then re-run csaa_analyze.${fuzzyHint}`,
                 },
@@ -1580,61 +1625,6 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
 
         ctx.finishPhase('analyze', 'done', { reportPath });
         CSStatusWriter.write(ctx);
-
-        // v1.38 Phase 4 — seed the translate queue. Same architecture
-        // as the analyze queue: one item per generated file (feature +
-        // steps + N pages + data). Downstream csaa_translate /
-        // csaa_append_translation_file return per-file envelopes so
-        // the LLM never composes a multi-file payload.
-        let translateQueueSeeded = false;
-        let translateQueueLength = 0;
-        try {
-            // Load run-params for project/module — needed to build
-            // canonical test/<project>/<...>/<module>/x paths.
-            let project = 'default';
-            let module = 'default';
-            const rp = ctx.readPhaseArtifact('intake', 'run-params.json');
-            if (rp) {
-                try {
-                    const p = JSON.parse(rp) as { project?: string; module?: string };
-                    project = p.project ?? project;
-                    module = p.module ?? p.project ?? module;
-                } catch { /* ignore */ }
-            }
-
-            // Optional: pull per-page field-count floor from signature so
-            // the page-coverage gate has the right minFieldCount.
-            const sigRaw = ctx.readPhaseArtifact('discover', 'signature.json');
-            let sigPages: Record<string, { fields?: unknown[] }> = {};
-            if (sigRaw) {
-                try {
-                    const sig = JSON.parse(sigRaw) as { pages?: Record<string, { fields?: unknown[] }> };
-                    sigPages = sig.pages ?? {};
-                } catch { /* ignore */ }
-            }
-
-            const items = buildTranslateQueueItems({
-                project,
-                module,
-                analysis: analysis as unknown as {
-                    scenarios: Array<{ id: string; steps?: Array<{ text?: string }> }>;
-                    pages: Array<{ className: string; role?: string }>;
-                },
-                sigPages,
-            });
-            const queue = CSWorkQueue.load(ctx);
-            queue.seedTranslate(items);
-            translateQueueSeeded = items.length > 0;
-            translateQueueLength = items.length;
-        } catch (qErr) {
-            // Best-effort. If seeding fails, csaa_translate falls back
-            // to the legacy bulk envelope.
-            ctx.writePhaseArtifact(
-                'analyze',
-                'translate-queue-seed-error.txt',
-                qErr instanceof Error ? (qErr.stack ?? qErr.message) : String(qErr),
-            );
-        }
 
         return jsonResult(
             {
@@ -1647,16 +1637,68 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 gapCount: (analysis.gaps ?? []).length,
                 runFolder: ctx.runFolder,
                 reportPath,
-                translateQueueSeeded,
-                translateQueueLength,
+                translateQueueSeeded: seedResult.seeded,
+                translateQueueLength: seedResult.length,
+                translateQueueSeedError: seedResult.error,
                 nextStepNeeded: true,
                 nextSuggestedTool: 'csaa_plan',
                 nextSuggestedArgs: { runId },
             },
-            `Analysis recorded: ${analysis.scenarios.length} scenarios, ${analysis.pages.length} pages, readiness ${readinessScore.toFixed(2)}. Translate queue: ${translateQueueLength} items. Call csaa_plan next.`,
+            `Analysis recorded: ${analysis.scenarios.length} scenarios, ${analysis.pages.length} pages, readiness ${readinessScore.toFixed(2)}. Translate queue: ${seedResult.length} items${seedResult.error ? ` (SEEDING ERROR: ${seedResult.error})` : ''}. Call csaa_plan next.`,
         );
     })
     .build();
+
+/**
+ * Extracted helper (v1.38.3). Seeds the translate queue from a recorded
+ * analysis. Returns the result inline so callers can surface seeding
+ * failures in the tool response — earlier versions wrapped the body in a
+ * silent try/catch and dropped errors to disk, which left the LLM with no
+ * signal that the queue was empty (it would invisibly fall back to the
+ * bulk envelope and hit the per-message length limit). Called from BOTH
+ * the success and BLOCKED_NEED_HUMAN paths in csaa_record_analysis so the
+ * iterator stays available even when readiness < 0.7.
+ */
+function seedTranslateQueue(
+    ctx: CSRunContext,
+    analysis: {
+        scenarios: Array<{ id: string; steps?: Array<{ text?: string }> }>;
+        pages: Array<{ className: string; role?: string }>;
+    },
+): { seeded: boolean; length: number; error?: string } {
+    try {
+        let project = 'default';
+        let module = 'default';
+        const rp = ctx.readPhaseArtifact('intake', 'run-params.json');
+        if (rp) {
+            try {
+                const p = JSON.parse(rp) as { project?: string; module?: string };
+                project = p.project ?? project;
+                module = p.module ?? p.project ?? module;
+            } catch { /* ignore */ }
+        }
+        const sigRaw = ctx.readPhaseArtifact('discover', 'signature.json');
+        let sigPages: Record<string, { fields?: unknown[] }> = {};
+        if (sigRaw) {
+            try {
+                const sig = JSON.parse(sigRaw) as { pages?: Record<string, { fields?: unknown[] }> };
+                sigPages = sig.pages ?? {};
+            } catch { /* ignore */ }
+        }
+        const items = buildTranslateQueueItems({ project, module, analysis, sigPages });
+        const queue = CSWorkQueue.load(ctx);
+        queue.seedTranslate(items);
+        return { seeded: items.length > 0, length: items.length };
+    } catch (qErr) {
+        const msg = qErr instanceof Error ? qErr.message : String(qErr);
+        ctx.writePhaseArtifact(
+            'analyze',
+            'translate-queue-seed-error.txt',
+            qErr instanceof Error ? (qErr.stack ?? qErr.message) : String(qErr),
+        );
+        return { seeded: false, length: 0, error: msg };
+    }
+}
 
 /**
  * Build the translate-queue items from a recorded analysis. Items shape:
@@ -1679,6 +1721,25 @@ function buildTranslateQueueItems(opts: {
     const { project, module, analysis, sigPages } = opts;
     const items: TranslateQueueItem[] = [];
 
+    // v1.38.3 — defensive guards. Previous code threw `undefined.map()` if
+    // analysis.scenarios or analysis.pages were undefined/null, and the
+    // outer try/catch silently swallowed the exception → seedTranslate
+    // never ran → csaa_translate fell back to the bulk envelope path
+    // invisibly. Now produces a clear error the seeder surfaces in its
+    // return value.
+    if (!Array.isArray(analysis?.scenarios)) {
+        throw new Error(
+            `analysis.scenarios must be an array (got ${typeof analysis?.scenarios}). ` +
+            `Cannot seed translate queue without scenario list.`,
+        );
+    }
+    if (!Array.isArray(analysis?.pages)) {
+        throw new Error(
+            `analysis.pages must be an array (got ${typeof analysis?.pages}). ` +
+            `Cannot seed translate queue without page list.`,
+        );
+    }
+
     const scenarioIds = analysis.scenarios.map((s) => s.id);
     const baseDir = (kind: 'features' | 'steps' | 'pages' | 'data') =>
         `test/${project}/${kind}/${module}`;
@@ -1690,8 +1751,13 @@ function buildTranslateQueueItems(opts: {
         scenarioIds,
     });
 
-    // 1× steps — collect unique Gherkin step texts so the LLM knows
-    // exactly which step-def patterns to implement.
+    // v1.38.3 — STEPS FILE SPLITTING. A single .steps.ts with 80-120 unique
+    // step-def patterns easily exceeds 15-25 KB which itself approaches the
+    // per-message output cap. Split when stepDefTexts.size exceeds
+    // MAX_STEPS_PER_FILE so each generated file stays in the safe 5-8 KB
+    // range. Splits are named `<module>-1.steps.ts`, `<module>-2.steps.ts`,
+    // etc. The step-def coverage gate sums coverage across all step files.
+    const MAX_STEPS_PER_FILE = 50;
     const stepDefTexts = new Set<string>();
     for (const s of analysis.scenarios) {
         for (const st of s.steps ?? []) {
@@ -1700,11 +1766,28 @@ function buildTranslateQueueItems(opts: {
             }
         }
     }
-    items.push({
-        kind: 'steps',
-        relativePath: `${baseDir('steps')}/${module}.steps.ts`,
-        stepDefTexts: [...stepDefTexts],
-    });
+    const allSteps = [...stepDefTexts];
+    if (allSteps.length <= MAX_STEPS_PER_FILE) {
+        items.push({
+            kind: 'steps',
+            relativePath: `${baseDir('steps')}/${module}.steps.ts`,
+            stepDefTexts: allSteps,
+        });
+    } else {
+        // Split into sequential chunks of MAX_STEPS_PER_FILE.
+        const chunkCount = Math.ceil(allSteps.length / MAX_STEPS_PER_FILE);
+        for (let i = 0; i < chunkCount; i++) {
+            const chunk = allSteps.slice(
+                i * MAX_STEPS_PER_FILE,
+                (i + 1) * MAX_STEPS_PER_FILE,
+            );
+            items.push({
+                kind: 'steps',
+                relativePath: `${baseDir('steps')}/${module}-${i + 1}.steps.ts`,
+                stepDefTexts: chunk,
+            });
+        }
+    }
 
     // N× page — one per create-new analysis page. Reuse-existing pages
     // already exist in the consumer's test/<project>/pages/ tree.
@@ -2509,6 +2592,28 @@ const PER_FILE_RESPONSE_SCHEMA: Record<string, unknown> = {
     },
 };
 
+/**
+ * v1.38.3 — SILENCE_PREFIX. Universal warning prepended to every per-file
+ * instruction. The previous version put SILENCE rules as a trailing
+ * reminder; real runs showed the LLM still wrote "Producing the steps
+ * file now:" in chat before composing the tool call — the narration plus
+ * the file payload combined exceeded the per-message output cap. Putting
+ * the rule at the TOP, with ⚠️ + banned-phrase examples, makes the LLM
+ * read it before generating any text and prevents the narration entirely.
+ */
+const SILENCE_PREFIX: string[] = [
+    '⚠️ SILENCE RULE (CRITICAL, READ FIRST):',
+    '  - Do NOT narrate "Producing the X file now:" or any preamble in chat.',
+    '  - Do NOT say "Composing", "Generating", "Writing", "Submitting", "Let me", "I will now".',
+    '  - Do NOT show file contents in markdown code blocks before the tool call.',
+    '  - Just compose the tool call DIRECTLY as your next action. Zero chat.',
+    '  - The user reads STATUS.md and the persisted file artefacts — not your chat reply.',
+    '  - Every line of chat narration counts against the per-message output cap that triggers',
+    '    "Sorry, the response hit the length limit." A 5-line preamble + a 15 KB file payload',
+    '    blows the cap. A direct tool call alone does not.',
+    '',
+];
+
 function buildTranslateFileEnvelope(
     item: TranslateQueueItem,
     progress: { completed: number; total: number },
@@ -2607,7 +2712,7 @@ function buildTranslateFileEnvelope(
 
     return {
         task: 'produce-one-file',
-        instruction: instructionBody.join('\n'),
+        instruction: [...SILENCE_PREFIX, ...instructionBody].join('\n'),
         responseSchema: PER_FILE_RESPONSE_SCHEMA,
         grounding: {
             runId: common.runId,
@@ -2691,6 +2796,37 @@ const csaa_translate: MCPToolDefinition = (defineTool() as MCPToolBuilder)
         if (!fs.existsSync(analysisReportPath)) {
             return errorResult(`no analysis report — call csaa_analyze + csaa_record_analysis first`, runId);
         }
+
+        // v1.38.3 — POST-FINALIZE SEAL. If csaa_finalize_translation
+        // already succeeded (content-map.json exists), csaa_translate
+        // returns TRANSLATE_SEALED EARLY — before composing any bulk
+        // envelope. Without this seal, a post-finalize re-call would
+        // return the bulk envelope (queue is empty because it drained)
+        // and the LLM would try to compose ALL files in one message →
+        // length limit. The downstream seal on csaa_record_translation
+        // catches the symptom but only after the LLM has already burned
+        // its output budget composing. Seal must fire at the entry point.
+        const contentMapPath = path.join(
+            ctx.runFolder,
+            CSRunContext.phaseFolder('translate'),
+            'content-map.json',
+        );
+        if (fs.existsSync(contentMapPath)) {
+            return jsonResult(
+                {
+                    state: 'TRANSLATE_SEALED',
+                    runId,
+                    phase: 'translate',
+                    blockedReason: 'Translate phase already finalized (content-map.json exists). DO NOT re-enter translate. For corrections, use csaa_audit (Phase 6) to identify violations, then csaa_write the corrected files individually; the heal loop will catch real-app issues. For full re-translate, start a NEW run via cs_ai_auto_assist.',
+                    contentMapPath,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_audit',
+                    nextSuggestedArgs: { runId },
+                },
+                'Translate sealed — content-map.json already exists. Use csaa_audit for corrections or start a new run.',
+            );
+        }
+
         const project = getStr(params, 'project') ?? 'default';
         const module = getStr(params, 'module');
         const frameworkPkg =
@@ -2869,6 +3005,31 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
         const runId = String(params.runId ?? '');
         const ctx = getCtx(runId);
         if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+
+        // v1.38.3 — POST-FINALIZE SEAL. content-map.json existence means
+        // csaa_finalize_translation already ran successfully. Any direct
+        // record_translation call after that is a post-finalize correction
+        // attempt — refuse so the LLM doesn't compose a fresh bulk payload.
+        const recordSealPath = path.join(
+            ctx.runFolder,
+            CSRunContext.phaseFolder('translate'),
+            'content-map.json',
+        );
+        if (fs.existsSync(recordSealPath) && params._bypassSizeGate !== true) {
+            return jsonResult(
+                {
+                    state: 'TRANSLATE_SEALED',
+                    runId,
+                    phase: 'translate',
+                    blockedReason: 'Translate phase already finalized (content-map.json exists). DO NOT recompose a full translation. For corrections, use csaa_audit (Phase 6).',
+                    contentMapPath: recordSealPath,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_audit',
+                    nextSuggestedArgs: { runId },
+                },
+                'Translate sealed — record_translation rejected after finalize.',
+            );
+        }
 
         const payload = params.payload;
         if (typeof payload !== 'object' || payload === null) {
@@ -3461,6 +3622,31 @@ const csaa_append_translation_file: MCPToolDefinition = (defineTool() as MCPTool
         const ctx = getCtx(runId);
         if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
 
+        // v1.38.3 — POST-FINALIZE SEAL. content-map.json existence means
+        // finalize already ran — reject post-finalize appends so the LLM
+        // can't accidentally start a fresh streaming round-trip after the
+        // phase is sealed.
+        const appendSealPath = path.join(
+            ctx.runFolder,
+            CSRunContext.phaseFolder('translate'),
+            'content-map.json',
+        );
+        if (fs.existsSync(appendSealPath)) {
+            return jsonResult(
+                {
+                    state: 'TRANSLATE_SEALED',
+                    runId,
+                    phase: 'translate',
+                    blockedReason: 'Translate phase already finalized (content-map.json exists). DO NOT append more files. For corrections, use csaa_audit + csaa_write on the specific file.',
+                    contentMapPath: appendSealPath,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_audit',
+                    nextSuggestedArgs: { runId },
+                },
+                'Translate sealed — append_translation_file rejected after finalize.',
+            );
+        }
+
         const file = params.file;
         if (typeof file !== 'object' || file === null) {
             return errorResult('file must be an object', runId);
@@ -3692,6 +3878,28 @@ const csaa_finalize_translation: MCPToolDefinition = (defineTool() as MCPToolBui
         const runId = String(params.runId ?? '');
         const ctx = getCtx(runId);
         if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+
+        // v1.38.3 — POST-FINALIZE SEAL. Reject double-finalize.
+        const finalizeSealPath = path.join(
+            ctx.runFolder,
+            CSRunContext.phaseFolder('translate'),
+            'content-map.json',
+        );
+        if (fs.existsSync(finalizeSealPath)) {
+            return jsonResult(
+                {
+                    state: 'TRANSLATE_SEALED',
+                    runId,
+                    phase: 'translate',
+                    blockedReason: 'Translate phase already finalized once (content-map.json exists). Cannot double-finalize. For corrections, use csaa_audit (Phase 6).',
+                    contentMapPath: finalizeSealPath,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_audit',
+                    nextSuggestedArgs: { runId },
+                },
+                'Translate sealed — finalize_translation rejected (already finalized).',
+            );
+        }
 
         const scratchRaw = ctx.readPhaseArtifact('translate', 'scratch-files.json');
         if (!scratchRaw) {
