@@ -1064,7 +1064,9 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                             maxBytes: MAX_BYTES_PER_CALL,
                             nextStepNeeded: true,
                             nextSuggestedTool: 'csaa_append_analysis_scenario',
-                            feedback: `csaa_record_analysis rejected: payload too large for single-call (${scenarios.length} scenarios, ${totalBytes} bytes — caps ${MAX_SCENARIOS_PER_CALL} scenarios / ${Math.round(MAX_BYTES_PER_CALL / 1024)} KB). Composing a 4+ scenario analysis in one JSON payload blows the LLM-host per-message output budget — you hit "response hit the length limit" mid-composition and the tool call never lands.\n\nUse the streaming protocol:\n  1. For EACH legacy @Test method, call csaa_append_analysis_scenario(runId, scenario: {...}). One scenario per call (~1-3 KB). Stages to 03-analyze/scratch-scenarios.json — survives compaction.\n  2. When every scenario is appended, call csaa_finalize_analysis(runId, payload: { source, feature, pages, dependencyGraph, configFiles, loginContract, gaps, readinessScore }) — DO NOT include scenarios in the finalize payload (they come from the scratch). Finalize runs every gate (semantic + signature-coverage + readiness) identically.\n\nDo NOT retry csaa_record_analysis with the same payload — same rejection. Streaming is mandatory above the cap.`,
+                            feedback:
+                                `${SILENCE_PREFIX.join('\n')}\n` +
+                                `csaa_record_analysis rejected: payload too large for single-call (${scenarios.length} scenarios, ${totalBytes} bytes — caps ${MAX_SCENARIOS_PER_CALL} scenarios / ${Math.round(MAX_BYTES_PER_CALL / 1024)} KB). Composing a 4+ scenario analysis in one JSON payload blows the LLM-host per-message output budget — you hit "response hit the length limit" mid-composition and the tool call never lands.\n\nUse the streaming protocol:\n  1. For EACH legacy @Test method, call csaa_append_analysis_scenario(runId, scenario: {...}). One scenario per call (~1-3 KB). Stages to 03-analyze/scratch-scenarios.json — survives compaction.\n  2. When every scenario is appended, call csaa_finalize_analysis(runId, payload: { source, feature, pages, dependencyGraph, configFiles, loginContract, gaps, readinessScore }) — DO NOT include scenarios in the finalize payload (they come from the scratch). Finalize runs every gate (semantic + signature-coverage + readiness) identically.\n\nDo NOT retry csaa_record_analysis with the same payload — same rejection. Streaming is mandatory above the cap.`,
                         },
                         `csaa_record_analysis rejected: ${scenarios.length} scenarios / ${totalBytes} bytes exceeds single-call cap. Use csaa_append_analysis_scenario + csaa_finalize_analysis.`,
                     );
@@ -1529,6 +1531,10 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 'semantic-errors.json',
                 JSON.stringify(semanticErrors, null, 2),
             );
+            // v1.38.5 — direct LLM to per-scenario replacement via append
+            // (now supports overwrite when scratch exists) rather than to
+            // a bulk record_analysis retry that risks the per-message cap.
+            const scenarioScratchExists = ctx.readPhaseArtifact('analyze', 'scratch-scenarios.json') !== null;
             return jsonResult(
                 {
                     state: 'AWAITING_LLM_RETRY',
@@ -1536,10 +1542,16 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                     phase: 'analyze',
                     semanticErrors,
                     nextStepNeeded: true,
-                    nextSuggestedTool: 'csaa_record_analysis',
-                    feedback: `Analysis is shallow. Specifically:\n${semanticErrors.map((e) => `  - ${e}`).join('\n')}\n\nRedo the missing reads, fill the fields, re-call csaa_record_analysis.`,
+                    nextSuggestedTool: scenarioScratchExists ? 'csaa_append_analysis_scenario' : 'csaa_record_analysis',
+                    feedback:
+                        `${SILENCE_PREFIX.join('\n')}\n` +
+                        `Analysis is shallow. ${semanticErrors.length} semantic error(s) found.\n\n` +
+                        (scenarioScratchExists
+                            ? `**DO NOT recompose all scenarios via csaa_record_analysis — that path hits the per-message length limit.**\n\nCorrection protocol (v1.38.5):\n  1. Scratch at 03-analyze/scratch-scenarios.json holds all previously appended scenarios.\n  2. For each affected scenario, call csaa_append_analysis_scenario(runId, scenario) with corrected content — same id OVERWRITES the prior staged version (replacement mode).\n  3. When corrections are appended, call csaa_finalize_analysis(runId, payload) with the meta fields. Gates re-run on the full set.\n  4. DO NOT re-submit scenarios that already passed.\n`
+                            : `**Use csaa_append_analysis_scenario instead — do NOT recompose the entire payload via csaa_record_analysis.**\n\nFor each legacy @Test, call csaa_append_analysis_scenario(runId, scenario) one at a time (~1-3 KB each). When all scenarios are staged, call csaa_finalize_analysis with the meta payload.\n`) +
+                        `\nSpecific errors:\n${semanticErrors.map((e) => `  - ${e}`).join('\n')}`,
                 },
-                `Analysis rejected (${semanticErrors.length} semantic error(s)). Retry.`,
+                `Analysis rejected (${semanticErrors.length} semantic error(s)). Use csaa_append_analysis_scenario (replacement mode) — do NOT recompose bulk.`,
             );
         }
 
@@ -1885,22 +1897,19 @@ const csaa_append_analysis_scenario: MCPToolDefinition = (defineTool() as MCPToo
         const list: unknown[] = scratchRaw ? JSON.parse(scratchRaw) : [];
         const id = (scenario as { id?: string }).id ?? `[${list.length}]`;
 
-        // Reject duplicate id within the same staging session.
-        if (list.some((s) => (s as { id?: string }).id === id)) {
-            return jsonResult(
-                {
-                    state: 'AWAITING_LLM_RETRY',
-                    runId,
-                    phase: 'analyze',
-                    nextStepNeeded: true,
-                    nextSuggestedTool: 'csaa_append_analysis_scenario',
-                    feedback: `Scenario id "${id}" was already appended in this run. Either re-emit with a unique id, or proceed to csaa_finalize_analysis if you've recorded every legacy @Test.`,
-                },
-                `Duplicate scenario id "${id}".`,
-            );
+        // v1.38.5 — REPLACEMENT MODE. Pre-seal (no analysis-report.json),
+        // duplicate ids are an EXPECTED retry path after semantic-gate
+        // rejection (e.g. step-coverage shortfall on scenario X). The LLM
+        // should be able to re-append scenario X with corrections without
+        // having to discard the rest of the queue. The post-finalize seal
+        // higher up catches post-seal corrections.
+        const dupIdx = list.findIndex((s) => (s as { id?: string }).id === id);
+        const isReplacement = dupIdx >= 0;
+        if (isReplacement) {
+            list[dupIdx] = scenario;
+        } else {
+            list.push(scenario);
         }
-
-        list.push(scenario);
         ctx.writePhaseArtifact(
             'analyze',
             'scratch-scenarios.json',
@@ -2167,17 +2176,16 @@ const csaa_append_analysis_page: MCPToolDefinition = (defineTool() as MCPToolBui
 
         const scratchRaw = ctx.readPhaseArtifact('analyze', 'scratch-pages.json');
         const list: Record<string, unknown>[] = scratchRaw ? JSON.parse(scratchRaw) : [];
-        if (list.some((x) => x.className === className)) {
-            return jsonResult(
-                {
-                    state: 'AWAITING_LLM_RETRY',
-                    runId,
-                    feedback: `Page className "${className}" was already appended in this run. Either re-emit with a unique className, or proceed to csaa_finalize_analysis if every signature page has been recorded.`,
-                },
-                `Page "${className}" duplicate`,
-            );
+        // v1.38.5 — REPLACEMENT MODE for pages (symmetric to scenarios).
+        // Allow overwriting prior staged page when analysis-report.json
+        // doesn't exist yet (post-seal re-entry blocked higher up).
+        const pageDupIdx = list.findIndex((x) => x.className === className);
+        const pageIsReplacement = pageDupIdx >= 0;
+        if (pageIsReplacement) {
+            list[pageDupIdx] = { ...p };
+        } else {
+            list.push({ ...p });
         }
-        list.push({ ...p });
         ctx.writePhaseArtifact('analyze', 'scratch-pages.json', JSON.stringify(list, null, 2));
 
         // Advance the pages queue. Permissive match: case-insensitive
@@ -2335,6 +2343,37 @@ const csaa_finalize_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilde
         const meta = params.payload;
         if (typeof meta !== 'object' || meta === null) {
             return errorResult(`payload must be an object`, runId);
+        }
+
+        // v1.38.5 — cap the meta payload size. After scenarios + pages
+        // moved to scratch (v1.38.2), the meta should be ~1-3 KB. If it
+        // exceeds 8 KB the LLM is doing something wrong (e.g. embedding
+        // huge dependencyGraph or pasting all gaps with verbose suggestions).
+        // Reject early so the LLM splits or trims before recomposing.
+        const META_BYTE_CAP = 8 * 1024;
+        const metaBytes = JSON.stringify(meta).length;
+        if (metaBytes > META_BYTE_CAP) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    phase: 'analyze',
+                    metaBytes,
+                    capBytes: META_BYTE_CAP,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_finalize_analysis',
+                    feedback:
+                        `${SILENCE_PREFIX.join('\n')}\n` +
+                        `csaa_finalize_analysis meta payload is ${metaBytes} bytes — exceeds the ${Math.round(META_BYTE_CAP / 1024)} KB cap. ` +
+                        `The meta should be ~1-3 KB (source + feature + dependencyGraph + configFiles + loginContract + gaps + readinessScore). ` +
+                        `If it's larger, most likely cause:\n` +
+                        `  - dependencyGraph has >50 entries (cap it at the most relevant ~10 files: entry + base classes + page objects directly used + helpers expanded)\n` +
+                        `  - gaps[].suggestedFuzzyMatch has verbose alternatives[] arrays (keep top 3 candidates per gap)\n` +
+                        `  - configFiles[].values is huge (only include keys actually referenced by the tests)\n` +
+                        `Trim the payload and re-call. DO NOT split into multiple finalize calls — finalize is a single-call atomic close-out.`,
+                },
+                `Finalize meta payload too large (${metaBytes} > ${META_BYTE_CAP} bytes).`,
+            );
         }
 
         const scratchRaw = ctx.readPhaseArtifact('analyze', 'scratch-scenarios.json');
@@ -3070,7 +3109,9 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
                             maxBytes: MAX_BYTES_PER_CALL,
                             nextStepNeeded: true,
                             nextSuggestedTool: 'csaa_append_translation_file',
-                            feedback: `csaa_record_translation rejected: payload too large for single-call submission (${filesArr.length} files, ${totalBytes} bytes — caps ${MAX_FILES_PER_CALL} files / ${MAX_BYTES_PER_CALL} bytes). This cap exists because composing a 5-15 file translation in one JSON payload blows the LLM-host per-message output budget — you hit "response hit the length limit" mid-composition and the tool call never lands. \n\nUse the streaming protocol instead:\n  1. For EACH file in your translation, call csaa_append_translation_file(runId, file: { relativePath, kind, content }). One file per call (~1-5 KB each). Stages to 05-translate/scratch-files.json — survives compaction.\n  2. When every file is appended, call csaa_finalize_translation(runId). It runs EVERY gate (schema + content + page-coverage signature + step-coverage signature + compile_check) identical to single-call. No shortcut, no quality compromise.\n\nDo NOT retry csaa_record_translation with the same payload — you'll get the same rejection. The streaming path is mandatory above the cap.`,
+                            feedback:
+                                `${SILENCE_PREFIX.join('\n')}\n` +
+                                `csaa_record_translation rejected: payload too large for single-call submission (${filesArr.length} files, ${totalBytes} bytes — caps ${MAX_FILES_PER_CALL} files / ${MAX_BYTES_PER_CALL} bytes). This cap exists because composing a 5-15 file translation in one JSON payload blows the LLM-host per-message output budget — you hit "response hit the length limit" mid-composition and the tool call never lands. \n\nUse the streaming protocol instead:\n  1. For EACH file in your translation, call csaa_append_translation_file(runId, file: { relativePath, kind, content }). One file per call (~1-5 KB each). Stages to 05-translate/scratch-files.json — survives compaction. Duplicate paths OVERWRITE the prior staged version (replacement mode, v1.38.5).\n  2. When every file is appended, call csaa_finalize_translation(runId). It runs EVERY gate (schema + content + page-coverage signature + step-coverage signature + compile_check) identical to single-call. No shortcut, no quality compromise.\n\nDo NOT retry csaa_record_translation with the same payload — you'll get the same rejection. The streaming path is mandatory above the cap.`,
                         },
                         `csaa_record_translation rejected: ${filesArr.length} files / ${totalBytes} bytes exceeds single-call cap. Use csaa_append_translation_file + csaa_finalize_translation.`,
                     );
@@ -3138,6 +3179,18 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
                     summaryLines.push(`  [${v.severity}] ${v.ruleId}${v.line ? ` (line ${v.line})` : ''}: ${v.message}`);
                 }
             }
+            const affectedFiles = Object.keys(grouped).filter((rel) =>
+                grouped[rel].some((v) => v.severity === 'error'),
+            );
+            // v1.38.5 — switch nextSuggestedTool from csaa_record_translation
+            // (which directs the LLM back to the bulk path that caused the
+            // failure) to csaa_append_translation_file (per-file replacement).
+            // The scratch (if present) retains all prior files; the LLM
+            // overwrites ONLY the affected files via append-replacement,
+            // then re-calls csaa_finalize_translation. Without this redirect,
+            // the LLM composes all 16 files in chat → length limit before
+            // the call lands.
+            const scratchExists = ctx.readPhaseArtifact('translate', 'scratch-files.json') !== null;
             return jsonResult(
                 {
                     state: 'AWAITING_LLM_RETRY',
@@ -3145,11 +3198,21 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
                     phase: 'translate',
                     contentViolations,
                     errorCount: errors.length,
+                    affectedFiles,
                     nextStepNeeded: true,
-                    nextSuggestedTool: 'csaa_record_translation',
-                    feedback: `Content gates rejected the translation. Fix each violation and re-call csaa_record_translation:${summaryLines.join('\n')}`,
+                    nextSuggestedTool: 'csaa_append_translation_file',
+                    feedback:
+                        `${SILENCE_PREFIX.join('\n')}\n` +
+                        `Content gates rejected ${errors.length} error(s) across ${affectedFiles.length} file(s).\n\n` +
+                        `**DO NOT recompose all files via csaa_record_translation — that path hits the per-message length limit.**\n\n` +
+                        `Correction protocol (v1.38.5):\n` +
+                        (scratchExists
+                            ? `  1. The scratch at 05-translate/scratch-files.json already holds ALL ${Object.keys(grouped).length === affectedFiles.length ? '' : 'previously staged '}files (good files included).\n  2. For EACH affected file below, call csaa_append_translation_file(runId, file: { relativePath, kind, content }) with the corrected content. Same relativePath OVERWRITES the prior staged version (replacement mode).\n  3. When all affected files are re-appended, call csaa_finalize_translation(runId). Gates re-run on the full set.\n  4. Files NOT in the affected list stay as-is in scratch — DO NOT re-submit them.\n`
+                            : `  1. No scratch on disk yet. For EACH affected file below, call csaa_append_translation_file(runId, file: { relativePath, kind, content }) with the corrected content. Build up the scratch one file at a time.\n  2. ALSO append the OTHER files that were in your original bulk submit (the ones that passed gates). Each as a separate csaa_append_translation_file call.\n  3. When all files are staged, call csaa_finalize_translation(runId). Gates run on the full set.\n`) +
+                        `\nAffected files (need correction):\n  - ${affectedFiles.join('\n  - ')}\n` +
+                        `\nViolation details:${summaryLines.join('\n')}`,
                 },
-                `Content gates failed: ${errors.length} error(s) across ${Object.keys(grouped).length} file(s). Retry.`,
+                `Content gates failed: ${errors.length} error(s) across ${affectedFiles.length} file(s). Use csaa_append_translation_file (replacement mode) — do NOT recompose bulk.`,
             );
         }
 
@@ -3661,36 +3724,59 @@ const csaa_append_translation_file: MCPToolDefinition = (defineTool() as MCPTool
         if (typeof f.content !== 'string') {
             return errorResult('file.content required (string)', runId);
         }
-        if (f.content.length > 256 * 1024) {
-            return errorResult(`file.content is ${f.content.length} bytes — exceeds 256 KB per-file limit. Split the file or escalate as a gap.`, runId);
+        // v1.38.5 — lowered per-file size cap from 256 KB → 32 KB. A real
+        // BDD file shouldn't approach 32 KB; if it does the LLM is
+        // generating bloated content that risks the per-message output cap
+        // on its own. Force a split (or a gap entry for genuinely-large
+        // legacy content) early.
+        const PER_FILE_BYTE_CAP = 32 * 1024;
+        if (f.content.length > PER_FILE_BYTE_CAP) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    phase: 'translate',
+                    fileSize: f.content.length,
+                    capBytes: PER_FILE_BYTE_CAP,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_append_translation_file',
+                    feedback:
+                        `${SILENCE_PREFIX.join('\n')}\n` +
+                        `File "${f.relativePath}" is ${f.content.length} bytes — exceeds the ${Math.round(PER_FILE_BYTE_CAP / 1024)} KB per-file cap. ` +
+                        `A single file that large risks the per-message output cap on its own (the file plus tool-call envelope plus chat narration easily crosses 32 KB). ` +
+                        `Options:\n` +
+                        `  - For steps files: split scenario step-defs into <module>-1.steps.ts, <module>-2.steps.ts, etc.\n` +
+                        `  - For pages: split mega-pages into per-region helpers (rare; usually means analysis lumped two pages together).\n` +
+                        `  - For data files: split scenarios by domain/grouping into <module>-<group>-scenarios.json.\n` +
+                        `Then re-call csaa_append_translation_file with each smaller piece.`,
+                },
+                `File too large (${f.content.length} > ${PER_FILE_BYTE_CAP} bytes).`,
+            );
         }
 
         const scratchRaw = ctx.readPhaseArtifact('translate', 'scratch-files.json');
         const list: Array<{ relativePath: string; kind: string; content: string; reuseDecision?: string }> =
             scratchRaw ? JSON.parse(scratchRaw) : [];
 
-        // Reject duplicate paths — would shadow the prior file silently.
-        if (list.some((x) => x.relativePath === f.relativePath)) {
-            return jsonResult(
-                {
-                    state: 'AWAITING_LLM_RETRY',
-                    runId,
-                    phase: 'translate',
-                    nextStepNeeded: true,
-                    nextSuggestedTool: 'csaa_append_translation_file',
-                    feedback: `File "${f.relativePath}" was already appended in this run. To replace it, call csaa_finalize_translation first (so the scratch is consumed), then re-start translate. Or proceed to finalize if every file is staged.`,
-                },
-                `Duplicate file path "${f.relativePath}".`,
-            );
-        }
-
-        list.push({
+        // v1.38.5 — REPLACEMENT MODE. Pre-seal (no content-map.json),
+        // duplicate paths are an EXPECTED retry path after content-gate
+        // rejection. Overwrite the prior staged entry so the LLM can
+        // submit a corrected version one file at a time. Post-seal is
+        // caught earlier by the post-finalize seal check.
+        const dupIdx = list.findIndex((x) => x.relativePath === f.relativePath);
+        const isReplacement = dupIdx >= 0;
+        const entry = {
             relativePath: f.relativePath,
             kind: f.kind as 'feature' | 'steps' | 'page' | 'data',
             content: f.content,
             ...(typeof (f as { reuseDecision?: unknown }).reuseDecision === 'string' ?
                 { reuseDecision: (f as { reuseDecision: string }).reuseDecision } : {}),
-        });
+        };
+        if (isReplacement) {
+            list[dupIdx] = entry;
+        } else {
+            list.push(entry);
+        }
         ctx.writePhaseArtifact(
             'translate',
             'scratch-files.json',
@@ -3768,6 +3854,7 @@ const csaa_append_translation_file: MCPToolDefinition = (defineTool() as MCPTool
                         filesCollected: list.length,
                         kindCounts,
                         lastAppended: f.relativePath,
+                        replaced: isReplacement,
                         delegation: env,
                         queue: {
                             current: tFileQueue.completed('translate') + 1,
@@ -3798,6 +3885,7 @@ const csaa_append_translation_file: MCPToolDefinition = (defineTool() as MCPTool
                     filesCollected: list.length,
                     kindCounts,
                     lastAppended: f.relativePath,
+                    replaced: isReplacement,
                     delegation: finalizeEnv,
                     queue: {
                         current: tFileQueue.total('translate'),
@@ -3825,6 +3913,7 @@ const csaa_append_translation_file: MCPToolDefinition = (defineTool() as MCPTool
                 filesCollected: list.length,
                 kindCounts,
                 lastAppended: f.relativePath,
+                replaced: isReplacement,
                 nextStepNeeded: true,
                 nextSuggestedTool: 'csaa_append_translation_file',
                 recoveryHint: 'If the conversation was compacted, your staged files live at translate/scratch-files.json under the run folder. Continue appending the remaining files (one feature + one steps + N pages + one data), then call csaa_finalize_translation.',
@@ -4206,6 +4295,32 @@ const csaa_write: MCPToolDefinition = (defineTool() as MCPToolBuilder)
             );
             ctx.finishPhase('write', 'done', { reportPath });
             CSStatusWriter.write(ctx);
+
+            // v1.38.4 — credentials detection. Scan the written env files
+            // for placeholder/empty USERNAME or PASSWORD lines. If any are
+            // missing or stub-shaped, signal credentialsMissing=true so
+            // the agent prompts the user + invokes csaa_configure_credentials
+            // before csaa_execute (which would fail without real creds).
+            let credentialsMissing = false;
+            const credentialsHint: string[] = [];
+            for (const p of configWritten) {
+                if (!/\benvironments[\\\/].+\.env$/i.test(p)) continue;
+                try {
+                    const envBody = fs.readFileSync(p, 'utf-8');
+                    const userLine = envBody.split(/\r?\n/).find((l) => /^(DEFAULT_)?USERNAME\s*=/i.test(l.trim()));
+                    const passLine = envBody.split(/\r?\n/).find((l) => /^(DEFAULT_)?PASSWORD\s*=/i.test(l.trim()));
+                    const userVal = userLine ? userLine.split('=').slice(1).join('=').trim() : '';
+                    const passVal = passLine ? passLine.split('=').slice(1).join('=').trim() : '';
+                    const userMissing = !userVal || /<paste-/i.test(userVal) || /\$\{.*\}/i.test(userVal);
+                    const passMissing = !passVal || /<paste-/i.test(passVal) || /^ENCRYPTED:$/i.test(passVal) || /<.*encrypt.*>/i.test(passVal);
+                    if (userMissing || passMissing) {
+                        credentialsMissing = true;
+                        credentialsHint.push(
+                            `${path.basename(p)} → ${userMissing ? 'USERNAME missing' : ''}${userMissing && passMissing ? ' + ' : ''}${passMissing ? 'PASSWORD missing/placeholder' : ''}`,
+                        );
+                    }
+                } catch { /* non-fatal */ }
+            }
             return jsonResult(
                 {
                     state: 'RUNNING',
@@ -4216,12 +4331,18 @@ const csaa_write: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                     auditFailed: result.auditFailed.length,
                     runFolder: ctx.runFolder,
                     reportPath,
+                    credentialsMissing,
+                    credentialsHint: credentialsMissing
+                        ? `Login credentials missing or placeholder in ${credentialsHint.join('; ')}. Ask the user for the username + password, then call csaa_configure_credentials(runId, username, password) BEFORE csaa_execute. The password is encrypted via CSEncryptionUtil before write — plaintext never persists.`
+                        : undefined,
                     nextStepNeeded: true,
-                    nextSuggestedTool: 'csaa_execute',
+                    nextSuggestedTool: credentialsMissing ? 'csaa_configure_credentials' : 'csaa_execute',
                     nextSuggestedArgs: { runId },
                     filesWritten: result.written,
                 },
-                `Wrote ${result.written.length} file(s); skipped ${result.skippedExisting.length} existing. Call csaa_execute next.`,
+                credentialsMissing
+                    ? `Wrote ${result.written.length} file(s). CREDENTIALS MISSING — ask the user for username + password, then call csaa_configure_credentials.`
+                    : `Wrote ${result.written.length} file(s); skipped ${result.skippedExisting.length} existing. Call csaa_execute next.`,
             );
         } catch (err) {
             ctx.finishPhase('write', 'blocked_user', {
@@ -5155,6 +5276,259 @@ async function scaffoldFrameworkConfig(
 }
 
 // ============================================================================
+// csaa_read_config_file — deterministic config/properties reader (v1.38.4)
+// ============================================================================
+// VS Code Copilot's built-in `read` respects .gitignore — legacy reference
+// folders (LegacySeleniumCodeForConversion/...) are typically gitignored,
+// so the LLM cannot reach env.properties via its native tool. This walks
+// Node fs directly, parses k=v pairs, classifies keys into urlKeys /
+// credentialKeys / dbKeys, and auto-detects env from path. Result feeds
+// directly into analysis.configFiles[].values which feeds the generated
+// config/<project>/environments/<env>.env scaffold.
+
+const csaa_read_config_file: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_read_config_file')
+    .title('CS-AI-Auto-Assist — Read legacy config/properties file (bypasses gitignore)')
+    .description(
+        'Reads a legacy .properties / .env / .cfg / .ini / .yaml / .yml / .json config file ' +
+            'from disk via Node fs (bypasses .gitignore — Copilot\'s built-in read does not work ' +
+            'on legacy reference folders that are typically gitignored). Parses key=value pairs ' +
+            '(.properties / .env / .cfg / .ini) or JSON (.yaml / .yml / .json), returns the full ' +
+            'values object plus key classification (urlKeys: contain url/host, credentialKeys: ' +
+            'contain user/password/secret, dbKeys: db.* prefix). Auto-detects env from the path ' +
+            '(resources/<env>/env.properties pattern). Use the returned `values` object to ' +
+            'populate analysis.configFiles[i].values — without it, the generated env scaffold has ' +
+            'placeholder URLs and blank credentials.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .stringParam('filePath', 'Absolute path to the config file. May come from inventory.propertiesFiles[] or via fuzzy-match.', { required: true })
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+        const filePath = getStr(params, 'filePath');
+        if (!filePath) return errorResult('filePath required', runId);
+        if (!fs.existsSync(filePath)) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    error: `config file '${filePath}' not found on disk`,
+                    suggestion: 'Verify path. If unsure, check inventory.propertiesFiles[] in 02-discover/inventory.json or use csaa_resolve_data_file with the annotation value.',
+                },
+                `config file '${filePath}' not found`,
+            );
+        }
+        let raw: string;
+        try { raw = fs.readFileSync(filePath, 'utf-8'); }
+        catch (err) {
+            return errorResult(`failed to read '${filePath}': ${err instanceof Error ? err.message : String(err)}`, runId);
+        }
+        const ext = path.extname(filePath).toLowerCase();
+        const values: Record<string, string> = {};
+        if (ext === '.json') {
+            try {
+                const obj = JSON.parse(raw);
+                if (typeof obj === 'object' && obj !== null) {
+                    for (const [k, v] of Object.entries(obj)) {
+                        values[k] = typeof v === 'string' ? v : JSON.stringify(v);
+                    }
+                }
+            } catch (err) {
+                return errorResult(`'${filePath}' is not valid JSON: ${err instanceof Error ? err.message : String(err)}`, runId);
+            }
+        } else if (ext === '.yaml' || ext === '.yml') {
+            // Minimal flat YAML parser (k: v on each line). For deep YAML
+            // the user can pass a pre-flattened JSON instead.
+            for (const line of raw.split(/\r?\n/)) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith('#')) continue;
+                const m = trimmed.match(/^([^:]+):\s*(.*)$/);
+                if (m) {
+                    const k = m[1].trim();
+                    let v = m[2].trim();
+                    // strip surrounding quotes
+                    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+                        v = v.slice(1, -1);
+                    }
+                    values[k] = v;
+                }
+            }
+        } else {
+            // .properties / .env / .cfg / .ini — k=v pairs, # or ! comments.
+            for (const line of raw.split(/\r?\n/)) {
+                const trimmed = line.trim();
+                if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) continue;
+                const eqIdx = trimmed.indexOf('=');
+                if (eqIdx > 0) {
+                    const k = trimmed.slice(0, eqIdx).trim();
+                    const v = trimmed.slice(eqIdx + 1).trim();
+                    values[k] = v;
+                }
+            }
+        }
+
+        // Classify keys so the LLM knows which to lift into the analysis.
+        const keys = Object.keys(values);
+        const lower = (s: string): string => s.toLowerCase();
+        const urlKeys = keys.filter((k) => /url|host|endpoint|baseuri|baseurl|appurl|loginurl/i.test(lower(k)) && !/db\.|database\.|jdbc/i.test(lower(k)));
+        const credentialKeys = keys.filter((k) => /user|pass|secret|token|apikey|credential/i.test(lower(k)));
+        const dbKeys = keys.filter((k) => /^db\.|^database\.|jdbc/i.test(lower(k)));
+        const otherKeys = keys.filter((k) =>
+            !urlKeys.includes(k) && !credentialKeys.includes(k) && !dbKeys.includes(k),
+        );
+
+        // Detect env from path: resources/<env>/env.properties etc.
+        let detectedEnv: string | undefined;
+        const envMatch = filePath.match(/[\\\/]resources?[\\\/]([^\\\/]+)[\\\/]/i);
+        if (envMatch) detectedEnv = envMatch[1];
+
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                filePath,
+                fileExt: ext,
+                detectedEnv,
+                keyCount: keys.length,
+                keys,
+                values,
+                urlKeys,
+                credentialKeys,
+                dbKeys,
+                otherKeys,
+                hint: 'Populate analysis.configFiles[i] with { path: filePath, env: detectedEnv, keysExtracted: keys, values: values }. The `values` object is critical — without it, the generated env scaffold has placeholder URLs and blank credentials.',
+            },
+            `Read ${keys.length} key(s) from ${path.basename(filePath)} (env=${detectedEnv ?? 'unknown'}). urlKeys: ${urlKeys.length}, credentialKeys: ${credentialKeys.length}, dbKeys: ${dbKeys.length}.`,
+        );
+    })
+    .build();
+
+// ============================================================================
+// csaa_configure_credentials — encrypted credential writer (v1.38.4)
+// ============================================================================
+// Phase 7.5 helper. When csaa_write reports credentialsMissing=true, the
+// agent asks the user for the real username + password in chat, then
+// invokes this tool. The password is encrypted via CSEncryptionUtil
+// (AES-256-GCM, "ENCRYPTED:base64" format) before write — plaintext never
+// persists to disk. The framework's runtime config layer decrypts at
+// runtime when the test starts.
+
+const csaa_configure_credentials: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_configure_credentials')
+    .title('CS-AI-Auto-Assist — Configure encrypted credentials (Phase 7.5)')
+    .description(
+        'Writes USERNAME + ENCRYPTED:base64 PASSWORD to config/<project>/environments/<env>.env. ' +
+            'The password is encrypted via CSEncryptionUtil (AES-256-GCM); plaintext never lands ' +
+            'on disk. Use this after csaa_write returns credentialsMissing=true. Ask the user ' +
+            'for the username + password in chat (the ONE exception to the no-user-interruption ' +
+            'rule), then invoke this tool with their values. Existing USERNAME/PASSWORD lines ' +
+            'are overwritten; other keys in the env file are preserved.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .stringParam('username', 'Plaintext username. Stored as USERNAME=<value> in the env file.', { required: true })
+    .stringParam('password', 'Plaintext password. Encrypted via CSEncryptionUtil before write — plaintext is NOT persisted.', { required: true })
+    .stringParam('project', 'Target CS Playwright project name. Defaults to run-params.project.')
+    .stringParam('environment', 'Target environment name (e.g. sit / dev / uat). Defaults to first env from the analysis configFiles.')
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+        const username = getStr(params, 'username');
+        const password = getStr(params, 'password');
+        if (!username || !password) {
+            return errorResult('username + password required (plaintext; password is encrypted before write)', runId);
+        }
+
+        // Resolve project + env.
+        let project = getStr(params, 'project');
+        const rpRaw = ctx.readPhaseArtifact('intake', 'run-params.json');
+        if (!project && rpRaw) {
+            try { project = (JSON.parse(rpRaw) as { project?: string }).project; } catch { /* ignore */ }
+        }
+        if (!project) return errorResult('project not provided and not found in run-params.json — pass it explicitly', runId);
+
+        let environment = getStr(params, 'environment');
+        if (!environment) {
+            const reportRaw = ctx.readPhaseArtifact('analyze', 'analysis-report.json');
+            if (reportRaw) {
+                try {
+                    const r = JSON.parse(reportRaw) as { configFiles?: Array<{ env?: string }> };
+                    environment = r.configFiles?.find((c) => typeof c.env === 'string')?.env;
+                } catch { /* ignore */ }
+            }
+        }
+        if (!environment) environment = 'sit';
+
+        // Build target env file path. Mirrors scaffoldFrameworkConfig.
+        const consumerRoot = process.cwd();
+        const envFilePath = path.resolve(
+            consumerRoot,
+            'config', project, 'environments', `${environment}.env`,
+        );
+
+        // Encrypt password.
+        let encrypted: string;
+        try {
+            const { CSEncryptionUtil } = await import('../../utils/CSEncryptionUtil');
+            encrypted = CSEncryptionUtil.getInstance().encrypt(password);
+        } catch (err) {
+            return errorResult(`failed to encrypt password: ${err instanceof Error ? err.message : String(err)}`, runId);
+        }
+
+        // Read existing file (preserve other keys), update USERNAME/PASSWORD.
+        let existing = '';
+        if (fs.existsSync(envFilePath)) {
+            try { existing = fs.readFileSync(envFilePath, 'utf-8'); } catch { /* ignore */ }
+        }
+        const lines = existing.split(/\r?\n/);
+        const updated: string[] = [];
+        let sawUser = false;
+        let sawPass = false;
+        for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) { updated.push(line); continue; }
+            if (/^USERNAME\s*=/i.test(trimmed) || /^DEFAULT_USERNAME\s*=/i.test(trimmed)) {
+                updated.push(`USERNAME=${username}`);
+                sawUser = true;
+            } else if (/^PASSWORD\s*=/i.test(trimmed) || /^DEFAULT_PASSWORD\s*=/i.test(trimmed)) {
+                updated.push(`PASSWORD=${encrypted}`);
+                sawPass = true;
+            } else {
+                updated.push(line);
+            }
+        }
+        if (!sawUser) updated.push(`USERNAME=${username}`);
+        if (!sawPass) updated.push(`PASSWORD=${encrypted}`);
+
+        try {
+            fs.mkdirSync(path.dirname(envFilePath), { recursive: true });
+            fs.writeFileSync(envFilePath, updated.join('\n').replace(/\n\n+$/, '\n'), 'utf-8');
+        } catch (err) {
+            return errorResult(`failed to write env file: ${err instanceof Error ? err.message : String(err)}`, runId);
+        }
+
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                envFilePath,
+                project,
+                environment,
+                passwordEncrypted: true,
+                encryptionFormat: 'AES-256-GCM (CSEncryptionUtil); ENCRYPTED:base64 prefix',
+                nextStepNeeded: true,
+                nextSuggestedTool: 'csaa_execute',
+                nextSuggestedArgs: { runId },
+            },
+            `Credentials written to ${path.relative(consumerRoot, envFilePath)}. Password encrypted via CSEncryptionUtil; plaintext NOT stored. Call csaa_execute next.`,
+        );
+    })
+    .build();
+
+// ============================================================================
 // csaa_expand_helper — Deterministic helper-method body extraction
 // ============================================================================
 // The LLM calls this during analyze to get the authoritative leaf-action list
@@ -5404,6 +5778,8 @@ export const csaaPrimitiveTools: MCPToolDefinition[] = [
     csaa_publish,
     csaa_query_existing_pages,
     csaa_read_legacy_data,
+    csaa_read_config_file,
+    csaa_configure_credentials,
     csaa_resolve_data_file,
     csaa_expand_helper,
     csaa_extract_page_fields,

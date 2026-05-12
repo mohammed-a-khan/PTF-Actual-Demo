@@ -2453,7 +2453,9 @@ tools:
   - csaa_publish
   # Companion primitives:
   - csaa_query_existing_pages
-  - csaa_read_legacy_data
+  - csaa_read_legacy_data       # deterministic XLS/CSV/XML data-file reader (bypasses gitignore)
+  - csaa_read_config_file       # deterministic .properties/.env reader; returns parsed values + key classification (bypasses gitignore)
+  - csaa_configure_credentials  # encrypt password via CSEncryptionUtil + write to env config (Phase 7.5)
   - csaa_resolve_data_file      # deterministic resolver for legacy data-file paths (bypasses gitignore)
   - csaa_expand_helper          # deterministic helper-method body extractor
   - csaa_extract_page_fields    # deterministic page-object @FindBy extractor
@@ -2576,28 +2578,156 @@ need streaming to dodge the per-message cap:
 - For tiny inputs (≤2 files OR ≤3 scenarios) the bulk record tools
   (\`csaa_record_analysis\` / \`csaa_record_translation\`) still work.
 
-## SILENCE RULE — no chat narration of generated content
+## ⚠️ SILENCE RULE — CRITICAL, NON-NEGOTIABLE
 
-When composing tool calls for \`csaa_append_translation_file\` or
-\`csaa_record_translation\`, **DO NOT narrate the file contents in your
-chat reply**. Phrases like:
+This is the **#1 cause** of \`Sorry, the response hit the length limit\`
+aborts. Real production runs have repeatedly hit the cap because the
+LLM wrote a one-line preamble in chat BEFORE composing a 15 KB file
+payload — combined output exceeded ~32 KB and the tool call never
+landed.
 
+**Banned phrases — DO NOT write any of these in chat:**
+
+- "Producing the steps file now:"
 - "Now writing the page object class..."
+- "Now generating the feature file:"
 - "Adding element locators with self-healing..."
 - "Defining the page class with decorators..."
-- "Writing page object imports... Writing page object methods..."
+- "Writing page object imports..."
+- "Writing page object methods..."
+- "Composing the file content:"
+- "Let me now create the X file..."
+- "I will now submit..."
+- "Submitting now:"
 
-burn output tokens the LLM host counts toward the per-message cap. Two
-or three such page objects narrated and you hit
-\`Sorry, the response hit the length limit\` mid-flow.
+**Banned formatting — DO NOT do any of these:**
 
-**Compose tool calls SILENTLY.** Your chat reply should contain only:
-1. A one-line "submitting feature/steps/page X..." status (or nothing).
-2. The tool call itself.
+- \` \`\`\`typescript \` / \` \`\`\`gherkin \` / \` \`\`\`json \` code fences before the tool call
+- Bullet lists describing what the file will contain
+- "Here is the file content:" + the content inlined
+- Recap of what was just appended ("Feature file appended successfully")
 
-The user reads \`STATUS.md\` for progress and the persisted artefacts for
-content. Visible markdown narration of generated file content is the #1
-cause of \`length limit\` aborts on the translate phase.
+**The ONLY acceptable chat output between two iterator turns is:**
+1. **Nothing.** Just compose the tool call directly.
+2. OR a single short status like \`Producing steps 2/6\` (≤ 5 words, no body).
+
+Every line of chat narration counts against the per-message output cap.
+A 5-line preamble + a 15 KB file payload blows the cap. A direct tool
+call alone does not. The user reads \`STATUS.md\` for progress and the
+persisted artefacts for content — your chat is not the channel.
+
+**Where this matters most:**
+- \`csaa_append_translation_file\` (per-file iterator submit)
+- \`csaa_append_analysis_scenario\` (per-scenario iterator submit)
+- \`csaa_append_analysis_page\` (per-page iterator submit)
+- \`csaa_record_translation\` (bulk path — already at the cap)
+
+**Note on splitting:** For modules with >50 unique step-def patterns,
+the framework now seeds MULTIPLE steps-file queue items
+(\`<module>-1.steps.ts\`, \`<module>-2.steps.ts\`, …). Treat each as one
+independent per-file turn; do NOT try to merge them.
+
+## POST-FINALIZE SEAL — do NOT re-enter a finalized phase
+
+Once \`csaa_finalize_translation\` succeeds, \`content-map.json\` is
+written and the translate phase is **SEALED**. The framework will
+reject any subsequent call to:
+
+- \`csaa_translate\` → returns \`state: TRANSLATE_SEALED\`
+- \`csaa_append_translation_file\` → returns \`state: TRANSLATE_SEALED\`
+- \`csaa_record_translation\` → returns \`state: TRANSLATE_SEALED\`
+- \`csaa_finalize_translation\` (re-call) → returns \`state: TRANSLATE_SEALED\`
+
+Same on the analyze side: once \`csaa_finalize_analysis\` or
+\`csaa_record_analysis\` succeeds, \`analysis-report.json\` exists and:
+
+- \`csaa_analyze\` → returns \`state: ANALYZE_SEALED\`
+
+**DO NOT** notice a defect in a generated file and try to re-enter
+translate to "fix it" with a corrected payload. That will:
+1. Trigger the seal → \`TRANSLATE_SEALED\` (best case)
+2. OR — if you compose first — hit the per-message length limit
+   trying to assemble a fresh bulk payload (worst case, the failure
+   mode this seal prevents)
+
+**For corrections after finalize:**
+- Run \`csaa_audit\` (Phase 6). It identifies content violations on the
+  persisted files at \`test/<project>/...\`. Fix specific files via
+  \`csaa_write\` on the targeted path.
+- The \`csaa_execute\` + \`csaa_verify\` heal loop will catch real-app
+  issues automatically.
+- For wholesale re-translate (rare), start a NEW run via
+  \`cs_ai_auto_assist\` — do NOT recycle the sealed run folder.
+
+If you see \`state: TRANSLATE_SEALED\` or \`state: ANALYZE_SEALED\`, read
+the \`blockedReason\` and call the suggested \`nextSuggestedTool\`. Do not
+retry the same call.
+
+## ⚠️ GATE-RETRY PROTOCOL — content-gate rejections (PRE-finalize)
+
+This is the most common pipeline failure beyond the bulk-payload length
+limit. Real symptoms: \`csaa_finalize_translation\` returns
+\`AWAITING_LLM_RETRY\` with content violations (duplicate step-def bodies,
+orphan step-defs, escaped quotes, encoding issues like \`№\`,
+step-coverage shortfall, etc.).
+
+**The wrong reflex** (will hit the length limit every time):
+
+> "I'll fix all 16 files and re-call csaa_record_translation with the
+> corrected payload."
+
+This is the failure mode the framework now catches via the
+\`nextSuggestedTool\` switch. The corrected reflex:
+
+### Per-file replacement (v1.38.5)
+
+\`csaa_append_translation_file\` now **OVERWRITES** the prior staged
+version when:
+1. The same \`relativePath\` is submitted again
+2. \`content-map.json\` does NOT exist yet (no successful finalize)
+
+So the retry path is structurally simple:
+
+1. Read the rejection feedback — it lists \`affectedFiles[]\` and the
+   specific violations per file.
+2. For EACH affected file, call
+   \`csaa_append_translation_file(runId, file: { relativePath, kind,
+   content })\` with the corrected content. Same \`relativePath\`
+   triggers replacement mode — the scratch entry is overwritten in
+   place. Response carries \`replaced: true\`.
+3. Files NOT in \`affectedFiles[]\` stay in scratch untouched — DO NOT
+   re-submit them.
+4. When all corrected files are appended, call
+   \`csaa_finalize_translation(runId)\`. Gates re-run on the full scratch
+   (good files + corrected files together).
+
+Same protocol on the analyze side:
+
+- \`csaa_append_analysis_scenario\` overwrites prior scenario with same \`id\`.
+- \`csaa_append_analysis_page\` overwrites prior page with same \`className\`.
+
+### What the agent must NOT do after a gate rejection
+
+- **NEVER** call \`csaa_record_translation\` with a freshly composed
+  full payload. The cap rejects ≥5 files OR ≥12 KB, and even within
+  the cap, composing the payload in chat triggers the length limit.
+- **NEVER** call \`csaa_record_analysis\` with a freshly composed full
+  payload of scenarios. Same reason.
+- **NEVER** narrate the corrections in chat as a bulleted list before
+  composing tool calls. That alone burns enough output budget to hit
+  the cap. Compose the tool call directly. ZERO chat.
+- **NEVER** re-submit unaffected files. They're already correct in scratch.
+
+### What success looks like
+
+For 16 files with 5 affected: you make 5 \`csaa_append_translation_file\`
+calls (one per affected file, each ~1-5 KB), then 1
+\`csaa_finalize_translation\` call. Six tool calls total. Each
+~1-5 KB. The per-message length limit is never approached.
+
+If the SAME files keep failing on the SAME violations after 3 retry
+rounds, the gate rejection is structural — escalate to the user with
+the specific violation pattern rather than retrying again.
 
 ## CONVERSATION COMPACTION RECOVERY
 
@@ -2729,6 +2859,16 @@ the user to provide missing material.
   these and force a retry.
 - Use existing pages from \`grounding.existingPagesIndex\` instead of
   creating duplicates; mark them \`role: reuse-existing\`.
+- **NEVER use your built-in \`read\` tool for legacy config/properties
+  files.** Reference folders like \`LegacySeleniumCodeForConversion/...\`
+  are typically gitignored — your \`read\` returns nothing. Call
+  \`csaa_read_config_file(runId, filePath)\` instead; it walks Node fs
+  directly and returns parsed key=value pairs plus key classification
+  (urlKeys / credentialKeys / dbKeys / detectedEnv). Populate
+  \`configFiles[i].values\` from the returned \`values\` object — without
+  it, the generated \`config/<project>/environments/<env>.env\` ships
+  with placeholder URLs and blank credentials and the run cannot
+  execute.
 
 ### Phase 4 — PLAN (call \`csaa_plan\`)
 
@@ -2801,12 +2941,60 @@ feedback). Persistent violations land in \`06-audit/violations.json\`.
 
 \`\`\`
 csaa_write(runId, overwriteExisting?: false)
-  → { manifest, written, skippedExisting }
+  → { manifest, written, skippedExisting, credentialsMissing?, credentialsHint?, nextSuggestedTool }
 \`\`\`
 
 Atomic per-file writer with the **Fix Manifest** displayed before
 each write (path + violation count + reuse decision). Skip-existing
 protection unless explicitly opted in.
+
+**Credential detection (v1.38.4):** After scaffolding the framework
+config, \`csaa_write\` scans the generated \`config/<project>/environments/
+<env>.env\` files for missing/placeholder \`USERNAME\` or \`PASSWORD\`. If
+either is empty or stub-shaped (e.g. \`<paste-username-or-leave-blank>\`,
+\`ENCRYPTED:\`), the result carries \`credentialsMissing: true\` plus a
+\`credentialsHint\` and \`nextSuggestedTool: csaa_configure_credentials\`.
+Real test runs cannot pass without real creds — proceed to Phase 7.5
+when this flag fires.
+
+### Phase 7.5 — CONFIGURE CREDENTIALS (call \`csaa_configure_credentials\`, only if csaa_write returned credentialsMissing=true)
+
+This phase is the **ONE exception** to the "never ask the user between
+phases" rule. Credentials require human input — there is no source we
+can derive them from. Skip this phase entirely when \`credentialsMissing\`
+is false.
+
+When credentials ARE missing:
+
+1. Surface the \`credentialsHint\` to the user verbatim.
+2. Ask in plain English:
+   > "The tests require login credentials. Please provide the username
+   > and password for the \`<env>\` environment. The password will be
+   > encrypted with the framework's AES-256-GCM utility before being
+   > written to disk — plaintext is never stored."
+3. When the user replies, call:
+
+\`\`\`
+csaa_configure_credentials(runId, username, password, project?, environment?)
+  → { envFilePath, passwordEncrypted, nextSuggestedTool: 'csaa_execute' }
+\`\`\`
+
+The tool encrypts the password via \`CSEncryptionUtil.getInstance()
+.encrypt()\` (AES-256-GCM, \`ENCRYPTED:base64\` format), then writes
+\`USERNAME=<plaintext>\` + \`PASSWORD=ENCRYPTED:<base64>\` to
+\`config/<project>/environments/<env>.env\`. Existing lines are
+overwritten; other keys in the env file are preserved.
+
+**Hard rules:**
+- NEVER log or echo the user's password back in chat.
+- NEVER store the plaintext password anywhere — pass it directly to
+  \`csaa_configure_credentials\` and the encryption happens immediately.
+- Refer to the env config file by relative path (e.g. \`config/orders/
+  environments/sit.env\`), not by the full absolute path (which may
+  contain the user's home directory).
+
+After \`csaa_configure_credentials\` returns successfully, proceed to
+\`csaa_execute\` per the standard flow.
 
 ### Phase 8 — EXECUTE & HEAL (call \`csaa_execute\`)
 
