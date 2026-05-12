@@ -22,20 +22,20 @@ Returned after Phase 1 (intake via `cs_ai_auto_assist`) + Phase 2
 
 ```yaml
 scope-report:
-  runId: run_<timestamp>_<rand>          # REQUIRED, starts with 'run_'
-  mode: legacy_test_code | bdd_feature | ado_test_case_id | document_path | source_code_path | app_url | natural_language_chat
-  classifiedProject: <string>            # REQUIRED, kebab-case (e.g. "orders")
-  classifiedModule: <string>             # OPTIONAL, sub-folder name (kebab-case)
-  inventoryCounts:
-    tests: <number>
-    pages: <number>
-    helpers: <number>
-    dataFiles: <number>
-  signatureExtracted: <boolean>
-  analyzeQueueLength: <number>           # 0 if no signature; ≥1 if signature seeded a queue
-  analyzePagesQueueLength: <number>
-  runFolder: <absolute path>             # REQUIRED, must exist on disk
-  nextPhase: 'cs-bdd-author'             # Always, unless mode requires user clarification first
+ runId: run_<timestamp>_<rand> # REQUIRED, starts with 'run_'
+ mode: legacy_test_code | bdd_feature | ado_test_case_id | document_path | source_code_path | app_url | natural_language_chat
+ classifiedProject: <string> # REQUIRED, kebab-case (e.g. "orders")
+ classifiedModule: <string> # OPTIONAL, sub-folder name (kebab-case)
+ inventoryCounts:
+ tests: <number>
+ pages: <number>
+ helpers: <number>
+ dataFiles: <number>
+ signatureExtracted: <boolean>
+ analyzeQueueLength: <number> # 0 if no signature; ≥1 if signature seeded a queue
+ analyzePagesQueueLength: <number>
+ runFolder: <absolute path> # REQUIRED, must exist on disk
+ nextPhase: 'cs-bdd-author' # Always, unless mode requires user clarification first
 ```
 
 Validation:
@@ -54,18 +54,18 @@ Returned after Phase 3 (`csaa_analyze` + iterator streaming +
 
 ```yaml
 bdd-author-report:
-  runId: <string>
-  scenarioCount: <number>                # REQUIRED, ≥1
-  pageCount: <number>                    # REQUIRED, ≥0 (0 only if all pages reuse-existing)
-  readinessScore: <number>               # REQUIRED, 0.0–1.0
-  highSeverityGaps: <number>
-  translateQueueSeeded: <boolean>
-  translateQueueLength: <number>         # 1 feature + N steps + M pages + 1 data
-  analysisReportPath: <absolute path>    # REQUIRED, must exist
-  planPath: <absolute path>              # REQUIRED, must exist
-  blockedReason: <string | null>         # set ONLY if readinessScore < 0.7 OR highSeverityGaps ≥ 3
-  fuzzyMatchSuggestions: [...]           # set ONLY if blocked
-  nextPhase: 'cs-artifact-synthesizer' | 'BLOCKED_NEED_HUMAN'
+ runId: <string>
+ scenarioCount: <number> # REQUIRED, ≥1
+ pageCount: <number> # REQUIRED, ≥0 (0 only if all pages reuse-existing)
+ readinessScore: <number> # REQUIRED, 0.0–1.0
+ highSeverityGaps: <number>
+ translateQueueSeeded: <boolean>
+ translateQueueLength: <number> # 1 feature + N steps + M pages + 1 data
+ analysisReportPath: <absolute path> # REQUIRED, must exist
+ planPath: <absolute path> # REQUIRED, must exist
+ blockedReason: <string | null> # set ONLY if readinessScore < 0.7 OR highSeverityGaps ≥ 3
+ fuzzyMatchSuggestions: [...] # set ONLY if blocked
+ nextPhase: 'cs-artifact-synthesizer' | 'BLOCKED_NEED_HUMAN'
 ```
 
 Validation:
@@ -82,14 +82,14 @@ Returned after Phase 5 (`csaa_translate` + iterator streaming + patches +
 
 ```yaml
 artifact-report:
-  runId: <string>
-  filesGenerated: <number>               # REQUIRED, ≥3
-  contentMapPath: <absolute path>        # REQUIRED, must exist
-  allGatesPassed: <boolean>
-  auditViolations: <number>              # MUST be 0 for unblocked progression
-  patchCyclesUsed: <number>              # 0 if no content-gate retries needed
-  blockedReason: <string | null>
-  nextPhase: 'cs-vault-writer' | 'BLOCKED_NEED_HUMAN'
+ runId: <string>
+ filesGenerated: <number> # REQUIRED, ≥3
+ contentMapPath: <absolute path> # REQUIRED, must exist
+ allGatesPassed: <boolean>
+ auditViolations: <number> # MUST be 0 for unblocked progression
+ patchCyclesUsed: <number> # 0 if no content-gate retries needed
+ blockedReason: <string | null>
+ nextPhase: 'cs-vault-writer' | 'BLOCKED_NEED_HUMAN'
 ```
 
 Validation:
@@ -106,14 +106,14 @@ if needed).
 
 ```yaml
 vault-report:
-  runId: <string>
-  filesWritten: <number>                 # REQUIRED, ≥3
-  skippedExisting: <number>
-  auditFailed: <number>                  # MUST be 0
-  credentialsRequested: <boolean>        # true ONLY if csaa_write reported credentialsMissing
-  credentialsConfigured: <boolean>       # true if csaa_configure_credentials was called successfully
-  envFilePath: <absolute path | null>    # set when credentials configured
-  nextPhase: 'cs-resilience-engineer'
+ runId: <string>
+ filesWritten: <number> # REQUIRED, ≥3
+ skippedExisting: <number>
+ auditFailed: <number> # MUST be 0
+ credentialsRequested: <boolean> # true ONLY if csaa_write reported credentialsMissing
+ credentialsConfigured: <boolean> # true if csaa_configure_credentials was called successfully
+ envFilePath: <absolute path | null> # set when credentials configured
+ nextPhase: 'cs-resilience-engineer'
 ```
 
 Validation:
@@ -128,22 +128,22 @@ Returned after Phase 8 (`csaa_execute` + heal loop).
 
 ```yaml
 resilience-report:
-  runId: <string>
-  runVerdict: 'passed' | 'passed_after_heal' | 'pass_weak' | 'failed_after_heal'
-  scenariosTotal: <number>
-  scenariosPassed: <number>
-  scenariosFailed: <number>
-  healCyclesUsed: <number>                # total cycles across all scenarios
-  perScenarioVerdicts:
-    - id: <scenarioId>
-      verdict: 'passed' | 'passed_after_heal' | 'failed_after_heal'
-      cyclesUsed: <number>
-      fixes: [<failureType>, ...]         # e.g. ['locator-drift', 'timing-flaky']
-      lastClassification: <failureType | null>
-  correctionMemoryHits: <number>
-  correctionMemoryMisses: <number>
-  failureReportPath: <absolute path | null>  # set when scenariosFailed > 0
-  nextPhase: 'cs-trust-arbiter'           # always; trust-arbiter computes degraded score on weak/failed
+ runId: <string>
+ runVerdict: 'passed' | 'passed_after_heal' | 'pass_weak' | 'failed_after_heal'
+ scenariosTotal: <number>
+ scenariosPassed: <number>
+ scenariosFailed: <number>
+ healCyclesUsed: <number> # total cycles across all scenarios
+ perScenarioVerdicts:
+ - id: <scenarioId>
+ verdict: 'passed' | 'passed_after_heal' | 'failed_after_heal'
+ cyclesUsed: <number>
+ fixes: [<failureType>, ...] # e.g. ['locator-drift', 'timing-flaky']
+ lastClassification: <failureType | null>
+ correctionMemoryHits: <number>
+ correctionMemoryMisses: <number>
+ failureReportPath: <absolute path | null> # set when scenariosFailed > 0
+ nextPhase: 'cs-trust-arbiter' # always; trust-arbiter computes degraded score on weak/failed
 ```
 
 Validation:
@@ -159,20 +159,20 @@ Returned after Phase 9 (`csaa_verify` + optional `csaa_publish`).
 
 ```yaml
 trust-report:
-  runId: <string>
-  trustScore: <number>                   # 0.0–1.0, REQUIRED
-  semanticEquivalence: <boolean>         # legacy assertions ↔ generated assertions match
-  finalReportPath: <absolute path>       # REQUIRED, must exist
-  factors:
-    readinessScore: <number>
-    auditViolations: <number>
-    runVerdict: <string>
-    semanticEquivalence: <boolean>
-    healCyclesUsed: <number>
-  published: <boolean>                   # true ONLY if user opted in at intake AND publish succeeded
-  adoRunUrl: <string | null>             # set when published
-  createdTestCaseIds: [<string>, ...]    # set when published
-  finalStatus: 'READY' | 'PASS_WEAK' | 'FAILED'
+ runId: <string>
+ trustScore: <number> # 0.0–1.0, REQUIRED
+ semanticEquivalence: <boolean> # legacy assertions ↔ generated assertions match
+ finalReportPath: <absolute path> # REQUIRED, must exist
+ factors:
+ readinessScore: <number>
+ auditViolations: <number>
+ runVerdict: <string>
+ semanticEquivalence: <boolean>
+ healCyclesUsed: <number>
+ published: <boolean> # true ONLY if user opted in at intake AND publish succeeded
+ adoRunUrl: <string | null> # set when published
+ createdTestCaseIds: [<string>, ...] # set when published
+ finalStatus: 'READY' | 'PASS_WEAK' | 'FAILED'
 ```
 
 Validation:
@@ -200,11 +200,11 @@ contract name. Example:
 
 ```yaml
 scope-report:
-  runId: run_1735632147382_xyz123
-  mode: legacy_test_code
-  classifiedProject: orders
-  ...
-  nextPhase: 'cs-bdd-author'
+ runId: run_1735632147382_xyz123
+ mode: legacy_test_code
+ classifiedProject: orders
+ ...
+ nextPhase: 'cs-bdd-author'
 ```
 
 No prose after the block. The orchestrator reads the block, validates,

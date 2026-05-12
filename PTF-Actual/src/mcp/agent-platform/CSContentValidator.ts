@@ -643,9 +643,60 @@ export class CSContentValidator {
     }
 
     private static collectStepDefTexts(stepsContent: string, into: Set<string>): void {
-        const re = /@CSBDDStepDef\s*\(\s*['"]([^'"]+)['"]/g;
+        // v1.38.7 — proper tokenizer. The old regex
+        //   /@CSBDDStepDef\s*\(\s*['"]([^'"]+)['"]/g
+        // had three real bugs that broke real-world step defs:
+        //   1. Embedded quotes in single-quoted JS strings
+        //      e.g. @CSBDDStepDef('I see "User saved."') was truncated to
+        //      `I see ` because the embedded " ended the character class.
+        //   2. Backtick template literals weren't matched at all.
+        //   3. Escape sequences (`\'`, `\"`, `` \` ``) weren't honoured.
+        //
+        // The fix: locate `@CSBDDStepDef(`, then read the next JS string
+        // literal honouring its actual quote-style + escape rules.
+        const decoratorRe = /@CSBDDStepDef\s*\(\s*(['"`])/g;
         let m: RegExpExecArray | null;
-        while ((m = re.exec(stepsContent)) !== null) into.add(m[1]);
+        while ((m = decoratorRe.exec(stepsContent)) !== null) {
+            const quote = m[1];
+            const start = m.index + m[0].length;
+            // Read forward until we see the matching unescaped quote.
+            let i = start;
+            let pattern = '';
+            while (i < stepsContent.length) {
+                const ch = stepsContent[i];
+                if (ch === '\\' && i + 1 < stepsContent.length) {
+                    // Escape sequence — unescape known JS escapes; copy the
+                    // raw char otherwise. Cucumber expressions only care
+                    // about the unescaped pattern text.
+                    const next = stepsContent[i + 1];
+                    const unescaped: Record<string, string> = {
+                        '\\': '\\', "'": "'", '"': '"', '`': '`',
+                        n: '\n', r: '\r', t: '\t', b: '\b', f: '\f', '0': '\0',
+                    };
+                    pattern += unescaped[next] !== undefined ? unescaped[next] : next;
+                    i += 2;
+                    continue;
+                }
+                if (ch === quote) break; // unescaped closing quote — done
+                if (quote === '`' && ch === '$' && stepsContent[i + 1] === '{') {
+                    // Template-literal interpolation `${...}` — fast-forward
+                    // past the closing brace. We KEEP a placeholder so the
+                    // pattern continues to round-trip-match feature steps.
+                    pattern += '${...}';
+                    i += 2;
+                    let depth = 1;
+                    while (i < stepsContent.length && depth > 0) {
+                        if (stepsContent[i] === '{') depth++;
+                        else if (stepsContent[i] === '}') depth--;
+                        i++;
+                    }
+                    continue;
+                }
+                pattern += ch;
+                i++;
+            }
+            if (pattern.length > 0) into.add(pattern);
+        }
     }
 
     private static splitScenarios(featureContent: string): Array<{

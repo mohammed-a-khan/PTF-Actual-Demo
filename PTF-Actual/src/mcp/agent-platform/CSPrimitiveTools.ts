@@ -1547,7 +1547,7 @@ const csaa_record_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                         `${SILENCE_PREFIX.join('\n')}\n` +
                         `Analysis is shallow. ${semanticErrors.length} semantic error(s) found.\n\n` +
                         (scenarioScratchExists
-                            ? `**DO NOT recompose all scenarios via csaa_record_analysis — that path hits the per-message length limit.**\n\nCorrection protocol (v1.38.5):\n  1. Scratch at 03-analyze/scratch-scenarios.json holds all previously appended scenarios.\n  2. For each affected scenario, call csaa_append_analysis_scenario(runId, scenario) with corrected content — same id OVERWRITES the prior staged version (replacement mode).\n  3. When corrections are appended, call csaa_finalize_analysis(runId, payload) with the meta fields. Gates re-run on the full set.\n  4. DO NOT re-submit scenarios that already passed.\n`
+                            ? `**DO NOT recompose all scenarios via csaa_record_analysis — that path hits the per-message length limit.**\n\nCorrection protocol:\n  1. Scratch at 03-analyze/scratch-scenarios.json holds all previously appended scenarios.\n  2. For each affected scenario, call csaa_append_analysis_scenario(runId, scenario) with corrected content — same id OVERWRITES the prior staged version (replacement mode).\n  3. When corrections are appended, call csaa_finalize_analysis(runId, payload) with the meta fields. Gates re-run on the full set.\n  4. DO NOT re-submit scenarios that already passed.\n`
                             : `**Use csaa_append_analysis_scenario instead — do NOT recompose the entire payload via csaa_record_analysis.**\n\nFor each legacy @Test, call csaa_append_analysis_scenario(runId, scenario) one at a time (~1-3 KB each). When all scenarios are staged, call csaa_finalize_analysis with the meta payload.\n`) +
                         `\nSpecific errors:\n${semanticErrors.map((e) => `  - ${e}`).join('\n')}`,
                 },
@@ -1721,6 +1721,58 @@ function seedTranslateQueue(
  *      pages are skipped — the consumer already has them)
  *   1× data (lists every scenarioId so the JSON has one row per scenario)
  */
+/**
+ * Categorise a Gherkin step text into one of three buckets — used by
+ * the steps-file semantic naming logic. Single-pass, leading-verb match.
+ */
+function categoriseStepText(text: string): 'navigation' | 'actions' | 'validations' {
+    const t = text.trim();
+    // Strip leading Gherkin keyword if present (Given/When/Then/And/But).
+    const body = t.replace(/^(?:Given|When|Then|And|But)\s+/i, '').toLowerCase();
+
+    // Validation verbs first — they're the most distinctive.
+    if (/^i\s+(see|verify|check|expect|confirm|assert|observe|notice|should|shouldn't|don't see|cannot see|am able to see|am unable to)/.test(body)) {
+        return 'validations';
+    }
+    if (/^(the\s+)?(\w+\s+)?(is|should be|must be|are|appears|appear|displays|displayed|shown|visible|hidden|enabled|disabled|present|absent|matches|equals|contains)\b/.test(body)) {
+        return 'validations';
+    }
+    // Navigation verbs.
+    if (/^i\s+(navigate|open|go to|return to|switch to|sign in|sign out|log in|log out|click\s+(?:the\s+)?(?:menu|tab|link|breadcrumb|nav)|access|launch)/.test(body)) {
+        return 'navigation';
+    }
+    // Everything else is an action (fill / select / save / submit / upload / etc.).
+    return 'actions';
+}
+
+/**
+ * Detect well-known common/shared-component page class names so they
+ * route to `test/<project>/pages/common/` instead of being duplicated
+ * under every module's `pages/<module>/` folder.
+ */
+function isCommonPageClass(className: string): boolean {
+    const n = className.toLowerCase();
+    // Exact-name commons (handles Login, Logout, Header, Footer, etc. as suffixes).
+    const commonNames = [
+        'login', 'logout', 'signin', 'signout', 'authentication', 'auth',
+        'header', 'footer', 'navigation', 'navbar', 'sidebar', 'topbar', 'menu',
+        'toast', 'modal', 'dialog', 'popup', 'notification', 'alert',
+        'grid', 'table', 'form', 'datepicker', 'combobox', 'dropdown',
+        'breadcrumb', 'pagination', 'spinner', 'loader', 'layout',
+    ];
+    // Match if className contains any of the common-name tokens as a word
+    // (e.g. "LoginPage", "MainHeader", "OrderGrid", "ConfirmDialog").
+    for (const token of commonNames) {
+        // Word-boundary check on lowered className.
+        const re = new RegExp(`(^|[a-z])${token}(page|component|widget|view|panel|$|[A-Z])`, 'i');
+        if (re.test(className)) return true;
+    }
+    // Generic suffixes always-common.
+    if (/(Component|Widget|Layout)s?$/i.test(className)) return true;
+    if (/^(Common|Shared|Base|Global)/i.test(className)) return true;
+    return false;
+}
+
 function buildTranslateQueueItems(opts: {
     project: string;
     module: string;
@@ -1763,13 +1815,22 @@ function buildTranslateQueueItems(opts: {
         scenarioIds,
     });
 
-    // v1.38.3 — STEPS FILE SPLITTING. A single .steps.ts with 80-120 unique
-    // step-def patterns easily exceeds 15-25 KB which itself approaches the
-    // per-message output cap. Split when stepDefTexts.size exceeds
-    // MAX_STEPS_PER_FILE so each generated file stays in the safe 5-8 KB
-    // range. Splits are named `<module>-1.steps.ts`, `<module>-2.steps.ts`,
-    // etc. The step-def coverage gate sums coverage across all step files.
-    const MAX_STEPS_PER_FILE = 50;
+    // STEPS FILES — split when needed using SEMANTIC GROUPING.
+    //
+    // A single .steps.ts with 80-120 unique step-def patterns easily exceeds
+    // 15-25 KB which itself approaches the per-message output cap. We split
+    // when stepDefTexts.size > MAX_STEPS_PER_FILE.
+    //
+    // SEMANTIC NAMING: instead of mechanical -1/-2 suffixes, we categorise
+    // each step-def into one of three buckets based on its leading verb:
+    //   - navigation   (open / navigate / go to / click menu / select tab / sign in)
+    //   - actions      (fill / type / enter / select / save / submit / upload / etc.)
+    //   - validations  (see / verify / assert / check / expect / confirm / observe)
+    // Files are named `<module>.actions.steps.ts`,
+    // `<module>.validations.steps.ts`, etc. If a bucket exceeds the cap, it
+    // sub-splits within its category (`<module>.actions-1.steps.ts`,
+    // `<module>.actions-2.steps.ts`).
+    const MAX_STEPS_PER_FILE = 80;
     const stepDefTexts = new Set<string>();
     for (const s of analysis.scenarios) {
         for (const st of s.steps ?? []) {
@@ -1786,23 +1847,46 @@ function buildTranslateQueueItems(opts: {
             stepDefTexts: allSteps,
         });
     } else {
-        // Split into sequential chunks of MAX_STEPS_PER_FILE.
-        const chunkCount = Math.ceil(allSteps.length / MAX_STEPS_PER_FILE);
-        for (let i = 0; i < chunkCount; i++) {
-            const chunk = allSteps.slice(
-                i * MAX_STEPS_PER_FILE,
-                (i + 1) * MAX_STEPS_PER_FILE,
-            );
-            items.push({
-                kind: 'steps',
-                relativePath: `${baseDir('steps')}/${module}-${i + 1}.steps.ts`,
-                stepDefTexts: chunk,
-            });
+        // Categorise by step verb.
+        const buckets: Record<'navigation' | 'actions' | 'validations', string[]> = {
+            navigation: [], actions: [], validations: [],
+        };
+        for (const step of allSteps) {
+            buckets[categoriseStepText(step)].push(step);
+        }
+        // Each non-empty bucket emits one or more files (sub-split if oversize).
+        for (const [category, steps] of Object.entries(buckets)) {
+            if (steps.length === 0) continue;
+            if (steps.length <= MAX_STEPS_PER_FILE) {
+                items.push({
+                    kind: 'steps',
+                    relativePath: `${baseDir('steps')}/${module}.${category}.steps.ts`,
+                    stepDefTexts: steps,
+                });
+            } else {
+                const chunkCount = Math.ceil(steps.length / MAX_STEPS_PER_FILE);
+                for (let i = 0; i < chunkCount; i++) {
+                    const chunk = steps.slice(
+                        i * MAX_STEPS_PER_FILE,
+                        (i + 1) * MAX_STEPS_PER_FILE,
+                    );
+                    items.push({
+                        kind: 'steps',
+                        relativePath: `${baseDir('steps')}/${module}.${category}-${i + 1}.steps.ts`,
+                        stepDefTexts: chunk,
+                    });
+                }
+            }
         }
     }
 
-    // N× page — one per create-new analysis page. Reuse-existing pages
-    // already exist in the consumer's test/<project>/pages/ tree.
+    // N× page — one per create-new analysis page. COMMON-PAGE ROUTING:
+    // pages whose class name matches a well-known shared-component pattern
+    // (Login / Header / Footer / Nav / Menu / Modal / Dialog / Toast /
+    // Grid / Table / Form / Component suffix etc.) route to
+    // `test/<project>/pages/common/`. Module-specific pages stay under
+    // `test/<project>/pages/<module>/`. Without this, common pages get
+    // duplicated into every module folder.
     for (const p of analysis.pages) {
         if (p.role !== 'create-new') continue;
         const sig = sigPages[p.className];
@@ -1810,9 +1894,13 @@ function buildTranslateQueueItems(opts: {
         // 80% floor from the page-coverage gate; minimum 1 so even an
         // empty signature page produces an item.
         const minFieldCount = Math.max(1, Math.ceil(legacyFieldCount * 0.8));
+        const isCommon = isCommonPageClass(p.className);
+        const pageDir = isCommon
+            ? `test/${project}/pages/common`
+            : `test/${project}/pages/${module}`;
         items.push({
             kind: 'page',
-            relativePath: `${baseDir('pages')}/${p.className}.ts`,
+            relativePath: `${pageDir}/${p.className}.ts`,
             legacyClassName: p.className,
             minFieldCount,
         });
@@ -3111,7 +3199,7 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
                             nextSuggestedTool: 'csaa_append_translation_file',
                             feedback:
                                 `${SILENCE_PREFIX.join('\n')}\n` +
-                                `csaa_record_translation rejected: payload too large for single-call submission (${filesArr.length} files, ${totalBytes} bytes — caps ${MAX_FILES_PER_CALL} files / ${MAX_BYTES_PER_CALL} bytes). This cap exists because composing a 5-15 file translation in one JSON payload blows the LLM-host per-message output budget — you hit "response hit the length limit" mid-composition and the tool call never lands. \n\nUse the streaming protocol instead:\n  1. For EACH file in your translation, call csaa_append_translation_file(runId, file: { relativePath, kind, content }). One file per call (~1-5 KB each). Stages to 05-translate/scratch-files.json — survives compaction. Duplicate paths OVERWRITE the prior staged version (replacement mode, v1.38.5).\n  2. When every file is appended, call csaa_finalize_translation(runId). It runs EVERY gate (schema + content + page-coverage signature + step-coverage signature + compile_check) identical to single-call. No shortcut, no quality compromise.\n\nDo NOT retry csaa_record_translation with the same payload — you'll get the same rejection. The streaming path is mandatory above the cap.`,
+                                `csaa_record_translation rejected: payload too large for single-call submission (${filesArr.length} files, ${totalBytes} bytes — caps ${MAX_FILES_PER_CALL} files / ${MAX_BYTES_PER_CALL} bytes). This cap exists because composing a 5-15 file translation in one JSON payload blows the LLM-host per-message output budget — you hit "response hit the length limit" mid-composition and the tool call never lands. \n\nUse the streaming protocol instead:\n  1. For EACH file in your translation, call csaa_append_translation_file(runId, file: { relativePath, kind, content }). One file per call (~1-5 KB each). Stages to 05-translate/scratch-files.json — survives compaction. Duplicate paths OVERWRITE the prior staged version (replacement mode).\n  2. When every file is appended, call csaa_finalize_translation(runId). It runs EVERY gate (schema + content + page-coverage signature + step-coverage signature + compile_check) identical to single-call. No shortcut, no quality compromise.\n\nDo NOT retry csaa_record_translation with the same payload — you'll get the same rejection. The streaming path is mandatory above the cap.`,
                         },
                         `csaa_record_translation rejected: ${filesArr.length} files / ${totalBytes} bytes exceeds single-call cap. Use csaa_append_translation_file + csaa_finalize_translation.`,
                     );
@@ -3201,7 +3289,7 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
                         `${SILENCE_PREFIX.join('\n')}\n` +
                         `Content gates rejected ${errors.length} error(s) across ${affectedFiles.length} file(s).\n\n` +
                         `**DO NOT recompose any file via csaa_record_translation or full csaa_append_translation_file — that hits the per-message length limit.**\n\n` +
-                        `Correction protocol (v1.38.6) — PATCH-FIRST:\n` +
+                        `Correction protocol — PATCH-FIRST:\n` +
                         `  1. For EACH violation, identify the minimal find/replace pair (e.g. find: 'i.e. "username"', replace: 'i.e. <username>'). Typical fix is 20-100 bytes.\n` +
                         `  2. For each affected file, call csaa_patch_translation_file(runId, relativePath, patches: [{find, replace}, ...]).\n  3. Patches apply atomically to the staged scratch — server reports patchesApplied and the new content stays in scratch-files.json.\n` +
                         `  4. When patches are applied across all affected files, call csaa_finalize_translation(runId). Gates re-run on the patched scratch.\n` +
@@ -3970,7 +4058,7 @@ function fileMatchesTranslateItem(
 
 const csaa_patch_translation_file: MCPToolDefinition = (defineTool() as MCPToolBuilder)
     .name('csaa_patch_translation_file')
-    .title('CS-AI-Auto-Assist — Patch staged translation file (v1.38.6)')
+    .title('CS-AI-Auto-Assist — Patch staged translation file')
     .description(
         'Apply find/replace patches to a staged translation file (in 05-translate/scratch-files.json). ' +
             'Use this INSTEAD of csaa_append_translation_file when correcting content-gate violations: ' +
@@ -4616,6 +4704,7 @@ const csaa_execute: MCPToolDefinition = (defineTool() as MCPToolBuilder)
     .stringParam('project', 'Project name')
     .stringParam('env', 'Environment (dev / sit / uat)', { default: 'dev' })
     .stringParam('tags', 'Optional Cucumber tag expression to filter scenarios')
+    .stringParam('workspaceRoot', 'Consumer workspace root (defaults to cwd)')
     .handler(async (params: Record<string, unknown>, _toolCtx: MCPToolContext) => {
         const runId = String(params.runId ?? '');
         const ctx = getCtx(runId);
@@ -4644,13 +4733,84 @@ const csaa_execute: MCPToolDefinition = (defineTool() as MCPToolBuilder)
             );
         }
 
-        const project = getStr(params, 'project') ?? 'default';
-        const env = getStr(params, 'env') ?? 'dev';
+        // Resolve project + env: prefer explicit params, fall back to
+        // intake/run-params.json (the canonical values from intake) so the
+        // execute uses the same env the analysis was authored for.
+        // Defaulting to 'dev' ignores the BASE_URL the consumer put in
+        // sit.env / uat.env / etc.
+        let project = getStr(params, 'project');
+        let env = getStr(params, 'env');
+        if (!project || !env) {
+            const rp = ctx.readPhaseArtifact('intake', 'run-params.json');
+            if (rp) {
+                try {
+                    const p = JSON.parse(rp) as { project?: string; environments?: string[] };
+                    if (!project) project = p.project;
+                    if (!env && Array.isArray(p.environments) && p.environments.length > 0) {
+                        env = p.environments[0];
+                    }
+                } catch { /* ignore */ }
+            }
+        }
+        if (!project) project = 'default';
+        if (!env) env = 'sit';
         const tags = getStr(params, 'tags');
 
-        // CSConfigurationManager reads project/env from process.env (see
-        // CSConfigurationManager.ts:76-77). Set them here so the runner
-        // picks up the right config folder. Restore originals after.
+        // Auto-resolve appUrl from the env file's BASE_URL if not passed.
+        // This is the fix for the "csaa_execute was called without a live
+        // appUrl" error — the env scaffold already has BASE_URL set
+        // correctly; csaa_execute should use it instead of demanding the
+        // LLM pass it explicitly.
+        let appUrl = getStr(params, 'appUrl');
+        let appUrlSource = appUrl ? 'param' : 'unresolved';
+        const workspaceRoot = getStr(params, 'workspaceRoot') ?? process.cwd();
+        if (!appUrl) {
+            const envFilePath = path.resolve(
+                workspaceRoot,
+                'config', project, 'environments', `${env}.env`,
+            );
+            if (fs.existsSync(envFilePath)) {
+                try {
+                    const envBody = fs.readFileSync(envFilePath, 'utf-8');
+                    for (const line of envBody.split(/\r?\n/)) {
+                        const t = line.trim();
+                        if (!t || t.startsWith('#')) continue;
+                        const m = t.match(/^BASE_URL\s*=\s*(.+)$/);
+                        if (m) {
+                            const val = m[1].trim().replace(/^["']|["']$/g, '');
+                            if (val && /^https?:\/\//i.test(val) && !val.startsWith('<')) {
+                                appUrl = val;
+                                appUrlSource = `env-file:${path.relative(workspaceRoot, envFilePath)}`;
+                                break;
+                            }
+                        }
+                    }
+                } catch { /* non-fatal — runner will read env file again at start */ }
+            }
+        }
+        if (!appUrl) {
+            return jsonResult(
+                {
+                    state: 'BLOCKED_NEED_HUMAN',
+                    runId,
+                    phase: 'execute',
+                    project,
+                    env,
+                    blockedReason:
+                        `No appUrl resolvable. Tried:\n` +
+                        `  1. explicit appUrl param — not provided\n` +
+                        `  2. config/${project}/environments/${env}.env → BASE_URL — not found OR placeholder OR invalid scheme\n\n` +
+                        `Either pass appUrl explicitly, or populate BASE_URL in the env file (must be https?://...). ` +
+                        `If your analysis populated configFiles[].values.baseUrl/appUrl, the scaffold should have written BASE_URL; check that the env file has a real URL not a placeholder.`,
+                    nextStepNeeded: true,
+                },
+                `Cannot execute — no appUrl resolvable from param or ${env}.env BASE_URL.`,
+            );
+        }
+
+        // CSConfigurationManager reads project/env from process.env. Set
+        // them here so the runner picks up the right config folder.
+        // Restore originals after.
         const prevProject = process.env.PROJECT;
         const prevEnv = process.env.ENVIRONMENT;
         if (project) process.env.PROJECT = project;
@@ -4765,13 +4925,17 @@ const csaa_execute: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 phase: 'execute',
                 scenariosPassed: totalPassed,
                 scenariosFailed: totalFailed,
+                project,
+                env,
+                appUrl,
+                appUrlSource,
                 runFolder: ctx.runFolder,
                 reportPath,
                 nextStepNeeded: true,
                 nextSuggestedTool: 'csaa_verify',
                 nextSuggestedArgs: { runId },
             },
-            `Execute: ${totalPassed} passed / ${totalFailed} failed across ${features.length} feature(s). Call csaa_verify.`,
+            `Execute (${project} / ${env} @ ${appUrl}): ${totalPassed} passed / ${totalFailed} failed across ${features.length} feature(s). Call csaa_verify.`,
         );
     })
     .build();

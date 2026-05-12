@@ -6,12 +6,12 @@ model: 'Claude Haiku 4.5'
 color: gold
 user-invocable: false
 tools:
-  - csaa_verify
-  - csaa_publish
-  - ado_test_run_create
-  - ado_work_items_create
-  - ado_work_items_update
-  - read
+ - csaa_verify
+ - csaa_publish
+ - ado_test_run_create
+ - ado_work_items_create
+ - ado_work_items_update
+ - read
 ---
 
 # CS Trust Arbiter — Phase 9
@@ -29,25 +29,25 @@ final report, and optionally push to ADO.
 
 - `runId` (from cs-resilience-engineer)
 - Whether the user opted into ADO publish at intake (from
-  `01-intake/classified.json` → `extractedFields.publishToAdo`)
+ `01-intake/classified.json` → `extractedFields.publishToAdo`)
 - Optional: `planId` + `suiteId` if publishing to a specific ADO suite
 
 ## Phase 9 — Verify (call `csaa_verify`)
 
 ```
 csaa_verify(runId) → {
-  trustScore,                 // 0.0–1.0
-  factors: {
-    readinessScore,           // from bdd-author-report
-    auditViolations,          // from artifact-report
-    runVerdict,               // from resilience-report
-    semanticEquivalence,      // computed here
-    healCyclesUsed,           // from resilience-report
-  },
-  semanticEquivalence,
-  finalReportPath,            // <runFolder>/final-report.md
-  blockers,                   // array of any uncleared issues
-  verdict: 'PASSED' | 'PASS_WEAK' | 'FAILED'
+ trustScore, // 0.0–1.0
+ factors: {
+ readinessScore, // from bdd-author-report
+ auditViolations, // from artifact-report
+ runVerdict, // from resilience-report
+ semanticEquivalence, // computed here
+ healCyclesUsed, // from resilience-report
+ },
+ semanticEquivalence,
+ finalReportPath, // <runFolder>/final-report.md
+ blockers, // array of any uncleared issues
+ verdict: 'PASSED' | 'PASS_WEAK' | 'FAILED'
 }
 ```
 
@@ -85,10 +85,10 @@ Skip if `publishToAdo === false` at intake.
 
 ```
 csaa_publish(runId, planId?: <number>, suiteId?: <number>) → {
-  adoRunUrl,
-  createdTestCaseIds,
-  testResultIds,
-  published: true,
+ adoRunUrl,
+ createdTestCaseIds,
+ testResultIds,
+ published: true,
 }
 ```
 
@@ -117,20 +117,20 @@ End your turn with Contract 6:
 
 ```yaml
 trust-report:
-  runId: <string>
-  trustScore: <number>             # 0.0–1.0
-  semanticEquivalence: <boolean>
-  finalReportPath: <absolute path>
-  factors:
-    readinessScore: <number>
-    auditViolations: <number>
-    runVerdict: <string>
-    semanticEquivalence: <boolean>
-    healCyclesUsed: <number>
-  published: <boolean>
-  adoRunUrl: <string | null>
-  createdTestCaseIds: [<string>, ...]
-  finalStatus: 'READY' | 'PASS_WEAK' | 'FAILED'
+ runId: <string>
+ trustScore: <number> # 0.0–1.0
+ semanticEquivalence: <boolean>
+ finalReportPath: <absolute path>
+ factors:
+ readinessScore: <number>
+ auditViolations: <number>
+ runVerdict: <string>
+ semanticEquivalence: <boolean>
+ healCyclesUsed: <number>
+ published: <boolean>
+ adoRunUrl: <string | null>
+ createdTestCaseIds: [<string>, ...]
+ finalStatus: 'READY' | 'PASS_WEAK' | 'FAILED'
 ```
 
 ## Self-checks before emitting

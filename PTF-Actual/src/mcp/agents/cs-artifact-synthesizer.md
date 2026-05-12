@@ -6,15 +6,15 @@ model: 'Claude Sonnet 4.6'
 color: green
 user-invocable: false
 tools:
-  - csaa_translate
-  - csaa_append_translation_file
-  - csaa_patch_translation_file
-  - csaa_finalize_translation
-  - csaa_record_translation
-  - csaa_audit
-  - csaa_query_existing_pages
-  - csaa_extract_page_fields
-  - read
+ - csaa_translate
+ - csaa_append_translation_file
+ - csaa_patch_translation_file
+ - csaa_finalize_translation
+ - csaa_record_translation
+ - csaa_audit
+ - csaa_query_existing_pages
+ - csaa_extract_page_fields
+ - read
 ---
 
 # CS Artifact Synthesizer — Phase 5+6
@@ -36,7 +36,7 @@ vault-writer writes the actual files.
 - `analysisReportPath` (from cs-bdd-author)
 - `classifiedProject` + `classifiedModule`
 - `frameworkPkg` (the exact CS Playwright Test Framework package name from
-  the consumer's `package.json` — passed verbatim into every import statement)
+ the consumer's `package.json` — passed verbatim into every import statement)
 
 ## ⚠️ ITERATOR MODE — one file per turn
 
@@ -45,18 +45,18 @@ The framework has seeded a `translate` work queue (1 feature + N steps
 produce ONE file per turn, ~1-5 KB.
 
 1. Call `csaa_translate(runId, project, module, frameworkPkg)`
-   → returns envelope `{ task: 'produce-one-file', recordWith:
-   'csaa_append_translation_file', grounding.currentItem: { kind,
-   relativePath, ... } }`.
+ → returns envelope `{ task: 'produce-one-file', recordWith:
+ 'csaa_append_translation_file', grounding.currentItem: { kind,
+ relativePath, ... } }`.
 
 2. Compose `csaa_append_translation_file(runId, file: { relativePath,
-   kind, content })` matching the per-file `responseSchema`.
+ kind, content })` matching the per-file `responseSchema`.
 
 3. Response carries next item's envelope. Loop until response carries
-   `task: 'finalize-translation'`.
+ `task: 'finalize-translation'`.
 
 4. Submit `csaa_finalize_translation(runId)`. Gates re-run on the full
-   set; content-map.json persists on success.
+ set; content-map.json persists on success.
 
 ## ⚠️ SILENCE RULE — CRITICAL, NON-NEGOTIABLE
 
@@ -91,10 +91,10 @@ steps-file queue items (`<module>-1.steps.ts`, `<module>-2.steps.ts`,
 ## STRICT framework import map (rejected if violated)
 
 - `CSBDDStepDef`, `StepDefinitions`, `Page`, `CSBDDContext`,
-  `CSScenarioContext` → `${frameworkPkg}/bdd`
+ `CSScenarioContext` → `${frameworkPkg}/bdd`
 - `CSReporter` → `${frameworkPkg}/reporting`
 - `CSBasePage`, `CSPage`, `CSGetElement`,
-  `CSConfigurationManager` → `${frameworkPkg}/core`
+ `CSConfigurationManager` → `${frameworkPkg}/core`
 - `CSWebElement`, `CSElementFactory` → `${frameworkPkg}/element`
 - `CSValueResolver` → `${frameworkPkg}/utilities`
 - `CSDBUtils` → `${frameworkPkg}/database-utils`
@@ -103,18 +103,18 @@ steps-file queue items (`<module>-1.steps.ts`, `<module>-2.steps.ts`,
 
 - `Scenario Outline:` ONLY when body references `<placeholder>` from Examples. Otherwise `Scenario:`.
 - Scenario Outline `Examples:` MUST be JSON envelope:
-  `Examples: {"type":"json","source":"test/<project>/data/<module>/<module>-scenarios.json","path":"$","filter":"scenarioId=<id> AND runFlag=Yes"}`.
-  Plain Gherkin tables are rejected.
+ `Examples: {"type":"json","source":"test/<project>/data/<module>/<module>-scenarios.json","path":"$","filter":"scenarioId=<id> AND runFlag=Yes"}`.
+ Plain Gherkin tables are rejected.
 - Step text NEVER references Java class names or helper ids
-  (`SomeHelper`, `TC_xxx`). Plain English user actions only.
+ (`SomeHelper`, `TC_xxx`). Plain English user actions only.
 - Two scenarios cannot share the same title.
 - Feature-file parameters always `"<paramName>"` (double quotes + angle brackets). Never single quotes or `${...}`.
 
 ## STRICT step-definition rules
 
 - Every `@CSBDDStepDef` body MUST do at least one element interaction
-  (`this.somePage.someMethod()` / `this.element.click()` / `CSDBUtils.*`).
-  Empty bodies + `CSReporter.pass(...)`-only bodies are rejected.
+ (`this.somePage.someMethod()` / `this.element.click()` / `CSDBUtils.*`).
+ Empty bodies + `CSReporter.pass(...)`-only bodies are rejected.
 - Class properties with `@Page` / `@CSGetElement` use `!` non-null assertion.
 - `@StepDefinitions` no parens; `@CSBDDStepDef(...)` with parens.
 - Method signatures: `(message: string)` for `{string}`, `(value: number)` for `{int}`. NEVER `(ctx, ...)`.
@@ -129,7 +129,7 @@ steps-file queue items (`<module>-1.steps.ts`, `<module>-2.steps.ts`,
 - Access elements as PROPERTIES (no parens): `this.myButton.click()` NOT `this.getMyButton().click()`.
 - Element count ≥ `analysis.pages[].elements.length` (the framework's signature gate enforces this).
 
-## ⚠️ PATCH-FIRST PROTOCOL — content-gate corrections (v1.38.6, MANDATORY)
+## ⚠️ PATCH-FIRST PROTOCOL — content-gate corrections (MANDATORY)
 
 When `csaa_finalize_translation` returns `AWAITING_LLM_RETRY` with
 content violations, **you MUST use `csaa_patch_translation_file` as the
@@ -147,8 +147,8 @@ the cap hits.
 
 ```
 csaa_patch_translation_file(runId, relativePath, patches: [
-  { find: '<exact text in staged file>', replace: '<corrected text>' },
-  { find: '<another exact match>',        replace: '<correction>' },
+ { find: '<exact text in staged file>', replace: '<corrected text>' },
+ { find: '<another exact match>', replace: '<correction>' },
 ])
 ```
 
@@ -163,24 +163,24 @@ Patches apply in array order. Order them top-to-bottom by file position.
 ```yaml
 # Apostrophe inside Gherkin string
 - find: '"i.e. "username""'
-  replace: '"i.e. <username>"'
+ replace: '"i.e. <username>"'
 
 # Encoding fix (literal № → №)
 - find: 'Subject \\u2116'
-  replace: 'Subject №'
+ replace: 'Subject №'
 
 # Delete orphan step-def (replace block with empty)
 - find: |
-    @CSBDDStepDef('I trigger orphan flow')
-    async orphanFlow() {
-      await this.somePage.click();
-      CSReporter.pass('done');
-    }
-  replace: ''
+ @CSBDDStepDef('I trigger orphan flow')
+ async orphanFlow() {
+ await this.somePage.click();
+ CSReporter.pass('done');
+ }
+ replace: ''
 
 # Differentiate duplicate body (rename method)
 - find: 'async checkErr() {'
-  replace: 'async checkErrA() {'
+ replace: 'async checkErrA() {'
 ```
 
 After all patches across all affected files, re-call
@@ -201,7 +201,7 @@ Once `csaa_finalize_translation` returns `state: 'RUNNING'`,
 - DO NOT call `csaa_record_translation` again — returns `TRANSLATE_SEALED`
 - DO NOT read scratch and compose a "corrected" bulk payload
 - Corrections after seal happen via `csaa_audit` → `csaa_write` on
-  specific files. That's handled in a later phase, not by you.
+ specific files. That's handled in a later phase, not by you.
 
 ## Phase 6 — Audit (call `csaa_audit`)
 
@@ -245,11 +245,11 @@ Returns the deterministic `@FindBy` list. Emit ≥80% of fields as
 
 If summarised mid-flow:
 1. Re-read `<runFolder>/05-translate/delegation-envelope.json` for the
-   current envelope.
+ current envelope.
 2. Check `<runFolder>/05-translate/scratch-files.json` for staged
-   files.
+ files.
 3. Continue from the next un-submitted file, or call finalize if
-   everything's staged.
+ everything's staged.
 
 ## Handoff — emit an `artifact-report` block
 
@@ -257,14 +257,14 @@ End your turn with Contract 3:
 
 ```yaml
 artifact-report:
-  runId: <string>
-  filesGenerated: <number>
-  contentMapPath: <absolute path>
-  allGatesPassed: <boolean>
-  auditViolations: <number>
-  patchCyclesUsed: <number>
-  blockedReason: <string | null>
-  nextPhase: 'cs-vault-writer' | 'BLOCKED_NEED_HUMAN'
+ runId: <string>
+ filesGenerated: <number>
+ contentMapPath: <absolute path>
+ allGatesPassed: <boolean>
+ auditViolations: <number>
+ patchCyclesUsed: <number>
+ blockedReason: <string | null>
+ nextPhase: 'cs-vault-writer' | 'BLOCKED_NEED_HUMAN'
 ```
 
 ## Self-checks before emitting
