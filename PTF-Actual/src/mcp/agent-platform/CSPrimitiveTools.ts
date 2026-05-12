@@ -3182,14 +3182,10 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
             const affectedFiles = Object.keys(grouped).filter((rel) =>
                 grouped[rel].some((v) => v.severity === 'error'),
             );
-            // v1.38.5 — switch nextSuggestedTool from csaa_record_translation
-            // (which directs the LLM back to the bulk path that caused the
-            // failure) to csaa_append_translation_file (per-file replacement).
-            // The scratch (if present) retains all prior files; the LLM
-            // overwrites ONLY the affected files via append-replacement,
-            // then re-calls csaa_finalize_translation. Without this redirect,
-            // the LLM composes all 16 files in chat → length limit before
-            // the call lands.
+            // v1.38.6 — PRIMARY recommendation: csaa_patch_translation_file
+            // (tiny find/replace payloads, ~50-500 bytes per fix). FALLBACK:
+            // csaa_append_translation_file replacement mode for files that
+            // need >50% rewrite. NEVER recompose full bulk via record_translation.
             const scratchExists = ctx.readPhaseArtifact('translate', 'scratch-files.json') !== null;
             return jsonResult(
                 {
@@ -3200,19 +3196,25 @@ const csaa_record_translation: MCPToolDefinition = (defineTool() as MCPToolBuild
                     errorCount: errors.length,
                     affectedFiles,
                     nextStepNeeded: true,
-                    nextSuggestedTool: 'csaa_append_translation_file',
+                    nextSuggestedTool: 'csaa_patch_translation_file',
                     feedback:
                         `${SILENCE_PREFIX.join('\n')}\n` +
                         `Content gates rejected ${errors.length} error(s) across ${affectedFiles.length} file(s).\n\n` +
-                        `**DO NOT recompose all files via csaa_record_translation — that path hits the per-message length limit.**\n\n` +
-                        `Correction protocol (v1.38.5):\n` +
+                        `**DO NOT recompose any file via csaa_record_translation or full csaa_append_translation_file — that hits the per-message length limit.**\n\n` +
+                        `Correction protocol (v1.38.6) — PATCH-FIRST:\n` +
+                        `  1. For EACH violation, identify the minimal find/replace pair (e.g. find: 'i.e. "username"', replace: 'i.e. <username>'). Typical fix is 20-100 bytes.\n` +
+                        `  2. For each affected file, call csaa_patch_translation_file(runId, relativePath, patches: [{find, replace}, ...]).\n  3. Patches apply atomically to the staged scratch — server reports patchesApplied and the new content stays in scratch-files.json.\n` +
+                        `  4. When patches are applied across all affected files, call csaa_finalize_translation(runId). Gates re-run on the patched scratch.\n` +
+                        `  5. Files NOT in the affected list stay as-is — DO NOT touch them.\n` +
+                        `\n**Patch payload is tiny (~100 bytes per fix). 8 fixes across 4 files = ~3 KB total LLM output across ~4 tool calls. Per-message cap is unreachable.**\n` +
+                        `\nFallback ONLY if a file needs >50% rewrite: csaa_append_translation_file (replacement mode — same relativePath overwrites the staged version).\n` +
                         (scratchExists
-                            ? `  1. The scratch at 05-translate/scratch-files.json already holds ALL ${Object.keys(grouped).length === affectedFiles.length ? '' : 'previously staged '}files (good files included).\n  2. For EACH affected file below, call csaa_append_translation_file(runId, file: { relativePath, kind, content }) with the corrected content. Same relativePath OVERWRITES the prior staged version (replacement mode).\n  3. When all affected files are re-appended, call csaa_finalize_translation(runId). Gates re-run on the full set.\n  4. Files NOT in the affected list stay as-is in scratch — DO NOT re-submit them.\n`
-                            : `  1. No scratch on disk yet. For EACH affected file below, call csaa_append_translation_file(runId, file: { relativePath, kind, content }) with the corrected content. Build up the scratch one file at a time.\n  2. ALSO append the OTHER files that were in your original bulk submit (the ones that passed gates). Each as a separate csaa_append_translation_file call.\n  3. When all files are staged, call csaa_finalize_translation(runId). Gates run on the full set.\n`) +
+                            ? `\nScratch state: 05-translate/scratch-files.json holds all previously staged files. Read it via your read tool if you need to see the exact text around a violation.\n`
+                            : `\nNo scratch on disk yet (file was submitted via bulk path). Start fresh via csaa_append_translation_file then patch.\n`) +
                         `\nAffected files (need correction):\n  - ${affectedFiles.join('\n  - ')}\n` +
                         `\nViolation details:${summaryLines.join('\n')}`,
                 },
-                `Content gates failed: ${errors.length} error(s) across ${affectedFiles.length} file(s). Use csaa_append_translation_file (replacement mode) — do NOT recompose bulk.`,
+                `Content gates failed: ${errors.length} error(s) across ${affectedFiles.length} file(s). Use csaa_patch_translation_file (PATCH-FIRST) — do NOT recompose bulk.`,
             );
         }
 
@@ -3941,6 +3943,244 @@ function fileMatchesTranslateItem(
         path.basename(p).toLowerCase().replace(/\.[a-z0-9]+$/, '');
     return stem(item.relativePath) === stem(submittedPath);
 }
+
+// ============================================================================
+// csaa_patch_translation_file — find/replace patches on a staged file (v1.38.6)
+// ============================================================================
+// After content-gate rejection, the LLM previously had to re-submit the
+// FULL corrected file via csaa_append_translation_file. For files near the
+// per-message output cap (steps with many step-defs, feature with many
+// scenarios), composing the full content in chat tips over the cap even
+// after replacement-mode. Patches let the LLM submit ONLY the corrections
+// — typically 50-500 bytes per fix — so the entire correction round-trip
+// is ~1-2 KB total across all patches. Length limit is structurally
+// unreachable.
+//
+// Constraints:
+//  - Each patch's `find` must match the staged content exactly (literal
+//    string match, no regex), case-sensitive, whitespace-significant.
+//  - Each `find` must be UNIQUE in the file — server rejects ambiguous
+//    patches with a count of matches so the LLM extends the pattern with
+//    more context.
+//  - Patches apply in array order. Earlier patches modify the buffer that
+//    later patches see; the LLM must order patches by file position to
+//    avoid context drift.
+//  - Total `patches` payload capped at 16 KB. Above that, use append-mode
+//    full-file replacement instead.
+
+const csaa_patch_translation_file: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_patch_translation_file')
+    .title('CS-AI-Auto-Assist — Patch staged translation file (v1.38.6)')
+    .description(
+        'Apply find/replace patches to a staged translation file (in 05-translate/scratch-files.json). ' +
+            'Use this INSTEAD of csaa_append_translation_file when correcting content-gate violations: ' +
+            'patches are typically 50-500 bytes each (vs 1-15 KB for a full file rewrite). For a 16-file ' +
+            'translation with 5 violations across 4 files, 8 small patches across 4 calls = ~2 KB total LLM ' +
+            'output. The per-message length limit is structurally unreachable. Each patch is { find, replace } ' +
+            'where `find` must match exactly (case-sensitive, whitespace-significant) and be unique within ' +
+            'the file. Server rejects ambiguous patches with the match count so you can add disambiguating context.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .stringParam('relativePath', 'Path of the staged file to patch (must match a prior csaa_append_translation_file submission).', { required: true })
+    .arrayParam(
+        'patches',
+        'Array of { find: string, replace: string } patches. Applied in array order. Each find must literally match exactly once in the (current) file content. Use replace="" to delete the find pattern.',
+        'object',
+        { required: true },
+    )
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+
+        // Post-finalize seal — same as other translate tools.
+        const sealPath = path.join(
+            ctx.runFolder,
+            CSRunContext.phaseFolder('translate'),
+            'content-map.json',
+        );
+        if (fs.existsSync(sealPath)) {
+            return jsonResult(
+                {
+                    state: 'TRANSLATE_SEALED',
+                    runId,
+                    phase: 'translate',
+                    blockedReason: 'Translate phase already finalized (content-map.json exists). Patches not accepted post-seal — use csaa_audit for corrections.',
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_audit',
+                    nextSuggestedArgs: { runId },
+                },
+                'Translate sealed — patch rejected.',
+            );
+        }
+
+        const relativePath = getStr(params, 'relativePath');
+        if (!relativePath) return errorResult('relativePath required', runId);
+
+        const patchesParam = params.patches;
+        if (!Array.isArray(patchesParam) || patchesParam.length === 0) {
+            return errorResult('patches required (non-empty array of { find, replace })', runId);
+        }
+        const patches = patchesParam as Array<{ find?: unknown; replace?: unknown }>;
+
+        // Sanity cap on total patch payload size.
+        const PATCH_BYTE_CAP = 16 * 1024;
+        const patchBytes = JSON.stringify(patches).length;
+        if (patchBytes > PATCH_BYTE_CAP) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    phase: 'translate',
+                    patchBytes,
+                    capBytes: PATCH_BYTE_CAP,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_append_translation_file',
+                    feedback:
+                        `${SILENCE_PREFIX.join('\n')}\n` +
+                        `Patch payload is ${patchBytes} bytes (>${Math.round(PATCH_BYTE_CAP / 1024)} KB cap). If the corrections are this large, the file structurally needs a full rewrite — use csaa_append_translation_file with the corrected content instead (replacement mode).`,
+                },
+                `Patch payload too large (${patchBytes} > ${PATCH_BYTE_CAP} bytes).`,
+            );
+        }
+
+        // Load scratch.
+        const scratchRaw = ctx.readPhaseArtifact('translate', 'scratch-files.json');
+        if (!scratchRaw) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    phase: 'translate',
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_append_translation_file',
+                    feedback:
+                        `${SILENCE_PREFIX.join('\n')}\n` +
+                        `No staged files. Cannot patch a file that hasn't been appended yet. Call csaa_append_translation_file first with the initial content, then csaa_patch_translation_file for corrections.`,
+                },
+                'No scratch — append before patching.',
+            );
+        }
+        let list: Array<{ relativePath: string; kind: string; content: string; reuseDecision?: string }>;
+        try {
+            list = JSON.parse(scratchRaw);
+        } catch {
+            return errorResult('scratch-files.json is corrupt — re-append or escalate', runId);
+        }
+        const idx = list.findIndex((f) => f.relativePath === relativePath);
+        if (idx < 0) {
+            const stagedNames = list.map((f) => f.relativePath);
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    phase: 'translate',
+                    stagedFiles: stagedNames,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_append_translation_file',
+                    feedback:
+                        `${SILENCE_PREFIX.join('\n')}\n` +
+                        `File "${relativePath}" is not staged. Currently staged:\n  - ${stagedNames.join('\n  - ')}\n\nEither correct the relativePath OR append the file first via csaa_append_translation_file.`,
+                },
+                `File "${relativePath}" not in scratch.`,
+            );
+        }
+
+        // Apply patches sequentially. Each must find a UNIQUE match in the
+        // current buffer state.
+        let content = list[idx].content;
+        const applied: Array<{ patchIndex: number; findPreview: string; replacePreview: string; bytesDelta: number }> = [];
+        const failures: Array<{ patchIndex: number; find: string; reason: string; matchCount?: number }> = [];
+
+        for (let i = 0; i < patches.length; i++) {
+            const p = patches[i];
+            const find = typeof p.find === 'string' ? p.find : '';
+            const replace = typeof p.replace === 'string' ? p.replace : '';
+            if (!find) {
+                failures.push({ patchIndex: i, find: '<empty>', reason: 'patch.find is required and must be non-empty' });
+                continue;
+            }
+            // Count occurrences via split (handles overlapping correctly enough for literal patterns).
+            const matchCount = content.split(find).length - 1;
+            if (matchCount === 0) {
+                failures.push({
+                    patchIndex: i,
+                    find: find.length > 80 ? find.slice(0, 80) + '…' : find,
+                    reason: 'pattern not found in file (whitespace + quoting matter; copy exact text from your prior submission or the scratch via your read tool)',
+                });
+                continue;
+            }
+            if (matchCount > 1) {
+                failures.push({
+                    patchIndex: i,
+                    find: find.length > 80 ? find.slice(0, 80) + '…' : find,
+                    reason: `pattern matches ${matchCount} times — add disambiguating context (a unique line above or below) so the find anchors to one specific occurrence`,
+                    matchCount,
+                });
+                continue;
+            }
+            const beforeBytes = content.length;
+            content = content.replace(find, replace);
+            applied.push({
+                patchIndex: i,
+                findPreview: find.length > 60 ? find.slice(0, 60) + '…' : find,
+                replacePreview: replace.length > 60 ? replace.slice(0, 60) + '…' : replace,
+                bytesDelta: content.length - beforeBytes,
+            });
+        }
+
+        if (failures.length > 0) {
+            // Don't persist partial application — all-or-nothing. Otherwise
+            // a partial state would force the LLM to figure out which
+            // patches landed.
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    phase: 'translate',
+                    relativePath,
+                    appliedCount: applied.length,
+                    failureCount: failures.length,
+                    failures,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_patch_translation_file',
+                    feedback:
+                        `${SILENCE_PREFIX.join('\n')}\n` +
+                        `Patches NOT applied (all-or-nothing). ${failures.length} of ${patches.length} patches failed:\n` +
+                        failures.map((f) => `  - patch[${f.patchIndex}]: ${f.reason}\n    find: "${f.find}"`).join('\n') +
+                        `\n\nFix the find patterns and re-call csaa_patch_translation_file with the corrected patches array. ` +
+                        `Tip: if you don't remember the exact text in scratch, your read tool can fetch <runFolder>/05-translate/scratch-files.json and you can grep for context.`,
+                },
+                `${failures.length}/${patches.length} patches failed — none applied.`,
+            );
+        }
+
+        // All patches applied — persist.
+        list[idx].content = content;
+        ctx.writePhaseArtifact(
+            'translate',
+            'scratch-files.json',
+            JSON.stringify(list, null, 2),
+        );
+
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                phase: 'translate',
+                relativePath,
+                patchesApplied: applied.length,
+                applied,
+                newContentBytes: content.length,
+                nextStepNeeded: true,
+                nextSuggestedTool: 'csaa_finalize_translation',
+                nextSuggestedArgs: { runId },
+            },
+            `Patched ${relativePath}: ${applied.length} fix(es) applied. Call csaa_finalize_translation to re-run gates.`,
+        );
+    })
+    .build();
 
 // ============================================================================
 // csaa_finalize_translation — close-out of streamed translation recording
@@ -5770,6 +6010,7 @@ export const csaaPrimitiveTools: MCPToolDefinition[] = [
     csaa_translate,
     csaa_record_translation,
     csaa_append_translation_file,
+    csaa_patch_translation_file,
     csaa_finalize_translation,
     csaa_audit,
     csaa_write,

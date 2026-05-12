@@ -2445,6 +2445,7 @@ tools:
   - csaa_translate
   - csaa_record_translation # partner to csaa_translate — submit LLM-produced files (≤2 files)
   - csaa_append_translation_file   # chunked recording: stream ONE file at a time
+  - csaa_patch_translation_file    # find/replace patches on a staged file (PATCH-FIRST for content-gate corrections, v1.38.6)
   - csaa_finalize_translation      # chunked recording: close out after all files are appended
   - csaa_audit
   - csaa_write
@@ -2662,6 +2663,83 @@ translate to "fix it" with a corrected payload. That will:
 If you see \`state: TRANSLATE_SEALED\` or \`state: ANALYZE_SEALED\`, read
 the \`blockedReason\` and call the suggested \`nextSuggestedTool\`. Do not
 retry the same call.
+
+## ⚠️ PATCH-FIRST PROTOCOL — content-gate corrections (v1.38.6, MANDATORY)
+
+When \`csaa_finalize_translation\` returns \`AWAITING_LLM_RETRY\` with content
+violations, you **MUST** use \`csaa_patch_translation_file\` as the FIRST
+correction tool. Full-file re-submission via \`csaa_append_translation_file\`
+is the fallback ONLY when >50% of the file needs rewriting (rare).
+
+**Why:** patches are 50-500 bytes per fix. 8 fixes across 4 files = ~3 KB
+total LLM output across 4 tool calls. The per-message length limit is
+structurally unreachable. Full-file re-submission of a 10 KB feature
+file plus 2 lines of chat narration = ~10.5 KB, and **that** is where
+the length limit hits — your last 3 failures all happened in that path.
+
+### How to patch
+
+\`\`\`
+csaa_patch_translation_file(runId, relativePath, patches: [
+  { find: '<exact text in staged file>', replace: '<corrected text>' },
+  { find: '<another exact match>',        replace: '<correction>' },
+])
+\`\`\`
+
+Each \`find\` must:
+1. **Literally match** the text in the staged file — case-sensitive,
+   whitespace-significant. Copy-paste from your prior submission or from
+   \`<runFolder>/05-translate/scratch-files.json\` via your read tool.
+2. **Match exactly ONCE** in the file. If a short pattern appears
+   multiple times, EXTEND it with disambiguating context (line above
+   or below) until it's unique. Server rejects ambiguous patches with
+   the match count so you know what to do.
+
+Patches apply in array order. Order them by file position (top to bottom)
+so later patches don't accidentally match into earlier-replaced text.
+
+### Worked examples
+
+**Apostrophe inside Gherkin string:**
+\`\`\`
+{ find: '"i.e. "username""',  replace: '"i.e. <username>"' }
+\`\`\`
+
+**Encoding fix (literal \`№\` → \`№\`):**
+\`\`\`
+{ find: 'Subject \\\\u2116',  replace: 'Subject №' }
+\`\`\`
+
+**Delete orphan step-def (replace block with empty):**
+\`\`\`
+{
+  find: '  @CSBDDStepDef(\\'I trigger orphan flow\\')\\n  async orphanFlow() {\\n    await this.somePage.click();\\n    CSReporter.pass(\\'done\\');\\n  }\\n',
+  replace: ''
+}
+\`\`\`
+
+**Differentiate duplicate body (rename method + body):**
+\`\`\`
+{
+  find: '  @CSBDDStepDef(\\'I see error A\\')\\n  async checkErr() {\\n    await this.page.verifyErrorA();\\n  }',
+  replace: '  @CSBDDStepDef(\\'I see error A\\')\\n  async checkErrA() {\\n    await this.page.verifyErrorA();\\n  }'
+}
+\`\`\`
+
+### After all patches
+
+When every affected file has been patched, call
+\`csaa_finalize_translation(runId)\`. Gates re-run on the patched scratch.
+If new violations appear (rare — most patches are surgical), repeat the
+patch round-trip.
+
+### Hard rule
+
+If you find yourself about to compose a full file content in chat for a
+correction — **STOP**. The fix is a patch. The vast majority of
+content-gate violations are 1-10 character fixes that don't need a
+full-file rewrite. Even "fix all 4 step files" usually means 5-15 tiny
+patches across 4 tool calls — never 4 full-file re-submissions.
 
 ## ⚠️ GATE-RETRY PROTOCOL — content-gate rejections (PRE-finalize)
 
