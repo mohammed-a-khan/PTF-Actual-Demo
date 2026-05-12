@@ -26,6 +26,8 @@ const agentNames = [
     'cs-playwright',
     // CS-AI-Auto-Assist orchestrator (user-invocable, single-prompt)
     'cs-ai-auto-assist',
+    // CS-AI-Auto-Assist v2 — slim orchestrator that delegates to v1.39 sub-agents
+    'cs-ai-auto-assist-v2',
     // Pipeline subagents (user-invocable: false, delegated via runSubagent)
     'analyzer',
     'data-ingestor',
@@ -35,6 +37,13 @@ const agentNames = [
     'pipeline-healer',
     // Agent platform subagent (user-invocable: false, delegated by cs_test_agent)
     'clarification',
+    // CS-AI-Auto-Assist v1.39 sub-agents (user-invocable: false, called by orchestrator via `agent` tool)
+    'cs-scope-mapper',
+    'cs-bdd-author',
+    'cs-artifact-synthesizer',
+    'cs-vault-writer',
+    'cs-resilience-engineer',
+    'cs-trust-arbiter',
 ];
 
 // kebab-case filename → camelCase TS identifier

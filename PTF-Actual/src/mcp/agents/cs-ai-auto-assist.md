@@ -509,8 +509,8 @@ the user to provide missing material.
 - Use existing pages from `grounding.existingPagesIndex` instead of
   creating duplicates; mark them `role: reuse-existing`.
 - **NEVER use your built-in `read` tool for legacy config/properties
-  files.** Reference folders like `LegacySeleniumCodeForConversion/...`
-  are typically gitignored — your `read` returns nothing. Call
+  files.** Legacy reference folders are typically gitignored — your
+  `read` returns nothing. Call
   `csaa_read_config_file(runId, filePath)` instead; it walks Node fs
   directly and returns parsed key=value pairs plus key classification
   (urlKeys / credentialKeys / dbKeys / detectedEnv). Populate

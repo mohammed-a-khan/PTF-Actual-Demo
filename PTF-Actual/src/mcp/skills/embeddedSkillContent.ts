@@ -665,87 +665,6 @@ business intent — review every scenario before merging.*
 `,
     },
     'audit-rules': {
-        'SKILL.md': `---
-name: audit-rules
-description: The canonical set of MANDATED rules every generated file must obey. Consumed by the cs-playwright-mcp audit_file tool. Load this skill before generating or reviewing any target file.
----
-
-# CS Playwright Framework — MANDATED Rules
-
-The \`audit_file\` MCP tool runs these rules deterministically. Any \`error\`-severity violation blocks the file from advancing to the commit-ready gate.
-
-Rule IDs are stable — referenced by the healer, the generator, and escalation reports.
-
-## Page-object rules (PO)
-
-| ID | Severity | Rule |
-|---|---|---|
-| PO001 | error | Class decorated with \`@CSPage('<kebab-case-id>')\` |
-| PO002 | error | Class extends \`CSBasePage\` (or \`CSFramePage\` if it has a \`frame\` property) |
-| PO003 | error | Every \`CSWebElement\`-typed field has an \`@CSGetElement\` decorator |
-| PO004 | error | \`@CSGetElement\` uses \`xpath:\` as primary locator (not \`id:\`, \`css:\`, or \`role:\` as primary) |
-| PO005 | error | Every \`@CSGetElement\` has a \`description:\` string |
-| PO006 | warn | Interactive elements (inputs, buttons, links, submits) have \`selfHeal: true\` |
-| PO007 | error | No raw \`this.page.locator(...)\`, \`this.page.click(...)\`, \`this.page.fill(...)\` anywhere in the class |
-| PO008 | error | Action methods use \`*WithTimeout\` variants, not bare \`click()\` / \`fill()\` |
-| PO009 | warn | Navigation-triggering clicks use \`clickWithTimeout(30000)\` or higher |
-
-## Step-definition rules (SD)
-
-| ID | Severity | Rule |
-|---|---|---|
-| SD001 | error | Class has \`@StepDefinitions\` decorator |
-| SD002 | error | Page injection via \`@Page('<kebab-key>')\` — no \`new PageName()\` anywhere |
-| SD003 | error | Step decorator \`@CSBDDStepDef('<exact text>')\`; no other step decorator permitted |
-| SD004 | error | Scenario-scoped state via \`CSBDDContext.getInstance()\` — no private class fields holding scenario data |
-| SD005 | error | Each step body either calls \`CSReporter.pass(msg)\` on success, or calls \`CSReporter.fail(msg)\` followed by \`throw new Error(msg)\` — no silent return |
-| SD006 | error | Config access via \`CSValueResolver.resolve('{config:<KEY>}', context)\` — no raw \`process.env\` |
-
-## Feature-file rules (FF)
-
-| ID | Severity | Rule |
-|---|---|---|
-| FF001 | error | Feature-level tags include a project tag + at least one module/feature-area tag |
-| FF002 | error | Data-driven scenarios use \`Scenario Outline:\` + \`Examples:\` block with \`"type": "json"\` source |
-| FF003 | error | \`Examples:\` filter clause uses \`scenarioId=<id> AND runFlag=Yes\` |
-| FF004 | warn | Every scenario has at least 3 \`Then\`/\`And\` verification steps |
-
-## Data-file rules (DF)
-
-| ID | Severity | Rule |
-|---|---|---|
-| DF001 | error | Top-level JSON is an array of objects with at minimum \`{scenarioId, scenarioName, runFlag}\` |
-| DF002 | error | No \`REPLACE_WITH_*\` placeholder values |
-| DF003 | error | Every \`scenarioId\` in a feature file has a matching row in the data JSON |
-
-## Helper / DB rules (DB)
-
-| ID | Severity | Rule |
-|---|---|---|
-| DB001 | error | No inline SQL in pages or steps; every query resolves to a named entry in \`<project>-db-queries.env\` invoked via \`CSDBUtils.executeQuery(alias, queryName, params)\` |
-| DB002 | error | Every query's \`schema.table.column\` is verified by \`schema_lookup\`; unresolved tables carry \`-- SCHEMA REFERENCE NEEDED\` sentinel |
-| DB003 | error | DB helper methods are \`static\`, return typed interfaces (not \`any\`), handle case-tolerant column access (\`r.col ?? r.COL\`) |
-
-## Cross-cutting rules (CC)
-
-| ID | Severity | Rule |
-|---|---|---|
-| CC001 | error | No underscore separators in numeric literals — \`5000\` not \`5_000\` |
-| CC002 | error | No application-source paths referenced in generated file comments (no \`/WEB-INF/\`, no upstream class names, no line-number citations) |
-| CC003 | error | No \`console.log\` |
-| CC004 | error | No bare \`expect(...)\` from \`@playwright/test\` |
-| CC005 | error | Imports only from \`@mdakhan.mak/cs-playwright-test-framework/*\` subpaths or local files |
-| CC006 | error | No \`TODO\`, \`FIXME\`, \`XXX\`, \`HACK\`, or \`PLACEHOLDER\` tokens |
-| CC007 | error | No \`@pending\`, \`@skip\`, \`@wip\`, \`@ignore\` tags on shipped scenarios |
-
-## How agents use this skill
-
-- **Generator** loads this before drafting each file; runs through the rules mentally, then calls \`audit_file\` to verify deterministically
-- **Healer** loads this before every proposed fix; audits the fix content before applying
-- **Orchestrator** loads this at the commit-ready gate to verify the \`audit_file\` report is clean
-
-The \`rules.yaml\` bundled alongside this SKILL.md is the machine-readable form of the same rule set, consumed directly by the \`audit_file\` tool.
-`,
         'rules.yaml': `# Machine-readable audit rules consumed by the cs-playwright-mcp audit_file tool.
 # Keep in sync with SKILL.md in this folder. Rule IDs are stable.
 #
@@ -1104,6 +1023,87 @@ rules:
     detect: 'regex:\\bprocess\\.env\\.[A-Z_][A-Z0-9_]*'
     invertMatch: true
     violation: "Raw process.env access — use CSValueResolver.resolve('{config:KEY}', context) so encrypted values, env precedence, and {input:...} placeholders all resolve correctly"
+`,
+        'SKILL.md': `---
+name: audit-rules
+description: The canonical set of MANDATED rules every generated file must obey. Consumed by the cs-playwright-mcp audit_file tool. Load this skill before generating or reviewing any target file.
+---
+
+# CS Playwright Framework — MANDATED Rules
+
+The \`audit_file\` MCP tool runs these rules deterministically. Any \`error\`-severity violation blocks the file from advancing to the commit-ready gate.
+
+Rule IDs are stable — referenced by the healer, the generator, and escalation reports.
+
+## Page-object rules (PO)
+
+| ID | Severity | Rule |
+|---|---|---|
+| PO001 | error | Class decorated with \`@CSPage('<kebab-case-id>')\` |
+| PO002 | error | Class extends \`CSBasePage\` (or \`CSFramePage\` if it has a \`frame\` property) |
+| PO003 | error | Every \`CSWebElement\`-typed field has an \`@CSGetElement\` decorator |
+| PO004 | error | \`@CSGetElement\` uses \`xpath:\` as primary locator (not \`id:\`, \`css:\`, or \`role:\` as primary) |
+| PO005 | error | Every \`@CSGetElement\` has a \`description:\` string |
+| PO006 | warn | Interactive elements (inputs, buttons, links, submits) have \`selfHeal: true\` |
+| PO007 | error | No raw \`this.page.locator(...)\`, \`this.page.click(...)\`, \`this.page.fill(...)\` anywhere in the class |
+| PO008 | error | Action methods use \`*WithTimeout\` variants, not bare \`click()\` / \`fill()\` |
+| PO009 | warn | Navigation-triggering clicks use \`clickWithTimeout(30000)\` or higher |
+
+## Step-definition rules (SD)
+
+| ID | Severity | Rule |
+|---|---|---|
+| SD001 | error | Class has \`@StepDefinitions\` decorator |
+| SD002 | error | Page injection via \`@Page('<kebab-key>')\` — no \`new PageName()\` anywhere |
+| SD003 | error | Step decorator \`@CSBDDStepDef('<exact text>')\`; no other step decorator permitted |
+| SD004 | error | Scenario-scoped state via \`CSBDDContext.getInstance()\` — no private class fields holding scenario data |
+| SD005 | error | Each step body either calls \`CSReporter.pass(msg)\` on success, or calls \`CSReporter.fail(msg)\` followed by \`throw new Error(msg)\` — no silent return |
+| SD006 | error | Config access via \`CSValueResolver.resolve('{config:<KEY>}', context)\` — no raw \`process.env\` |
+
+## Feature-file rules (FF)
+
+| ID | Severity | Rule |
+|---|---|---|
+| FF001 | error | Feature-level tags include a project tag + at least one module/feature-area tag |
+| FF002 | error | Data-driven scenarios use \`Scenario Outline:\` + \`Examples:\` block with \`"type": "json"\` source |
+| FF003 | error | \`Examples:\` filter clause uses \`scenarioId=<id> AND runFlag=Yes\` |
+| FF004 | warn | Every scenario has at least 3 \`Then\`/\`And\` verification steps |
+
+## Data-file rules (DF)
+
+| ID | Severity | Rule |
+|---|---|---|
+| DF001 | error | Top-level JSON is an array of objects with at minimum \`{scenarioId, scenarioName, runFlag}\` |
+| DF002 | error | No \`REPLACE_WITH_*\` placeholder values |
+| DF003 | error | Every \`scenarioId\` in a feature file has a matching row in the data JSON |
+
+## Helper / DB rules (DB)
+
+| ID | Severity | Rule |
+|---|---|---|
+| DB001 | error | No inline SQL in pages or steps; every query resolves to a named entry in \`<project>-db-queries.env\` invoked via \`CSDBUtils.executeQuery(alias, queryName, params)\` |
+| DB002 | error | Every query's \`schema.table.column\` is verified by \`schema_lookup\`; unresolved tables carry \`-- SCHEMA REFERENCE NEEDED\` sentinel |
+| DB003 | error | DB helper methods are \`static\`, return typed interfaces (not \`any\`), handle case-tolerant column access (\`r.col ?? r.COL\`) |
+
+## Cross-cutting rules (CC)
+
+| ID | Severity | Rule |
+|---|---|---|
+| CC001 | error | No underscore separators in numeric literals — \`5000\` not \`5_000\` |
+| CC002 | error | No application-source paths referenced in generated file comments (no \`/WEB-INF/\`, no upstream class names, no line-number citations) |
+| CC003 | error | No \`console.log\` |
+| CC004 | error | No bare \`expect(...)\` from \`@playwright/test\` |
+| CC005 | error | Imports only from \`@mdakhan.mak/cs-playwright-test-framework/*\` subpaths or local files |
+| CC006 | error | No \`TODO\`, \`FIXME\`, \`XXX\`, \`HACK\`, or \`PLACEHOLDER\` tokens |
+| CC007 | error | No \`@pending\`, \`@skip\`, \`@wip\`, \`@ignore\` tags on shipped scenarios |
+
+## How agents use this skill
+
+- **Generator** loads this before drafting each file; runs through the rules mentally, then calls \`audit_file\` to verify deterministically
+- **Healer** loads this before every proposed fix; audits the fix content before applying
+- **Orchestrator** loads this at the commit-ready gate to verify the \`audit_file\` report is clean
+
+The \`rules.yaml\` bundled alongside this SKILL.md is the machine-readable form of the same rule set, consumed directly by the \`audit_file\` tool.
 `,
     },
     'commit-ready-9-gates': {
@@ -2311,6 +2311,222 @@ attachment, and fail audit \`DL100\`. Always go through
 4. **\`addDownloadedFile()\` is mandatory** for the test report to
    surface the file. Skip it and the file exists on disk but doesn't
    show up in the HTML report.
+`,
+    },
+    'handoff-contracts': {
+        'SKILL.md': `---
+name: handoff-contracts
+description: 'Structured handoff blocks each cs-ai-auto-assist sub-agent must return. Use this when validating sub-agent output in the orchestrator, or when authoring a new sub-agent return block.'
+---
+
+# Handoff Contracts — sub-agent return shapes
+
+Every sub-agent invoked by \`cs-ai-auto-assist\` (the orchestrator) returns a
+**structured handoff block** at the end of its turn. The orchestrator
+validates the block against its contract before advancing to the next phase.
+
+This skill defines all six contracts. Sub-agents reference their contract
+verbatim in their prompt. Orchestrator validates against its contract
+verbatim during phase-gate decisions.
+
+---
+
+## Contract 1 — \`scope-report\` (from \`cs-scope-mapper\`)
+
+Returned after Phase 1 (intake via \`cs_ai_auto_assist\`) + Phase 2
+(\`csaa_discover\`).
+
+\`\`\`yaml
+scope-report:
+  runId: run_<timestamp>_<rand>          # REQUIRED, starts with 'run_'
+  mode: legacy_test_code | bdd_feature | ado_test_case_id | document_path | source_code_path | app_url | natural_language_chat
+  classifiedProject: <string>            # REQUIRED, kebab-case (e.g. "orders")
+  classifiedModule: <string>             # OPTIONAL, sub-folder name (kebab-case)
+  inventoryCounts:
+    tests: <number>
+    pages: <number>
+    helpers: <number>
+    dataFiles: <number>
+  signatureExtracted: <boolean>
+  analyzeQueueLength: <number>           # 0 if no signature; ≥1 if signature seeded a queue
+  analyzePagesQueueLength: <number>
+  runFolder: <absolute path>             # REQUIRED, must exist on disk
+  nextPhase: 'cs-bdd-author'             # Always, unless mode requires user clarification first
+\`\`\`
+
+Validation:
+- \`runId\` matches \`/^run_\\d+_/\`
+- \`mode\` is one of the enum values
+- \`classifiedProject\` is non-empty kebab-case
+- \`runFolder\` resolves to an existing directory
+- If \`signatureExtracted: true\` then \`analyzeQueueLength >= 1\`
+
+---
+
+## Contract 2 — \`bdd-author-report\` (from \`cs-bdd-author\`)
+
+Returned after Phase 3 (\`csaa_analyze\` + iterator streaming +
+\`csaa_finalize_analysis\`) + Phase 4 (\`csaa_plan\`).
+
+\`\`\`yaml
+bdd-author-report:
+  runId: <string>
+  scenarioCount: <number>                # REQUIRED, ≥1
+  pageCount: <number>                    # REQUIRED, ≥0 (0 only if all pages reuse-existing)
+  readinessScore: <number>               # REQUIRED, 0.0–1.0
+  highSeverityGaps: <number>
+  translateQueueSeeded: <boolean>
+  translateQueueLength: <number>         # 1 feature + N steps + M pages + 1 data
+  analysisReportPath: <absolute path>    # REQUIRED, must exist
+  planPath: <absolute path>              # REQUIRED, must exist
+  blockedReason: <string | null>         # set ONLY if readinessScore < 0.7 OR highSeverityGaps ≥ 3
+  fuzzyMatchSuggestions: [...]           # set ONLY if blocked
+  nextPhase: 'cs-artifact-synthesizer' | 'BLOCKED_NEED_HUMAN'
+\`\`\`
+
+Validation:
+- \`analysisReportPath\` and \`planPath\` exist on disk
+- If \`readinessScore < 0.7\` OR \`highSeverityGaps >= 3\` then \`nextPhase === 'BLOCKED_NEED_HUMAN'\`
+- If unblocked then \`translateQueueSeeded === true\` AND \`translateQueueLength >= 3\`
+
+---
+
+## Contract 3 — \`artifact-report\` (from \`cs-artifact-synthesizer\`)
+
+Returned after Phase 5 (\`csaa_translate\` + iterator streaming + patches +
+\`csaa_finalize_translation\`) + Phase 6 (\`csaa_audit\`).
+
+\`\`\`yaml
+artifact-report:
+  runId: <string>
+  filesGenerated: <number>               # REQUIRED, ≥3
+  contentMapPath: <absolute path>        # REQUIRED, must exist
+  allGatesPassed: <boolean>
+  auditViolations: <number>              # MUST be 0 for unblocked progression
+  patchCyclesUsed: <number>              # 0 if no content-gate retries needed
+  blockedReason: <string | null>
+  nextPhase: 'cs-vault-writer' | 'BLOCKED_NEED_HUMAN'
+\`\`\`
+
+Validation:
+- \`contentMapPath\` exists and parses as JSON
+- \`auditViolations === 0\` OR \`nextPhase === 'BLOCKED_NEED_HUMAN'\`
+- \`allGatesPassed === true\` OR \`nextPhase === 'BLOCKED_NEED_HUMAN'\`
+
+---
+
+## Contract 4 — \`vault-report\` (from \`cs-vault-writer\`)
+
+Returned after Phase 7 (\`csaa_write\`) + Phase 7.5 (\`csaa_configure_credentials\`
+if needed).
+
+\`\`\`yaml
+vault-report:
+  runId: <string>
+  filesWritten: <number>                 # REQUIRED, ≥3
+  skippedExisting: <number>
+  auditFailed: <number>                  # MUST be 0
+  credentialsRequested: <boolean>        # true ONLY if csaa_write reported credentialsMissing
+  credentialsConfigured: <boolean>       # true if csaa_configure_credentials was called successfully
+  envFilePath: <absolute path | null>    # set when credentials configured
+  nextPhase: 'cs-resilience-engineer'
+\`\`\`
+
+Validation:
+- If \`credentialsRequested === true\` then \`credentialsConfigured === true\` OR escalation
+- \`auditFailed === 0\`
+
+---
+
+## Contract 5 — \`resilience-report\` (from \`cs-resilience-engineer\`)
+
+Returned after Phase 8 (\`csaa_execute\` + heal loop).
+
+\`\`\`yaml
+resilience-report:
+  runId: <string>
+  runVerdict: 'passed' | 'passed_after_heal' | 'pass_weak' | 'failed_after_heal'
+  scenariosTotal: <number>
+  scenariosPassed: <number>
+  scenariosFailed: <number>
+  healCyclesUsed: <number>                # total cycles across all scenarios
+  perScenarioVerdicts:
+    - id: <scenarioId>
+      verdict: 'passed' | 'passed_after_heal' | 'failed_after_heal'
+      cyclesUsed: <number>
+      fixes: [<failureType>, ...]         # e.g. ['locator-drift', 'timing-flaky']
+      lastClassification: <failureType | null>
+  correctionMemoryHits: <number>
+  correctionMemoryMisses: <number>
+  failureReportPath: <absolute path | null>  # set when scenariosFailed > 0
+  nextPhase: 'cs-trust-arbiter'           # always; trust-arbiter computes degraded score on weak/failed
+\`\`\`
+
+Validation:
+- \`scenariosTotal === scenariosPassed + scenariosFailed\`
+- \`runVerdict\` matches the scenario outcomes
+- \`healCyclesUsed ≤ 20\` (global cap)
+
+---
+
+## Contract 6 — \`trust-report\` (from \`cs-trust-arbiter\`)
+
+Returned after Phase 9 (\`csaa_verify\` + optional \`csaa_publish\`).
+
+\`\`\`yaml
+trust-report:
+  runId: <string>
+  trustScore: <number>                   # 0.0–1.0, REQUIRED
+  semanticEquivalence: <boolean>         # legacy assertions ↔ generated assertions match
+  finalReportPath: <absolute path>       # REQUIRED, must exist
+  factors:
+    readinessScore: <number>
+    auditViolations: <number>
+    runVerdict: <string>
+    semanticEquivalence: <boolean>
+    healCyclesUsed: <number>
+  published: <boolean>                   # true ONLY if user opted in at intake AND publish succeeded
+  adoRunUrl: <string | null>             # set when published
+  createdTestCaseIds: [<string>, ...]    # set when published
+  finalStatus: 'READY' | 'PASS_WEAK' | 'FAILED'
+\`\`\`
+
+Validation:
+- \`finalReportPath\` exists on disk
+- \`trustScore\` in [0.0, 1.0]
+- \`published === true\` implies \`adoRunUrl\` is a valid URL
+
+---
+
+## How orchestrator uses these contracts
+
+The orchestrator's prompt instructs it to:
+
+1. Call each sub-agent via the \`agent\` tool.
+2. Parse the returned block as YAML.
+3. Validate against the matching contract (above).
+4. If validation passes AND \`nextPhase\` is a sub-agent name → invoke that sub-agent.
+5. If validation fails → escalate with the missing/invalid field.
+6. If \`nextPhase === 'BLOCKED_NEED_HUMAN'\` → surface \`blockedReason\` to the user and halt.
+
+## How sub-agents emit their handoff block
+
+Each sub-agent ends its turn with a fenced YAML block prefixed by the
+contract name. Example:
+
+\`\`\`yaml
+scope-report:
+  runId: run_1735632147382_xyz123
+  mode: legacy_test_code
+  classifiedProject: orders
+  ...
+  nextPhase: 'cs-bdd-author'
+\`\`\`
+
+No prose after the block. The orchestrator reads the block, validates,
+dispatches. The block is small (~200-500 bytes), so even after a
+sub-agent runs a complex iterator loop internally, the orchestrator
+only sees the summary.
 `,
     },
     'heal-cascade-revert': {
@@ -4653,4 +4869,4 @@ Output JSON:
     },
 };
 
-export const SKILL_NAMES: readonly string[] = ["ado-bidirectional-update","americas-timezone","api-call-pattern","app-url-exploration","audit-rules","commit-ready-9-gates","correction-memory-format","csv-data-driven","db-helper-case-tolerant","db-helper-findall-matching","db-helper-findby-id","db-state-assertion","dialog-handling","encrypted-config","excel-data-driven","ff-scenario-outline","ff-smoke-scenario","file-download-export","heal-cascade-revert","heal-locator-drift","heal-loop-driver","heal-timing-flaky","iframe-nested","interactive-clarification","ir-and-session-state","legacy-example-csharp-nunit","legacy-example-java-testng","legacy-example-jdbc-inline-sql","mutation-cleanup","named-query-env-entry","po-click-action-method","po-dynamic-element","po-fill-action-method","po-frame-element","po-self-healing-element","po-simple-element","po-wait-and-verify-method","reporter-fail-and-throw","reporter-pass-on-success","scenarios-json-row","sd-simple-step","sd-step-with-config","sd-step-with-context","sd-step-with-db-precondition","sd-step-with-params","xlsx-multi-row-per-id","xlsx-sheet-to-scenarios"] as const;
+export const SKILL_NAMES: readonly string[] = ["ado-bidirectional-update","americas-timezone","api-call-pattern","app-url-exploration","audit-rules","commit-ready-9-gates","correction-memory-format","csv-data-driven","db-helper-case-tolerant","db-helper-findall-matching","db-helper-findby-id","db-state-assertion","dialog-handling","encrypted-config","excel-data-driven","ff-scenario-outline","ff-smoke-scenario","file-download-export","handoff-contracts","heal-cascade-revert","heal-locator-drift","heal-loop-driver","heal-timing-flaky","iframe-nested","interactive-clarification","ir-and-session-state","legacy-example-csharp-nunit","legacy-example-java-testng","legacy-example-jdbc-inline-sql","mutation-cleanup","named-query-env-entry","po-click-action-method","po-dynamic-element","po-fill-action-method","po-frame-element","po-self-healing-element","po-simple-element","po-wait-and-verify-method","reporter-fail-and-throw","reporter-pass-on-success","scenarios-json-row","sd-simple-step","sd-step-with-config","sd-step-with-context","sd-step-with-db-precondition","sd-step-with-params","xlsx-multi-row-per-id","xlsx-sheet-to-scenarios"] as const;
