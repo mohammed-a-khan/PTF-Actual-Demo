@@ -75,9 +75,27 @@ export type TranslateQueueItem =
           scenarioIds: string[];
       };
 
-export type QueueItem = AnalyzeQueueItem | TranslateQueueItem;
+/**
+ * One page-class to be emitted as `analysis.pages[i]`. Seeded from the
+ * deterministic signature so the LLM produces ONE page-object JSON per
+ * tool call (mirrors the scenarios queue). Pages with many elements +
+ * legacy-file:<path>:<line> citations blow Copilot's per-message output
+ * cap when bundled into a single finalize call — streaming per-page is
+ * structurally smaller (one page ≈ 1-5 KB).
+ */
+export type AnalyzePageQueueItem = {
+    kind: 'analyze-page';
+    /** Class name as it appears in legacy source. */
+    className: string;
+    /** Absolute path to the legacy page-class file. */
+    legacyFile: string;
+    /** Floor for elements[] count (80% of legacy @FindBy count, min 1). */
+    minFieldCount: number;
+};
 
-export type Phase = 'analyze' | 'translate';
+export type QueueItem = AnalyzeQueueItem | AnalyzePageQueueItem | TranslateQueueItem;
+
+export type Phase = 'analyze' | 'analyzePages' | 'translate';
 
 interface QueueState {
     version: 1;
@@ -85,6 +103,11 @@ interface QueueState {
         items: AnalyzeQueueItem[];
         position: number; // index of NEXT item to produce
         completedAt?: string; // ISO timestamp when queue drained
+    };
+    analyzePages: {
+        items: AnalyzePageQueueItem[];
+        position: number;
+        completedAt?: string;
     };
     translate: {
         items: TranslateQueueItem[];
@@ -126,6 +149,12 @@ export class CSWorkQueue {
                 if (state.version !== 1) {
                     state = CSWorkQueue.emptyState();
                 }
+                // Backward-compat: queue.json files written before v1.38.2
+                // do not contain `analyzePages`. Initialise it as empty so
+                // load() never returns undefined.
+                if (!state.analyzePages) {
+                    state.analyzePages = { items: [], position: 0 };
+                }
             } catch {
                 state = CSWorkQueue.emptyState();
             }
@@ -139,6 +168,7 @@ export class CSWorkQueue {
         return {
             version: 1,
             analyze: { items: [], position: 0 },
+            analyzePages: { items: [], position: 0 },
             translate: { items: [], position: 0 },
         };
     }
@@ -146,6 +176,12 @@ export class CSWorkQueue {
     /** Replace the analyze queue with a fresh item list. */
     seedAnalyze(items: AnalyzeQueueItem[]): void {
         this.state.analyze = { items, position: 0 };
+        this.persist();
+    }
+
+    /** Replace the analyze-pages queue with a fresh item list. */
+    seedAnalyzePages(items: AnalyzePageQueueItem[]): void {
+        this.state.analyzePages = { items, position: 0 };
         this.persist();
     }
 

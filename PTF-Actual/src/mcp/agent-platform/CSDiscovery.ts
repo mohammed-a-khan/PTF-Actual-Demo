@@ -283,19 +283,47 @@ export class CSDiscovery {
     }
 
     private static findProjectRoot(start: string): string {
+        // Walk up to 10 levels stopping at the FIRST marker found —
+        // closest to the entry file wins. This handles two cases that the
+        // old "hard marker only" walk got wrong:
+        //   1. Legacy code-dump projects without pom.xml — we now stop at
+        //      the directory containing `resources/<env>/` (the QAF data
+        //      pattern) rather than walking up into an unrelated parent.
+        //   2. Test fixtures nested under a framework repo — we stop at
+        //      the fixture root (which has resources/) instead of jumping
+        //      all the way up to the framework's package.json.
+        // Both hard markers (build files) and soft markers (resources/,
+        // testng.xml, qaf-config*) return the CLOSEST match, never an
+        // ancestor that contains it.
+        const HARD_MARKERS = ['pom.xml', 'build.gradle', 'build.gradle.kts', 'package.json'];
+        const SOFT_MARKER_DIRS = ['resources', 'resource'];
+        const SOFT_MARKER_FILE_RE = /^(testng|qaf-config|cucumber\.runtime|application)[-_a-z0-9]*\.(xml|properties)$/i;
         let cur = start;
-        for (let i = 0; i < 5; i++) {
-            const candidates = ['pom.xml', 'build.gradle', 'build.gradle.kts', 'package.json', '*.csproj'];
-            for (const c of candidates) {
-                if (c.includes('*')) {
-                    try {
-                        const ents = fs.readdirSync(cur);
-                        if (ents.some((e) => e.endsWith('.csproj'))) return cur;
-                    } catch { /* ignore */ }
-                } else {
-                    if (fs.existsSync(path.join(cur, c))) return cur;
-                }
+        for (let i = 0; i < 10; i++) {
+            // Hard build-file markers — closest wins.
+            for (const c of HARD_MARKERS) {
+                if (fs.existsSync(path.join(cur, c))) return cur;
             }
+            try {
+                const ents = fs.readdirSync(cur);
+                if (ents.some((e) => e.endsWith('.csproj') || e.endsWith('.sln'))) return cur;
+                // Soft marker: <cur>/resources/ or <cur>/resource/ directory
+                // — the QAF/TestNG/Selenium legacy pattern.
+                for (const dirName of SOFT_MARKER_DIRS) {
+                    if (ents.includes(dirName)) {
+                        try {
+                            if (fs.statSync(path.join(cur, dirName)).isDirectory()) {
+                                return cur;
+                            }
+                        } catch { /* ignore */ }
+                    }
+                }
+                // Soft marker: testng.xml / qaf-config*.xml / cucumber.runtime.xml
+                // / application*.properties in <cur>.
+                if (ents.some((e) => SOFT_MARKER_FILE_RE.test(e))) {
+                    return cur;
+                }
+            } catch { /* ignore */ }
             const parent = path.dirname(cur);
             if (parent === cur) break;
             cur = parent;

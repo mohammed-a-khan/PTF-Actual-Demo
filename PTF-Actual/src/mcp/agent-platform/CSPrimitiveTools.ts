@@ -44,6 +44,7 @@ import {
 import {
     CSWorkQueue,
     type AnalyzeQueueItem,
+    type AnalyzePageQueueItem,
     type TranslateQueueItem,
 } from './CSWorkQueue';
 import { CSSemanticReuse } from './CSSemanticReuse';
@@ -108,15 +109,30 @@ function commonPrefixLen(a: string, b: string): number {
     return i;
 }
 
-function findFileWithEnvInPath(
+const SKIP_WALK_DIRS = new Set([
+    'node_modules', 'dist', 'build', 'target', 'out', 'bin',
+    '.git', '.gradle', '.idea', '.vscode', 'tmp', 'temp',
+    'Agent-Processing',
+]);
+
+/**
+ * Single-walk multi-target file finder. Walks `root` once and returns the
+ * FIRST file whose basename matches any of `targetBasenames` (case-insensitive)
+ * AND — when `envFilter` is set — whose path contains the env name as a
+ * segment. Capped at `maxDepth` directories deep. Cheap because each
+ * directory is read exactly once regardless of how many basenames we test.
+ */
+function findFileMultiExt(
     root: string,
-    targetBaseName: string,
-    env: string,
-    maxDepth = 12,
+    targetBasenames: string[],
+    options: { envFilter?: string; maxDepth?: number } = {},
 ): string | null {
-    const targetLower = targetBaseName.toLowerCase();
-    const envLower = env.toLowerCase();
-    const envSegment = new RegExp(`(^|[\\\\/])${envLower}([\\\\/]|$)`, 'i');
+    const targetSet = new Set(targetBasenames.map((b) => b.toLowerCase()));
+    const envLower = options.envFilter?.toLowerCase();
+    const envSegment = envLower
+        ? new RegExp(`(^|[\\\\/])${envLower}([\\\\/]|$)`, 'i')
+        : null;
+    const maxDepth = options.maxDepth ?? 12;
     const queue: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
     while (queue.length > 0) {
         const { dir, depth } = queue.shift()!;
@@ -126,16 +142,35 @@ function findFileWithEnvInPath(
         catch { continue; }
         for (const e of entries) {
             const full = path.join(dir, e.name);
-            if (e.isFile() && e.name.toLowerCase() === targetLower && envSegment.test(full)) {
-                return full;
+            if (e.isFile() && targetSet.has(e.name.toLowerCase())) {
+                if (!envSegment || envSegment.test(full)) return full;
             }
             if (e.isDirectory() && !e.name.startsWith('.') &&
-                e.name !== 'node_modules' && e.name !== 'dist' && e.name !== 'build') {
+                !SKIP_WALK_DIRS.has(e.name)) {
                 queue.push({ dir: full, depth: depth + 1 });
             }
         }
     }
     return null;
+}
+
+/** Convenience wrapper for the single-basename single-walk case. */
+function findFileWithEnvInPath(
+    root: string,
+    targetBaseName: string,
+    env: string,
+    maxDepth = 12,
+): string | null {
+    return findFileMultiExt(root, [targetBaseName], { envFilter: env, maxDepth });
+}
+
+/** Convenience wrapper for the single-basename single-walk case (no env). */
+function findFileByBasename(
+    root: string,
+    targetBaseName: string,
+    maxDepth = 12,
+): string | null {
+    return findFileMultiExt(root, [targetBaseName], { maxDepth });
 }
 
 function getStr(p: Record<string, unknown>, k: string): string | undefined {
@@ -241,6 +276,26 @@ const csaa_discover: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                             ),
                         }));
                         queue.seedAnalyze(items);
+
+                        // v1.38.2 — also seed the per-page sub-queue. Each
+                        // legacy page class becomes one work item so the
+                        // LLM emits ONE analysis.pages[i] entry per turn
+                        // via csaa_append_analysis_page. Without this, a
+                        // 6-page Administration module's finalize call
+                        // bundles ~15-25 KB of legacy-file: citations
+                        // into a single message — instant length-limit.
+                        const pageItems = Object.values(sig.pages)
+                            .map((p) => ({
+                                kind: 'analyze-page' as const,
+                                className: p.className,
+                                legacyFile: p.filePath,
+                                // 80% floor mirrors the page-coverage gate;
+                                // minimum 1 so an empty page still produces
+                                // a queue item the LLM can declare role=
+                                // reuse-existing for.
+                                minFieldCount: Math.max(1, Math.ceil((p.fields?.length ?? 0) * 0.8)),
+                            }));
+                        queue.seedAnalyzePages(pageItems);
                     } catch (queueErr) {
                         // Queue seeding is best-effort. If it fails the
                         // pipeline still works (downstream tools fall
@@ -475,11 +530,97 @@ function buildAnalyzeScenarioEnvelope(
 }
 
 /**
+ * Per-page envelope (v1.38.2). Built after scenarios drain. Asks the LLM
+ * to produce ONE analysis.pages[i] entry per turn — keeps each tool-call
+ * payload to ~1-5 KB even when a page declares 30+ elements with
+ * legacy-file:<path>:<line> citations.
+ */
+function buildAnalyzePageEnvelope(
+    item: AnalyzePageQueueItem,
+    progress: { completed: number; total: number },
+    common: AnalyzeIteratorCommonGrounding,
+): DelegationEnvelope {
+    const pageIdx = progress.completed + 1;
+    return {
+        task: 'produce-one-analysis-page',
+        instruction: [
+            `Produce ONE analysis page (${pageIdx}/${progress.total}).`,
+            '',
+            `Legacy page class: ${item.className}`,
+            `Legacy file: ${item.legacyFile}`,
+            `Minimum elements[] count: ${item.minFieldCount} (80% floor of legacy @FindBy count)`,
+            '',
+            'Steps:',
+            `  1. Call csaa_extract_page_fields(runId, pageClass: "${item.className}") to get the authoritative @FindBy list with line numbers.`,
+            `  2. Decide role: "create-new" if this page must be regenerated under test/<project>/pages/<module>/, or "reuse-existing" if a matching CS Playwright page object already exists in the consumer repo (use csaa_query_existing_pages to check). Default: "create-new".`,
+            `  3. Emit ONE element per legacy @FindBy. Each element needs: name (camelCase mirror of legacy field), primaryLocator { strategy:"xpath", value, source:"legacy-file:${item.legacyFile}:<line>" }, optional alternativeLocators[] for css/id variants.`,
+            '',
+            'Submit via `csaa_append_analysis_page(runId, page: { className, role, elements: [...] })`. My response will tell you the next page or the meta finalize envelope.',
+            '',
+            'SILENCE RULE: compose the tool call directly. Do NOT narrate locator strings or element lists in chat — that is the #1 cause of "response hit the length limit".',
+        ].join('\n'),
+        // Per-page schema — finalize re-validates the assembled pages[]
+        // array under ANALYSIS_SCHEMA.
+        responseSchema: {
+            type: 'object',
+            required: ['className', 'role', 'elements'],
+            properties: {
+                className: { type: 'string' },
+                role: { type: 'string', enum: ['create-new', 'reuse-existing'] },
+                reuseTargetPath: { type: 'string' },
+                elements: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        required: ['name', 'primaryLocator'],
+                        properties: {
+                            name: { type: 'string' },
+                            primaryLocator: {
+                                type: 'object',
+                                required: ['strategy', 'value', 'source'],
+                                properties: {
+                                    strategy: { type: 'string' },
+                                    value: { type: 'string' },
+                                    source: { type: 'string' },
+                                },
+                            },
+                            alternativeLocators: { type: 'array' },
+                        },
+                    },
+                },
+            },
+        },
+        grounding: {
+            runId: common.runId,
+            project: common.project,
+            module: common.module,
+            entryFile: common.entryFile,
+            inventoryPath: common.inventoryPath,
+            skillsPath: common.skillsPath,
+            currentItem: {
+                kind: item.kind,
+                className: item.className,
+                legacyFile: item.legacyFile,
+                minFieldCount: item.minFieldCount,
+            },
+            queue: {
+                current: pageIdx,
+                total: progress.total,
+                remaining: Math.max(0, progress.total - progress.completed - 1),
+                phase: 'analyzePages',
+            },
+        },
+        recordWith: 'csaa_append_analysis_page',
+        recordArgs: { runId: common.runId },
+    };
+}
+
+/**
  * Built when the analyze queue is drained. Tells the LLM to produce the
- * non-scenario portion of the analysis (source / feature / pages /
+ * non-scenario portion of the analysis (source / feature /
  * dependencyGraph / configFiles / loginContract / gaps / readinessScore)
- * and submit via csaa_finalize_analysis. Scenarios are already in the
- * scratch file — they must NOT be repeated in this payload.
+ * and submit via csaa_finalize_analysis. Scenarios AND pages are already
+ * in their scratch files — they must NOT be repeated in this payload.
  */
 function buildAnalyzeFinalizeEnvelope(
     scenariosStaged: number,
@@ -488,32 +629,34 @@ function buildAnalyzeFinalizeEnvelope(
     return {
         task: 'produce-analysis-meta',
         instruction: [
-            `All ${scenariosStaged} scenario(s) are staged in 03-analyze/scratch-scenarios.json. Now produce the non-scenario portion of the analysis and call csaa_finalize_analysis. This is the final step before the analyze phase closes.`,
+            `All ${scenariosStaged} scenario(s) are staged in 03-analyze/scratch-scenarios.json. Pages are staged in 03-analyze/scratch-pages.json (if any). Now produce the meta portion of the analysis and call csaa_finalize_analysis. This is the final step before the analyze phase closes.`,
             '',
             'Required fields (responseSchema below):',
             '  - source: { absolutePath, relativePath, sha256 } — the entry test file.',
             '  - feature: { name, slug, tags } — the Gherkin feature header.',
             '  - dependencyGraph: array of { path, kind } — entry + base class + every page object + every helper file you read. Floor is ≥3 entries.',
             '  - configFiles: array of { path, env?, keysExtracted, values } — at minimum the env.properties file (with web BASE_URL + credentials extracted into `values`). DB url goes into `values` separately under a `db.*`-prefixed key but NEVER as the web BASE_URL.',
-            '  - pages: array of { className, role, elements[] } — one per page class referenced. role is "create-new" or "reuse-existing". For role=create-new pages, call `csaa_extract_page_fields(runId, pageClass)` first and list ≥80% of the legacy @FindBy fields.',
             '  - loginContract: { detected, pattern, gherkinStep, loginPageFile?, url?, credentialFields? }',
             '  - gaps: array of { severity, detail, suggestedFuzzyMatch? } — any unresolved issues.',
             '  - readinessScore: number 0..1. Below 0.7 the run halts.',
             '',
-            'Submit via `csaa_finalize_analysis(runId, payload: { source, feature, dependencyGraph, configFiles, pages, loginContract, gaps, readinessScore })`. **Do NOT include `scenarios` in this payload** — they come from the scratch file. finalize re-dispatches into csaa_record_analysis so every gate fires identically (schema + semantic + signature-coverage + readiness).',
+            'Submit via `csaa_finalize_analysis(runId, payload: { source, feature, dependencyGraph, configFiles, loginContract, gaps, readinessScore })`. **Do NOT include `scenarios` or `pages` in this payload** — they come from their scratch files. finalize re-dispatches into csaa_record_analysis so every gate fires identically (schema + semantic + signature-coverage + readiness).',
             '',
             'SILENCE RULE: compose the tool call directly, do not narrate the payload contents in chat.',
         ].join('\n'),
-        // Minimal subset schema — finalize re-validates via the full ANALYSIS_SCHEMA after merging in scenarios from scratch.
+        // Minimal subset schema — finalize re-validates via the full
+        // ANALYSIS_SCHEMA after merging in scenarios + pages from scratch.
+        // No `pages` here: it comes from the per-page scratch file so the
+        // submission payload stays small enough to never blow the
+        // per-message output cap.
         responseSchema: {
             type: 'object',
-            required: ['source', 'feature', 'dependencyGraph', 'configFiles', 'pages', 'loginContract', 'gaps', 'readinessScore'],
+            required: ['source', 'feature', 'dependencyGraph', 'configFiles', 'loginContract', 'gaps', 'readinessScore'],
             properties: {
                 source: { type: 'object' },
                 feature: { type: 'object' },
                 dependencyGraph: { type: 'array' },
                 configFiles: { type: 'array' },
-                pages: { type: 'array' },
                 loginContract: { type: 'object' },
                 gaps: { type: 'array' },
                 readinessScore: { type: 'number' },
@@ -1763,7 +1906,48 @@ const csaa_append_analysis_scenario: MCPToolDefinition = (defineTool() as MCPToo
                     `Scenario "${id}" staged (${list.length}/${queue.total('analyze')}). Next: produce scenario ${queue.completed('analyze') + 1}/${queue.total('analyze')} (${nextItem.id}). Submit via csaa_append_analysis_scenario.`,
                 );
             }
-            // Queue drained — emit the finalize envelope.
+            // v1.38.2 — scenarios drained. If the pages sub-queue is non-
+            // empty, transition to per-page envelopes BEFORE the meta
+            // finalize. Each page goes via csaa_append_analysis_page so
+            // the payload stays small even when the legacy module has
+            // 6+ page classes with 30+ elements each.
+            if (!queue.isEmpty('analyzePages')) {
+                const firstPage = queue.peekNext('analyzePages') as AnalyzePageQueueItem;
+                const pageEnv = buildAnalyzePageEnvelope(
+                    firstPage,
+                    { completed: queue.completed('analyzePages'), total: queue.total('analyzePages') },
+                    common,
+                );
+                ctx.writePhaseArtifact(
+                    'analyze',
+                    'delegation-envelope.json',
+                    JSON.stringify(pageEnv, null, 2),
+                );
+                void itemsBefore;
+                return jsonResult(
+                    {
+                        state: 'AWAITING_LLM_FULFILMENT',
+                        runId,
+                        phase: 'analyze',
+                        scenariosCollected: list.length,
+                        lastAppended: id,
+                        delegation: pageEnv,
+                        queue: {
+                            current: queue.completed('analyzePages') + 1,
+                            total: queue.total('analyzePages'),
+                            progress: queue.progress('analyzePages'),
+                            phase: 'analyzePages',
+                        },
+                        iteratorMode: true,
+                        queueAdvanced: advanced,
+                        nextStepNeeded: true,
+                        nextSuggestedTool: 'csaa_append_analysis_page',
+                        nextSuggestedArgs: { runId },
+                    },
+                    `All ${list.length} scenario(s) staged. Next: produce analysis page 1/${queue.total('analyzePages')} (${firstPage.className}). Submit via csaa_append_analysis_page.`,
+                );
+            }
+            // Queue drained AND no pages sub-queue — emit the meta finalize.
             const finalizeEnv = buildAnalyzeFinalizeEnvelope(list.length, common);
             ctx.writePhaseArtifact(
                 'analyze',
@@ -1825,6 +2009,217 @@ function itemMatchesScenarioId(item: AnalyzeQueueItem, submittedId: string): boo
     if (item.id.replace(/^(TC|TS)_/, '') === submittedId.replace(/^(TC|TS)_/, '')) return true;
     return false;
 }
+
+// ============================================================================
+// csaa_append_analysis_page — chunked recording (one page at a time)  v1.38.2
+// ============================================================================
+// Pages with many @CSGetElement entries + legacy-file:<path>:<line> citations
+// blow VS Code Copilot's per-message output cap when bundled into a single
+// csaa_finalize_analysis payload. This tool stages ONE page per call to
+// scratch-pages.json — symmetric with csaa_append_analysis_scenario.
+
+const csaa_append_analysis_page: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_append_analysis_page')
+    .title('CS-AI-Auto-Assist — Append one analysis page (chunked)')
+    .description(
+        'Streams ONE analysis.pages[i] entry to the page scratch file. Use whenever the ' +
+            'finalize-analysis payload would exceed Copilot per-message output limits ' +
+            '(any page with 15+ elements + legacy-file: citations is a safe threshold). ' +
+            'Validate against ANALYSIS_SCHEMA.pages[]. When every signature page class has ' +
+            'been appended, the response carries the meta-finalize envelope; call ' +
+            'csaa_finalize_analysis with the small remaining fields (source/feature/' +
+            'dependencyGraph/configFiles/loginContract/gaps/readinessScore). Scratch survives ' +
+            'conversation compaction.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID from cs_ai_auto_assist', { required: true })
+    .objectParam(
+        'page',
+        'REQUIRED. One page object matching ANALYSIS_SCHEMA.pages[]: { className, role: "create-new"|"reuse-existing", reuseTargetPath?, elements: [{ name, primaryLocator: { strategy, value, source }, alternativeLocators? }, ...] }.',
+        undefined,
+        { required: true },
+    )
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const ctx = getCtx(runId);
+        if (!ctx) return errorResult(`unknown runId '${runId}'`, runId);
+        const page = params.page;
+        if (typeof page !== 'object' || page === null) {
+            return errorResult(`page must be an object`, runId);
+        }
+        const p = page as Record<string, unknown>;
+        const className = typeof p.className === 'string' ? p.className : '';
+        const role = typeof p.role === 'string' ? p.role : '';
+        const elements = Array.isArray(p.elements) ? p.elements : null;
+        if (!className) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    feedback: `page.className required. Use the legacy class name from the queue currentItem.`,
+                },
+                'page.className missing',
+            );
+        }
+        if (role !== 'create-new' && role !== 'reuse-existing') {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    feedback: `page.role must be "create-new" or "reuse-existing" (got ${JSON.stringify(role)}).`,
+                },
+                'page.role invalid',
+            );
+        }
+        if (!elements) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    feedback: `page.elements must be an array. For reuse-existing pages with no elements, pass [].`,
+                },
+                'page.elements missing',
+            );
+        }
+
+        const scratchRaw = ctx.readPhaseArtifact('analyze', 'scratch-pages.json');
+        const list: Record<string, unknown>[] = scratchRaw ? JSON.parse(scratchRaw) : [];
+        if (list.some((x) => x.className === className)) {
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    feedback: `Page className "${className}" was already appended in this run. Either re-emit with a unique className, or proceed to csaa_finalize_analysis if every signature page has been recorded.`,
+                },
+                `Page "${className}" duplicate`,
+            );
+        }
+        list.push({ ...p });
+        ctx.writePhaseArtifact('analyze', 'scratch-pages.json', JSON.stringify(list, null, 2));
+
+        // Advance the pages queue. Permissive match: case-insensitive
+        // className stem comparison (LLM may submit the class with
+        // different casing).
+        const queue = CSWorkQueue.load(ctx);
+        let advanced = false;
+        if (queue.total('analyzePages') > 0) {
+            const cur = queue.peekNext('analyzePages') as AnalyzePageQueueItem | null;
+            if (cur && cur.className.toLowerCase() === className.toLowerCase()) {
+                queue.advance('analyzePages');
+                advanced = true;
+            }
+        }
+
+        // Rebuild common grounding for the next envelope. We need entryFile
+        // + inventory path + project info — pull from intake/run-params and
+        // the prior analyze envelope.
+        let project = 'default';
+        let module: string | undefined;
+        let entryFile = '';
+        const rpRaw = ctx.readPhaseArtifact('intake', 'run-params.json');
+        if (rpRaw) {
+            try {
+                const rp = JSON.parse(rpRaw) as { project?: string; module?: string; entryFile?: string };
+                project = rp.project ?? project;
+                module = rp.module;
+                entryFile = rp.entryFile ?? '';
+            } catch { /* ignore */ }
+        }
+        const prevEnvRaw = ctx.readPhaseArtifact('analyze', 'delegation-envelope.json');
+        if (prevEnvRaw) {
+            try {
+                const prev = JSON.parse(prevEnvRaw) as { grounding?: { entryFile?: string; project?: string; module?: string } };
+                if (prev.grounding?.entryFile && !entryFile) entryFile = prev.grounding.entryFile;
+                if (prev.grounding?.project) project = prev.grounding.project;
+                if (prev.grounding?.module) module = prev.grounding.module;
+            } catch { /* ignore */ }
+        }
+        const inventoryPath = path.join(
+            ctx.runFolder,
+            CSRunContext.phaseFolder('discover'),
+            'inventory.json',
+        );
+        const common: AnalyzeIteratorCommonGrounding = {
+            runId,
+            project,
+            module,
+            entryFile,
+            inventoryPath,
+            skillsPath: '.github/skills/',
+        };
+
+        // Next page → emit per-page envelope. Last page drained → meta
+        // finalize envelope.
+        const nextPage = queue.peekNext('analyzePages') as AnalyzePageQueueItem | null;
+        if (nextPage) {
+            const env = buildAnalyzePageEnvelope(
+                nextPage,
+                { completed: queue.completed('analyzePages'), total: queue.total('analyzePages') },
+                common,
+            );
+            ctx.writePhaseArtifact('analyze', 'delegation-envelope.json', JSON.stringify(env, null, 2));
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_FULFILMENT',
+                    runId,
+                    phase: 'analyze',
+                    pagesCollected: list.length,
+                    lastAppended: className,
+                    delegation: env,
+                    queue: {
+                        current: queue.completed('analyzePages') + 1,
+                        total: queue.total('analyzePages'),
+                        progress: queue.progress('analyzePages'),
+                        phase: 'analyzePages',
+                    },
+                    iteratorMode: true,
+                    queueAdvanced: advanced,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_append_analysis_page',
+                    nextSuggestedArgs: { runId },
+                },
+                `Page "${className}" staged (${list.length}/${queue.total('analyzePages')}). Next: produce analysis page ${queue.completed('analyzePages') + 1}/${queue.total('analyzePages')} (${nextPage.className}).`,
+            );
+        }
+        // Pages queue drained — meta finalize envelope.
+        const finalizeEnv = buildAnalyzeFinalizeEnvelope(
+            // Pull staged scenarios count from scratch-scenarios.json if
+            // present — used only for the instruction text.
+            (() => {
+                try {
+                    const r = ctx.readPhaseArtifact('analyze', 'scratch-scenarios.json');
+                    if (!r) return 0;
+                    const arr = JSON.parse(r);
+                    return Array.isArray(arr) ? arr.length : 0;
+                } catch { return 0; }
+            })(),
+            common,
+        );
+        ctx.writePhaseArtifact('analyze', 'delegation-envelope.json', JSON.stringify(finalizeEnv, null, 2));
+        return jsonResult(
+            {
+                state: 'AWAITING_LLM_FULFILMENT',
+                runId,
+                phase: 'analyze',
+                pagesCollected: list.length,
+                lastAppended: className,
+                delegation: finalizeEnv,
+                queue: {
+                    current: queue.total('analyzePages'),
+                    total: queue.total('analyzePages'),
+                    progress: queue.progress('analyzePages'),
+                    phase: 'analyzePages',
+                },
+                iteratorMode: true,
+                queueAdvanced: advanced,
+                nextStepNeeded: true,
+                nextSuggestedTool: 'csaa_finalize_analysis',
+                nextSuggestedArgs: { runId },
+            },
+            `All ${list.length} page(s) staged. Now produce the meta payload and call csaa_finalize_analysis.`,
+        );
+    })
+    .build();
 
 // ============================================================================
 // csaa_finalize_analysis — close-out of streamed analysis recording
@@ -1891,7 +2286,37 @@ const csaa_finalize_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilde
             );
         }
 
-        const fullPayload = { ...(meta as Record<string, unknown>), scenarios };
+        // v1.38.2 — pages may be streamed via csaa_append_analysis_page.
+        // If scratch-pages.json exists, merge those in. If pages are ALSO
+        // in the payload, refuse — same shadow-truncation risk as
+        // scenarios above. If neither pages-scratch nor pages-in-payload,
+        // the LLM must include pages directly (backward compat for runs
+        // that bypassed the iterator-mode page streaming).
+        const pagesScratchRaw = ctx.readPhaseArtifact('analyze', 'scratch-pages.json');
+        let scratchPages: unknown[] | null = null;
+        if (pagesScratchRaw) {
+            try {
+                const parsed = JSON.parse(pagesScratchRaw);
+                if (Array.isArray(parsed) && parsed.length > 0) scratchPages = parsed;
+            } catch {
+                return errorResult(
+                    `Scratch page file is corrupt at analyze/scratch-pages.json. Inspect the file, fix or delete malformed entries, then re-append via csaa_append_analysis_page.`,
+                    runId,
+                );
+            }
+        }
+        const payloadPages = (meta as { pages?: unknown }).pages;
+        if (scratchPages && Array.isArray(payloadPages) && payloadPages.length > 0) {
+            return errorResult(
+                `csaa_finalize_analysis payload must NOT include 'pages' when scratch-pages.json is populated — they come from the per-page scratch file. Remove the pages key and re-call. (Got ${payloadPages.length} pages in the payload alongside ${scratchPages.length} in the scratch file.)`,
+                runId,
+            );
+        }
+
+        const mergedMeta = scratchPages
+            ? { ...(meta as Record<string, unknown>), pages: scratchPages }
+            : (meta as Record<string, unknown>);
+        const fullPayload = { ...mergedMeta, scenarios };
 
         // Re-dispatch through csaa_record_analysis so gate logic stays
         // single-sourced. On success it writes analysis-report.json and the
@@ -1907,15 +2332,14 @@ const csaa_finalize_analysis: MCPToolDefinition = (defineTool() as MCPToolBuilde
         const sc = res.structuredContent as { state?: string } | undefined;
         if (sc?.state === 'RUNNING' || sc?.state === 'BLOCKED_NEED_HUMAN') {
             // Validation passed (RUNNING) or the analysis was persisted but
-            // halted on readiness (BLOCKED). Either way the scratch file is
-            // no longer needed for retries.
+            // halted on readiness (BLOCKED). Either way the scratch files
+            // are no longer needed for retries.
             try {
-                const scratchPath = path.join(
-                    ctx.runFolder,
-                    CSRunContext.phaseFolder('analyze'),
-                    'scratch-scenarios.json',
-                );
-                if (fs.existsSync(scratchPath)) fs.unlinkSync(scratchPath);
+                const phaseDir = path.join(ctx.runFolder, CSRunContext.phaseFolder('analyze'));
+                for (const fn of ['scratch-scenarios.json', 'scratch-pages.json']) {
+                    const p = path.join(phaseDir, fn);
+                    if (fs.existsSync(p)) fs.unlinkSync(p);
+                }
             } catch { /* non-fatal */ }
         }
         return res;
@@ -4144,11 +4568,17 @@ const csaa_resolve_data_file: MCPToolDefinition = (defineTool() as MCPToolBuilde
             envList = envSet.size > 0 ? [...envSet] : ['sit'];
         }
 
-        // Workspace root: the inventory's rootPath.
-        const workspaceRoot = inv.rootPath;
-        if (!workspaceRoot || !fs.existsSync(workspaceRoot)) {
-            return errorResult(`inventory rootPath '${workspaceRoot}' missing on disk`, runId);
+        // Workspace root: the inventory's rootPath. v1.38.2 — single-walk
+        // multi-extension matcher; was previously a quadratic per-env x
+        // per-ext set of separate walks that hung on large repos. Now the
+        // resolver does at most TWO tree walks per env (with-env-segment,
+        // then basename-only) and each walk tests all alt-extension
+        // basenames in one pass.
+        const inferredRoot = inv.rootPath;
+        if (!inferredRoot || !fs.existsSync(inferredRoot)) {
+            return errorResult(`inventory rootPath '${inferredRoot}' missing on disk`, runId);
         }
+        const workspaceRoot = inferredRoot;
 
         // Expand placeholders for each env, then resolve.
         const placeholderRe = /\$\{(?:environment\.name|env|envName)\}/gi;
@@ -4158,35 +4588,48 @@ const csaa_resolve_data_file: MCPToolDefinition = (defineTool() as MCPToolBuilde
             absolutePath: string;
             exists: boolean;
             fileSize?: number;
+            resolutionStrategy?: string;
         }> = [];
         const baseName = path.basename(annotationValue);
-        const fallbacksTried = new Set<string>();
+        // Alt-basename set covering common extension swaps. Legacy code
+        // often annotates one extension while the file on disk has another
+        // (e.g. annotation says .xls, file is .xml).
+        const baseStem = baseName.replace(/\.[a-z0-9]+$/i, '');
+        const altExts = ['.xls', '.xlsx', '.xml', '.csv', '.tsv', '.json', '.yaml', '.yml'];
+        const altBasenames = [
+            baseName,
+            ...altExts.map((e) => baseStem + e).filter((b) => b.toLowerCase() !== baseName.toLowerCase()),
+        ];
 
         for (const env of envList) {
             const expanded = annotationValue.replace(placeholderRe, env);
-            // Direct join.
-            const direct = path.resolve(workspaceRoot, expanded);
-            const directExists = fs.existsSync(direct);
-            if (directExists) {
-                resolved.push({
-                    env,
-                    relativePath: expanded,
-                    absolutePath: direct,
-                    exists: true,
-                    fileSize: fs.statSync(direct).size,
-                });
-                continue;
+            // 1. Direct join (cheap fs.existsSync) — try each alt-extension.
+            let resolvedHere = false;
+            for (const tryName of altBasenames) {
+                const tryRel = expanded.replace(baseName, tryName);
+                const direct = path.resolve(workspaceRoot, tryRel);
+                if (fs.existsSync(direct)) {
+                    resolved.push({
+                        env,
+                        relativePath: tryRel,
+                        absolutePath: direct,
+                        exists: true,
+                        fileSize: fs.statSync(direct).size,
+                        resolutionStrategy: tryName === baseName ? 'direct' : `direct-alt-ext(${tryName})`,
+                    });
+                    resolvedHere = true;
+                    break;
+                }
             }
-            // Fallback: walk workspace for any file matching basename with the
-            // env name in its path. Caches results across envs to avoid
-            // re-walking.
-            const cacheKey = `${env}::${baseName}`;
-            if (fallbacksTried.has(cacheKey)) {
-                resolved.push({ env, relativePath: expanded, absolutePath: direct, exists: false });
-                continue;
-            }
-            fallbacksTried.add(cacheKey);
-            const found = findFileWithEnvInPath(workspaceRoot, baseName, env);
+            if (resolvedHere) continue;
+            // 2. Single env-segment walk testing all alt-basenames in one pass.
+            //    We do NOT fall back to a basename-only walk here — that
+            //    would return a file from a DIFFERENT env's folder for a
+            //    missing env (misleading). Callers can re-call without the
+            //    `${environment.name}` placeholder if their project has a
+            //    single shared data file.
+            const found = findFileMultiExt(workspaceRoot, altBasenames, { envFilter: env });
+            const strategy = 'bfs-env-segment';
             if (found) {
                 resolved.push({
                     env,
@@ -4194,12 +4637,13 @@ const csaa_resolve_data_file: MCPToolDefinition = (defineTool() as MCPToolBuilde
                     absolutePath: found,
                     exists: true,
                     fileSize: fs.statSync(found).size,
+                    resolutionStrategy: `${strategy}(${path.basename(found)})`,
                 });
             } else {
                 resolved.push({
                     env,
                     relativePath: expanded,
-                    absolutePath: direct,
+                    absolutePath: path.resolve(workspaceRoot, expanded),
                     exists: false,
                 });
             }
@@ -4571,15 +5015,40 @@ const csaa_expand_helper: MCPToolDefinition = (defineTool() as MCPToolBuilder)
             className: path.basename(p as string, path.extname(p as string)),
             path: p as string,
         }));
-        const all = [...helpers, ...pages];
-        const found = all.find((x) => x.className === helperClass);
+        // ALSO search every Java/C# source file in the inventory by basename
+        // — the classifier may have tagged the file as 'unknown' (e.g. a
+        // utility class whose filename doesn't end in Helper/Util/Utility/
+        // Support and isn't under a helpers/utils/utilities/support/common
+        // directory). Match by class name == file basename (case-sensitive).
+        const sourceFiles = (inv.files ?? [])
+            .filter((f) => typeof f === 'object' && f !== null && 'extension' in f &&
+                ((f as { extension?: string }).extension === '.java' ||
+                 (f as { extension?: string }).extension === '.cs'))
+            .map((f) => ({
+                className: path.basename((f as { path: string }).path, path.extname((f as { path: string }).path)),
+                path: (f as { path: string }).path,
+            }));
+        const all = [...helpers, ...pages, ...sourceFiles];
+        let found = all.find((x) => x.className === helperClass);
+        // Final safety net: walk the project tree looking for
+        // <helperClass>.java / .cs on disk. Catches files the classifier
+        // mistagged as 'unknown' (file naming doesn't match the helper
+        // heuristic) — a single BFS walk through the inventory root.
+        if (!found && inv.rootPath) {
+            const onDisk = findFileMultiExt(inv.rootPath, [
+                `${helperClass}.java`, `${helperClass}.cs`,
+            ]);
+            if (onDisk) {
+                found = { className: helperClass, path: onDisk };
+            }
+        }
         if (!found) {
             return jsonResult(
                 {
                     state: 'AWAITING_LLM_RETRY',
                     runId,
-                    error: `helper class '${helperClass}' not found in inventory (${inv.helpers?.length ?? 0} helpers + ${inv.pages?.length ?? 0} pages scanned)`,
-                    suggestion: 'Verify the class name spelling. If OCR / fuzzy-match is needed, check inventory.json under 02-discover for the closest match.',
+                    error: `helper class '${helperClass}' not found in inventory (${inv.helpers?.length ?? 0} helpers + ${inv.pages?.length ?? 0} pages + ${sourceFiles.length} other source files scanned) nor on disk within 8 parent directories`,
+                    suggestion: 'Verify the class name spelling exactly. If the file lives outside the project tree (e.g. a sibling utility module), call csaa_discover again with rootPath pointing at the common ancestor.',
                 },
                 `Helper class '${helperClass}' not in inventory.`,
             );
@@ -4713,6 +5182,7 @@ export const csaaPrimitiveTools: MCPToolDefinition[] = [
     csaa_analyze,
     csaa_record_analysis,
     csaa_append_analysis_scenario,
+    csaa_append_analysis_page,
     csaa_finalize_analysis,
     csaa_plan,
     csaa_translate,
