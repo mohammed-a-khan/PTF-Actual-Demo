@@ -200,7 +200,11 @@ export class CSRepoInventory {
         const entries: PageInventoryEntry[] = [];
         for (const abs of files) {
             const moduleName = CSRepoInventory.extractModuleName(abs, pagesRoot);
-            if (moduleFilter && moduleName !== moduleFilter) continue;
+            // When a moduleFilter is set, admit entries from the module's
+            // own folder AND from the shared `common/` folder (LoginPage,
+            // GridComponents, header/footer/sidebar/navbar). Without this,
+            // the BDD author loses access to the shared component library.
+            if (moduleFilter && moduleName !== moduleFilter && moduleName !== 'common') continue;
             const content = CSRepoInventory.safeRead(abs);
             if (!content) continue;
             entries.push({
@@ -282,7 +286,11 @@ export class CSRepoInventory {
         const entries: StepInventoryEntry[] = [];
         for (const abs of files) {
             const moduleName = CSRepoInventory.extractModuleName(abs, stepsRoot);
-            if (moduleFilter && moduleName !== moduleFilter) continue;
+            // When a moduleFilter is set, admit entries from the module's
+            // own folder AND from the shared `common/` folder (LoginPage,
+            // GridComponents, header/footer/sidebar/navbar). Without this,
+            // the BDD author loses access to the shared component library.
+            if (moduleFilter && moduleName !== moduleFilter && moduleName !== 'common') continue;
             const content = CSRepoInventory.safeRead(abs);
             if (!content) continue;
             entries.push({
@@ -321,7 +329,11 @@ export class CSRepoInventory {
         const entries: FeatureInventoryEntry[] = [];
         for (const abs of files) {
             const moduleName = CSRepoInventory.extractModuleName(abs, featuresRoot);
-            if (moduleFilter && moduleName !== moduleFilter) continue;
+            // When a moduleFilter is set, admit entries from the module's
+            // own folder AND from the shared `common/` folder (LoginPage,
+            // GridComponents, header/footer/sidebar/navbar). Without this,
+            // the BDD author loses access to the shared component library.
+            if (moduleFilter && moduleName !== moduleFilter && moduleName !== 'common') continue;
             const content = CSRepoInventory.safeRead(abs);
             if (!content) continue;
             entries.push({
@@ -402,7 +414,11 @@ export class CSRepoInventory {
         const entries: DataFileEntry[] = [];
         for (const abs of files) {
             const moduleName = CSRepoInventory.extractModuleName(abs, dataRoot);
-            if (moduleFilter && moduleName !== moduleFilter) continue;
+            // When a moduleFilter is set, admit entries from the module's
+            // own folder AND from the shared `common/` folder (LoginPage,
+            // GridComponents, header/footer/sidebar/navbar). Without this,
+            // the BDD author loses access to the shared component library.
+            if (moduleFilter && moduleName !== moduleFilter && moduleName !== 'common') continue;
             const content = CSRepoInventory.safeRead(abs);
             if (!content) continue;
             let scenarioIds: string[] = [];

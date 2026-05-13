@@ -793,10 +793,16 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
         }
 
         // Build a compact existing-pages index (paths + class names only).
+        // Scope the inventory to the requested module so the analyzer LLM
+        // only sees pages under `test/<project>/pages/<module>/` (plus the
+        // shared `pages/common/` folder added by CSRepoInventory when a
+        // module filter is set). Without this, the analyzer was being handed
+        // every page in the repo and pulling unrelated pages into the BDD
+        // grounding.
         let existingPagesIndex: Array<{ className: string; relativePath: string }> = [];
         if (workspaceRoot && fs.existsSync(workspaceRoot)) {
             try {
-                const inv = CSRepoInventory.inventory(project, { workspaceRoot });
+                const inv = CSRepoInventory.inventory(project, { workspaceRoot, module });
                 existingPagesIndex = inv.pages.slice(0, 100).map((p) => ({
                     className: p.className,
                     relativePath: p.relativePath,
@@ -5189,10 +5195,16 @@ const csaa_query_existing_pages: MCPToolDefinition = (defineTool() as MCPToolBui
         const workspaceRoot = String(params.workspaceRoot ?? '');
         const project = String(params.project ?? '');
         const candidate = String(params.candidateClassName ?? '');
+        const moduleFilter = getStr(params, 'module');
         if (!workspaceRoot || !project || !candidate) {
             return errorResult('workspaceRoot, project, candidateClassName all required');
         }
-        const inv = CSRepoInventory.inventory(project, { workspaceRoot });
+        // Scope the inventory to the requested module so we only compare
+        // against pages already living under `test/<project>/pages/<module>/`
+        // (plus the shared `pages/common/` folder). Without this filter,
+        // every page in the repo was being scored, surfacing irrelevant
+        // matches and inflating the BDD-author grounding context.
+        const inv = CSRepoInventory.inventory(project, { workspaceRoot, module: moduleFilter });
         const decision = CSSemanticReuse.decidePage(
             { className: candidate, sourcePath: undefined, elements: [], publicMethods: [] },
             inv.pages,

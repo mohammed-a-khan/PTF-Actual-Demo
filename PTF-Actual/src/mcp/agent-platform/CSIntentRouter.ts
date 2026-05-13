@@ -42,10 +42,14 @@ const PREFIXED_TS_REGEX = /^TS[#\-_]?(\d+)$/i;
 const PREFIXED_TP_REGEX = /^TP[#\-_]?(\d+)$/i;
 
 /**
- * Path-like pattern. Accepts both POSIX (/...) and Windows (C:\...) absolute
- * paths plus relative paths starting with ./ or ../.
+ * Path-like pattern. Accepts:
+ *   - POSIX absolute       /foo/bar
+ *   - POSIX relative       ./foo, ../foo
+ *   - Windows absolute     C:\foo, C:/foo
+ *   - Windows relative     .\foo, ..\foo
+ *   - Windows UNC          \\server\share\foo
  */
-const PATH_REGEX = /^(?:\.{1,2}\/|\/|[A-Za-z]:[\\/])/;
+const PATH_REGEX = /^(?:\.{1,2}[\\/]|[\\/]|[A-Za-z]:[\\/]|\\\\)/;
 
 /**
  * File extension classification table. Used to differentiate a generic
@@ -104,7 +108,7 @@ export class CSIntentRouter {
         //    natural_language_chat just because the whole blob isn't a path.
         const structured = CSIntentRouter.parseStructuredFields(trimmed);
         const structuredPath = structured.path || structured.source || structured.file;
-        if (structuredPath && PATH_REGEX.test(structuredPath) || (structuredPath && CSIntentRouter.looksLikePath(structuredPath))) {
+        if (structuredPath && (PATH_REGEX.test(structuredPath) || CSIntentRouter.looksLikePath(structuredPath))) {
             const classified = CSIntentRouter.classifyPath(structuredPath, rawInput);
             // Merge other structured fields (projectName, moduleName,
             // featureName, environments, etc.) so clarification doesn't
@@ -114,6 +118,28 @@ export class CSIntentRouter {
                 ...structured,
             };
             return classified;
+        }
+        // Relaxed structured-prompt fallback. When the path on the `Source:`
+        // line failed strict validation (e.g. UNC with unusual escaping,
+        // path with spaces and no leading `./`, or a bare filename) BUT the
+        // surrounding prompt clearly signals a legacy migration intake
+        // (project + module fields, or migration keywords), route to
+        // legacy_test_code instead of falling all the way through to
+        // natural_language_chat. NL-chat would force the user to re-supply
+        // a `feature:` Tier-1 field even though they already gave us a
+        // structured legacy-migration brief. Downstream tools surface a
+        // clear "could not read path" error if the path is genuinely bad.
+        if (structuredPath && CSIntentRouter.hasMigrationSignals(structured, trimmed)) {
+            const ext = path.extname(structuredPath).toLowerCase();
+            const mode: AgentRunMode = SOURCE_CODE_EXTS.has(ext)
+                ? 'legacy_test_code'
+                : 'source_code_path';
+            return CSIntentRouter.makeResult(
+                mode,
+                0.6,
+                { ...structured, path: structuredPath, ext },
+                rawInput,
+            );
         }
         const structuredUrl = structured.url || structured.appUrl;
         if (structuredUrl && URL_REGEX.test(structuredUrl)) {
@@ -373,6 +399,25 @@ export class CSIntentRouter {
             if (out[canonical] === undefined) out[canonical] = value;
         }
         return out;
+    }
+
+    /**
+     * Return true iff the structured prompt has enough surrounding context
+     * to be confidently treated as a legacy-migration intake even when the
+     * `Source:`/`path:` value itself failed strict path validation.
+     *
+     * Two ways to qualify:
+     *   1. At least one structured field naming the migration target
+     *      (projectName or moduleName) was supplied.
+     *   2. The raw input contains explicit migration vocabulary
+     *      (migrate / migration / legacy / selenium / testng / junit / cucumber).
+     */
+    private static hasMigrationSignals(
+        structured: Record<string, string>,
+        raw: string,
+    ): boolean {
+        if (structured.projectName || structured.moduleName) return true;
+        return /\b(migrate|migration|legacy|selenium|testng|junit|cucumber)\b/i.test(raw);
     }
 
     /**
