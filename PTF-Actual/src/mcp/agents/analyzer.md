@@ -2,7 +2,7 @@
 name: analyzer
 title: Analyzer (mode-aware)
 description: Parses legacy source into canonical IR (migration mode) OR explores live DOM to propose scenarios from user intent (greenfield mode). Invoked as a subagent by the cs-playwright orchestrator.
-model: 'Claude Sonnet 4.6'
+model: ['Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: cyan
 user-invocable: false
 tools:

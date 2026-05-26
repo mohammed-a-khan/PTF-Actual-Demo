@@ -406,18 +406,26 @@ export class CSIntentRouter {
      * to be confidently treated as a legacy-migration intake even when the
      * `Source:`/`path:` value itself failed strict path validation.
      *
-     * Two ways to qualify:
+     * Two ways to qualify (require strong signals to avoid false-positives
+     * on conversational English like "migrate this PR" or "legacy field
+     * name"):
      *   1. At least one structured field naming the migration target
-     *      (projectName or moduleName) was supplied.
-     *   2. The raw input contains explicit migration vocabulary
-     *      (migrate / migration / legacy / selenium / testng / junit / cucumber).
+     *      (projectName or moduleName) was supplied. Combined with a
+     *      structuredPath this is high-confidence migration intent.
+     *   2. The raw input has both a migration VERB (migrate / migration /
+     *      port / convert) AND a framework NOUN (selenium / testng / junit
+     *      / cucumber / legacy code / legacy tests / legacy test).
+     *      Co-occurrence requirement filters out "migrate this PR" /
+     *      "legacy field" false positives.
      */
     private static hasMigrationSignals(
         structured: Record<string, string>,
         raw: string,
     ): boolean {
         if (structured.projectName || structured.moduleName) return true;
-        return /\b(migrate|migration|legacy|selenium|testng|junit|cucumber)\b/i.test(raw);
+        const verb = /\b(migrate|migrating|migration|port|porting|convert|converting)\b/i.test(raw);
+        const noun = /\b(selenium|testng|junit|cucumber|legacy\s+(?:code|tests?|suite|automation|scripts?))\b/i.test(raw);
+        return verb && noun;
     }
 
     /**

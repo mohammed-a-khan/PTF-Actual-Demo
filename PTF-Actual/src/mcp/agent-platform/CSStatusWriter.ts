@@ -246,6 +246,26 @@ export class CSStatusWriter {
         });
         lines.push('');
 
+        // v1.39.8 — Sub-agent model preferences + Copilot UI lag note.
+        // Each sub-agent declares its preferred model in its .md front-matter.
+        // Copilot Chat's hover tooltip is known to lag and show the parent
+        // conversation's model even when the sub-agent is actually executing
+        // on its declared model. This footer is the authoritative record.
+        lines.push('## Sub-agent model preferences');
+        lines.push('');
+        lines.push('Each phase runs under its sub-agent\'s declared model. VS Code Copilot Chat\'s hover tooltip can lag — if the panel shows the same model for every phase, that\'s a known Copilot UI quirk, NOT a misconfiguration.');
+        lines.push('');
+        lines.push('| Phase    | Sub-agent              | Declared model chain                          |');
+        lines.push('|----------|------------------------|-----------------------------------------------|');
+        lines.push('| intake/discover | cs-scope-mapper        | Haiku 4.5 → Sonnet 4.6 → Sonnet 4.5     |');
+        lines.push('| analyze/plan    | cs-bdd-author          | Sonnet 4.6 → Sonnet 4.5                 |');
+        lines.push('| translate/audit | cs-artifact-synthesizer | Sonnet 4.6 → Sonnet 4.5                |');
+        lines.push('| write/credentials | cs-vault-writer       | Haiku 4.5 → Sonnet 4.6 → Sonnet 4.5     |');
+        lines.push('| preflight       | cs-preflight-auditor   | Haiku 4.5 → Sonnet 4.6 → Sonnet 4.5     |');
+        lines.push('| execute/heal    | cs-resilience-engineer | Sonnet 4.6 → Sonnet 4.5                 |');
+        lines.push('| verify/publish  | cs-trust-arbiter       | Haiku 4.5 → Sonnet 4.6 → Sonnet 4.5     |');
+        lines.push('');
+
         if ((opts.filesWritten ?? []).length > 0) {
             lines.push('## Files written');
             lines.push('');

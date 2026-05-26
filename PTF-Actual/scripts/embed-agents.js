@@ -44,6 +44,7 @@ const agentNames = [
     'cs-vault-writer',
     'cs-resilience-engineer',
     'cs-trust-arbiter',
+    'cs-preflight-auditor',
 ];
 
 // kebab-case filename → camelCase TS identifier

@@ -46,7 +46,7 @@ export interface HealAttempt {
     failureType: string;
     testId: string;
     classification: 'LOW' | 'MEDIUM' | 'HIGH' | 'UNKNOWN';
-    fixSource: 'memory' | 'sampling' | 'none';
+    fixSource: 'memory' | 'sampling' | 'deterministic' | 'none';
     fixApplied: boolean;
     afterAttemptPassed: boolean;
     notes?: string;
@@ -309,7 +309,30 @@ export class CSHealLoop {
         // sampling call below, not a shortcut.
         const memoryHit = await CSHealLoop.queryMemory(signature, context);
 
-        // -- Step 3: LLM-propose a fix --------------------------------------
+        // -- Step 3a: deterministic compile-error fixer ---------------------
+        // v1.39.2 — before falling back to LLM sampling (which is unavailable
+        // on Copilot / VDI environments), try to fix common LLM-typical
+        // compile errors via pure regex. Catches the @CSGetElement-shape
+        // and getAttributeValue() patterns that survive the content-gate
+        // rules — and matters because Copilot can't run sampling at all,
+        // so the alternative would be unconditional escalation.
+        const detFix = CSHealLoop.applyDeterministicCompileFixes(failure);
+        if (detFix.applied) {
+            return {
+                attemptNumber,
+                failureType: failure.failureType,
+                testId: failure.testId,
+                classification: classification === 'UNKNOWN' ? 'LOW' : classification,
+                fixSource: 'deterministic',
+                fixApplied: true,
+                afterAttemptPassed: false,
+                notes: `deterministic fix applied: ${detFix.fixesApplied.join(', ')}`,
+                signature,
+                strategy: detFix.fixesApplied.join('; '),
+            };
+        }
+
+        // -- Step 3b: LLM-propose a fix -------------------------------------
         if (!context.sampling) {
             return {
                 attemptNumber,
@@ -320,7 +343,7 @@ export class CSHealLoop {
                 fixApplied: false,
                 afterAttemptPassed: false,
                 notes:
-                    'escalate: no sampling client available; cannot propose fix',
+                    'escalate: no sampling client available and no deterministic fix matched',
                 signature,
             };
         }
@@ -831,6 +854,90 @@ export class CSHealLoop {
             return failure.testId;
         }
         return undefined;
+    }
+
+    /**
+     * Deterministic compile-error fixer. Regex-patches a small set of
+     * LLM-typical pattern errors that survive content gates or surface at
+     * tsc time:
+     *
+     *   - `strategy: 'xpath'` / `strategy: 'css'` → `xpath:` / `css:` directly
+     *   - `locator: '...'` paired with `strategy:` → remove (covered by above)
+     *   - `[{ strategy: 'css', locator: '...' }]` → `['css:...']` string array
+     *   - `.getAttributeValue(...)` → `.getAttribute(...)`
+     *
+     * Reads the file mentioned in the failure (via `guessFilePath`),
+     * applies fixes, writes back. Returns the list of patterns matched
+     * for telemetry. If the file can't be located or no patterns matched,
+     * returns `{ applied: false }`.
+     *
+     * Crucially, this works without `context.sampling` — on Copilot / VDI
+     * the heal loop has no LLM client and the alternative would be
+     * unconditional escalation.
+     */
+    public static applyDeterministicCompileFixes(
+        failure: ExecutionGateFailure,
+    ): { applied: boolean; fixesApplied: string[] } {
+        const filePath = CSHealLoop.guessFilePath(failure);
+        if (!filePath) return { applied: false, fixesApplied: [] };
+        let original: string;
+        try {
+            // Lazy require — keep `fs` out of the module top scope so the
+            // existing tests that mock parts of CSHealLoop aren't affected.
+            const fs = require('fs') as typeof import('fs');
+            if (!fs.existsSync(filePath)) return { applied: false, fixesApplied: [] };
+            original = fs.readFileSync(filePath, 'utf-8');
+        } catch {
+            return { applied: false, fixesApplied: [] };
+        }
+        let patched = original;
+        const fixes: string[] = [];
+
+        // Fix 1: { strategy: 'xpath', locator: '...' } → { xpath: '...' }
+        const strategyXpathRe =
+            /strategy\s*:\s*(['"`])xpath\1\s*,\s*locator\s*:\s*(['"`])((?:\\.|(?!\2).)*)\2/g;
+        const before1 = patched;
+        patched = patched.replace(strategyXpathRe, (_m, _q1, q2, val) => `xpath: ${q2}${val}${q2}`);
+        if (patched !== before1) fixes.push('strategy:xpath/locator → xpath:');
+
+        // Fix 2: { strategy: 'css', locator: '...' } → { css: '...' }
+        const strategyCssRe =
+            /strategy\s*:\s*(['"`])css\1\s*,\s*locator\s*:\s*(['"`])((?:\\.|(?!\2).)*)\2/g;
+        const before2 = patched;
+        patched = patched.replace(strategyCssRe, (_m, _q1, q2, val) => `css: ${q2}${val}${q2}`);
+        if (patched !== before2) fixes.push('strategy:css/locator → css:');
+
+        // Fix 3: alternativeLocators: [{ strategy: 'css', locator: '...' }, …]
+        // → alternativeLocators: ['css:...', …]
+        const altObjArrayRe = /alternativeLocators\s*:\s*\[\s*((?:\{[^}]*\}\s*,?\s*)+)\]/g;
+        const before3 = patched;
+        patched = patched.replace(altObjArrayRe, (whole, body: string) => {
+            const items: string[] = [];
+            const objRe = /\{\s*strategy\s*:\s*(['"`])(\w+)\1\s*,\s*locator\s*:\s*(['"`])((?:\\.|(?!\3).)*)\3\s*\}/g;
+            let mm: RegExpExecArray | null;
+            while ((mm = objRe.exec(body)) !== null) {
+                items.push(`'${mm[2]}:${mm[4].replace(/'/g, "\\'")}'`);
+            }
+            if (items.length === 0) return whole; // couldn't parse — leave untouched
+            return `alternativeLocators: [${items.join(', ')}]`;
+        });
+        if (patched !== before3) fixes.push('alternativeLocators object-array → string-array');
+
+        // Fix 4: .getAttributeValue( → .getAttribute(
+        const getAttrValueRe = /\.getAttributeValue\s*\(/g;
+        const before4 = patched;
+        patched = patched.replace(getAttrValueRe, '.getAttribute(');
+        if (patched !== before4) fixes.push('getAttributeValue → getAttribute');
+
+        if (patched === original) return { applied: false, fixesApplied: [] };
+
+        try {
+            const fs = require('fs') as typeof import('fs');
+            fs.writeFileSync(filePath, patched, 'utf-8');
+        } catch {
+            return { applied: false, fixesApplied: [] };
+        }
+        return { applied: true, fixesApplied: fixes };
     }
 
     private static async invokeTool(

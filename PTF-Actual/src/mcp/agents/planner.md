@@ -2,7 +2,7 @@
 name: cs-playwright-planner
 title: CS Playwright Planner
 description: Use this agent to explore applications and generate test plans
-model: 'GPT-4.1'
+model: ['GPT-4.1 (copilot)', 'GPT-5 (copilot)', 'Claude Sonnet 4.6 (copilot)']
 color: purple
 tools:
   # Browser - Core

@@ -2,7 +2,7 @@
 name: locator-reconciler
 title: Locator Reconciler
 description: Verifies every element in the IR against the live DOM, ranks locators by confidence, consults correction memory for prior reconciliations. Emits enriched IR for the Generator. Subagent of cs-playwright.
-model: 'Claude Sonnet 4.6'
+model: ['Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: teal
 user-invocable: false
 tools:

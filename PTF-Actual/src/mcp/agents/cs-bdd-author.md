@@ -2,7 +2,7 @@
 name: cs-bdd-author
 title: CS BDD Author
 description: Sub-agent of cs-ai-auto-assist. Authors the BDD analysis from legacy source — drives the iterator-mode per-scenario and per-page streaming, finalises the analysis, then produces the plan. Owns Phase 3 (analyze) and Phase 4 (plan). Returns a bdd-author-report handoff block.
-model: 'Claude Sonnet 4.6'
+model: ['Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: cyan
 user-invocable: false
 tools:

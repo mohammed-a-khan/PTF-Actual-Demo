@@ -2,7 +2,7 @@
 name: cs-vault-writer
 title: CS Vault Writer
 description: Sub-agent of cs-ai-auto-assist. Atomic file persistence + AES-encrypted credential vaulting. Reads the content-map produced by cs-artifact-synthesizer, writes files via the audit-gated csaa_write, then conditionally vaults credentials via csaa_configure_credentials. Owns Phase 7 (write) and Phase 7.5 (credentials). Returns a vault-report handoff block.
-model: 'Claude Haiku 4.5'
+model: ['Claude Haiku 4.5 (copilot)', 'Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: orange
 user-invocable: false
 tools:

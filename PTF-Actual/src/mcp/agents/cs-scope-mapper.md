@@ -2,7 +2,7 @@
 name: cs-scope-mapper
 title: CS Scope Mapper
 description: Sub-agent of cs-ai-auto-assist. Sanitises and classifies the user's migration intent, returns the runId, then walks the legacy project tree to produce a structured inventory + deterministic Java signature (if applicable). Owns Phase 1 (intake) and Phase 2 (discover). Returns a scope-report handoff block.
-model: 'Claude Haiku 4.5'
+model: ['Claude Haiku 4.5 (copilot)', 'Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: yellow
 user-invocable: false
 tools:

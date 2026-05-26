@@ -8,6 +8,25 @@
  * This file is automatically regenerated during "npm run build".
  */
 
+export interface SkillIndexEntry {
+    /** Skill folder name (the id used by retrievers). */
+    id: string;
+    /** From frontmatter `name:`. Falls back to id. */
+    title: string;
+    /** One-line summary from frontmatter `description:`. May be empty. */
+    summary: string;
+    /** Pipeline phase the skill applies to (translate | analyze | audit | heal | publish | …). */
+    phase?: string;
+    /** Target file kind for translate-phase skills (page | steps | feature | data | legacy-source). */
+    fileKind?: string;
+    /** Topical tags. Both naming-derived and explicitly-declared in frontmatter are merged. */
+    tags: readonly string[];
+    /** Tokenised body content (markdown stripped, stopwords removed). Used for BM25 scoring. */
+    bodyTokens: readonly string[];
+    /** Pre-computed token count of body. */
+    bodyLength: number;
+}
+
 export const SKILL_CONTENT: Record<string, Record<string, string>> = {
     'ado-bidirectional-update': {
         'SKILL.md': `---
@@ -689,6 +708,12 @@ Rule IDs are stable — referenced by the healer, the generator, and escalation 
 | PO007 | error | No raw \`this.page.locator(...)\`, \`this.page.click(...)\`, \`this.page.fill(...)\` anywhere in the class |
 | PO008 | error | Action methods use \`*WithTimeout\` variants, not bare \`click()\` / \`fill()\` |
 | PO009 | warn | Navigation-triggering clicks use \`clickWithTimeout(30000)\` or higher |
+| PO010 | error | \`xpath:\` values use double-quote outer strings — never single-quoted with escaped inner singles |
+| PO011 | error | Dialog handling via CSBasePage wrappers — never raw \`this.page.on('dialog', …)\` |
+| PO012 | error | \`@CSGetElement\` uses \`xpath:\` / \`css:\` directly — never \`strategy:\` / \`locator:\` (those properties don't exist on \`CSElementOptions\`) |
+| PO013 | error | \`alternativeLocators\` is \`string[]\` with prefix syntax (\`css:\`/\`xpath:\`/\`text:\`/\`role:\`/\`testid:\`) — never an object array |
+| PO014 | error | Use \`.getAttribute(name)\` — there is no \`.getAttributeValue()\` method on \`CSWebElement\` |
+| PO015 | error | Dialog handling via inherited \`acceptNextDialog()\` / \`dismissNextDialog()\` — never raw \`this.page.once('dialog', …)\` |
 
 ## Step-definition rules (SD)
 
@@ -833,6 +858,83 @@ rules:
     detect: "regex:this\\\\.page\\\\.on\\\\s*\\\\(\\\\s*['\\"]dialog['\\"]|\\\\bdialog\\\\.(accept|dismiss)\\\\s*\\\\("
     invertMatch: true
     violation: "Dialog handling uses raw Playwright API. Use this.acceptNextDialog() / this.dismissNextDialog() / this.acceptNextDialogWithText(text) from CSBasePage."
+
+  - id: PO012
+    severity: error
+    appliesTo: page
+    description: "@CSGetElement uses xpath:/css: directly — never the non-existent strategy:/locator: properties"
+    detect: "regex:@CSGetElement\\\\s*\\\\([^)]*strategy\\\\s*:"
+    invertMatch: true
+    violation: "@CSGetElement decorator uses strategy:/locator: — those properties do not exist on CSElementOptions and produce compile errors. Use xpath: '...' (or css: '...') directly."
+
+  - id: PO013
+    severity: error
+    appliesTo: page
+    description: "alternativeLocators is a string[] with prefix syntax — never an object array"
+    detect: "regex:alternativeLocators\\\\s*:\\\\s*\\\\[\\\\s*\\\\{"
+    invertMatch: true
+    violation: "alternativeLocators must be string[] with css:/xpath:/text:/role:/testid: prefix syntax (['css:input#id', 'xpath://input[@id=\\"id\\"]']). Object-array literals like [{ strategy: 'css', locator: '...' }] do not compile."
+
+  - id: PO014
+    severity: error
+    appliesTo: page
+    description: "Use .getAttribute(name) — there is no .getAttributeValue() method on CSWebElement"
+    detect: "regex:\\\\.getAttributeValue\\\\s*\\\\("
+    invertMatch: true
+    violation: ".getAttributeValue() does not exist on CSWebElement. Use .getAttribute(name) instead."
+
+  - id: PO015
+    severity: error
+    appliesTo: page
+    description: "Dialog handling via inherited CSBasePage helpers — never raw page.once('dialog')"
+    detect: "regex:this\\\\.page\\\\.once\\\\s*\\\\(\\\\s*['\\"\`]dialog['\\"\`]"
+    invertMatch: true
+    violation: "Raw this.page.once('dialog', ...) inside a page object. Call this.acceptNextDialog() / this.dismissNextDialog() from CSBasePage instead. See dialog-handling skill."
+
+  - id: PO016
+    severity: error
+    appliesTo: page,step,ts
+    description: "Value-carrying *WithTimeout methods take the value first, timeout last — never a numeric literal as the first argument"
+    detect: "regex:\\\\.(fill|type|pressSequentially|press|selectOption|uploadFiles|uploadFile|setChecked|getAttribute|dragTo|dispatchEvent)WithTimeout\\\\s*\\\\(\\\\s*\\\\d"
+    invertMatch: true
+    violation: "Swapped *WithTimeout arguments. Methods like fillWithTimeout / typeWithTimeout / selectOptionWithTimeout take the VALUE first and the timeout LAST: fillWithTimeout(value, 5000), not fillWithTimeout(5000, value). A numeric literal in the first argument position is always wrong for these methods. (Timeout-only methods such as clickWithTimeout(30000) are exempt — they are not matched by this rule.)"
+
+  # ========================================================================
+  # Login / navigation rules (LN) — generated test code must use the
+  # framework's navigate() + page-object wrappers, never a hand-rolled
+  # login that escapes to the raw Playwright Page.
+  # ========================================================================
+  - id: LN001
+    severity: error
+    appliesTo: page,step,ts
+    description: "No \`.getPage()\` — never obtain the raw Playwright Page handle in generated test code"
+    detect: "regex:\\\\.getPage\\\\s*\\\\(\\\\s*\\\\)"
+    invertMatch: true
+    violation: ".getPage() returns the raw Playwright Page; every call on it bypasses self-healing, reporting, and the wait pipeline. Drive interactions through @CSGetElement-decorated CSWebElement properties and inherited CSBasePage methods (navigate / acceptNextDialog / etc.)."
+
+  - id: LN002
+    severity: error
+    appliesTo: page,step,ts
+    description: "Config keys use the canonical names — never project-prefixed BASE_URL / USERNAME / PASSWORD"
+    detect: "regex:\\\\{config:(?!DEFAULT_)[A-Z][A-Z0-9]*_(?:BASE_URL|USERNAME|PASSWORD)\\\\}"
+    invertMatch: true
+    violation: "Project-prefixed config key (e.g. {config:CTSG_BASE_URL}, {config:<PROJECT>_USERNAME}). Use the canonical keys: {config:BASE_URL}, {config:DEFAULT_USERNAME}, {config:DEFAULT_PASSWORD}. Project-prefixed keys are never written to the generated env files and resolve to empty at runtime."
+
+  - id: LN003
+    severity: error
+    appliesTo: page,step,ts
+    description: "No hand-rolled SSO / Citrix / NetScaler / LDAP redirect handling"
+    detect: "regex:nsg-x|LogonPoint|doAuthentication|NetScaler|ldap-non-prod"
+    invertMatch: true
+    violation: "Hand-rolled SSO/Citrix/NetScaler login redirect code. CSBasePage.navigate() delegates to CSCrossDomainNavigationHandler, which performs the SSO bounce automatically when CROSS_DOMAIN_NAVIGATION_ENABLED=true. Remove the manual redirect block and call this.<page>.navigate()."
+
+  - id: LN004
+    severity: error
+    appliesTo: page,step
+    description: "No raw navigation — use the inherited navigate(), never \`.goto()\` / \`.waitForURL()\`"
+    detect: "regex:\\\\.(goto|waitForURL)\\\\s*\\\\("
+    invertMatch: true
+    violation: "Raw navigation call (.goto() / .waitForURL()) — those exist only on the raw Playwright Page. Navigation goes through the inherited this.<page>.navigate() (no URL argument — it reads BASE_URL from config and handles cross-domain auth)."
 
   # ========================================================================
   # Step-definition rules (SD)
@@ -4866,6 +4968,449 @@ Output JSON:
 - No \`REPLACE_WITH_*\` values ever — if a cell is known-incomplete, set \`runFlag: No\`
 - Re-running \`data_parse\` on the same xlsx should be idempotent (deterministic ordering)
 `,
+    },
+};
+
+export const SKILL_INDEX: Record<string, SkillIndexEntry> = {
+    'ado-bidirectional-update': {
+        id: 'ado-bidirectional-update',
+        title: "ado-bidirectional-update",
+        summary: "Use when the user has edited a generated test (changed a step, fixed an assertion, added a verification) and wants to push the change back to the original Azure DevOps test case. The existing `ado_work_items_update` tool handles the write — this skill documents the BDD-feature → Microsoft.VSTS.TCM.Steps conversion the LLM needs to perform first.",
+        phase: 'publish',
+        tags: ["ado"],
+        bodyTokens: ["ado","bidirectional","update","user","edited","generated","test","changed","step","fixed","assertion","added","verification","wants","push","change","back","original","azure","devops","test","case","existing","tool","handles","write","skill","documents","bdd","feature","microsoft","vsts","tcm","steps","conversion","llm","needs","perform","first","pattern","bidirectional","update","code","ado","migration","originally","came","ado","mode","user","since","edited","generated","file","step","file","wants","change","flow","back","ado","test","case","framework","mcp","tool","accepts","arbitrary","map","including","expects","steps","ado","html","xml","format","gherkin","skill","walks","through","conversion","call","end","end","flow","microsoft","vsts","tcm","steps","xml","format","ado","expects","elements","action","expected","framework","produces","xml","shape","programmatic","convert","bdd","scenario","first","action","expected","immediately","following","call","tool","call","shape","lands","test","case","audit","log","shows","change","came","conversion","rules","gherkin","ado","steps","gherkin","keyword","ado","step","action","ado","step","expected","empty","empty","merged","prior","step","expected","continues","prior","keyword","mode","continues","prior","keyword","mode","continues","prior","keyword","mode","continues","prior","keyword","mode","pair","fills","both","halves","ado","step","followed","another","produces","ado","steps","empty","keep","mapping","ado","testers","expect","ado","step","action","expected","freeform","prose","conversion","rules","scenario","outline","blocks","ado","test","cases","support","shared","parameters","phase","pushing","scenario","outline","back","prefer","push","template","scenario","references","push","rows","referenced","data","source","out","scope","skill","updates","steps","data","row","sync","stays","manual","through","ado","web","now","original","ado","test","case","had","set","leave","untouched","update","don","include","map","forbidden","patterns","common","gotchas","html","encoded","inner","tags","ado","expects","inner","markers","html","encoded","inside","element","raw","handles","build","xml","manually","encode","entities","first","attribute","equal","highest","doc","off","errors","here","cause","ado","web","silently","drop","last","step","save","step","numbering","starts","ado","reserves","internally","serializer","auto","handles","manual","construction","needs","same","convention","comment","goes","steps","xml","tool","parameter","never","embed","xml","revision","bump","every","successful","update","increments","work","item","want","optimistic","concurrency","fetch","first","add","field","update","ado","returns","409","revision","stale","existing","tooling","reference","tool","fetch","current","state","update","revision","check","actual","write","accepts","map","batch","refresh","multiple","updates","confirm","xml","parsedtestcase","inverse","direction","parsedtestcase","xml","direction","verify","test","case","still","historical","results","update"],
+        bodyLength: 347,
+    },
+    'americas-timezone': {
+        id: 'americas-timezone',
+        title: "americas-timezone",
+        summary: "Use whenever generated test code computes a date or time. Use CSDateTimeUtility — the framework default is America/New_York. Never use raw new Date() / Date.now(). Pairs with audit rule DT100.",
+        tags: ["datetime"],
+        bodyTokens: ["americas","timezone","whenever","generated","test","code","computes","date","time","csdatetimeutility","framework","default","america","new","york","never","raw","new","date","date","now","pairs","audit","rule","dt100","pattern","date","time","americas","timezone","scenario","generates","unique","timestamp","asserts","displayed","date","time","computes","future","date","payment","validates","created","backend","record","formats","date","input","field","framework","defaults","canonical","timezone","americas","deployments","tests","emit","utc","system","local","timestamps","produce","false","negatives","comparing","against","backend","records","stored","americas","time","working","example","step","definition","backend","timestamp","comparison","csdatetimeutility","cheat","sheet","need","call","current","time","date","default","unix","now","today","today","today","iso","8601","specific","timezone","format","add","days","months","years","etc","add","business","days","parse","loose","date","string","diff","seconds","minutes","days","weekend","weekday","style","human","label","may","2026","forbidden","patterns","audit","rule","dt100","fails","file","audit","rule","blocks","call","replacement","always","honours","framework","default","timezone","genuinely","need","different","timezone","cross","zone","tests","compare","america","new","york","display","america","los","angeles","backend","pass","iana","zone","explicitly","change","global","default","start","run","never","hardcode","utc","suffixes","americas","incorrect"],
+        bodyLength: 169,
+    },
+    'api-call-pattern': {
+        id: 'api-call-pattern',
+        title: "api-call-pattern",
+        summary: "Use when a step or page object makes an HTTP API call (REST, SOAP, JSON, XML). Always go through CSAPIClient — never import axios, fetch, node-fetch, or got directly. Pairs with audit rule API200.",
+        tags: ["api"],
+        bodyTokens: ["api","call","pattern","step","page","object","makes","http","api","call","rest","soap","json","xml","always","through","csapiclient","never","import","axios","fetch","node","fetch","got","directly","pairs","audit","rule","api200","pattern","api","call","scenario","verifies","backend","state","api","sets","test","data","admin","endpoint","asserts","action","produced","right","http","traffic","framework","wraps","playwright","plus","auth","retry","oauth","aws","signing","response","validators","template","variable","resolution","cross","cutting","concerns","raw","make","reinvent","working","example","simple","get","post","working","example","fluent","builder","complex","requests","step","definition","response","assertion","csapiclient","cheat","sheet","need","call","simple","get","post","put","patch","delete","etc","fluent","builder","default","headers","auth","basic","bearer","oauth2","aws","proxy","file","upload","file","download","connection","test","health","check","variables","template","substitution","extract","response","field","next","call","auth","flows","handled","out","box","basic","bearer","oauth","client","credentials","authorization","code","auto","refresh","cache","aws","signature","ping","ping","forbidden","patterns","audit","rule","api200","fails","file","framework","api","client","provides","consistent","error","wrapping","need","remember","lib","throws","4xx","returns","auto","retry","backoff","transient","5xx","auth","refresh","request","response","logging","network","capture","test","report","direct","imports","skip","fail","audit","common","gotchas","don","reuse","client","across","scenarios","unless","explicitly","intended","stateful","headers","cookies","leak","either","pass","call","instantiate","new","scenario","timeout","default","30s","long","running","async","apis","override","call","response","body","parsing","returns","parsed","json","other","types","read","don","put","real","pats","code","placeholders","resolver","pulls","env","secretstorage"],
+        bodyLength: 227,
+    },
+    'app-url-exploration': {
+        id: 'app-url-exploration',
+        title: "app-url-exploration",
+        summary: "Use when the user provides a live application URL (no source code, no ADO test cases, no requirements doc) and wants tests generated from a crawl. Documents the four entryFlow modes, the env-based credential pattern, and the storageState recording flow for SSO / multi-step / MFA logins.",
+        tags: [],
+        bodyTokens: ["app","url","exploration","user","provides","live","application","url","source","code","ado","test","cases","requirements","doc","wants","tests","generated","crawl","documents","four","entryflow","modes","env","based","credential","pattern","storagestate","recording","flow","sso","multi","step","mfa","logins","pattern","app","url","exploration","mode","mode","auto","detects","input","url","prefix","routes","mode","crawler","walks","live","app","identifies","interactive","elements","infers","features","emits","generated","test","suite","five","things","configure","run","url","itself","auth","flow","credentials","pre","recorded","storage","state","json","crawl","bounds","entryflow","values","value","provide","public","app","login","required","nothing","app","username","password","form","landing","env","encrypted","oauth","saml","okta","adfs","idp","mediated","flow","pre","recorded","playwright","storage","state","json","mfa","captcha","multi","page","wizards","pre","recorded","playwright","storage","state","json","working","examples","crawler","starts","url","follows","links","identifies","forms","buttons","generates","feature","discovered","page","state","env","file","encrypt","password","once","framework","cli","prompt","crawler","loads","url","detects","username","password","fields","heuristic","plus","closest","preceding","text","input","submits","env","credentials","crawls","everything","reachable","post","login","record","storage","state","once","interactively","save","disk","let","crawler","reuse","saved","cookies","tokens","env","file","prompt","crawler","injects","storage","state","first","navigation","app","sees","user","already","logged","goes","straight","post","auth","page","same","pattern","sso","mfa","captcha","multi","page","wizards","can","automated","generically","record","once","reuse","storage","state","crawl","bounds","cost","guards","bound","default","tune","tune","down","app","large","want","full","coverage","iterating","small","flow","app","distinct","pages","worth","testing","need","smoke","suite","default","deep","journeys","checkout","flow","supplied","specific","entry","path","exploration","crawler","generates","files","its","own","output","directory","framework","standard","layout","explorer","owns","its","own","scratch","space","result","includes","discovered","feature","login","dashboard","settings","etc","files","matched","features","files","discovered","page","state","master","tool","runs","same","pre","gate","audit","heal","loop","other","modes","flag","result","warns","user","crawler","can","find","elements","can","infer","business","intent","review","every","scenario","merging","forbidden","unsupported","form","mode","elicitation","passwords","forbidden","mcp","spec","don","expect","password","modal","credentials","come","env","values","code","secretstorage","captcha","protected","apps","can","auto","crawled","either","pre","recorded","session","skip","auth","bound","pages","entirely","crawl","public","surface","bot","detection","protected","apps","some","banking","finance","fronts","may","flag","playwright","automated","framework","supports","stealth","plugins","config","set","common","gotchas","login","form","selectors","changed","crawler","logs","auth","failure","diagnostic","app","username","password","field","selectors","moved","fix","pre","record","storage","state","instead","override","selector","hints","tool","answers","storage","state","expires","sso","sessions","typically","last","30d","expires","record","generated","tests","need","review","crawler","infers","structure","intent","page","might","called","dashboard","heuristic","actually","user","profile","page","review","every","generated","scenario","maxstates","hit","completion","log","shows","exploration","completed","produced","test","files","either","app","landing","static","page","try","deeper","start","url","bound","was","too","tight","raise","100","encrypted","password","rotation","password","changes","encrypt","cli","replace","line","env","don","paste","plaintext","git"],
+        bodyLength: 455,
+    },
+    'audit-rules': {
+        id: 'audit-rules',
+        title: "audit-rules",
+        summary: "The canonical set of MANDATED rules every generated file must obey. Consumed by the cs-playwright-mcp audit_file tool. Load this skill before generating or reviewing any target file.",
+        phase: 'audit',
+        tags: ["audit"],
+        bodyTokens: ["audit","rules","canonical","set","mandated","rules","every","generated","file","obey","consumed","playwright","mcp","audit","file","tool","load","skill","generating","reviewing","target","file","playwright","framework","mandated","rules","mcp","tool","runs","rules","deterministically","severity","violation","blocks","file","advancing","commit","ready","gate","rule","ids","stable","referenced","healer","generator","escalation","reports","page","object","rules","severity","rule","po001","error","class","decorated","po002","error","class","extends","property","po003","error","every","typed","field","decorator","po004","error","uses","primary","locator","primary","po005","error","every","string","po006","warn","interactive","elements","inputs","buttons","links","submits","po007","error","raw","anywhere","class","po008","error","action","methods","variants","bare","po009","warn","navigation","triggering","clicks","higher","po010","error","values","double","quote","outer","strings","never","single","quoted","escaped","inner","singles","po011","error","dialog","handling","csbasepage","wrappers","never","raw","po012","error","uses","directly","never","properties","don","exist","po013","error","prefix","syntax","never","object","array","po014","error","there","method","po015","error","dialog","handling","inherited","never","raw","step","definition","rules","severity","rule","sd001","error","class","decorator","sd002","error","page","injection","anywhere","sd003","error","step","decorator","other","step","decorator","permitted","sd004","error","scenario","scoped","state","private","class","fields","holding","scenario","data","sd005","error","step","body","either","calls","success","calls","followed","silent","return","sd006","error","config","access","raw","feature","file","rules","severity","rule","ff001","error","feature","level","tags","include","project","tag","least","module","feature","area","tag","ff002","error","data","driven","scenarios","block","source","ff003","error","filter","clause","uses","ff004","warn","every","scenario","least","verification","steps","data","file","rules","severity","rule","df001","error","top","level","json","array","objects","minimum","df002","error","placeholder","values","df003","error","every","feature","file","matching","row","data","json","helper","rules","severity","rule","db001","error","inline","sql","pages","steps","every","query","resolves","named","entry","invoked","db002","error","every","query","verified","unresolved","tables","carry","sentinel","db003","error","helper","methods","return","typed","interfaces","handle","case","tolerant","column","access","cross","cutting","rules","severity","rule","cc001","error","underscore","separators","numeric","literals","cc002","error","application","source","paths","referenced","generated","file","comments","upstream","class","names","line","number","citations","cc003","error","cc004","error","bare","cc005","error","imports","subpaths","local","files","cc006","error","tokens","cc007","error","tags","shipped","scenarios","agents","skill","generator","loads","drafting","file","runs","through","rules","mentally","calls","verify","deterministically","healer","loads","every","proposed","fix","audits","fix","content","applying","orchestrator","loads","commit","ready","gate","verify","report","clean","bundled","alongside","skill","machine","readable","form","same","rule","set","consumed","directly","tool"],
+        bodyLength: 385,
+    },
+    'commit-ready-9-gates': {
+        id: 'commit-ready-9-gates',
+        title: "commit-ready-9-gates",
+        summary: "The canonical 9-gate exit bar — every generated file must pass all nine before the pipeline advances to the per-file human-approval handoff.",
+        tags: ["commit-gate"],
+        bodyTokens: ["commit","ready","gates","canonical","gate","exit","bar","every","generated","file","pass","nine","pipeline","advances","file","human","approval","handoff","commit","ready","exit","bar","gates","file","reaches","approve","migrate","next","handoff","every","gates","passes","miss","escalation","instead","nine","gates","gate","check","tool","compile","clean","produces","zero","errors","generated","file","audit","clean","every","generated","file","returns","zero","severity","violations","tests","green","healer","returned","every","scope","scenario","green","baseline","preserved","final","full","suite","run","green","healer","subagent","placeholders","generated","file","raw","apis","generated","file","sql","grounded","every","sql","string","generated","helper","step","resolves","registered","entry","verified","spot","check","gate","imports","resolve","every","path","generated","file","exists","catches","side","effect","data","matches","every","generated","feature","file","matching","row","corresponding","tool","orphans","every","generated","file","pipeline","emitted","disk","listed","run","summary","files","written","lost","tool","check","runs","stage","pipeline","orchestrator","calls","tool","returns","orchestrator","presents","three","handoff","buttons","approve","advance","rework","stop","orchestrator","writes","escalation","report","citing","failing","gates","halts","rework","stop","buttons","approve","advance","option","human","resolve","pipeline","continues","there","partial","success","gates","binary","pass","fail","get","advance","green","point","bar","guarantee","every","approved","file","truly","commit","ready","follow","cleanup","expected"],
+        bodyLength: 186,
+    },
+    'correction-memory-format': {
+        id: 'correction-memory-format',
+        title: "correction-memory-format",
+        summary: "How to read and write the Healer's correction memory file — the system that makes the pipeline smarter over time.",
+        tags: ["memory"],
+        bodyTokens: ["correction","memory","format","read","write","healer","correction","memory","file","system","makes","pipeline","smarter","time","correction","memory","file","content","list","json","blocks","recording","verified","fix","pattern","prepended","heading","appended","time","never","rewritten","place","entry","format","json","signature","timeouterror","locator","did","match","button","signin","btn","hash","a3f7e12b4c5d8e9a","failureclass","low","rootcause","element","changed","signin","btn","testid","loginsubmit","fixstrategy","updated","csgetelement","xpath","primary","button","data","testid","loginsubmit","retained","old","css","form","last","alternative","verifiedgreen","true","recordedat","2026","23t14","123z","examplepatch","xpath","button","signin","btn","xpath","button","data","testid","loginsubmit","signature","hash","signature","failureclass","low","medium","high","classify","failure","rootcause","fixstrategy","verifiedgreen","recordedat","examplepatch","correction","memory","query","hash","signature","signature","correction","memory","record","verifiedgreen","false","fixstrategy","agent","runs","correction","patterns","archive","tool","does","automatically","healer","appends"],
+        bodyLength: 121,
+    },
+    'csv-data-driven': {
+        id: 'csv-data-driven',
+        title: "csv-data-driven",
+        summary: "Use when a feature reads test data from a CSV / TSV / pipe-separated file. Always go through CSCsvUtility — never import csv-parse, papaparse, or csv-parser directly. Pairs with audit rule CSV100.",
+        phase: 'translate',
+        fileKind: 'data',
+        tags: ["data-driven"],
+        bodyTokens: ["csv","data","driven","feature","reads","test","data","csv","tsv","pipe","separated","file","always","through","cscsvutility","never","import","csv","parse","papaparse","csv","parser","directly","pairs","audit","rule","csv100","pattern","csv","data","driven","tests","legacy","data","file","custom","delimiter","file","same","shape","excel","data","driven","different","format","handles","delimiter","sniffing","quoted","fields","embedded","newlines","boms","working","example","cscsvutility","cheat","sheet","need","call","rows","json","rows","array","single","column","single","row","index","headers","filter","rows","predicate","distinct","values","custom","delimiter","tsv","pipe","etc","validate","header","structure","convert","csv","json","file","convert","json","csv","file","compare","csvs","common","object","forbidden","patterns","audit","rule","csv100","fails","file","framework","wraps","libraries","internally","consistent","error","handling","encoding","detection","bom","stripping","direct","import","fails","audit","skips","wrapper","guarantees","common","gotchas","bom","characters","start","utf","files","silently","break","header","matching","strips","raw","doesn","quoted","fields","embedded","commas","handled","correctly","don","try","split","manually","empty","trailing","line","default","handles","toggle","off","data","legitimately","empty","rows","numeric","fields","come","back","strings","csv","parsers","coerce","explicitly","reading"],
+        bodyLength: 165,
+    },
+    'db-helper-case-tolerant': {
+        id: 'db-helper-case-tolerant',
+        title: "db-helper-case-tolerant",
+        summary: "Use for every DB helper — case-tolerant column access, because Oracle and SQL Server drivers disagree on column-name case.",
+        phase: 'translate',
+        fileKind: 'steps',
+        tags: ["database"],
+        bodyTokens: ["helper","case","tolerant","every","helper","case","tolerant","column","access","oracle","sql","server","drivers","disagree","column","name","case","pattern","case","tolerant","column","access","helpers","every","time","read","value","result","row","regardless","database","same","pattern","single","row","helpers","list","helpers","count","helpers","rule","always","access","never","write","oracle","jdbc","returns","column","names","upper","case","default","microsoft","sql","server","postgresql","drivers","can","return","either","case","depending","driver","config","framework","test","runs","may","switch","databases","code","assumes","case","breaks","other","nullish","coalesce","free","undefined","access","performance","cost","example","rules","every","mapped","field","uses","number","boolean","date","columns","may","still","need","conversion","access","column","legitimately","case","mixed","source","rare","include","both","variants"],
+        bodyLength: 107,
+    },
+    'db-helper-findall-matching': {
+        id: 'db-helper-findall-matching',
+        title: "db-helper-findall-matching",
+        summary: "Use when authoring a database helper that returns a list of matching rows. Covers typed-array return, empty-array default, CSReporter logging.",
+        phase: 'translate',
+        fileKind: 'steps',
+        tags: ["database"],
+        bodyTokens: ["helper","findall","matching","authoring","database","helper","returns","list","matching","rows","covers","typed","array","return","empty","array","default","csreporter","logging","pattern","helper","findall","list","helper","returns","zero","rows","given","criterion","list","users","role","list","active","deals","list","payments","status","example","matching","entry","rules","return","never","empty","result","return","always","count","surfaces","reports","map","every","row","through","explicit","field","extraction","case","tolerant","method","static","constructor","needed"],
+        bodyLength: 64,
+    },
+    'db-helper-findby-id': {
+        id: 'db-helper-findby-id',
+        title: "db-helper-findby-id",
+        summary: "Use when authoring a database helper method that reads a single row by id. Covers CSDBUtils.executeQuery, named-query reference, typed return, case-tolerant row access.",
+        phase: 'translate',
+        fileKind: 'steps',
+        tags: ["database"],
+        bodyTokens: ["helper","findby","authoring","database","helper","method","reads","single","row","covers","csdbutils","executequery","named","query","reference","typed","return","case","tolerant","row","access","pattern","helper","findbyx","single","row","scenario","preamble","needs","resolve","row","test","database","driving","common","given","active","deal","exists","given","user","role","exists","given","payment","status","exists","example","matching","entry","rules","helper","methods","never","instantiate","class","return","typed","interface","never","null","single","row","miss","empty","array","list","miss","never","throw","empty","case","tolerant","column","access","every","field","oracle","sql","server","drivers","differ","constant","alias","key","pipeline","config","query","name","key","file","never","inline","sql","helper","empty","result","logging","fail","note","imports","exclusively","raw","return","types","string","concat","sql"],
+        bodyLength: 108,
+    },
+    'db-state-assertion': {
+        id: 'db-state-assertion',
+        title: "db-state-assertion",
+        summary: "Use when a step verifies backend database state — count, single value, row contents — after a UI action. Always use CSDBUtils with named queries. Never import a DB driver directly. Pairs with audit rule DB200.",
+        phase: 'translate',
+        fileKind: 'steps',
+        tags: ["database"],
+        bodyTokens: ["state","assertion","step","verifies","backend","database","state","count","single","value","row","contents","action","always","csdbutils","named","queries","never","import","driver","directly","pairs","audit","rule","db200","pattern","database","state","assertion","scenario","clicks","submit","save","approve","test","verify","right","rows","landed","database","right","column","values","assertions","miss","data","layer","bugs","rounding","truncation","charset","issues","soft","delete","behaviour","framework","gives","consistent","api","across","mssql","postgres","mysql","oracle","mongodb","redis","named","queries","stored","env","file","working","example","count","single","value","single","row","named","queries","preferred","shape","don","inline","sql","strings","test","code","store","env","file","prefix","reference","key","step","file","load","sql","file","directly","csdbutils","cheat","sheet","need","call","run","sql","params","named","query","key","first","column","first","row","scalar","first","row","first","row","null","throw","count","returning","number","row","exists","boolean","column","array","key","value","map","insert","update","delete","affected","rows","multi","statement","transaction","stored","proc","pagination","read","sql","file","cleanup","call","hook","long","runs","forbidden","patterns","audit","rule","db200","fails","file","bypass","framework","connection","pool","named","query","resolution","case","tolerant","column","access","test","connection","lifecycle","audit","fails","file","common","gotchas","case","tolerant","column","access","different","drivers","return","columns","different","cases","oracle","uppercases","mssql","lowercases","postgres","preserves","always","portability","parameterise","never","concatenate","always","placeholders","params","object","string","concat","sql","sql","injection","vector","fails","framework","safety","gate","connection","alias","env","key","prefix","resolves","cleanup","test","data","tests","insert","need","corresponding","delete","mutation","cleanup","pattern","hooks","otherwise","test","fails","second","run","row","already","exists"],
+        bodyLength: 239,
+    },
+    'dialog-handling': {
+        id: 'dialog-handling',
+        title: "dialog-handling",
+        summary: "Use when a page object or step needs to interact with browser dialogs (alert, confirm, prompt). Always use CSBasePage's wrapper methods, never page.on('dialog'). Pairs with audit rule DG100.",
+        tags: ["dialog"],
+        bodyTokens: ["dialog","handling","page","object","step","needs","interact","browser","dialogs","alert","confirm","prompt","always","csbasepage","wrapper","methods","never","page","dialog","pairs","audit","rule","dg100","pattern","dialog","handling","flow","triggers","javascript","delete","confirmations","save","warnings","navigation","away","prompts","custom","dialogs","dialog","wrappers","live","itself","page","objects","inherit","automatically","working","example","available","wrapper","methods","csbasepage","method","behavior","arms","once","next","dialog","accepted","arms","once","next","dialog","dismissed","dialogs","supplies","text","accepts","persistent","every","dialog","scenario","sees","accepted","persistent","every","dialog","dismissed","text","shown","last","dialog","page","captured","clears","single","shot","always","handlers","call","hooks","forbidden","patterns","audit","rule","dg100","fails","file","bypass","framework","dialog","tracking","never","populate","leak","listeners","across","scenarios","fail","pre","gate","audit","common","gotchas","arm","action","registers","handler","doesn","itself","trigger","anything","call","line","above","click","produces","dialog","dialog","arm","consumes","itself","next","dialog","call","again","next","dialog","producing","action","always","bleeds","persists","rest","scenario","call","step","later","steps","shouldn","auto","accept"],
+        bodyLength: 152,
+    },
+    'encrypted-config': {
+        id: 'encrypted-config',
+        title: "encrypted-config",
+        summary: "Use when generated test code reads any config value, especially secrets (DB passwords, ADO PAT, API tokens). Always go through CSValueResolver — supports ENCRYPTED: prefix and {input:...} placeholders. Never use raw process.env. Pairs with audit rule ENV100.",
+        tags: ["encryption"],
+        bodyTokens: ["encrypted","config","generated","test","code","reads","config","value","especially","secrets","passwords","ado","pat","api","tokens","always","through","csvalueresolver","supports","encrypted","prefix","input","placeholders","never","raw","process","env","pairs","audit","rule","env100","pattern","encrypted","config","value","resolution","place","test","reads","value","env","config","login","urls","base","urls","passwords","api","tokens","ado","pats","framework","provides","single","resolution","mechanism","resolves","env","files","level","precedence","workspace","common","env","specific","etc","auto","decrypts","values","prefixed","bundled","aes","key","resolves","mcp","server","prompt","string","inputs","stored","code","secretstorage","resolves","nested","placeholders","recursively","working","example","env","file","structure","encrypting","value","time","shell","paste","output","including","prefix","env","file","resolution","precedence","same","key","appears","multiple","files","highest","priority","process","env","defaults","baked","framework","tool","call","parameter","lowest","priority","fallback","csvalueresolver","cheat","sheet","need","call","resolve","sync","multi","placeholder","string","resolve","every","value","object","nested","templates","resolves","recursively","pass","scenario","state","context","plain","env","values","without","prefix","come","back","unchanged","values","auto","decrypted","bundled","key","skip","wrapper","want","literal","string","forbidden","patterns","audit","rule","env100","fails","file","bypass","encrypted","auto","decryption","project","env","hierarchy","run","overrides","tool","answers","secret","redaction","csreporter","logs","accidentally","log","raw","passwords","audit","rule","blocks","reference","test","code","common","gotchas","synchronous","needed","returns","resolved","string","directly","throws","truly","missing","keys","template","can","substituted","template","precedence","left","right","resolves","first","encrypted","values","can","edited","plain","text","rotate","encrypt","new","value","cli","replace","line","secret","redaction","pwd","password","log","encrypted","form","decrypted","got","value","through","assigned","decrypted","value","local","variable","logged","redaction","best","practice","never","log","credentials"],
+        bodyLength: 250,
+    },
+    'excel-data-driven': {
+        id: 'excel-data-driven',
+        title: "excel-data-driven",
+        summary: "Use when a feature reads test data from an .xlsx file. Always go through CSExcelUtility — never import xlsx or exceljs directly. Pairs with audit rule EX100.",
+        phase: 'translate',
+        fileKind: 'data',
+        tags: ["data-driven"],
+        bodyTokens: ["excel","data","driven","feature","reads","test","data","xlsx","file","always","through","csexcelutility","never","import","xlsx","exceljs","directly","pairs","audit","rule","ex100","pattern","excel","data","driven","tests","legacy","tests","often","consume","files","migrated","test","should","keep","xls","authoring","format","team","prefers","spreadsheets","convert","json","csexcelutility","flexibility","either","way","xlsx","goes","through","working","example","read","xlsx","data","source","step","definition","example","xlsx","backed","scenario","outline","convert","xlsx","json","during","migration","recommended","path","framework","prefers","json","runtime","json","parses","faster","diffs","better","reviews","round","trips","through","natively","migrate","xlsx","json","once","during","migration","ship","json","data","file","mode","handler","does","automatically","generated","already","populated","real","xls","rows","csexcelutility","cheat","sheet","need","call","sheets","json","single","cell","range","array","row","count","col","count","find","rows","predicate","distinct","values","column","write","json","xlsx","update","single","cell","diff","files","sheet","metadata","forbidden","patterns","audit","rule","ex100","fails","file","bypass","framework","logging","error","wrapping","run","caching","fail","pre","gate","audit","always","import","framework","common","gotchas","empty","cells","return","coercing","string","assertions","header","row","row","treats","first","row","keys","sheet","title","row","skip","date","cells","excel","stores","dates","serial","numbers","convert","don","trust","raw","value","sheet","name","match","exactly","case","sensitive","whitespace","sensitive","confirm"],
+        bodyLength: 196,
+    },
+    'ff-scenario-outline': {
+        id: 'ff-scenario-outline',
+        title: "ff-scenario-outline",
+        summary: "Use when authoring a feature file with data-driven scenarios. Covers Scenario Outline + the JSON-sourced Examples block with filter syntax.",
+        phase: 'translate',
+        fileKind: 'feature',
+        tags: ["feature-file","scenario-outline"],
+        bodyTokens: ["scenario","outline","authoring","feature","file","data","driven","scenarios","covers","scenario","outline","json","sourced","examples","block","filter","syntax","pattern","data","driven","feature","file","json","examples","scenario","varies","data","different","users","different","inputs","different","expected","outcomes","data","lives","sibling","file","referenced","block","example","its","sibling","data","file","rules","feature","level","tags","project","tag","least","module","area","tag","scenario","level","tag","legacy","test","preserve","legacy","never","rename","plain","data","driven","tests","block","json","object","line","keys","path","relative","workspace","root","style","path","file","usually","root","array","both","clauses","required","placeholders","steps","match","json","field","names","exactly","every","scenario","least","verification","steps","thin","scenarios","verifications","rejected","audit","tags","shipped","scenarios","json","instead"],
+        bodyLength: 108,
+    },
+    'ff-smoke-scenario': {
+        id: 'ff-smoke-scenario',
+        title: "ff-smoke-scenario",
+        summary: "Use when authoring a single non-data-driven scenario — smoke test, quick health check.",
+        phase: 'translate',
+        fileKind: 'feature',
+        tags: ["feature-file","smoke"],
+        bodyTokens: ["smoke","scenario","authoring","single","non","data","driven","scenario","smoke","test","quick","health","check","pattern","simple","scenario","outline","scenario","data","variations","fixed","path","typically","smoke","test","single","negative","test","plain","example","rules","feature","level","tags","project","feature","area","scenario","level","tag","legacy","test","maps","otherwise","clear","tag","block","plain","least","verification","steps","audit","rule","ff004","steps","match","step","definition","text","exactly"],
+        bodyLength: 60,
+    },
+    'file-download-export': {
+        id: 'file-download-export',
+        title: "file-download-export",
+        summary: "Use when a feature triggers a file export (PDF, Excel, CSV) and the test needs to capture the downloaded file under the per-run test-results directory. Pairs with audit rule DL100.",
+        tags: [],
+        bodyTokens: ["file","download","export","feature","triggers","file","export","pdf","excel","csv","test","needs","capture","downloaded","file","run","test","results","directory","pairs","audit","rule","dl100","pattern","file","download","export","capture","legacy","test","clicks","export","excel","download","pdf","save","report","button","verifies","file","arrived","expected","name","size","content","framework","owns","run","download","directory","every","captured","file","lands","reports","show","inline","artefact","upload","picks","automatically","working","example","step","definition","example","forbidden","patterns","audit","rule","dl100","fails","file","leak","files","outside","test","results","dir","miss","report","attachment","fail","audit","always","through","common","gotchas","arm","click","call","download","event","already","fired","time","out","can","collide","same","scenario","exports","twice","suffix","filename","timestamp","avoid","overwrite","verify","file","content","existence","read","file","node","pdfs","assert","export","actually","correct","byte","placeholder","mandatory","test","report","surface","file","skip","file","exists","disk","doesn","show","html","report"],
+        bodyLength: 135,
+    },
+    'handoff-contracts': {
+        id: 'handoff-contracts',
+        title: "handoff-contracts",
+        summary: "Structured handoff blocks each cs-ai-auto-assist sub-agent must return. Use this when validating sub-agent output in the orchestrator, or when authoring a new sub-agent return block.",
+        tags: ["handoff"],
+        bodyTokens: ["handoff","contracts","structured","handoff","blocks","auto","assist","sub","agent","return","validating","sub","agent","output","orchestrator","authoring","new","sub","agent","return","block","handoff","contracts","sub","agent","return","shapes","every","sub","agent","invoked","orchestrator","returns","structured","handoff","block","end","its","turn","orchestrator","validates","block","against","its","contract","advancing","next","phase","skill","defines","six","contracts","sub","agents","reference","contract","verbatim","prompt","orchestrator","validates","against","its","contract","verbatim","during","phase","gate","decisions","contract","returned","phase","intake","phase","validation","matches","enum","values","non","empty","kebab","case","resolves","existing","directory","contract","returned","phase","iterator","streaming","phase","validation","exist","disk","unblocked","contract","returned","phase","iterator","streaming","patches","phase","validation","exists","parses","json","contract","returned","phase","phase","needed","validation","escalation","contract","returned","phase","heal","loop","validation","matches","scenario","outcomes","global","cap","contract","returned","phase","optional","validation","exists","disk","implies","valid","url","orchestrator","uses","contracts","orchestrator","prompt","instructs","call","sub","agent","tool","parse","returned","block","yaml","validate","against","matching","contract","above","validation","passes","sub","agent","name","invoke","sub","agent","validation","fails","escalate","missing","invalid","field","surface","user","halt","sub","agents","emit","handoff","block","sub","agent","ends","its","turn","fenced","yaml","block","prefixed","contract","name","example","prose","block","orchestrator","reads","block","validates","dispatches","block","small","200","500","bytes","even","sub","agent","runs","complex","iterator","loop","internally","orchestrator","sees","summary"],
+        bodyLength: 209,
+    },
+    'heal-cascade-revert': {
+        id: 'heal-cascade-revert',
+        title: "heal-cascade-revert",
+        summary: "Use when a fix for one failing scenario breaks a previously-green scenario. Revert, reclassify, escalate.",
+        phase: 'heal',
+        tags: ["healing"],
+        bodyTokens: ["heal","cascade","revert","fix","failing","scenario","breaks","previously","green","scenario","revert","reclassify","escalate","healing","pattern","cascade","regression","apply","healer","applies","fix","runs","failing","scenario","green","cascade","check","reports","previously","green","scenario","now","red","fix","introduced","regression","elsewhere","classification","original","failure","was","low","medium","cascade","event","reclassifies","high","contract","cascade","regression","second","fix","attempt","revert","escalate","healer","does","try","second","fix","might","break","yet","another","scenario","sequence","escalation","report","includes","original","failure","signature","fix","attempted","file","edited","exact","diff","cascade","scenarios","regressed","ids","new","error","messages","classification","high","cascade","induced","recommendation","original","failure","likely","requires","broader","refactor","page","object","restructure","shared","helper","change","beyond","healer","single","file","fix","scope","pointer","human","should","look","example","failing","target","fix","proposed","changed","locator","cascade","check","previously","green","now","fails","same","locator","reuses","same","underlying","dom","change","affects","both","generated","fix","considered","target","scenario","context","action","revert","escalate","human","needs","decide","whether","page","object","change","right","fix","would","update","too","whether","change","unexpected","should","reverted","app","rules","revert","mandatory","cascade","detected","ship","fix","regressed","green","scenarios","revert","restores","exact","pre","fix","content","snapshot","applying","restore","revert","revert","confirm","target","scenario","again","its","original","failing","state","sanity","check","now","passes","fix","original","failure","may","been","flaky","deterministic","never","retry","different","fix","cascade","regression","same","loop","escalate","let","human","judge","failed","attempt","recorded","correction","memory","memory","records","verified","green","patterns"],
+        bodyLength: 223,
+    },
+    'heal-locator-drift': {
+        id: 'heal-locator-drift',
+        title: "heal-locator-drift",
+        summary: "Use when a test fails because an element locator no longer matches the DOM. The Healer uses this pattern to propose a targeted fix.",
+        phase: 'heal',
+        tags: ["healing"],
+        bodyTokens: ["heal","locator","drift","test","fails","element","locator","longer","matches","dom","healer","uses","pattern","propose","targeted","fix","healing","pattern","locator","drift","apply","failure","signatures","classification","low","diagnostic","sequence","call","failing","page","capture","live","accessibility","tree","find","element","semantically","matches","failing","locator","description","call","element","get","ranked","strategies","testid","role","name","label","text","css","call","failure","signature","prior","fix","similar","drift","exists","prefer","its","strategy","propose","fix","update","page","object","new","primary","xpath","carry","old","value","fallback","example","fix","locator","stopped","matching","live","snapshot","reveals","element","now","role","name","old","was","removed","fix","preserves","old","form","fallback","uses","testid","based","xpath","primary","rules","xpath","primary","ranked","strategy","role","based","wrap","preserve","old","locator","last","entry","helps","change","was","partial","reverted","audit","apply","proposed","fix","pass","still","xpath","primary","still","selfheal","true","interactive","elements","compile","run","remain","clean","cascade","check","run","other","scenarios","same","page","object","still","pass","record","green","call","signature","fix","strategy","once","final","full","suite","run","green"],
+        bodyLength: 157,
+    },
+    'heal-loop-driver': {
+        id: 'heal-loop-driver',
+        title: "heal-loop-driver",
+        summary: "Use after a generated test fails. Documents the end-to-end heal flow the host LLM should drive: run scenario → on fail capture state → inspect live DOM → propose locator/timing fix → apply via replace_string_in_file → re-run until green or hit retry cap.",
+        phase: 'heal',
+        tags: ["healing"],
+        bodyTokens: ["heal","loop","driver","generated","test","fails","documents","end","end","heal","flow","host","llm","should","drive","run","scenario","fail","capture","state","inspect","live","dom","propose","locator","timing","fix","apply","replace","string","file","run","green","hit","retry","cap","pattern","agent","driven","heal","loop","generated","test","failed","compile","passed","audit","passed","test","itself","didn","pass","against","real","app","failure","shapes","locator","drift","page","object","xpath","doesn","match","live","dom","common","happens","app","html","changes","between","test","was","written","now","timing","flake","element","exists","test","doesn","wait","long","enough","races","against","animation","hits","stale","state","read","host","llm","copilot","drives","heal","loop","mcp","server","provides","primitives","plus","existing","tool","framework","runtime","self","healing","strategies","catches","many","drift","cases","automatically","loop","handles","cases","runtime","engine","can","fix","end","end","flow","bounded","retry","policy","attempts","scenario","failed","fix","attempts","same","scenario","escalate","surface","clear","summary","user","loop","indefinitely","attempts","total","migration","run","even","individual","scenarios","still","scenario","cap","stop","loop","globally","prevent","runaway","cost","cascade","revert","fix","scenario","breaks","scenario","was","previously","passing","revert","fix","try","different","approach","never","trade","green","new","red","concrete","tool","sequences","sequence","locator","drift","attempt","fixes","sequence","timing","flake","sequence","three","attempt","escalation","loop","compile","errors","failures","fixed","first","audit","loop","don","try","heal","test","won","compile","audit","failures","pre","gate","audit","rule","violations","fixed","test","runs","heal","loop","post","audit","high","severity","classification","environment","related","failures","dns","certs","app","down","test","fault","escalate","don","retry","diagnostic","priorities","returns","artefact","paths","read","order","screenshot","fastest","signal","went","wrong","visually","console","log","errors","network","failures","redirects","error","pages","dom","snapshot","screenshot","console","didn","tell","element","drifted","trace","zip","last","resort","opens","playwright","trace","viewer","useful","timing","waterfall","analysis","forbidden","patterns","common","gotchas","requires","scenario","was","actually","run","calling","returns","test","results","directory","surface","active","imperative","reason","screenshots","post","failure","show","page","step","failed","user","expected","dom","may","moved","error","page","modal","opens","real","browser","honours","framework","config","long","running","locator","inspections","accumulate","playwright","contexts","check","lifecycle","suspect","leaks","cascade","revert","responsibility","framework","run","previously","passing","scenarios","fix","confirm","still","pass","heal","loop","scenario","cap","means","individual","scenarios","bounded","globally","cascading","regression","caught","here","ambiguous","element","intent","returns","multiple","candidates","similar","scores","within","other","intent","string","was","too","vague","call","specific","intent","save","changes","button","user","edit","form","primary","submit","pick","highest","scored","result"],
+        bodyLength: 381,
+    },
+    'heal-timing-flaky': {
+        id: 'heal-timing-flaky',
+        title: "heal-timing-flaky",
+        summary: "Use when a test fails intermittently with timing / visibility errors — action fires before the page has rendered or settled.",
+        phase: 'heal',
+        tags: ["healing"],
+        bodyTokens: ["heal","timing","flaky","test","fails","intermittently","timing","visibility","errors","action","fires","page","rendered","settled","healing","pattern","timing","flakiness","apply","failure","signatures","visible","run","timeouts","intermittent","classification","low","root","causes","priority","order","action","fired","page","settled","click","happens","navigation","still","flight","element","waits","ajax","test","proceeds","first","paint","animation","transition","button","visible","yet","interactive","implicit","default","timeout","too","short","server","round","trip","clicks","diagnostic","sequence","run","failing","scenario","alone","confirm","flakiness","passes","sometimes","check","action","method","there","explicit","action","check","click","timeout","5000","navigation","triggering","click","check","there","loading","overlay","wasn","awaited","fix","variants","variant","raise","click","timeout","variant","add","explicit","readiness","wait","variant","wait","loading","overlay","disappear","variant","wait","next","page","anchor","element","rules","never","fix","band","aid","solution","audit","may","allow","warning","wrong","approach","raise","specific","element","timeouts","rather","blanket","increasing","default","prefer","waiting","next","meaningful","element","waiting","page","settle","flakiness","persists","correct","fix","failure","longer","low","reclassify","escalate"],
+        bodyLength: 150,
+    },
+    'iframe-nested': {
+        id: 'iframe-nested',
+        title: "iframe-nested",
+        summary: "Use when a page object element lives inside an iframe (or nested iframes). Pass the frame chain to @CSGetElement via the `frame` option — the framework resolves the chain at runtime. Never use page.frame() or frameLocator() directly.",
+        tags: ["iframe"],
+        bodyTokens: ["iframe","nested","page","object","element","lives","inside","iframe","nested","iframes","pass","frame","chain","csgetelement","option","framework","resolves","chain","runtime","never","page","frame","framelocator","directly","pattern","iframe","nested","iframe","element","element","inside","common","embedded","payment","widgets","stripe","adyen","third","party","reporting","dashboards","legacy","app","shells","app","wrapped","portal","frame","nested","frames","admin","portal","containing","frame","containing","form","framework","decorator","accepts","option","takes","either","single","selector","array","selectors","nested","iframes","walks","chain","runtime","resolving","frames","render","working","example","single","iframe","working","example","nested","iframes","programmatic","frame","switching","csbasepage","helpers","step","level","frame","work","doesn","fit","page","object","element","frame","option","signature","selector","forms","supported","frame","plain","css","xpath","object","forbidden","patterns","audit","rule","wrap100","fails","file","bypass","framework","frame","chain","resolution","frames","render","mid","test","silently","fail","without","self","heal","hooks","csreporter","integration","audit","blocks","common","gotchas","frames","render","sometimes","iframe","dom","replaced","between","steps","framework","resolves","frame","chain","every","element","call","even","valuable","inside","frames","top","level","frame","selector","order","matters","outermost","frame","first","innermost","last","reverse","order","element","found","cross","origin","iframes","iframe","different","origin","browser","sandbox","rules","apply","some","interactions","clipboard","file","upload","restricted","test","headed","browser","debug","don","mix","manual","pick","approach","page","manual","switch","decorator","frame","conflicts","produce","confusing","element","found","errors"],
+        bodyLength: 205,
+    },
+    'interactive-clarification': {
+        id: 'interactive-clarification',
+        title: "interactive-clarification",
+        summary: "Standardized 4-option elicitation pattern for handling gaps mid-migration. Every subagent uses this when it hits missing / ambiguous / undecidable input. Skip is always the default.",
+        tags: ["clarification"],
+        bodyTokens: ["interactive","clarification","standardized","option","elicitation","pattern","handling","gaps","mid","migration","every","subagent","uses","hits","missing","ambiguous","undecidable","input","skip","always","default","pattern","interactive","clarification","skip","default","time","subagent","reaches","point","needs","user","input","proceed","cannot","safely","pick","default","context","examples","missing","dependency","file","can","resolved","ambiguous","data","file","classification","excel","could","scenarios","config","live","app","unreachable","url","configured","sql","table","schema","reference","element","locator","equally","plausible","candidates","entry","point","url","cannot","inferred","credential","source","unclear","never","silently","pick","default","proceed","block","pipeline","free","form","question","fail","hard","abandon","file","elicitation","contract","every","gap","invocation","uses","exact","shape","fields","mandatory","render","order","always","user","hits","enter","skip","option","does","option","provide","value","user","types","answer","validate","accepting","gap","type","validation","file","path","file","exists","readable","url","parseable","reachable","head","request","timeout","warn","unreachable","accept","credential","never","store","raw","convert","placeholder","integer","boolean","yes","true","false","case","insensitive","selector","non","empty","string","warn","malformed","xpath","validation","fails","show","error","elicit","max","retries","gap","fails","auto","skip","option","option","show","suggestions","agent","builds","ranked","candidates","available","context","suggestion","includes","suggestion","source","rules","gap","type","preferred","sources","rank","missing","dep","file","basename","matches","legacy","source","tree","entry","point","url","basetestcase","constants","properties","files","testng","xml","login","credentials","env","files","placeholder","data","file","classification","first","row","signature","file","extension","content","shape","element","locator","ambiguous","live","dom","candidates","ranked","stability","score","sql","table","schema","fuzzy","match","against","schema","reference","mark","schema","reference","needed","config","value","search","discovered","config","files","placeholder","agent","can","produce","suggestions","context","draw","report","fall","through","option","form","provide","skip","abort","option","skip","mark","todo","default","log","dropped","scenarios","report","skipped","during","migration","section","pipeline","continues","generator","healer","substitute","safe","placeholder","comment","wherever","skipped","value","would","gone","option","abort","file","halt","current","file","migration","immediately","write","stage","abort","gap","triggered","abort","accumulated","state","partial","partial","generation","recommended","actions","retrying","user","should","prepare","orchestrator","returns","file","selection","prompt","session","state","preserves","completed","files","wording","rules","make","elicitations","readable","starts","user","knows","category","glance","sentence","present","tense","shows","already","know","user","doesn","read","whole","file","option","labels","verbs","provide","value","show","suggestions","value","suggestions","three","option","form","suggestions","unavailable","agent","zero","context","draw","suggestions","drop","option","renumbered","skip","stays","never","ask","same","thing","twice","session","session","state","maintains","map","elicitating","hash","check","already","answered","reuse","without","asking","logging","every","elicitation","every","elicitation","resolved","skipped","appended","stage","summary","includes","clarifications","count","gaps","asked","resolved","skipped","subagents","never","proceed","past","gap","without","either","resolved","value","option","logged","skip","option","reference","skill","whenever","gap","hit","following","pattern","need","log","every","elicitation","jsonl","file","even","skipped","ones","option","skip","install","safe","placeholder","silent","empty","string","option","abort","make","partial","writes","either","complete","stage","roll","back","cleanly","subagents","ask","free","form","questions","outside","contract","should","block","pipeline","waiting","user","input","default","pick","non","skip","default","without","user","choice","ask","same","gap","twice","session","skip","without","logging","dropped","scenarios","report"],
+        bodyLength: 479,
+    },
+    'ir-and-session-state': {
+        id: 'ir-and-session-state',
+        title: "ir-and-session-state",
+        summary: "Canonical JSON shapes for the intermediate representation (IR) shared between agents and the orchestrator session state file.",
+        tags: [],
+        bodyTokens: ["session","state","canonical","json","shapes","intermediate","representation","shared","between","agents","orchestrator","session","state","file","intermediate","representation","analyzer","produces","every","downstream","agent","reads","shape","stable","across","source","languages","enriched","locator","reconciler","every","element","gains","session","state","rules","every","agent","reads","agent","parses","source","lets","downstream","agents","cache","same","hash","same","reuse","empty","arrays","nulls","data","cases","agents","mutate","nothing","place","return","enriched","copies","session","state","shallow","merged","every","update","semantics"],
+        bodyLength: 69,
+    },
+    'legacy-example-csharp-nunit': {
+        id: 'legacy-example-csharp-nunit',
+        title: "legacy-example-csharp-nunit",
+        summary: "Reference — a representative C# + NUnit test class + page object. Agents pattern-match against this when parsing similar legacy files.",
+        phase: 'analyze',
+        fileKind: 'legacy-source',
+        tags: ["legacy-example"],
+        bodyTokens: ["legacy","example","csharp","nunit","reference","representative","nunit","test","class","page","object","agents","pattern","match","against","parsing","similar","legacy","files","reference","typical","nunit","legacy","test","skill","encounters","nunit","source","file","typical","test","class","typical","page","object","extracts","runner","detected","tests","its","rows","becoming","inlined","steps","navigate","fill","fill","click","assert","page","objects","same","java","translates","element","list","ops","inline","constructions","variations","instead","xunit","runner","data","provider","equivalent","usage","translates","steps","ginq","linq","assertions","same","assert","equals","semantics"],
+        bodyLength: 76,
+    },
+    'legacy-example-java-testng': {
+        id: 'legacy-example-java-testng',
+        title: "legacy-example-java-testng",
+        summary: "Reference — a representative Java + TestNG test class + page object. Agents pattern-match against this when parsing similar legacy files.",
+        phase: 'analyze',
+        fileKind: 'legacy-source',
+        tags: ["legacy-example"],
+        bodyTokens: ["legacy","example","java","testng","reference","representative","java","testng","test","class","page","object","agents","pattern","match","against","parsing","similar","legacy","files","reference","typical","java","testng","legacy","test","skill","encounters","java","testng","source","file","agent","needs","sanity","check","parsed","against","shape","real","world","legacy","code","typical","test","class","typical","page","object","extracts","tests","step","sequence","navigate","fill","fill","click","assert","data","refs","method","inlined","rows","case","page","objects","elements","userid","password","xpath","ops","inline","select","goes","migration","variations","seen","wild","place","instead","treat","tag","metadata","inline","locators","extract","dynamic","locator"],
+        bodyLength: 88,
+    },
+    'legacy-example-jdbc-inline-sql': {
+        id: 'legacy-example-jdbc-inline-sql',
+        title: "legacy-example-jdbc-inline-sql",
+        summary: "Reference — common legacy inline-SQL patterns in Java / C# so extract_db_calls can identify them and the agent can sanity-check the migration plan.",
+        phase: 'analyze',
+        fileKind: 'legacy-source',
+        tags: ["legacy-example"],
+        bodyTokens: ["legacy","example","jdbc","inline","sql","reference","common","legacy","inline","sql","patterns","java","extract","calls","can","identify","agent","can","sanity","check","migration","plan","reference","common","inline","sql","patterns","legacy","code","returns","plan","agent","needs","verify","extraction","caught","right","strings","pattern","raw","jdbc","string","concatenation","emits","pattern","preparedstatement","placeholders","emits","pattern","hibernate","hql","hibernate","hql","harder","can","identify","string","migration","plan","notes","hql","sql","map","entity","table","registering","named","query","pattern","inline","assertion","against","query","result","emits","agent","does","plan","entry","call","against","field","verified","add","unverified","emit","sentinel","escalate","generate","typed","helper","method","patterns","replace","original","call","site","generated","file","helper","invocation","watch","heredoc","multi","line","sql","kotlin","verbatim","strings","some","may","slip","through","regex","extraction","dynamic","sql","built","string","manipulation","may","need","manual","review","rewrite","stored","procedure","calls","treat","separate","migration","pattern","named","execution","select"],
+        bodyLength: 135,
+    },
+    'mutation-cleanup': {
+        id: 'mutation-cleanup',
+        title: "mutation-cleanup",
+        summary: "Use when a scenario CREATES or MODIFIES backend data — new user, new payment, status change, file upload. Without cleanup the test fails on second run because the data already exists. Pattern: unique IDs + After-step DB cleanup.",
+        tags: ["mutation"],
+        bodyTokens: ["mutation","cleanup","scenario","creates","modifies","backend","data","new","user","new","payment","status","change","file","upload","without","cleanup","test","fails","second","run","data","already","exists","pattern","unique","ids","step","cleanup","pattern","mutation","cleanup","scenario","isn","read","clicks","create","user","submit","payment","approve","upload","actions","write","backend","problems","solve","idempotency","test","work","its","first","run","every","subsequent","run","first","run","created","second","run","either","delete","first","different","test","isolation","parallel","scenarios","collide","workers","creating","user","001","simultaneously","race","strategy","unique","ids","timestamp","simplest","append","unique","suffix","every","test","generated","identifier","precision","optionally","random","suffix","parallel","safety","lightest","pattern","cleanup","needed","every","run","gets","fresh","downside","rows","accumulate","test","time","schedule","periodic","sweep","strategy","below","clear","strategy","step","cleanup","csafter","hook","scenarios","need","specific","legacy","data","file","hardcodes","clean","hook","next","run","starts","fresh","strategy","periodic","sweep","out","band","data","hard","attribute","specific","scenario","generated","server","side","naming","convention","schedule","daily","job","deletes","test","rows","older","hours","out","scope","individual","scenarios","document","project","readme","team","knows","exists","strategy","capture","undo","context","complex","flows","create","rollback","cleanest","pattern","decision","flowchart","common","gotchas","delete","hook","best","effort","hook","itself","fails","data","leaks","keep","delete","simple","single","sql","parameterised","joins","catch","log","errors","don","throw","runs","even","scenario","failure","point","test","failed","mid","create","cleanup","still","runs","soft","delete","columns","schema","uses","semantics","hard","may","want","check","schema","instead","appropriate","foreign","keys","deleting","user","cascades","orders","etc","either","delete","right","order","rely","check","schema","assuming","don","cleanup","global","fixture","data","row","shared","multiple","scenarios","pre","loaded","setup","script","don","delete","clean","scenario","created"],
+        bodyLength: 257,
+    },
+    'named-query-env-entry': {
+        id: 'named-query-env-entry',
+        title: "named-query-env-entry",
+        summary: "Use when adding a SQL query to the project's db-queries env file. Covers naming, parameterisation, and comment conventions.",
+        tags: [],
+        bodyTokens: ["named","query","env","entry","adding","sql","query","project","queries","env","file","covers","naming","parameterisation","comment","conventions","pattern","named","query","every","sql","query","test","suite","runs","lives","file","helpers","invoke","name","file","location","example","rules","key","format","upper","snake","case","verb","bind","parameters","indexed","never","inline","string","values","sql","been","verified","against","project","schema","reference","never","fabricate","table","names","unverified","mark","escalate","group","entity","comment","header","makes","file","browseable","grows","never","leave","commented","out","queries","delete","instead"],
+        bodyLength: 76,
+    },
+    'po-click-action-method': {
+        id: 'po-click-action-method',
+        title: "po-click-action-method",
+        summary: "Use when authoring a click action on a page object. Covers clickWithTimeout with the correct long-timeout convention for navigation-triggering clicks.",
+        phase: 'translate',
+        fileKind: 'page',
+        tags: ["page-object"],
+        bodyTokens: ["click","action","method","authoring","click","action","page","object","covers","clickwithtimeout","correct","long","timeout","convention","navigation","triggering","clicks","pattern","click","action","method","method","page","object","performs","click","navigation","link","submit","button","row","link","tab","switch","separate","waits","assertions","own","methods","example","rules","higher","clicks","trigger","page","load","server","round","trip","short","timeouts","5000","safe","purely","client","side","controls","always","click","eliminates","class","timing","flakes","call","click","appears","test","report","never","bare","always","variant","never","call","directly"],
+        bodyLength: 75,
+    },
+    'po-dynamic-element': {
+        id: 'po-dynamic-element',
+        title: "po-dynamic-element",
+        summary: "Use when an element must be located at runtime (loop index, row number, dynamic label). Covers CSElementFactory for runtime element construction.",
+        phase: 'translate',
+        fileKind: 'page',
+        tags: ["dynamic","page-object"],
+        bodyTokens: ["dynamic","element","element","located","runtime","loop","index","row","number","dynamic","label","covers","cselementfactory","runtime","element","construction","pattern","runtime","built","element","cselementfactory","locator","depends","test","time","data","row","whose","first","cell","contains","nth","result","button","labelled","static","decorators","can","express","action","method","example","rules","description","required","shows","logs","always","escape","user","supplied","strings","xpath","prefer","static","possible","reserve","factory","genuinely","dynamic","cases","returned","element","same","surface","decorated","elements","navigation","clicks","still","30000","timeout"],
+        bodyLength: 72,
+    },
+    'po-fill-action-method': {
+        id: 'po-fill-action-method',
+        title: "po-fill-action-method",
+        summary: "Use when authoring a fill / type action on a page object. Covers clear + fillWithTimeout sequence.",
+        phase: 'translate',
+        fileKind: 'page',
+        tags: ["page-object"],
+        bodyTokens: ["fill","action","method","authoring","fill","type","action","page","object","covers","clear","fillwithtimeout","sequence","pattern","fill","action","method","method","types","input","standard","sequence","wait","clear","fill","optional","reporter","line","example","rules","always","clear","fill","prevents","residue","prior","values","bare","never","log","raw","password","value","log","redacted","marker","needed","short","timeouts","5000","fine","fill","purely","client","side"],
+        bodyLength: 55,
+    },
+    'po-frame-element': {
+        id: 'po-frame-element',
+        title: "po-frame-element",
+        summary: "Use when the page content lives inside one or more nested iframes. Covers CSFramePage with single-frame string and nested-frame array forms.",
+        phase: 'translate',
+        fileKind: 'page',
+        tags: ["iframe","page-object"],
+        bodyTokens: ["frame","element","page","content","lives","inside","nested","iframes","covers","csframepage","single","frame","string","nested","frame","array","forms","pattern","elements","inside","iframes","target","screen","content","rendered","inside","embedded","third","party","widget","rich","text","editor","iframe","legacy","webform","embedded","host","app","page","needs","frame","context","applied","example","single","iframe","example","nested","iframes","frame","selector","options","property","accepts","either","single","descriptor","array","descriptors","outer","inner","string","xpath","auto","detected","css","object","rules","extend","element","page","lives","inside","iframe","class","field","decorator","option","nested","frames","order","array","outermost","first","call","first","interaction","other","page","object","rules","apply","xpath","primary","selfheal","interactive","descriptions","withtimeout","methods"],
+        bodyLength: 100,
+    },
+    'po-self-healing-element': {
+        id: 'po-self-healing-element',
+        title: "po-self-healing-element",
+        summary: "Use when declaring an interactive element (input, button, link, submit, checkbox, combobox) on a page object. Adds selfHeal + alternativeLocators for resilient locator fallback.",
+        phase: 'translate',
+        fileKind: 'page',
+        tags: ["page-object","self-healing"],
+        bodyTokens: ["self","healing","element","declaring","interactive","element","input","button","link","submit","checkbox","combobox","page","object","adds","selfheal","alternativelocators","resilient","locator","fallback","pattern","self","healing","interactive","element","element","user","clicks","types","selects","buttons","inputs","submit","controls","links","checkboxes","select","dropdowns","needed","purely","read","labels","headers","example","rules","primary","css","text","variants","every","interactive","element","required","navigation","triggering","clicks","higher","short","timeouts","time","out","server","round","trip","clicks","action","methods","call","variants","never","bare","success","call","failure","call","plain","numeric","literals","everything","goes","through","decorated","element"],
+        bodyLength: 83,
+    },
+    'po-simple-element': {
+        id: 'po-simple-element',
+        title: "po-simple-element",
+        summary: "Use when declaring a passive (non-interactive) element on a page object — labels, headers, read-only fields. Covers @CSGetElement with xpath primary + description + waitForVisible.",
+        phase: 'translate',
+        fileKind: 'page',
+        tags: ["page-object"],
+        bodyTokens: ["simple","element","declaring","passive","non","interactive","element","page","object","labels","headers","read","fields","covers","csgetelement","xpath","primary","description","waitforvisible","pattern","simple","passive","element","page","object","read","element","page","title","section","heading","displayed","status","label","badge","static","text","click","fill","type","test","reads","its","text","verifies","its","visibility","example","rules","always","primary","locator","wrap","xpath","values","double","quotes","inner","single","quote","string","literals","need","escaping","never","write","required","human","readable","appears","logs","elements","present","page","considered","loaded","needed","passive","elements","save","interactive","ones","variants","cswebelement","methods","never","bare","versions","plain","numeric","literals"],
+        bodyLength: 91,
+    },
+    'po-wait-and-verify-method': {
+        id: 'po-wait-and-verify-method',
+        title: "po-wait-and-verify-method",
+        summary: "Use when authoring a verification / assertion method on a page object. Covers waitForVisible + textContent + strict pass/fail pattern.",
+        phase: 'translate',
+        fileKind: 'page',
+        tags: ["page-object"],
+        bodyTokens: ["wait","verify","method","authoring","verification","assertion","method","page","object","covers","waitforvisible","textcontent","strict","pass","fail","pattern","pattern","wait","verify","method","page","object","method","whose","purpose","assert","reached","expected","state","title","correct","value","displayed","item","present","example","rules","reading","text","avoids","reading","element","still","rendering","normalise","whitespace","avoid","false","negatives","stray","newlines","failure","same","message","string","success","report","reflects","verified","state","never","bare"],
+        bodyLength: 62,
+    },
+    'reporter-fail-and-throw': {
+        id: 'reporter-fail-and-throw',
+        title: "reporter-fail-and-throw",
+        summary: "Use on any failure path in a step or page-object method. Covers the mandatory CSReporter.fail + throw Error pattern — never silent return, never raw expect.",
+        tags: ["reporter"],
+        bodyTokens: ["reporter","fail","throw","failure","path","step","page","object","method","covers","mandatory","csreporter","fail","throw","error","pattern","never","silent","return","never","raw","expect","pattern","failure","path","place","code","detects","condition","means","test","failed","assertion","mismatch","missing","value","unexpected","state","timeout","required","element","pattern","always","same","example","success","path","always","info","debug","non","assertion","logging","rules","every","assertion","path","either","ends","silent","return","error","message","passed","same","string","report","reader","sees","same","text","test","runner","sees","alone","enough","too","call","logs","throw","stops","execution","framework","reporter","owns","assertions","error","messages","actionable","include","expected","actual","values","element","description","scenario","known"],
+        bodyLength: 97,
+    },
+    'reporter-pass-on-success': {
+        id: 'reporter-pass-on-success',
+        title: "reporter-pass-on-success",
+        summary: "Use on every success path. CSReporter.pass with a specific, actionable message that surfaces in the HTML report.",
+        tags: ["reporter"],
+        bodyTokens: ["reporter","pass","success","every","success","path","csreporter","pass","specific","actionable","message","surfaces","html","report","pattern","report","success","every","page","object","method","step","def","helper","reaches","its","happy","path","end","state","should","end","call","test","runner","html","report","built","messages","example","makes","good","pass","message","specific","include","entity","expected","outcome","verified","value","past","tense","verified","payment","approved","dashboard","opened","clicking","button","actionable","failure","test","later","fails","elsewhere","good","pass","message","report","tells","debugger","worked","short","line","120","chars","rules","pair","every","pass","guarded","condition","don","blanket","log","pass","without","verifying","wouldn","confident","telling","user","step","succeeded","don","call","never","log","raw","secrets","passwords","tokens","redact","omit","mid","flight","progress","updates","typing","clicking","reserve","end","state","confirmation"],
+        bodyLength: 115,
+    },
+    'scenarios-json-row': {
+        id: 'scenarios-json-row',
+        title: "scenarios-json-row",
+        summary: "Use when authoring or updating a _scenarios.json data file. Covers canonical array shape, required fields, runFlag semantics, and the no-placeholder rule.",
+        tags: [],
+        bodyTokens: ["scenarios","json","row","authoring","updating","scenarios","json","data","file","covers","canonical","array","shape","required","fields","runflag","semantics","placeholder","rule","pattern","canonical","scenarios","json","shape","every","feature","file","matching","its","shape","fixed","improvise","example","shape","rules","top","level","json","array","object","every","row","string","matches","feature","file","clause","string","human","readable","summary","string","other","keys","scenario","fields","camelcase","matching","feature","steps","exactly","row","may","carry","field","explaining","helps","reviewers","forbidden","values","placeholders","anywhere","row","unresolved","values","set","field","shipped","bogus","placeholder","empty","required","fields","field","unknown","omit","row","don","ship","relationship","feature","file","feature","clause","matches","exactly","row","named","flag","feature","blocks","may","reference","different","filters","data","file","data","files","every","feature","exist","data","file","every","row","marked","should","correspond","feature","file","scenario"],
+        bodyLength: 122,
+    },
+    'sd-simple-step': {
+        id: 'sd-simple-step',
+        title: "sd-simple-step",
+        summary: "Use when authoring a basic step definition with a single page injection and a single action.",
+        phase: 'translate',
+        fileKind: 'steps',
+        tags: ["step-definition"],
+        bodyTokens: ["simple","step","authoring","basic","step","definition","single","page","injection","single","action","pattern","simple","step","definition","step","calls","method","page","object","parameter","interpolation","context","variables","lookups","example","rules","class","decorated","page","injection","match","key","page","object","step","text","decorator","matches","text","exactly","case","whitespace","punctuation","step","body","delegates","page","object","method","does","manipulate","elements","directly","page","method","already","calls","duplicate","logging","step"],
+        bodyLength: 61,
+    },
+    'sd-step-with-config': {
+        id: 'sd-step-with-config',
+        title: "sd-step-with-config",
+        summary: "Use when a step needs an environment or configuration value — BASE_URL, API_KEY, test user email. CSValueResolver, never process.env.",
+        phase: 'translate',
+        fileKind: 'steps',
+        tags: ["step-definition"],
+        bodyTokens: ["step","config","step","needs","environment","configuration","value","base","url","api","key","test","user","email","csvalueresolver","never","process","env","pattern","step","definition","reading","config","step","depends","environment","config","urls","feature","flags","shared","credentials","service","endpoints","example","rules","config","access","never","resolved","value","might","empty","undefined","always","check","fail","loudly","missing","config","keys","map","entries","runtime","encrypted","values","framework","decrypts","automatically","accessed"],
+        bodyLength: 60,
+    },
+    'sd-step-with-context': {
+        id: 'sd-step-with-context',
+        title: "sd-step-with-context",
+        summary: "Use when a step needs to pass data to another step in the same scenario — e.g., capturing an id from a \"Given …\" to consume in a \"Then …\".",
+        phase: 'translate',
+        fileKind: 'steps',
+        tags: ["step-definition"],
+        bodyTokens: ["step","context","step","needs","pass","data","another","step","same","scenario","capturing","given","consume","pattern","passing","data","between","steps","csbddcontext","scenario","step","discovers","creates","value","generated","resolved","entity","key","timestamp","step","needs","reference","scenario","scoped","automatically","cleared","end","scenario","example","rules","singleton","scenario","single","class","write","read","always","cast","expected","type","missing","values","checked","fail","loudly","never","pass","downstream","silently","store","data","private","class","fields","class","shared","across","scenarios","state","leak","preferred","keys","camelcase","descriptive"],
+        bodyLength: 74,
+    },
+    'sd-step-with-db-precondition': {
+        id: 'sd-step-with-db-precondition',
+        title: "sd-step-with-db-precondition",
+        summary: "Use when a Given step resolves data from the database before driving UI — \"Given a user with role X exists\".",
+        phase: 'translate',
+        fileKind: 'steps',
+        tags: ["step-definition"],
+        bodyTokens: ["step","precondition","given","step","resolves","data","database","driving","given","user","role","exists","pattern","step","definition","precondition","self","sufficient","scenarios","whose","setup","requires","real","database","state","role","lookup","active","deal","lookup","existing","entity","resolution","step","queries","stores","result","scenario","context","later","steps","consume","example","rules","access","helper","method","never","inline","sql","step","expected","row","isn","found","fail","loudly","create","row","insert","writes","out","scope","project","policy","store","resolved","entity","descriptive","key","downstream","steps","read","same","key","fail","unset"],
+        bodyLength: 77,
+    },
+    'sd-step-with-params': {
+        id: 'sd-step-with-params',
+        title: "sd-step-with-params",
+        summary: "Use when a step captures parameters from the scenario — {string}, {int}, {float}.",
+        phase: 'translate',
+        fileKind: 'steps',
+        tags: ["step-definition"],
+        bodyTokens: ["step","params","step","captures","parameters","scenario","string","int","float","pattern","step","definition","parameters","step","whose","feature","file","text","contains","scenario","outline","quoted","values","step","body","receive","example","supported","parameter","types","matches","step","text","matches","delivered","matches","delivered","matches","single","word","spaces","rules","parameter","order","method","signature","matches","order","step","text","every","parameter","typescript","type","never","embed","values","directly","decorator","string","always","parameters","feature","file","values","map","cucumber","expression","rules","custom","regex","required"],
+        bodyLength: 72,
+    },
+    'xlsx-multi-row-per-id': {
+        id: 'xlsx-multi-row-per-id',
+        title: "xlsx-multi-row-per-id",
+        summary: "Use when a legacy xlsx sheet has multiple data rows per test id (variant rows). Covers flattening into scenarioId suffixes.",
+        phase: 'translate',
+        fileKind: 'data',
+        tags: ["data-driven"],
+        bodyTokens: ["xlsx","multi","row","legacy","xlsx","sheet","multiple","data","rows","test","variant","rows","covers","flattening","scenarioid","suffixes","pattern","xlsx","multi","row","shape","variants","some","legacy","test","data","sheets","pack","variant","data","single","test","smoke","test","runs","three","different","users","three","rows","same","handles","flattening","variants","distinct","entries","input","shape","source","sheet","scenarioid","scenarioname","username","expectedoutcome","runflag","login","variants","login","variant","alice","example","com","welcome","alice","yes","empty","bob","example","com","welcome","bob","yes","empty","charlie","example","com","welcome","charlie","yes","logout","logout","example","com","goodbye","yes","rows","share","row","blank","variant","continuation","flattening","works","produces","feature","file","consumption","filter","now","uses","include","variants","simpler","glob","prefix","depending","framework","filter","parser","support","rules","blank","continuation","previous","row","suffix","starting","inherited","first","variant","row","unless","variant","its","own","fields","default","inherit","first","row","values","blank","cell","variant","flattened","output","always","canonical","scenarios","shape","downstream","code","treats","variant","first","class","scenario"],
+        bodyLength: 147,
+    },
+    'xlsx-sheet-to-scenarios': {
+        id: 'xlsx-sheet-to-scenarios',
+        title: "xlsx-sheet-to-scenarios",
+        summary: "Use when converting a legacy Excel sheet into a scenarios JSON file. One sheet → one scenarios JSON.",
+        phase: 'translate',
+        fileKind: 'data',
+        tags: ["data-driven"],
+        bodyTokens: ["xlsx","sheet","scenarios","converting","legacy","excel","sheet","scenarios","json","file","sheet","scenarios","json","pattern","xlsx","sheet","scenarios","json","flat","shape","legacy","projects","typically","ship","single","file","sheet","feature","module","row","test","case","tool","auto","detects","xlsx","emits","canonical","scenarios","json","mapping","works","first","row","sheet","header","becomes","json","field","names","camelcased","subsequent","rows","scenarios","column","recognised","supplies","column","supplies","yes","missing","auto","generated","example","source","sheet","scenarioid","scenarioname","username","expectedheader","runflag","login","standard","login","alice","example","com","welcome","alice","yes","login","locked","account","locked","example","com","account","locked","yes","login","pending","reset","reset","example","com","reset","email","sent","invocation","output","json","rules","sheet","json","scenarios","file","unless","multi","row","shape","sheet","headers","become","camelcase","keys","empty","cells","missing","keys","json","empty","string","agents","can","reason","optional","fields","values","ever","cell","known","incomplete","set","running","same","xlsx","should","idempotent","deterministic","ordering"],
+        bodyLength: 140,
     },
 };
 

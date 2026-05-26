@@ -2,7 +2,7 @@
 name: clarification
 title: Clarification Agent (tiered)
 description: Asks tiered clarification questions before the platform commits to a generation strategy. Invoked by the cs_ai_auto_assist master tool whenever required Tier-1 fields are missing for the classified mode.
-model: 'Claude Sonnet 4.6'
+model: ['Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: yellow
 user-invocable: false
 tools:

@@ -22,6 +22,12 @@ Rule IDs are stable — referenced by the healer, the generator, and escalation 
 | PO007 | error | No raw `this.page.locator(...)`, `this.page.click(...)`, `this.page.fill(...)` anywhere in the class |
 | PO008 | error | Action methods use `*WithTimeout` variants, not bare `click()` / `fill()` |
 | PO009 | warn | Navigation-triggering clicks use `clickWithTimeout(30000)` or higher |
+| PO010 | error | `xpath:` values use double-quote outer strings — never single-quoted with escaped inner singles |
+| PO011 | error | Dialog handling via CSBasePage wrappers — never raw `this.page.on('dialog', …)` |
+| PO012 | error | `@CSGetElement` uses `xpath:` / `css:` directly — never `strategy:` / `locator:` (those properties don't exist on `CSElementOptions`) |
+| PO013 | error | `alternativeLocators` is `string[]` with prefix syntax (`css:`/`xpath:`/`text:`/`role:`/`testid:`) — never an object array |
+| PO014 | error | Use `.getAttribute(name)` — there is no `.getAttributeValue()` method on `CSWebElement` |
+| PO015 | error | Dialog handling via inherited `acceptNextDialog()` / `dismissNextDialog()` — never raw `this.page.once('dialog', …)` |
 
 ## Step-definition rules (SD)
 

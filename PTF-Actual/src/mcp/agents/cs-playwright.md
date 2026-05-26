@@ -2,7 +2,7 @@
 name: cs-playwright
 title: CS Playwright Orchestrator
 description: End-to-end agentic orchestrator for CS Playwright framework. Handles legacy test migration (Java/C# Selenium) and greenfield automation. Scopes work, discovers dependencies, delegates to specialised subagents, enforces commit-ready gates, halts per file for human approval.
-model: 'Claude Opus 4.6'
+model: ['Claude Opus 4.7 (copilot)', 'Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: purple
 tools:
   - detect_project

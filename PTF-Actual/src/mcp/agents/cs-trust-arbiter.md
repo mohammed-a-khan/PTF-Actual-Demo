@@ -2,7 +2,7 @@
 name: cs-trust-arbiter
 title: CS Trust Arbiter
 description: Sub-agent of cs-ai-auto-assist. Final phase — computes the trust score from analysis readiness, audit cleanliness, run verdict, semantic equivalence, and heal cycles used. Verifies semantic equivalence between legacy assertions and generated assertions. Writes final-report.md. Conditionally publishes to ADO. Phase 9. Returns a trust-report handoff block.
-model: 'Claude Haiku 4.5'
+model: ['Claude Haiku 4.5 (copilot)', 'Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: gold
 user-invocable: false
 tools:

@@ -2,7 +2,7 @@
 name: pipeline-generator
 title: Pipeline Generator
 description: Emits commit-ready TypeScript target files from enriched IR — page objects, step definitions, feature files, scenarios JSON, DB helpers. Audit-and-compile-gated internally. Subagent of cs-playwright.
-model: 'GPT-5.2-Codex'
+model: ['GPT-5 (copilot)', 'GPT-5 mini (copilot)', 'GPT-4.1 (copilot)']
 color: green
 user-invocable: false
 tools:

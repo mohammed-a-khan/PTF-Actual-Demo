@@ -2,7 +2,7 @@
 name: cs-ai-auto-assist
 title: CS-AI-Auto-Assist
 description: Single-prompt orchestrator that turns any input (legacy Java/C# test file, BDD .feature file, ADO test case id, requirements doc, app URL, or free-form description) into framework-native CS Playwright BDD tests. Composes a toolbox of narrow MCP primitives — never writes test files inline. Always cost-bounded, audit-gated, and verified-green before declaring success.
-model: 'Claude Opus 4.7'
+model: ['Claude Opus 4.7 (copilot)', 'Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: cyan
 tools:
  - cs_ai_auto_assist
@@ -574,6 +574,31 @@ gates are green.
 - `CSWebElement, CSElementFactory` → `/element`
 - `CSValueResolver` → `/utilities`
 - `CSDBUtils` → `/database-utils`
+
+**SEPARATION OF CONCERNS — shared vs module-specific.** The translate
+queue already routes files for you; produce each at the EXACT
+`relativePath` its envelope gives — never relocate it.
+- **Shared page objects** (login / header / nav / grid / dialog / shell
+ pages) → `test/<project>/pages/common/`. **Module-specific** pages →
+ `test/<project>/pages/<module>/`.
+- **Auth / session step-defs** ("I am logged in…", "I sign on…") →
+ `test/<project>/steps/common/auth.steps.ts` — produced as its OWN
+ queue item. **Module business step-defs** → `test/<project>/steps/<module>/`.
+ The login step-def must NEVER land in a module steps file.
+
+**NEVER ESCAPE THE FRAMEWORK** (hard audit-gate rejections — LN001-LN004,
+WRAP100, PO007):
+- No `.getPage()` — never obtain the raw Playwright `Page`. Drive every
+ interaction through `@CSGetElement` CSWebElement properties + inherited
+ `CSBasePage` methods.
+- No raw `.goto()` / `.waitForURL()` / `.locator()` / `this.page.*`. Use
+ `this.<page>.navigate()` (reads `BASE_URL` from config, handles
+ cross-domain SSO automatically) and CSWebElement methods.
+- Config keys are canonical ONLY: `{config:BASE_URL}`,
+ `{config:DEFAULT_USERNAME}`, `{config:DEFAULT_PASSWORD}`. Never invent
+ project-prefixed keys.
+- No hand-rolled SSO / Citrix / NetScaler / LDAP redirect code —
+ `navigate()` handles the auth bounce when `CROSS_DOMAIN_NAVIGATION_ENABLED=true`.
 
 ### Phase 6 — AUDIT (call `csaa_audit`)
 

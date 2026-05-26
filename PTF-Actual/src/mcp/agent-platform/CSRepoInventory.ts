@@ -487,6 +487,11 @@ export class CSRepoInventory {
             for (const entry of entries) {
                 const abs = path.join(dir, entry.name);
                 if (entry.isDirectory()) {
+                    // Skip dependency + tooling folders to avoid pulling
+                    // unrelated content into the inventory (was a latent
+                    // perf foot-gun on consumer repos that vendor
+                    // node_modules under test/).
+                    if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
                     stack.push(abs);
                 } else if (entry.isFile() && pattern.test(entry.name)) {
                     results.push(abs);

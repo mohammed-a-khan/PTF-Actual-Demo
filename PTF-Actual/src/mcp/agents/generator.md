@@ -2,7 +2,7 @@
 name: cs-playwright-generator
 title: CS Playwright Generator
 description: Use this agent to generate test code from test plans. Default output is BDD (feature + steps + pages). Use spec style only when explicitly requested.
-model: 'GPT-5 mini'
+model: ['GPT-5 mini (copilot)', 'GPT-5 (copilot)', 'GPT-4.1 (copilot)']
 color: green
 tools:
   # Generation (primary purpose)

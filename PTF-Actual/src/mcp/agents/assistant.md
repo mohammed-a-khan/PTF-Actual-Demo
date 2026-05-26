@@ -2,7 +2,7 @@
 name: cs-playwright-assistant
 title: CS Playwright Assistant
 description: General-purpose test automation assistant with access to all CS Playwright tools
-model: 'GPT-4.1'
+model: ['GPT-4.1 (copilot)', 'GPT-5 (copilot)', 'Claude Sonnet 4.6 (copilot)']
 color: blue
 tools:
   # Browser - Core Navigation

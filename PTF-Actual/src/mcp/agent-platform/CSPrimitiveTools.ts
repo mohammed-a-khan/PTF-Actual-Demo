@@ -50,6 +50,9 @@ import {
 import { CSSemanticReuse } from './CSSemanticReuse';
 import { CSWriteWithAudit, AuditViolation } from './CSWriteWithAudit';
 import { CSRepoInventory } from './CSRepoInventory';
+import { CSSkillRetriever } from './CSSkillRetriever';
+import { CSPreflightAuditor } from './CSPreflightAuditor';
+import { CSDependencyGraph } from './CSDependencyGraph';
 import { CSAdoCreateBackFlow } from './CSAdoCreateBackFlow';
 import {
     ANALYSIS_SCHEMA,
@@ -281,9 +284,9 @@ const csaa_discover: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                         // legacy page class becomes one work item so the
                         // LLM emits ONE analysis.pages[i] entry per turn
                         // via csaa_append_analysis_page. Without this, a
-                        // 6-page Administration module's finalize call
-                        // bundles ~15-25 KB of legacy-file: citations
-                        // into a single message — instant length-limit.
+                        // mid-sized module (~6 pages) bundles ~15-25 KB of
+                        // legacy-file citations into a single finalize
+                        // message — instant per-message length-limit hit.
                         const pageItems = Object.values(sig.pages)
                             .map((p) => ({
                                 kind: 'analyze-page' as const,
@@ -315,6 +318,39 @@ const csaa_discover: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                         'discover',
                         'signature-error.txt',
                         sigErr instanceof Error ? (sigErr.stack ?? sigErr.message) : String(sigErr),
+                    );
+                }
+            }
+
+            // v1.39.6 — build the transitive-import dependency closure
+            // from the entry file. This replaces the flat
+            // `inventory.pages[]` listing that downstream agents previously
+            // had to guess against. The graph clearly partitions the
+            // project into:
+            //   - `nodes` — files actually imported by the entry test
+            //   - `unrelated` — files in the project but NOT in the closure
+            //   - `unresolvedImports` — 3rd-party or typo'd FQNs
+            //   - `cycles` — circular dependencies
+            // Scope-mapper / BDD-author consume `nodes` only and the
+            // analyze envelope quotes `unrelated` as a do-not-include list.
+            if (entryForSignature && /\.(java|cs)$/i.test(entryForSignature) && fs.existsSync(entryForSignature)) {
+                try {
+                    const depGraph = CSDependencyGraph.build(entryForSignature, rootPath);
+                    ctx.writePhaseArtifact(
+                        'discover',
+                        'dependency-graph.json',
+                        JSON.stringify(depGraph, null, 2),
+                    );
+                    ctx.writePhaseArtifact(
+                        'discover',
+                        'dependency-graph.md',
+                        CSDependencyGraph.renderSummary(depGraph),
+                    );
+                } catch (depErr) {
+                    ctx.writePhaseArtifact(
+                        'discover',
+                        'dependency-graph-error.txt',
+                        depErr instanceof Error ? (depErr.stack ?? depErr.message) : String(depErr),
                     );
                 }
             }
@@ -884,7 +920,14 @@ const csaa_analyze: MCPToolDefinition = (defineTool() as MCPToolBuilder)
             instruction: [
                 'You are analyzing a legacy Selenium/TestNG (or NUnit/MSTest) test file. Your output drives downstream translation. Shallow analysis = garbage translation.',
                 '',
-                'STEP 0 — READ the framework SKILL files first. Use your `read` tool on `<workspaceRoot>/.github/skills/<name>/SKILL.md` for EVERY entry in `grounding.mandatorySkills`. These document the conventions the audit will enforce. Skipping this step is the #1 source of regenerations.',
+                "STEP 0 — fetch analyzer skill bodies via `csaa_retrieve_skills({ phase: 'analyze', includeBody: true, k: 4 })`. Also call `csaa_retrieve_skills({ tags: ['audit'], includeBody: true, k: 1 })` for the audit-rules skill which lists every analysis gate. The retriever has every framework skill indexed — do NOT separately `read` .github/skills/*.md. `grounding.mandatorySkills` is the back-compat fallback list; use retrieval as the primary substrate.",
+                '',
+                "STEP 0.25 — **READ THE DEPENDENCY GRAPH FIRST.** `read` the file at `<runFolder>/02-discover/dependency-graph.json`. It is the deterministic transitive-import closure of the entry test file — the framework already computed which pages, helpers, and data files this test ACTUALLY depends on (transitive, not folder-walked). The graph has four fields you must consume:",
+                "  - `nodes[]` — files in scope. Every page-object analysis entry, helper expansion call, and data-file reference you emit MUST resolve to a node in this list. Files NOT in `nodes[]` do NOT belong in this analysis.",
+                "  - `unrelated[]` — files in the project that the entry test does NOT import (directly or transitively). DO NOT include any of these in `analysis.pages[]` or `dependencyGraph[]`. These are pages from other modules, dormant helpers, etc. Including them in the analysis triggers a record_analysis rejection.",
+                "  - `unresolvedImports[]` — imports the framework could not resolve to a file. Investigate each: if it's third-party (Selenium, TestNG, java.*), ignore it. If it looks like a typo or missing source, raise a `gap`.",
+                "  - `cycles[]` — circular imports the framework detected. Report in `gaps` if present.",
+                "If the graph is missing (no `dependency-graph.json`), invoke `csaa_trace_dependencies(runId, entryFile, projectRoot)` to build it before continuing.",
                 '',
                 'STEP 0.5 — READ the legacy signature at `<runFolder>/02-discover/signature.json`. This is the deterministic floor: per-@Test action counts (including helper expansion), per-page-class @FindBy field counts. Your analysis MUST cover at least 70% of legacy actions per scenario AND 80% of legacy fields per create-new page object. Below those floors, csaa_record_analysis rejects with specific shortfall details — you cannot pass with thin output. Two deterministic tools are wired specifically for this:',
                 '  • `csaa_expand_helper(runId, helperClass, helperMethod)` — returns the ordered leaf-action list for any helper method. CALL IT FOR EVERY helper invocation in the @Test body. Then emit one Gherkin step per returned action.',
@@ -1752,6 +1795,26 @@ function categoriseStepText(text: string): 'navigation' | 'actions' | 'validatio
 }
 
 /**
+ * Detect auth / login / session step texts. These are NOT owned by any
+ * single business module — every module's scenarios start by signing in —
+ * so their step-defs route to `test/<project>/steps/common/auth.steps.ts`
+ * instead of being duplicated into each module's steps file.
+ *
+ * Deliberately NARROW: matches only unambiguous session verbs ("signed in",
+ * "log on", "authenticate", "valid user"). It does NOT match field-entry
+ * steps like "I enter loginUser" or "I enter password" — those can appear in
+ * a change-password flow that has nothing to do with authentication, and
+ * stay with their module.
+ */
+function isCommonStepText(text: string): boolean {
+    const body = text.trim().replace(/^(?:Given|When|Then|And|But)\s+/i, '');
+    return (
+        /\b(?:sign(?:ed)?[\s-]?(?:in|on|off|out)|log(?:ged)?[\s-]?(?:in|on|off|out)|logged\s+(?:in|into|out)|authenticat(?:e|ed|ion)|re-?authenticat)\b/i.test(body) ||
+        /\bvalid\s+(?:user|credential|credentials|login)\b/i.test(body)
+    );
+}
+
+/**
  * Detect well-known common/shared-component page class names so they
  * route to `test/<project>/pages/common/` instead of being duplicated
  * under every module's `pages/<module>/` folder.
@@ -1760,7 +1823,11 @@ function isCommonPageClass(className: string): boolean {
     const n = className.toLowerCase();
     // Exact-name commons (handles Login, Logout, Header, Footer, etc. as suffixes).
     const commonNames = [
-        'login', 'logout', 'signin', 'signout', 'authentication', 'auth',
+        'login', 'logout', 'logon', 'signin', 'signout', 'signon',
+        'authentication', 'auth',
+        // Application-shell / entry pages — these are not owned by any single
+        // business module; every module's flow passes through them.
+        'home', 'welcome', 'landing', 'dashboard', 'splash',
         'header', 'footer', 'navigation', 'navbar', 'sidebar', 'topbar', 'menu',
         'toast', 'modal', 'dialog', 'popup', 'notification', 'alert',
         'grid', 'table', 'form', 'datepicker', 'combobox', 'dropdown',
@@ -1845,14 +1912,36 @@ function buildTranslateQueueItems(opts: {
             }
         }
     }
-    const allSteps = [...stepDefTexts];
-    if (allSteps.length <= MAX_STEPS_PER_FILE) {
+
+    // SEPARATION OF CONCERNS — auth / session step-defs ("I am signed in",
+    // "I log on", …) are shared across every module, so they route to a
+    // single `test/<project>/steps/common/auth.steps.ts`. Module-specific
+    // step-defs stay under `test/<project>/steps/<module>/`. Without this
+    // split the login step gets duplicated into (and owned by) whichever
+    // module happens to be migrated first.
+    const commonSteps: string[] = [];
+    const moduleSteps: string[] = [];
+    for (const t of stepDefTexts) {
+        (isCommonStepText(t) ? commonSteps : moduleSteps).push(t);
+    }
+    if (commonSteps.length > 0) {
+        items.push({
+            kind: 'steps',
+            relativePath: `test/${project}/steps/common/auth.steps.ts`,
+            stepDefTexts: commonSteps,
+        });
+    }
+
+    // Module-specific step-defs. Emit nothing if every step was common
+    // (degenerate, but possible) — an empty steps file helps no one.
+    const allSteps = moduleSteps;
+    if (allSteps.length > 0 && allSteps.length <= MAX_STEPS_PER_FILE) {
         items.push({
             kind: 'steps',
             relativePath: `${baseDir('steps')}/${module}.steps.ts`,
             stepDefTexts: allSteps,
         });
-    } else {
+    } else if (allSteps.length > MAX_STEPS_PER_FILE) {
         // Categorise by step verb.
         const buckets: Record<'navigation' | 'actions' | 'validations', string[]> = {
             navigation: [], actions: [], validations: [],
@@ -2747,12 +2836,90 @@ const SILENCE_PREFIX: string[] = [
     '',
 ];
 
+/**
+ * v1.39 — Per-file-kind skill citation. Replaces "inline every potentially
+ * relevant skill into the envelope" with "cite a small starter set of skill
+ * IDs + the right retrieval filter, agent fetches via csaa_retrieve_skills".
+ *
+ * The starter set is the minimum the agent should read before producing
+ * that file kind. The agent is also told to call csaa_retrieve_skills with
+ * the listed filter — that surfaces additional context-specific skills
+ * (e.g. iframe / dialog / dynamic) that the starter list cannot anticipate.
+ */
+interface SkillCitation {
+    /** Starter set of skill IDs the agent should read first. */
+    readonly ids: readonly string[];
+    /** Filter the agent should pass to csaa_retrieve_skills for any additional skills. */
+    readonly retrievalFilter: {
+        readonly phase: 'translate';
+        readonly fileKind: 'feature' | 'steps' | 'page' | 'data';
+    };
+}
+
+const TRANSLATE_SKILL_CITATIONS: Record<TranslateQueueItem['kind'], SkillCitation> = {
+    feature: {
+        ids: ['ff-scenario-outline', 'ff-smoke-scenario', 'audit-rules'],
+        retrievalFilter: { phase: 'translate', fileKind: 'feature' },
+    },
+    steps: {
+        ids: [
+            'sd-simple-step',
+            'sd-step-with-params',
+            'sd-step-with-context',
+            'sd-step-with-config',
+            'reporter-pass-on-success',
+            'reporter-fail-and-throw',
+            'audit-rules',
+        ],
+        retrievalFilter: { phase: 'translate', fileKind: 'steps' },
+    },
+    page: {
+        ids: [
+            'po-simple-element',
+            'po-self-healing-element',
+            'po-click-action-method',
+            'po-fill-action-method',
+            'po-wait-and-verify-method',
+            'po-dynamic-element',
+            'audit-rules',
+        ],
+        retrievalFilter: { phase: 'translate', fileKind: 'page' },
+    },
+    data: {
+        ids: ['scenarios-json-row', 'csv-data-driven', 'xlsx-sheet-to-scenarios', 'audit-rules'],
+        retrievalFilter: { phase: 'translate', fileKind: 'data' },
+    },
+};
+
+/**
+ * Render the "STEP 0 — fetch relevant skills" prefix for a per-file
+ * envelope. Cites the starter skill IDs and points the agent at
+ * `csaa_retrieve_skills` for additional context-specific skills.
+ */
+function renderSkillCitationBlock(kind: TranslateQueueItem['kind']): string[] {
+    const cite = TRANSLATE_SKILL_CITATIONS[kind];
+    const filterJson = JSON.stringify({
+        ...cite.retrievalFilter,
+        includeBody: true,
+        k: 5,
+    });
+    return [
+        'STEP 0 — fetch the relevant skill bodies BEFORE producing the file.',
+        `  Starter set (always-needed for ${kind}): ${cite.ids.map((id) => `\`${id}\``).join(', ')}.`,
+        `  Call \`csaa_retrieve_skills(${filterJson})\` to fetch those bodies plus any context-specific skills (iframe, dialog, dynamic, …) the retriever surfaces by tag. The retriever already has every skill indexed — do NOT separately \`read\` .github/skills/*.md when retrieval is available.`,
+        '  Treat the skill bodies as your authoritative reference for syntax. The orchestrator-enforced rules below add constraints on TOP of the skills; they do not replace the patterns.',
+        '',
+    ];
+}
+
 function buildTranslateFileEnvelope(
     item: TranslateQueueItem,
     progress: { completed: number; total: number },
     common: TranslateIteratorCommonGrounding,
 ): DelegationEnvelope {
     const fileIdx = progress.completed + 1; // 1-indexed
+    const skillCitation = TRANSLATE_SKILL_CITATIONS[item.kind];
+    const skillBlock = renderSkillCitationBlock(item.kind);
     let instructionBody: string[];
 
     switch (item.kind) {
@@ -2763,6 +2930,7 @@ function buildTranslateFileEnvelope(
                 `Target path: ${item.relativePath}`,
                 `Scenarios to declare (${item.scenarioIds.length}): ${item.scenarioIds.join(', ')}`,
                 '',
+                ...skillBlock,
                 'Requirements:',
                 '  - One `Scenario:` block (or `Scenario Outline:` if every step references `<placeholder>`) per scenarioId above. Tag each with @<scenarioId>.',
                 '  - Step text comes from analysis.scenarios[id].steps — read the analysis at grounding.analysisReportPath via your `read` tool. Step text MUST match exactly across the feature and the steps-defs you will emit next.',
@@ -2775,17 +2943,22 @@ function buildTranslateFileEnvelope(
                 'SILENCE RULE: compose the tool call directly. Do NOT narrate file content in chat — that burns the per-message output budget.',
             ];
             break;
-        case 'steps':
+        case 'steps': {
+            const isCommonStepsFile = item.relativePath.includes('/steps/common/');
             instructionBody = [
                 `Produce ONE file: the step-defs (${fileIdx}/${progress.total}).`,
                 '',
                 `Target path: ${item.relativePath}`,
+                isCommonStepsFile
+                    ? 'SCOPE: this is the SHARED auth/session steps file (test/<project>/steps/common/). It holds login / sign-on / authentication step-defs ONLY — they are reused by every module. Do NOT put module-specific business steps here.'
+                    : 'SCOPE: this is a MODULE-specific steps file (test/<project>/steps/<module>/). It holds the business step-defs for this module ONLY. Auth/login/session step-defs do NOT belong here — they live in test/<project>/steps/common/auth.steps.ts and are produced as a separate file.',
                 `Required step-def patterns (${item.stepDefTexts.length}):`,
                 ...item.stepDefTexts.slice(0, 50).map((t) => `  - "${t}"`),
                 ...(item.stepDefTexts.length > 50
                     ? [`  …and ${item.stepDefTexts.length - 50} more (see analysis.scenarios[].steps[].text)`]
                     : []),
                 '',
+                ...skillBlock,
                 'Requirements:',
                 `  - Use framework imports: CSBDDStepDef / StepDefinitions / Page from "${common.frameworkPkg}/bdd", CSReporter from "${common.frameworkPkg}/reporting", CSBasePage / CSPage / CSGetElement from "${common.frameworkPkg}/core", CSWebElement from "${common.frameworkPkg}/element", CSValueResolver from "${common.frameworkPkg}/utilities", CSDBUtils from "${common.frameworkPkg}/database-utils".`,
                 '  - One @CSBDDStepDef per step-def text above. The pattern in @CSBDDStepDef MUST match the feature step text exactly.',
@@ -2794,19 +2967,42 @@ function buildTranslateFileEnvelope(
                 '  - `@StepDefinitions` (no parens) on the class. `@CSBDDStepDef(...)` (with parens) on each method.',
                 '  - Method signatures: `(message: string)` for {string}, `(value: number)` for {int}. NO `(ctx, ...)`.',
                 '',
+                'NEVER ESCAPE THE FRAMEWORK (these are hard audit-gate rejections):',
+                '  - NO `.getPage()` — never obtain the raw Playwright Page. Every interaction goes through @CSGetElement-decorated CSWebElement properties on a page object, or inherited CSBasePage methods.',
+                '  - NO raw `.goto(...)` / `.waitForURL(...)` / `.locator(...)` / `this.page.*`. Use `this.<page>.navigate()` and CSWebElement methods.',
+                '  - Config keys are the canonical names ONLY: `{config:BASE_URL}`, `{config:DEFAULT_USERNAME}`, `{config:DEFAULT_PASSWORD}`. Never invent project-prefixed keys like `{config:<PROJECT>_BASE_URL}`.',
+                '  - NO hand-rolled SSO / Citrix / NetScaler / LDAP redirect code. `navigate()` handles the cross-domain auth bounce automatically when CROSS_DOMAIN_NAVIGATION_ENABLED=true.',
+                '',
+                'CANONICAL LOGIN STEP PATTERN — the login step-def is exactly this shape (no raw Playwright, no manual redirect handling):',
+                '  @CSBDDStepDef(\'I am logged in as a valid user\')',
+                '  async loginAsValidUser(): Promise<void> {',
+                '      const ctx = CSBDDContext.getInstance();',
+                '      await this.loginPage.navigate(); // reads BASE_URL from config + handles cross-domain SSO',
+                '      await this.loginPage.enterUsername(await CSValueResolver.resolve(\'{config:DEFAULT_USERNAME}\', ctx));',
+                '      await this.loginPage.enterPassword(await CSValueResolver.resolve(\'{config:DEFAULT_PASSWORD}\', ctx));',
+                '      await this.loginPage.clickLogin();',
+                '      CSReporter.pass(\'Logged in as valid user\');',
+                '  }',
+                '  The page-object methods (navigate / enterUsername / enterPassword / clickLogin) live on the shared LoginPage under test/<project>/pages/common/ — call them, do not re-implement the form interaction inline.',
+                '',
                 'Submit via `csaa_append_translation_file(runId, file: { relativePath, kind: "steps", content })`.',
                 '',
                 'SILENCE RULE: compose the tool call directly, no chat narration of code.',
             ];
             break;
+        }
         case 'page':
             instructionBody = [
                 `Produce ONE file: a page object (${fileIdx}/${progress.total}).`,
                 '',
                 `Target path: ${item.relativePath}`,
+                item.relativePath.includes('/pages/common/')
+                    ? 'SCOPE: this is a SHARED page object (test/<project>/pages/common/) — a login / shell / navigation / grid component reused across modules. Write it at EXACTLY this path; do not relocate it under a module folder.'
+                    : 'SCOPE: this is a MODULE-specific page object (test/<project>/pages/<module>/). Write it at EXACTLY this path. Shared components (login / header / nav / grid) are produced as separate files under test/<project>/pages/common/ — do not inline them here.',
                 `Legacy page class: ${item.legacyClassName}`,
                 `Minimum @CSGetElement count: ${item.minFieldCount} (80% floor from legacy @FindBy count)`,
                 '',
+                ...skillBlock,
                 'Steps:',
                 `  1. Call csaa_extract_page_fields(runId, pageClass: "${item.legacyClassName}") to get the authoritative @FindBy list from the legacy file.`,
                 '  2. Emit ONE @CSGetElement per legacy field. XPath primary, alternativeLocators[] for CSS variants if available.',
@@ -2830,6 +3026,7 @@ function buildTranslateFileEnvelope(
                 `Target path: ${item.relativePath}`,
                 `Scenario rows to include (${item.scenarioIds.length}): ${item.scenarioIds.join(', ')}`,
                 '',
+                ...skillBlock,
                 'Requirements:',
                 '  - JSON array of row objects. One row per scenarioId above.',
                 '  - Each row MUST include: scenarioId, scenarioName, runFlag, plus EVERY column from analysis.scenarios[id].dataRow.',
@@ -2853,7 +3050,17 @@ function buildTranslateFileEnvelope(
             module: common.module,
             frameworkPkg: common.frameworkPkg,
             analysisReportPath: common.analysisReportPath,
-            skillsPath: common.skillsPath,
+            // Skill discovery — see STEP 0. relevantSkills is the starter
+            // set; retrieveSkillsArgs is the exact filter to call
+            // csaa_retrieve_skills with for additional context-specific
+            // skills surfaced by tag (iframe, dialog, dynamic, …).
+            relevantSkills: [...skillCitation.ids],
+            retrieveSkillsTool: 'csaa_retrieve_skills',
+            retrieveSkillsArgs: {
+                ...skillCitation.retrievalFilter,
+                includeBody: true,
+                k: 5,
+            },
             currentItem: item,
             queue: {
                 current: fileIdx,
@@ -2967,147 +3174,124 @@ const csaa_translate: MCPToolDefinition = (defineTool() as MCPToolBuilder)
 
         ctx.startPhase('translate');
 
-        // v1.38 Phase 5 — iterator mode. When the translate queue was
-        // seeded by csaa_record_analysis success, return the per-file
-        // envelope so the LLM produces ONE file per turn. The bulk
-        // envelope below remains as the backward-compat fallback for
-        // runs that bypassed signature+queue seeding.
-        const tQueue = CSWorkQueue.load(ctx);
-        if (!tQueue.isEmpty('translate')) {
-            const tItem = tQueue.peekNext('translate') as TranslateQueueItem;
-            const tCommon: TranslateIteratorCommonGrounding = {
-                runId,
-                project,
-                module,
-                frameworkPkg,
-                analysisReportPath,
-                skillsPath: '.github/skills/',
-            };
-            const tIterEnv = buildTranslateFileEnvelope(
-                tItem,
-                { completed: tQueue.completed('translate'), total: tQueue.total('translate') },
-                tCommon,
-            );
-            ctx.writePhaseArtifact(
-                'translate',
-                'delegation-envelope.json',
-                JSON.stringify(tIterEnv, null, 2),
-            );
-            CSStatusWriter.write(ctx);
-            return jsonResult(
-                {
-                    state: 'AWAITING_LLM_FULFILMENT',
-                    runId,
-                    phase: 'translate',
-                    delegation: tIterEnv,
-                    queue: {
-                        current: tQueue.completed('translate') + 1,
-                        total: tQueue.total('translate'),
-                        progress: tQueue.progress('translate'),
+        // v1.38 Phase 5 — iterator mode. The translate queue is seeded by
+        // csaa_record_analysis / csaa_finalize_analysis. csaa_translate ONLY
+        // ever drives the per-file iterator (one file per turn). It never
+        // composes a "produce every artefact in a single message" bulk
+        // envelope — that old fallback told the LLM to `read` the entire
+        // multi-thousand-line analysis-report.json and emit feature + steps
+        // + every page + data in one reply, which reliably exhausted the
+        // output-token budget ("response hit the length limit") before any
+        // file landed on disk.
+        let tQueue = CSWorkQueue.load(ctx);
+
+        if (tQueue.isEmpty('translate')) {
+            // An empty queue has two distinct causes — handle both
+            // explicitly. Falling through to a bulk envelope is never
+            // correct.
+            if (tQueue.total('translate') > 0) {
+                // (A) DRAINED — every file was already produced via the
+                // iterator, but csaa_finalize_translation has not run yet.
+                // Re-entering translate would re-emit the same files and
+                // burn the output budget. The agent must finalize.
+                CSStatusWriter.write(ctx);
+                return jsonResult(
+                    {
+                        state: 'TRANSLATE_DRAINED',
+                        runId,
+                        phase: 'translate',
+                        blockedReason:
+                            'Translate queue fully drained — every file was produced via the iterator, but csaa_finalize_translation has not run yet. DO NOT re-enter csaa_translate (it would re-emit the same files). Call csaa_finalize_translation(runId) to run the content gates and persist content-map.json.',
+                        queue: {
+                            total: tQueue.total('translate'),
+                            progress: tQueue.progress('translate'),
+                        },
+                        nextStepNeeded: true,
+                        nextSuggestedTool: 'csaa_finalize_translation',
+                        nextSuggestedArgs: { runId },
                     },
-                    iteratorMode: true,
-                    runFolder: ctx.runFolder,
-                    nextStepNeeded: true,
-                    nextSuggestedTool: 'csaa_append_translation_file',
-                    nextSuggestedArgs: { runId },
-                },
-                `Iterator mode: produce file ${tQueue.completed('translate') + 1}/${tQueue.total('translate')} (${tItem.kind} → ${tItem.relativePath}). Submit via csaa_append_translation_file.`,
-            );
+                    `Translate queue drained (${tQueue.progress('translate')}). Call csaa_finalize_translation to close out.`,
+                );
+            }
+
+            // (B) NEVER SEEDED — csaa_record_analysis / csaa_finalize_analysis
+            // did not seed the queue (a seeding error, or the analysis was
+            // recorded by an older code path). Re-seed it now from the
+            // recorded analysis so the iterator can run. Only error out if
+            // the re-seed genuinely yields no items — never fall back to a
+            // bulk envelope.
+            const analysisRaw = ctx.readPhaseArtifact('analyze', 'analysis-report.json');
+            if (!analysisRaw) {
+                return errorResult(
+                    `translate queue is empty and analysis-report.json is unreadable — cannot seed the iterator. Re-run csaa_analyze + csaa_record_analysis.`,
+                    runId,
+                );
+            }
+            let parsedAnalysis: {
+                scenarios: Array<{ id: string; steps?: Array<{ text?: string }> }>;
+                pages: Array<{ className: string; role?: string }>;
+            };
+            try {
+                parsedAnalysis = JSON.parse(analysisRaw);
+            } catch (e) {
+                return errorResult(
+                    `translate queue is empty and analysis-report.json is not valid JSON (${e instanceof Error ? e.message : String(e)}). Re-run csaa_record_analysis.`,
+                    runId,
+                );
+            }
+            const seedResult = seedTranslateQueue(ctx, parsedAnalysis);
+            if (!seedResult.seeded) {
+                return errorResult(
+                    `translate queue could not be seeded from analysis-report.json` +
+                        (seedResult.error
+                            ? `: ${seedResult.error}`
+                            : ` — the analysis produced no feature/steps/page/data items. Check that analysis.scenarios[] and analysis.pages[] are populated.`),
+                    runId,
+                );
+            }
+            // Re-load so the freshly-seeded items are visible.
+            tQueue = CSWorkQueue.load(ctx);
         }
 
-        const envelope: DelegationEnvelope = {
-            task: 'translate-analysis-to-bdd',
-            instruction: [
-                'You are translating a recorded analysis into CS Playwright BDD files. Half-effort output gets rejected by content gates — bake the skills in from the start.',
-                '',
-                'STEP 0 — READ the skill files first. For EVERY entry in `grounding.mandatorySkills`, use `read` on `<workspaceRoot>/.github/skills/<name>/SKILL.md`. These are the framework conventions the audit enforces. Examples block format, page-object pattern, step-def signature variants, data-driven shape — all documented there.',
-                '',
-                'STEP 1 — read the analysis. Use `read` on `grounding.analysisReportPath`.',
-                '',
-                'STEP 2 — produce ALL of the following artefacts. Emitting fewer kinds is rejected by the file-kind coverage gate (see csaa_record_translation). A partial translation (e.g. only steps.ts) is never accepted.',
-                '  - REQUIRED: 1 .feature file → `test/<project>/features/<module>/<slug>.feature` covering EVERY scenario from analysis.scenarios[]',
-                '  - REQUIRED: 1 .steps.ts file → `test/<project>/steps/<module>/<slug>.steps.ts` with a @CSBDDStepDef whose pattern EXACTLY matches every Given/When/Then text in the feature (no extra words, no rephrasing)',
-                '  - REQUIRED: 1 data JSON file → `test/<project>/data/<module>/<slug>-scenarios.json` — include EVERY column from `analysis.scenarios[i].dataRow`, not just metadata',
-                '  - REQUIRED: 1 page object .ts file under `test/<project>/pages/<module>/` for EVERY analysis page with role=create-new (one file per page, named after the page class)',
-                '  - Pages with role=reuse-existing → DO NOT emit (the consumer already has them).',
-                '',
-                'STRICT FEATURE-FILE RULES (per ff-scenario-outline skill):',
-                ' - Use `Scenario Outline:` ONLY when the body references at least one `<placeholder>` from Examples. If no placeholders, use plain `Scenario:`.',
-                ' - If you use Scenario Outline, the `Examples:` block MUST be the JSON envelope:',
-                '     Examples: {"type":"json","source":"test/<project>/data/<module>/<slug>-scenarios.json","path":"$","filter":"scenarioId=<id> AND runFlag=Yes"}',
-                '   NOT a Gherkin table. Plain `| scenarioId |` tables are rejected.',
-                ' - Step text in features must NEVER contain code references like `ClassName.methodName`. Translate `CTSSupportMethod.TS_4963` to a human-readable step like `Given I am signed in as <user>`.',
-                '',
-                'STRICT IMPORT CONVENTIONS (rejected if violated):',
-                `  - Framework package is "${frameworkPkg}" — use this exact prefix.`,
-                '  - CSBDDStepDef, StepDefinitions, Page, CSBDDContext, CSScenarioContext → /bdd',
-                '  - CSReporter → /reporting',
-                '  - CSBasePage, CSPage, CSGetElement, CSConfigurationManager → /core',
-                '  - CSWebElement, CSElementFactory → /element',
-                '  - CSValueResolver → /utilities',
-                '  - CSDBUtils → /database-utils',
-                '',
-                'STRICT STEP-DEFINITION RULES (rejected if violated):',
-                ' - EVERY @CSBDDStepDef body MUST do at least one element interaction — call a method on `this.somePage` (click, fill, verify, etc.) OR use CSDBUtils/CSConfigurationManager. Bodies that only call `CSReporter.pass(...)` are stub-step-body violations.',
-                ' - Locators on @CSGetElement MUST come from `analysis.pages[].elements[].primaryLocator.value` (the legacy file value). Do not invent XPaths.',
-                ' - Class properties decorated with @Page or @CSGetElement MUST use the `!` non-null assertion (e.g. `myPage!: MyPage;`) to satisfy strict TypeScript.',
-                ' - Decorator `@StepDefinitions` is used WITHOUT parens. `@CSBDDStepDef(...)` takes parens.',
-                ' - Step-def method signatures: `(message: string)` for {string}, `(value: number)` for {int}. NEVER use `(ctx, ...)` — there is no ctx parameter.',
-                '',
-                'STRICT PAGE-OBJECT RULES:',
-                ' - Use `@CSGetElement({...})` and access elements as PROPERTIES (no parens): `this.myButton.click()` NOT `this.getMyButton().click()`.',
-                ' - Do not invent chained APIs like `.getRowByCellValue(...)` or `.getButton(...)` on CSWebElement — they do not exist. Use the framework methods documented in the skill files only.',
-                '',
-                'STRICT CONTENT RULES:',
-                ' - Every scenario MUST have ≥1 When + ≥1 Then (not just Given).',
-                ' - NEVER emit "TODO", "not implemented", "placeholder", or "the operation should complete without errors".',
-                ' - No duplicate `import { X }` lines.',
-                ' - No duplicate `@Page("key")` decorators.',
-                '',
-                'STEP 3 — submit the translation. **DEFAULT: STREAMING.** Use `csaa_append_translation_file` for EVERY file then `csaa_finalize_translation` to close out. This is the path for any real migration.',
-                '  Why: `csaa_record_translation` enforces a HARD CAP (4 files OR 12 KB total content) on single-call submissions. Above that, it rejects with `state=AWAITING_LLM_RETRY` and forces you to retry via streaming. Even if you "think" your translation will fit (it won\'t — 5+ pages averaging 1-3 KB each easily blows it), composing the payload triggers "Sorry, the response hit the length limit" before the tool call lands. Skip the failed attempt; stream from the start.',
-                '  Streaming loop (mandatory above the cap, recommended otherwise):',
-                '    1. For EACH file in your translation, call `csaa_append_translation_file(runId, file: { relativePath, kind, content })`. One file per call (~1-5 KB). Order: feature first, then steps.ts, then one page object per analysis page with role=create-new, then data.json. Stages to `05-translate/scratch-files.json` — survives compaction.',
-                '    2. When every file is appended, call `csaa_finalize_translation(runId, notes?)`. It re-dispatches through `csaa_record_translation` with the bypass flag set, so EVERY gate fires identically (schema + content + page-coverage signature + step-coverage signature + compile_check). No shortcut, no quality compromise.',
-                '  Single-call path: only when total content < 12 KB AND files ≤ 4. Typically only "smoke fixture" sized inputs. Real migrations always need streaming.',
-                '',
-                '**CRITICAL — do NOT narrate file contents in chat.** Emitting "Now writing page object..." / "Adding element locators..." / "Defining the page class..." in your reply burns output tokens. Compose tool calls SILENTLY. The user reads STATUS.md for progress, not your narration. Inlining feature/steps/page content as visible markdown is the #1 cause of "response hit the length limit" on this phase.',
-                '',
-                'The record tool runs schema validation, content gates (placeholder / dup imports / wrong subpath / empty body / step-def coverage / stub bodies / Scenario Outline misuse / Examples envelope shape / helper-class leak / duplicate scenario title / orphan step def / duplicate step-def bodies / generic-placeholder step text / Java identifier leak), the page-coverage signature gate (generated @CSGetElement count vs legacy @FindBy count ≥ 80%), the step-coverage signature gate (Gherkin steps per scenario vs legacy actions ≥ 70%), and `tsc --noEmit` against the consumer\'s tsconfig. If ANY gate fails you receive the specific violations — fix and re-call up to 3 times.',
-            ].join('\n'),
-            responseSchema: TRANSLATION_SCHEMA,
-            grounding: {
-                runId,
-                project,
-                module,
-                frameworkPkg,
-                analysisReportPath,
-                skillsPath: '.github/skills/',
-                mandatorySkills: [...MANDATORY_TRANSLATE_SKILLS],
-            },
-            recordWith: 'csaa_record_translation',
-            recordArgs: { runId },
+        // Queue is guaranteed non-empty here — drive the per-file iterator.
+        const tItem = tQueue.peekNext('translate') as TranslateQueueItem;
+        const tCommon: TranslateIteratorCommonGrounding = {
+            runId,
+            project,
+            module,
+            frameworkPkg,
+            analysisReportPath,
+            skillsPath: '.github/skills/',
         };
-
+        const tIterEnv = buildTranslateFileEnvelope(
+            tItem,
+            { completed: tQueue.completed('translate'), total: tQueue.total('translate') },
+            tCommon,
+        );
         ctx.writePhaseArtifact(
             'translate',
             'delegation-envelope.json',
-            JSON.stringify(envelope, null, 2),
+            JSON.stringify(tIterEnv, null, 2),
         );
         CSStatusWriter.write(ctx);
-
         return jsonResult(
             {
                 state: 'AWAITING_LLM_FULFILMENT',
                 runId,
                 phase: 'translate',
-                delegation: envelope,
+                delegation: tIterEnv,
+                queue: {
+                    current: tQueue.completed('translate') + 1,
+                    total: tQueue.total('translate'),
+                    progress: tQueue.progress('translate'),
+                },
+                iteratorMode: true,
                 runFolder: ctx.runFolder,
                 nextStepNeeded: true,
-                nextSuggestedTool: 'csaa_record_translation',
+                nextSuggestedTool: 'csaa_append_translation_file',
                 nextSuggestedArgs: { runId },
             },
-            `Translate delegation ready. Produce file map matching TRANSLATION_SCHEMA, then call csaa_record_translation(runId, payload).`,
+            `Iterator mode: produce file ${tQueue.completed('translate') + 1}/${tQueue.total('translate')} (${tItem.kind} → ${tItem.relativePath}). Submit via csaa_append_translation_file.`,
         );
     })
     .build();
@@ -4670,13 +4854,13 @@ const csaa_write: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                         ? `Login credentials missing or placeholder in ${credentialsHint.join('; ')}. Ask the user for the username + password, then call csaa_configure_credentials(runId, username, password) BEFORE csaa_execute. The password is encrypted via CSEncryptionUtil before write — plaintext never persists.`
                         : undefined,
                     nextStepNeeded: true,
-                    nextSuggestedTool: credentialsMissing ? 'csaa_configure_credentials' : 'csaa_execute',
+                    nextSuggestedTool: credentialsMissing ? 'csaa_configure_credentials' : 'csaa_preflight',
                     nextSuggestedArgs: { runId },
                     filesWritten: result.written,
                 },
                 credentialsMissing
                     ? `Wrote ${result.written.length} file(s). CREDENTIALS MISSING — ask the user for username + password, then call csaa_configure_credentials.`
-                    : `Wrote ${result.written.length} file(s); skipped ${result.skippedExisting.length} existing. Call csaa_execute next.`,
+                    : `Wrote ${result.written.length} file(s); skipped ${result.skippedExisting.length} existing. Call csaa_preflight next (static pre-flight) before csaa_execute.`,
             );
         } catch (err) {
             ctx.finishPhase('write', 'blocked_user', {
@@ -4688,6 +4872,109 @@ const csaa_write: MCPToolDefinition = (defineTool() as MCPToolBuilder)
                 runId,
             );
         }
+    })
+    .build();
+
+// ============================================================================
+// csaa_preflight — Phase 7.5: static pre-flight audit before execute
+// ============================================================================
+// Cheap deterministic check after csaa_write writes files to disk. Runs:
+//   1. Content validator over each on-disk file (catches drift since finalize)
+//   2. Regex audit for PO012/PO013/PO014/PO015 (belt-and-suspenders to
+//      the content gates)
+//   3. Cross-file duplicate @CSBDDStepDef detection
+// Returns verdict=passed → call csaa_execute, or verdict=blocked with the
+// list of findings + suggested next step (patch via
+// csaa_patch_translation_file, or re-translate).
+
+const csaa_preflight: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_preflight')
+    .title('CS-AI-Auto-Assist — Pre-Flight Audit (Phase 7.5)')
+    .description(
+        'Static pre-flight audit between csaa_write and csaa_execute. Re-runs the ' +
+            'content validator over the on-disk files, runs the PO012-PO015 regex audit, ' +
+            'detects cross-file duplicate @CSBDDStepDef. Returns verdict=passed → proceed ' +
+            'to csaa_execute, or verdict=blocked with findings + next-step guidance.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .stringParam('project', 'Project name', { required: true })
+    .stringParam('module', 'Optional module sub-folder name')
+    .stringParam('workspaceRoot', 'Consumer workspace root (defaults to cwd)')
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const project = String(params.project ?? '');
+        const moduleFilter = getStr(params, 'module');
+        const workspaceRoot = getStr(params, 'workspaceRoot') ?? process.cwd();
+        if (!runId || !project) {
+            return errorResult('runId and project required');
+        }
+        // Path traversal guard: `project` is concatenated into a filesystem
+        // path inside CSPreflightAuditor.audit. Reject `..`, slashes, and
+        // backslashes so a malicious project name cannot walk outside the
+        // workspace.
+        if (project.includes('..') || project.includes('/') || project.includes('\\') || project.includes('\0')) {
+            return errorResult(`project name must be a single folder segment (got "${project}")`, runId);
+        }
+        if (moduleFilter && (moduleFilter.includes('..') || moduleFilter.includes('/') || moduleFilter.includes('\\'))) {
+            return errorResult(`module name must be a single folder segment (got "${moduleFilter}")`, runId);
+        }
+        const ctx = CSRunContext.get(runId);
+        if (!ctx) return errorResult(`runId not found: ${runId}`, runId);
+
+        ctx.startPhase('preflight');
+        const report = CSPreflightAuditor.audit(workspaceRoot, project, moduleFilter);
+        ctx.writePhaseArtifact('preflight', 'report.json', JSON.stringify(report, null, 2));
+        ctx.writePhaseArtifact('preflight', 'report.md', CSPreflightAuditor.renderReport(report));
+
+        if (report.verdict === 'blocked') {
+            ctx.finishPhase('preflight', 'blocked_user', {
+                reason: `${report.summary.errorCount} error(s), ${report.summary.duplicateStepDefCount} duplicate step-def(s)`,
+            });
+            CSStatusWriter.write(ctx);
+            return jsonResult(
+                {
+                    state: 'AWAITING_LLM_RETRY',
+                    runId,
+                    phase: 'preflight',
+                    verdict: 'blocked',
+                    summary: report.summary,
+                    findings: report.findings.slice(0, 50),
+                    duplicateStepDefs: report.duplicateStepDefs,
+                    nextStepNeeded: true,
+                    nextSuggestedTool: 'csaa_patch_translation_file',
+                    nextSuggestedArgs: { runId },
+                    blockedReason:
+                        `Pre-flight BLOCKED: ${report.summary.errorCount} error(s) + ` +
+                        `${report.summary.duplicateStepDefCount} duplicate step-def(s). ` +
+                        'Patch the offending files via csaa_patch_translation_file then re-run csaa_preflight.',
+                },
+                `Pre-flight BLOCKED — ${report.summary.errorCount} error(s), ` +
+                    `${report.summary.duplicateStepDefCount} duplicate step-def(s) across ` +
+                    `${report.filesScanned} file(s). See preflight/report.md.`,
+            );
+        }
+
+        ctx.finishPhase('preflight', 'done', {
+            reason: `${report.filesScanned} file(s) scanned, ${report.summary.warnCount} warning(s)`,
+        });
+        CSStatusWriter.write(ctx);
+        return jsonResult(
+            {
+                state: 'RUNNING',
+                runId,
+                phase: 'preflight',
+                verdict: 'passed',
+                summary: report.summary,
+                filesScanned: report.filesScanned,
+                nextStepNeeded: true,
+                nextSuggestedTool: 'csaa_execute',
+                nextSuggestedArgs: { runId },
+            },
+            `Pre-flight PASSED — ${report.filesScanned} file(s) clean ` +
+                `(${report.summary.warnCount} warning${report.summary.warnCount === 1 ? '' : 's'}). ` +
+                'Call csaa_execute next.',
+        );
     })
     .build();
 
@@ -5215,6 +5502,523 @@ const csaa_query_existing_pages: MCPToolDefinition = (defineTool() as MCPToolBui
     })
     .build();
 
+// ============================================================================
+// csaa_register_inputs — declare a multi-input run shape (legacy + doc + URL + ADO)
+// ============================================================================
+// G4 — primitive for the multi-input case (e.g. user provides a requirement
+// doc PLUS a URL PLUS ADO IDs). The orchestrator registers what input
+// surfaces the run will draw from, and downstream phases iterate. The
+// alternative (one global "mode" per run) forces the orchestrator to
+// pick one source and ignore the others.
+//
+// Stored in `runFolder/01-intake/inputs-manifest.json` so analyze + plan +
+// translate can consume the list.
+
+const csaa_register_inputs: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_register_inputs')
+    .title('CS-AI-Auto-Assist — Register Multi-Input Sources')
+    .description(
+        'Declare the set of input sources a run draws from. Each entry has a kind ' +
+            "(legacy_test_code | requirement_doc | app_source | url | ado_test_case | " +
+            'ado_test_suite | ado_test_plan | ado_user_story) plus locator (path / url / id). ' +
+            'Stored as `01-intake/inputs-manifest.json` for downstream phases to enumerate. ' +
+            'Replaces the single-source assumption baked into the older intake flow.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .arrayParam(
+        'inputs',
+        'Array of { kind, locator, optional notes }. kind ∈ legacy_test_code | requirement_doc | app_source | url | ado_test_case | ado_test_suite | ado_test_plan | ado_user_story.',
+        'object',
+        { required: true },
+    )
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const inputsRaw = params.inputs;
+        if (!runId) return errorResult('runId required');
+        if (!Array.isArray(inputsRaw) || inputsRaw.length === 0) {
+            return errorResult('inputs[] required (≥1)');
+        }
+        const ctx = CSRunContext.get(runId);
+        if (!ctx) return errorResult(`runId not found: ${runId}`, runId);
+
+        const validKinds = new Set([
+            'legacy_test_code',
+            'requirement_doc',
+            'app_source',
+            'url',
+            'ado_test_case',
+            'ado_test_suite',
+            'ado_test_plan',
+            'ado_user_story',
+        ]);
+        const pathLikeKinds = new Set(['legacy_test_code', 'requirement_doc', 'app_source']);
+        type Input = { kind: string; locator: string; notes?: string };
+        const parsed: Input[] = [];
+        for (let i = 0; i < inputsRaw.length; i++) {
+            const item = inputsRaw[i];
+            if (!item || typeof item !== 'object') {
+                return errorResult(`inputs[${i}] must be an object`);
+            }
+            const obj = item as Record<string, unknown>;
+            const kind = String(obj.kind ?? '');
+            const locator = String(obj.locator ?? '');
+            if (!validKinds.has(kind)) {
+                return errorResult(`inputs[${i}].kind invalid: ${kind} (must be one of ${Array.from(validKinds).join(', ')})`);
+            }
+            if (!locator) {
+                return errorResult(`inputs[${i}].locator required`);
+            }
+            // For path-shaped kinds, normalise + reject `..` walks. Downstream
+            // tools open these locators later — fail at registration if the
+            // shape is suspicious so the error surfaces close to the caller.
+            if (pathLikeKinds.has(kind)) {
+                const normalised = path.normalize(locator);
+                if (normalised.split(/[\\/]/).some((seg) => seg === '..')) {
+                    return errorResult(
+                        `inputs[${i}].locator contains ".." path traversal: ${locator}`,
+                    );
+                }
+            }
+            const entry: Input = { kind, locator };
+            if (typeof obj.notes === 'string') entry.notes = obj.notes;
+            parsed.push(entry);
+        }
+        // Ensure intake phase is started so STATUS.md reflects the activity
+        // (writePhaseArtifact lazily creates the folder, but timeline state
+        // would stay "pending" otherwise).
+        if (!ctx.snapshot().phases.find((p) => p.name === 'intake' && (p.status === 'running' || p.status === 'done'))) {
+            ctx.startPhase('intake');
+        }
+        const manifest = { runId, registeredAt: new Date().toISOString(), inputs: parsed };
+        ctx.writePhaseArtifact('intake', 'inputs-manifest.json', JSON.stringify(manifest, null, 2));
+
+        const summary = parsed.map((p) => `${p.kind}:${p.locator.slice(0, 40)}${p.locator.length > 40 ? '…' : ''}`).join(', ');
+        return jsonResult(
+            { runId, inputCount: parsed.length, kinds: parsed.map((p) => p.kind) },
+            `Registered ${parsed.length} input(s) — ${summary}.`,
+        );
+    })
+    .build();
+
+// ============================================================================
+// csaa_record_crawl_snapshot — append a captured page to the URL-mode crawl index
+// ============================================================================
+// G3 — primitive for the URL-only / doc+URL input modes. The browser_*
+// tools already cover navigation, snapshot, and DOM-tree capture. What's
+// missing is a place to PERSIST the captured page state so the agent's
+// later analyze phase can RAG over it. This tool appends one
+// snapshot-per-page record to `runFolder/02-discover/flow-graph.json`.
+//
+// The agent's crawl loop:
+//   1. browser_navigate(url)
+//   2. browser_snapshot()       → page DOM + URL
+//   3. csaa_record_crawl_snapshot(runId, { url, title, snapshot, navigableUrls })
+//   4. for each navigableUrl not yet visited → repeat
+//
+// The flow graph is just a node-list. Edges are inferred from the
+// `navigableUrls` field. Analyzer can later traverse it to enumerate
+// flows worth turning into scenarios.
+
+const csaa_record_crawl_snapshot: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_record_crawl_snapshot')
+    .title('CS-AI-Auto-Assist — Record URL Crawl Snapshot')
+    .description(
+        'Append one captured page snapshot to the run\'s flow-graph.json under 02-discover/. ' +
+            "Used by the URL-only / doc+URL exploration loop: the agent calls browser_navigate + browser_snapshot " +
+            "for each page, then records the snapshot here. Builds the substrate for later analyze + scenario emission.",
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .stringParam('url', 'Page URL as visited', { required: true })
+    .stringParam('title', 'Page <title> if known')
+    .stringParam('snapshot', 'DOM / accessibility-tree text snapshot (from browser_snapshot)', { required: true })
+    .arrayParam('navigableUrls', 'Outbound links / form targets discovered on this page', 'string')
+    .stringParam('notes', 'Optional human-readable annotation (e.g. "login page", "list view")')
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const url = String(params.url ?? '');
+        const snapshot = String(params.snapshot ?? '');
+        if (!runId || !url || !snapshot) {
+            return errorResult('runId, url, snapshot all required');
+        }
+        const ctx = CSRunContext.get(runId);
+        if (!ctx) return errorResult(`runId not found: ${runId}`, runId);
+        const title = getStr(params, 'title') ?? '';
+        const notes = getStr(params, 'notes') ?? '';
+        const navParam = params.navigableUrls;
+        const navigableUrls = Array.isArray(navParam)
+            ? (navParam as unknown[]).map((u) => String(u)).filter((u) => u.length > 0)
+            : [];
+
+        // Caps: per-snapshot truncation + total node cap. Without these the
+        // flow-graph.json grows unboundedly (O(N²) IO on a 1000-page crawl
+        // because each record rewrites the entire file).
+        const MAX_SNAPSHOT_CHARS = 32 * 1024;
+        const MAX_NODES = 200;
+        let truncated = false;
+        let storedSnapshot = snapshot;
+        if (storedSnapshot.length > MAX_SNAPSHOT_CHARS) {
+            storedSnapshot = storedSnapshot.slice(0, MAX_SNAPSHOT_CHARS);
+            truncated = true;
+        }
+
+        // Ensure discover phase started so timeline state is honest.
+        if (!ctx.snapshot().phases.find((p) => p.name === 'discover' && (p.status === 'running' || p.status === 'done'))) {
+            ctx.startPhase('discover');
+        }
+
+        // Load existing flow graph (if any).
+        const existing = ctx.readPhaseArtifact('discover', 'flow-graph.json');
+        type Node = {
+            id: string;
+            url: string;
+            title: string;
+            notes: string;
+            navigableUrls: string[];
+            snapshotLength: number;
+            truncated?: boolean;
+            capturedAt: string;
+        };
+        let graph: { nodes: Node[]; snapshotsByNodeId: Record<string, string> } = {
+            nodes: [],
+            snapshotsByNodeId: {},
+        };
+        if (existing) {
+            try { graph = JSON.parse(existing); } catch { /* malformed — start fresh */ }
+        }
+        if (graph.nodes.length >= MAX_NODES) {
+            return errorResult(
+                `flow graph already has ${graph.nodes.length} nodes (cap ${MAX_NODES}). ` +
+                    `Either start a new run or call csaa_record_crawl_snapshot less aggressively.`,
+                runId,
+            );
+        }
+        const nodeId = `n${graph.nodes.length + 1}`;
+        graph.nodes.push({
+            id: nodeId,
+            url,
+            title,
+            notes,
+            navigableUrls,
+            snapshotLength: snapshot.length,
+            ...(truncated ? { truncated: true } : {}),
+            capturedAt: new Date().toISOString(),
+        });
+        graph.snapshotsByNodeId[nodeId] = storedSnapshot;
+        ctx.writePhaseArtifact('discover', 'flow-graph.json', JSON.stringify(graph, null, 2));
+
+        return jsonResult(
+            { runId, nodeId, totalNodes: graph.nodes.length, truncated },
+            `Recorded snapshot node ${nodeId} (${storedSnapshot.length} chars` +
+                `${truncated ? `, truncated from ${snapshot.length}` : ''}). ` +
+                `Flow graph now has ${graph.nodes.length} node(s).`,
+        );
+    })
+    .build();
+
+// ============================================================================
+// csaa_trace_dependencies — build the transitive import closure on demand
+// ============================================================================
+// v1.39.6 — replaces "scope mapper pulls in every page in the folder" with
+// a deterministic transitive-import trace from an entry file. Returns the
+// closure (every file the entry depends on, direct or transitive),
+// `unrelated` (project files NOT in the closure), `unresolvedImports`
+// (3rd-party or typo'd FQNs), and `cycles`. Follows data-file references
+// (xlsx → xml / properties) up to maxDepth so multi-hop test-data chains
+// are walked end to end. Writes `02-discover/dependency-graph.json` +
+// `dependency-graph.md` to the run folder for downstream phases.
+
+const csaa_trace_dependencies: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_trace_dependencies')
+    .title('CS-AI-Auto-Assist — Trace Legacy Dependency Closure')
+    .description(
+        'Build a transitive-import dependency graph from an entry file (.java / .cs) ' +
+            'inside a legacy project. Returns nodes (closure), unrelated files (NOT to be ' +
+            'migrated), unresolvedImports, and cycles. Follows data-file references ' +
+            '(xlsx → xml / properties) so multi-hop test-data chains are walked end to end. ' +
+            'Use this before scope mapping to know exactly which pages/helpers are required.',
+    )
+    .category('multiagent')
+    .stringParam('runId', 'Run ID', { required: true })
+    .stringParam('entryFile', 'Absolute path to the entry legacy test file', { required: true })
+    .stringParam('projectRoot', 'Absolute path to the legacy project root', { required: true })
+    .numberParam('maxDepth', 'Max hop depth (default 8)')
+    .booleanParam('followDataRefs', 'Follow data-file cross-references (default true)')
+    .handler(async (params: Record<string, unknown>) => {
+        const runId = String(params.runId ?? '');
+        const entryFile = String(params.entryFile ?? '');
+        const projectRoot = String(params.projectRoot ?? '');
+        if (!runId || !entryFile || !projectRoot) {
+            return errorResult('runId, entryFile, projectRoot all required');
+        }
+        if (!fs.existsSync(entryFile)) return errorResult(`entryFile not found: ${entryFile}`);
+        if (!fs.existsSync(projectRoot)) return errorResult(`projectRoot not found: ${projectRoot}`);
+        const ctx = CSRunContext.get(runId);
+        if (!ctx) return errorResult(`runId not found: ${runId}`, runId);
+
+        const maxDepthRaw = typeof params.maxDepth === 'number' ? params.maxDepth : Number(params.maxDepth);
+        const maxDepth = Number.isFinite(maxDepthRaw) && maxDepthRaw > 0 ? Math.floor(maxDepthRaw) : 8;
+        const followDataRefs = params.followDataRefs !== false;
+
+        let graph;
+        try {
+            graph = CSDependencyGraph.build(entryFile, projectRoot, { maxDepth, followDataRefs });
+        } catch (e) {
+            return errorResult(`dependency graph build failed: ${(e as Error).message}`, runId);
+        }
+        ctx.writePhaseArtifact('discover', 'dependency-graph.json', JSON.stringify(graph, null, 2));
+        ctx.writePhaseArtifact('discover', 'dependency-graph.md', CSDependencyGraph.renderSummary(graph));
+
+        return jsonResult(
+            {
+                runId,
+                entryFile: graph.entryFile,
+                companyPackagePrefixes: graph.companyPackagePrefixes,
+                nodeCount: graph.nodes.length,
+                unrelatedCount: graph.unrelated.length,
+                unresolvedImportCount: graph.unresolvedImports.length,
+                cycleCount: graph.cycles.length,
+                maxDepthReached: graph.maxDepthReached,
+                // Compact node list — full graph persisted to the run folder.
+                nodes: graph.nodes.map((n) => ({
+                    relativePath: n.relativePath,
+                    kind: n.kind,
+                    depth: n.depth,
+                    importedBy: n.importedBy,
+                })),
+                unrelated: graph.unrelated.slice(0, 100),
+                unresolvedImports: graph.unresolvedImports.slice(0, 50),
+            },
+            `Dependency closure: ${graph.nodes.length} node(s) in scope, ${graph.unrelated.length} unrelated, ` +
+                `${graph.unresolvedImports.length} unresolved, max depth ${graph.maxDepthReached}. ` +
+                `See 02-discover/dependency-graph.{json,md}.`,
+        );
+    })
+    .build();
+
+// ============================================================================
+// csaa_chunk_document — split a markdown/text doc into rule-sized chunks
+// ============================================================================
+// G2 — minimal doc chunker primitive. When the user supplies a requirement
+// document (markdown, txt, pdf-text-extract) along with an ask for 100%
+// coverage, the analyzer needs to walk the doc rule-by-rule, retrieve the
+// surrounding context for each rule, and emit a scenario per rule. This
+// tool returns each chunk as `{ id, heading, body, offsetStart, offsetEnd }`
+// — chunked by H1/H2/H3 markdown headings, falling back to 1500-character
+// fixed-size chunks for plain text.
+//
+// Deliberately deterministic. The agent does the semantic work — this just
+// gives them the bytes in chunks small enough to fit in context.
+
+const csaa_chunk_document: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_chunk_document')
+    .title('CS-AI-Auto-Assist — Chunk a Requirement / Spec Document')
+    .description(
+        'Chunk a markdown / text requirement doc into context-sized pieces ' +
+            "(one per H1/H2/H3 section, or 1500-char fixed-size fallback). " +
+            'Returns id, heading, body, offsetStart, offsetEnd per chunk. The agent ' +
+            'iterates chunks to extract numbered rules / acceptance criteria.',
+    )
+    .category('multiagent')
+    .stringParam('filePath', 'Document path (.md / .txt / .markdown / .adoc). Relative paths resolve against workspaceRoot.', { required: true })
+    .stringParam('workspaceRoot', 'Workspace root the document MUST live under (path traversal rejected). Defaults to cwd.')
+    .numberParam('maxChunkChars', 'Soft cap per chunk in characters (default 1500)')
+    .handler(async (params: Record<string, unknown>) => {
+        const filePathRaw = String(params.filePath ?? '');
+        if (!filePathRaw) return errorResult('filePath required');
+        const workspaceRoot = path.resolve(getStr(params, 'workspaceRoot') ?? process.cwd());
+
+        // Path sandboxing — resolve against workspaceRoot and reject anything
+        // that escapes. Otherwise an LLM with prompt-injected input could
+        // call csaa_chunk_document({ filePath: '/etc/passwd' }) and pump the
+        // contents back through the chat.
+        const resolved = path.resolve(workspaceRoot, filePathRaw);
+        if (!resolved.startsWith(workspaceRoot + path.sep) && resolved !== workspaceRoot) {
+            return errorResult(
+                `filePath "${filePathRaw}" resolves outside workspaceRoot "${workspaceRoot}" — refusing to read`,
+            );
+        }
+        // Extension whitelist — binary formats (.pdf, etc.) need a separate
+        // extractor. Reject early instead of returning chunks of binary garbage.
+        const ext = path.extname(resolved).toLowerCase();
+        const acceptedExts = new Set(['.md', '.markdown', '.txt', '.adoc', '.rst']);
+        if (!acceptedExts.has(ext)) {
+            return errorResult(
+                `filePath extension "${ext}" not supported. Accepted: ${Array.from(acceptedExts).join(', ')}. ` +
+                    'For PDFs / docx, extract the text upstream and pass a .txt/.md file.',
+            );
+        }
+        const filePath = resolved;
+        const maxRaw = typeof params.maxChunkChars === 'number' ? params.maxChunkChars : Number(params.maxChunkChars);
+        const maxChunkChars = Number.isFinite(maxRaw) && maxRaw > 0 ? Math.floor(maxRaw) : 1500;
+        let raw: string;
+        try {
+            raw = fs.readFileSync(filePath, 'utf-8');
+        } catch (e) {
+            return errorResult(`failed to read ${filePath}: ${(e as Error).message}`);
+        }
+        // Magic-byte sniff — even with .md extension, refuse anything that
+        // starts with binary signatures (defense against rename attacks).
+        if (raw.startsWith('%PDF-') || raw.charCodeAt(0) === 0xFFFD) {
+            return errorResult(
+                `filePath "${filePathRaw}" contains binary content (magic bytes detected). Pass a plain-text doc instead.`,
+            );
+        }
+
+        type Chunk = { id: string; heading: string; body: string; offsetStart: number; offsetEnd: number };
+        const chunks: Chunk[] = [];
+        const lines = raw.split(/\r?\n/);
+
+        // Walk heading-driven chunks first.
+        let curHeading = '';
+        let curBody: string[] = [];
+        let curStart = 0;
+        let runningOffset = 0;
+        const flush = (endOffset: number) => {
+            const body = curBody.join('\n').trim();
+            if (!body && !curHeading) return;
+            chunks.push({
+                id: `chunk-${chunks.length + 1}`,
+                heading: curHeading || '(top-level)',
+                body,
+                offsetStart: curStart,
+                offsetEnd: endOffset,
+            });
+        };
+        for (const ln of lines) {
+            const lineWithNewline = ln + '\n';
+            const headingMatch = /^(#{1,3})\s+(.+)$/.exec(ln);
+            if (headingMatch) {
+                flush(runningOffset);
+                curHeading = headingMatch[2].trim();
+                curBody = [];
+                curStart = runningOffset;
+            } else {
+                curBody.push(ln);
+            }
+            runningOffset += lineWithNewline.length;
+        }
+        flush(runningOffset);
+
+        // If no headings produced chunks (plain text), fall back to
+        // fixed-size character chunks.
+        if (chunks.length === 0 || (chunks.length === 1 && chunks[0].heading === '(top-level)')) {
+            chunks.length = 0;
+            for (let i = 0; i < raw.length; i += maxChunkChars) {
+                const slice = raw.slice(i, Math.min(raw.length, i + maxChunkChars));
+                chunks.push({
+                    id: `chunk-${chunks.length + 1}`,
+                    heading: `(chars ${i}-${i + slice.length})`,
+                    body: slice.trim(),
+                    offsetStart: i,
+                    offsetEnd: i + slice.length,
+                });
+            }
+        }
+
+        // Split oversized chunks too — same maxChunkChars cap.
+        const finalChunks: Chunk[] = [];
+        for (const c of chunks) {
+            if (c.body.length <= maxChunkChars) {
+                finalChunks.push(c);
+                continue;
+            }
+            for (let i = 0; i < c.body.length; i += maxChunkChars) {
+                const slice = c.body.slice(i, Math.min(c.body.length, i + maxChunkChars));
+                finalChunks.push({
+                    id: `chunk-${finalChunks.length + 1}`,
+                    heading: `${c.heading} (part ${Math.floor(i / maxChunkChars) + 1})`,
+                    body: slice,
+                    offsetStart: c.offsetStart + i,
+                    offsetEnd: c.offsetStart + i + slice.length,
+                });
+            }
+        }
+
+        return jsonResult(
+            { filePath, totalChars: raw.length, chunkCount: finalChunks.length, chunks: finalChunks },
+            `Chunked ${path.basename(filePath)} into ${finalChunks.length} chunk(s) (${raw.length} chars total).`,
+        );
+    })
+    .build();
+
+// ============================================================================
+// csaa_retrieve_skills — BM25-filtered retrieval over the shipped skill index
+// ============================================================================
+// Replaces the "inline every potentially-relevant skill into the translate
+// envelope" pattern. The orchestrator now emits skill IDs as references; the
+// agent (Copilot) calls this tool when it needs the actual skill body. With
+// 48 skills averaging ~3 KB each, this is the single biggest contributor to
+// per-message envelope-cap pressure on Copilot Sonnet.
+//
+// Filtering by phase / fileKind / tags runs BEFORE BM25 scoring — most
+// callers narrow to <5 candidate skills before any text matching runs.
+//
+// Consumer override: if `<workspaceRoot>/.cs-ai-skills/<name>/SKILL.md`
+// exists, that file shadows the shipped skill of the same id.
+const csaa_retrieve_skills: MCPToolDefinition = (defineTool() as MCPToolBuilder)
+    .name('csaa_retrieve_skills')
+    .title('CS-AI-Auto-Assist — Retrieve Skills (BM25 over shipped index)')
+    .description(
+        'Return up to K skills relevant to the current generation step, ' +
+            'filtered by phase/fileKind/tags and ranked by BM25 over a free-text ' +
+            'query. Use this instead of asking for every skill upfront — the agent ' +
+            'fetches just the skills it actually needs, keeping the envelope small.',
+    )
+    .category('multiagent')
+    .stringParam('workspaceRoot', 'Optional workspace root to pick up consumer overrides under .cs-ai-skills/')
+    .stringParam('phase', "Phase filter (e.g. 'translate', 'analyze', 'audit', 'heal', 'publish')")
+    .stringParam('fileKind', "File-kind filter for translate-phase skills (e.g. 'page', 'steps', 'feature', 'data')")
+    .arrayParam('tags', 'Tags the skill MUST have (AND semantics). Examples: ["iframe"], ["self-healing"], ["database"].', 'string')
+    .stringParam('query', 'Free-text query — scored against title + summary + body')
+    .numberParam('k', 'Max results (default 5, capped at 20)')
+    .booleanParam('includeBody', 'When true, return full SKILL.md body for each hit (default false — caller fetches separately if needed)')
+    .handler(async (params: Record<string, unknown>) => {
+        const workspaceRoot = getStr(params, 'workspaceRoot');
+        const phase = getStr(params, 'phase');
+        const fileKind = getStr(params, 'fileKind');
+        const tagsParam = params.tags;
+        const tags = Array.isArray(tagsParam)
+            ? (tagsParam as unknown[]).map((t) => String(t)).filter((s) => s.length > 0)
+            : [];
+        const query = getStr(params, 'query');
+        const kRaw = typeof params.k === 'number' ? params.k : Number(params.k);
+        const k = Number.isFinite(kRaw) && kRaw > 0 ? Math.min(20, Math.floor(kRaw)) : 5;
+        const includeBody = params.includeBody === true;
+
+        const retriever = workspaceRoot
+            ? CSSkillRetriever.fromWorkspace(workspaceRoot)
+            : CSSkillRetriever.getDefault();
+
+        const hits = retriever.search({ phase, fileKind, tags, text: query, k });
+        const matches = hits.map((h) => ({
+            id: h.id,
+            title: h.title,
+            summary: h.summary,
+            phase: h.phase,
+            fileKind: h.fileKind,
+            tags: h.tags,
+            score: h.score,
+            ...(includeBody ? { body: retriever.getBody(h.id) } : {}),
+        }));
+
+        const filterSummary = [
+            phase ? `phase=${phase}` : null,
+            fileKind ? `fileKind=${fileKind}` : null,
+            tags.length > 0 ? `tags=[${tags.join(',')}]` : null,
+            query ? `query="${query.length > 40 ? query.slice(0, 40) + '…' : query}"` : null,
+        ]
+            .filter(Boolean)
+            .join(' ');
+
+        return jsonResult(
+            { matches, totalCandidates: retriever.listIds().length },
+            `csaa_retrieve_skills (${filterSummary || 'no filters'}): returned ${matches.length} skill${matches.length === 1 ? '' : 's'}.`,
+        );
+    })
+    .build();
+
 const csaa_read_legacy_data: MCPToolDefinition = (defineTool() as MCPToolBuilder)
     .name('csaa_read_legacy_data')
     .title('CS-AI-Auto-Assist — Read Legacy Data File')
@@ -5449,6 +6253,100 @@ const csaa_resolve_data_file: MCPToolDefinition = (defineTool() as MCPToolBuilde
  *
  * Returns the list of absolute file paths created.
  */
+// Root config/global.env — framework-wide base defaults (Level 7, lowest
+// priority). Project-specific values (PROJECT, ENVIRONMENT, BASE_URL,
+// FEATURE/STEP paths) live in config/<project>/global.env and the
+// environments/<env>.env files, which override these. Kept generic — no
+// project, company, or module identifiers.
+const ROOT_GLOBAL_ENV_TEMPLATE = `# ============================================================================
+#            CS TEST AUTOMATION FRAMEWORK — GLOBAL BASE DEFAULTS
+# ============================================================================
+# Level 7 (lowest priority) of the 8-level config hierarchy. Every project
+# and environment file overrides what is set here. Project-specific values
+# (PROJECT, ENVIRONMENT, BASE_URL, feature/step/data paths) belong in
+# config/<project>/global.env and config/<project>/environments/<env>.env.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+# BROWSER
+# ---------------------------------------------------------------------------
+BROWSER=chrome
+HEADLESS=false
+BROWSER_VIEWPORT_WIDTH=1920
+BROWSER_VIEWPORT_HEIGHT=1080
+BROWSER_LAUNCH_TIMEOUT=30000
+BROWSER_SLOWMO=0
+BROWSER_IGNORE_HTTPS_ERRORS=true
+BROWSER_LOCALE=en-US
+BROWSER_TIMEZONE=America/New_York
+
+# ---------------------------------------------------------------------------
+# TIMEOUTS
+# ---------------------------------------------------------------------------
+TIMEOUT=30000
+BROWSER_ACTION_TIMEOUT=10000
+BROWSER_NAVIGATION_TIMEOUT=30000
+BROWSER_AUTO_WAIT_TIMEOUT=5000
+ELEMENT_TIMEOUT=10000
+
+# ---------------------------------------------------------------------------
+# BROWSER INSTANCE MANAGEMENT
+# ---------------------------------------------------------------------------
+BROWSER_REUSE_ENABLED=true
+BROWSER_REUSE_CLEAR_STATE=true
+BROWSER_AUTO_RESTART_ON_CRASH=true
+BROWSER_MAX_RESTART_ATTEMPTS=3
+
+# ---------------------------------------------------------------------------
+# MEDIA CAPTURE & LOGGING
+# ---------------------------------------------------------------------------
+BROWSER_VIDEO=retain-on-failure
+VIDEO_DIR=./videos
+SCREENSHOT_CAPTURE_MODE=on-failure
+SCREENSHOT_ON_FAILURE=true
+TRACE_CAPTURE_MODE=on-failure
+LOG_LEVEL=INFO
+
+# ---------------------------------------------------------------------------
+# EXECUTION
+# ---------------------------------------------------------------------------
+PARALLEL=false
+MAX_PARALLEL_WORKERS=4
+RETRY_COUNT=2
+
+# ---------------------------------------------------------------------------
+# ELEMENT INTERACTION
+# ---------------------------------------------------------------------------
+ELEMENT_RETRY_COUNT=3
+ELEMENT_CLEAR_BEFORE_TYPE=true
+WAIT_FOR_SPINNERS=true
+
+# ---------------------------------------------------------------------------
+# CROSS-DOMAIN NAVIGATION (SSO / NetScaler / LDAP redirects)
+# ---------------------------------------------------------------------------
+# Default enabled — enterprise apps almost always have an SSO redirect.
+# CSBasePage.navigate() delegates to CSCrossDomainNavigationHandler, which
+# performs the redirect bounce automatically when this is true.
+CROSS_DOMAIN_NAVIGATION_ENABLED=true
+CROSS_DOMAIN_NAVIGATION_TIMEOUT=60000
+
+# ---------------------------------------------------------------------------
+# SELF-HEALING & AI
+# ---------------------------------------------------------------------------
+SELF_HEALING_ENABLED=true
+AI_ENABLED=false
+AI_CONFIDENCE_THRESHOLD=0.7
+
+# ---------------------------------------------------------------------------
+# REPORTING
+# ---------------------------------------------------------------------------
+REPORTS_BASE_DIR=./reports
+REPORTS_CREATE_TIMESTAMP_FOLDER=true
+REPORT_TYPES=html
+GENERATE_EXCEL_REPORT=true
+GENERATE_PDF_REPORT=true
+`;
+
 async function scaffoldFrameworkConfig(
     ctx: CSRunContext,
     workspaceRoot: string,
@@ -5602,7 +6500,15 @@ async function scaffoldFrameworkConfig(
             fallbackBaseUrl = url;
         }
     }
-    const environments = envs.size > 0 ? [...envs] : ['sit'];
+    // The consumer workspace always needs dev / sit / uat even when the
+    // source legacy project only carried one properties file (the analysis
+    // derives `envs` from analysis.configFiles[].env, so a sit-only legacy
+    // project previously produced only sit.env). Analysis envs come FIRST so
+    // environments[0] — which drives the ENVIRONMENT= default in the
+    // generated global.env — stays the env the legacy project actually used.
+    // The standard three are unioned in after (sit first, matching the prior
+    // sit-only fallback when the analysis surfaced no env at all).
+    const environments = [...new Set<string>([...envs, 'sit', 'dev', 'uat'])];
     const baseUrl = fallbackBaseUrl;
 
     // Preserve + override process.cwd so the generation tools write into the
@@ -5645,6 +6551,29 @@ async function scaffoldFrameworkConfig(
                 ctx.writePhaseArtifact(
                     'write',
                     'config-scaffold-error.txt',
+                    err instanceof Error ? (err.stack ?? err.message) : String(err),
+                );
+            }
+        }
+
+        // Root config/global.env — the framework's Level-7 base-defaults
+        // layer. CSConfigurationManager loads `config/global.env` first
+        // (lowest priority); generate_config_scaffold only writes the
+        // project-level config/<project>/global.env (Level 4), so without
+        // this the documented base layer is simply missing. Create-only —
+        // an existing file is the consumer's and is left untouched.
+        if (workspaceRoot && fs.existsSync(workspaceRoot)) {
+            try {
+                const rootGlobalPath = path.join(workspaceRoot, 'config', 'global.env');
+                if (!fs.existsSync(rootGlobalPath)) {
+                    fs.mkdirSync(path.dirname(rootGlobalPath), { recursive: true });
+                    fs.writeFileSync(rootGlobalPath, ROOT_GLOBAL_ENV_TEMPLATE, 'utf-8');
+                    written.push(rootGlobalPath);
+                }
+            } catch (err) {
+                ctx.writePhaseArtifact(
+                    'write',
+                    'root-global-env-error.txt',
                     err instanceof Error ? (err.stack ?? err.message) : String(err),
                 );
             }
@@ -5936,10 +6865,10 @@ const csaa_configure_credentials: MCPToolDefinition = (defineTool() as MCPToolBu
                 passwordEncrypted: true,
                 encryptionFormat: 'AES-256-GCM (CSEncryptionUtil); ENCRYPTED:base64 prefix',
                 nextStepNeeded: true,
-                nextSuggestedTool: 'csaa_execute',
+                nextSuggestedTool: 'csaa_preflight',
                 nextSuggestedArgs: { runId },
             },
-            `Credentials written to ${path.relative(consumerRoot, envFilePath)}. Password encrypted via CSEncryptionUtil; plaintext NOT stored. Call csaa_execute next.`,
+            `Credentials written to ${path.relative(consumerRoot, envFilePath)}. Password encrypted via CSEncryptionUtil; plaintext NOT stored. Call csaa_preflight next (static pre-flight) before csaa_execute.`,
         );
     })
     .build();
@@ -6190,10 +7119,16 @@ export const csaaPrimitiveTools: MCPToolDefinition[] = [
     csaa_finalize_translation,
     csaa_audit,
     csaa_write,
+    csaa_preflight,
     csaa_execute,
     csaa_verify,
     csaa_publish,
     csaa_query_existing_pages,
+    csaa_retrieve_skills,
+    csaa_trace_dependencies,
+    csaa_chunk_document,
+    csaa_record_crawl_snapshot,
+    csaa_register_inputs,
     csaa_read_legacy_data,
     csaa_read_config_file,
     csaa_configure_credentials,

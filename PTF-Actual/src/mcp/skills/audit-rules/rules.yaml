@@ -86,6 +86,83 @@ rules:
     invertMatch: true
     violation: "Dialog handling uses raw Playwright API. Use this.acceptNextDialog() / this.dismissNextDialog() / this.acceptNextDialogWithText(text) from CSBasePage."
 
+  - id: PO012
+    severity: error
+    appliesTo: page
+    description: "@CSGetElement uses xpath:/css: directly — never the non-existent strategy:/locator: properties"
+    detect: "regex:@CSGetElement\\s*\\([^)]*strategy\\s*:"
+    invertMatch: true
+    violation: "@CSGetElement decorator uses strategy:/locator: — those properties do not exist on CSElementOptions and produce compile errors. Use xpath: '...' (or css: '...') directly."
+
+  - id: PO013
+    severity: error
+    appliesTo: page
+    description: "alternativeLocators is a string[] with prefix syntax — never an object array"
+    detect: "regex:alternativeLocators\\s*:\\s*\\[\\s*\\{"
+    invertMatch: true
+    violation: "alternativeLocators must be string[] with css:/xpath:/text:/role:/testid: prefix syntax (['css:input#id', 'xpath://input[@id=\"id\"]']). Object-array literals like [{ strategy: 'css', locator: '...' }] do not compile."
+
+  - id: PO014
+    severity: error
+    appliesTo: page
+    description: "Use .getAttribute(name) — there is no .getAttributeValue() method on CSWebElement"
+    detect: "regex:\\.getAttributeValue\\s*\\("
+    invertMatch: true
+    violation: ".getAttributeValue() does not exist on CSWebElement. Use .getAttribute(name) instead."
+
+  - id: PO015
+    severity: error
+    appliesTo: page
+    description: "Dialog handling via inherited CSBasePage helpers — never raw page.once('dialog')"
+    detect: "regex:this\\.page\\.once\\s*\\(\\s*['\"`]dialog['\"`]"
+    invertMatch: true
+    violation: "Raw this.page.once('dialog', ...) inside a page object. Call this.acceptNextDialog() / this.dismissNextDialog() from CSBasePage instead. See dialog-handling skill."
+
+  - id: PO016
+    severity: error
+    appliesTo: page,step,ts
+    description: "Value-carrying *WithTimeout methods take the value first, timeout last — never a numeric literal as the first argument"
+    detect: "regex:\\.(fill|type|pressSequentially|press|selectOption|uploadFiles|uploadFile|setChecked|getAttribute|dragTo|dispatchEvent)WithTimeout\\s*\\(\\s*\\d"
+    invertMatch: true
+    violation: "Swapped *WithTimeout arguments. Methods like fillWithTimeout / typeWithTimeout / selectOptionWithTimeout take the VALUE first and the timeout LAST: fillWithTimeout(value, 5000), not fillWithTimeout(5000, value). A numeric literal in the first argument position is always wrong for these methods. (Timeout-only methods such as clickWithTimeout(30000) are exempt — they are not matched by this rule.)"
+
+  # ========================================================================
+  # Login / navigation rules (LN) — generated test code must use the
+  # framework's navigate() + page-object wrappers, never a hand-rolled
+  # login that escapes to the raw Playwright Page.
+  # ========================================================================
+  - id: LN001
+    severity: error
+    appliesTo: page,step,ts
+    description: "No `.getPage()` — never obtain the raw Playwright Page handle in generated test code"
+    detect: "regex:\\.getPage\\s*\\(\\s*\\)"
+    invertMatch: true
+    violation: ".getPage() returns the raw Playwright Page; every call on it bypasses self-healing, reporting, and the wait pipeline. Drive interactions through @CSGetElement-decorated CSWebElement properties and inherited CSBasePage methods (navigate / acceptNextDialog / etc.)."
+
+  - id: LN002
+    severity: error
+    appliesTo: page,step,ts
+    description: "Config keys use the canonical names — never project-prefixed BASE_URL / USERNAME / PASSWORD"
+    detect: "regex:\\{config:(?!DEFAULT_)[A-Z][A-Z0-9]*_(?:BASE_URL|USERNAME|PASSWORD)\\}"
+    invertMatch: true
+    violation: "Project-prefixed config key (e.g. {config:CTSG_BASE_URL}, {config:<PROJECT>_USERNAME}). Use the canonical keys: {config:BASE_URL}, {config:DEFAULT_USERNAME}, {config:DEFAULT_PASSWORD}. Project-prefixed keys are never written to the generated env files and resolve to empty at runtime."
+
+  - id: LN003
+    severity: error
+    appliesTo: page,step,ts
+    description: "No hand-rolled SSO / Citrix / NetScaler / LDAP redirect handling"
+    detect: "regex:nsg-x|LogonPoint|doAuthentication|NetScaler|ldap-non-prod"
+    invertMatch: true
+    violation: "Hand-rolled SSO/Citrix/NetScaler login redirect code. CSBasePage.navigate() delegates to CSCrossDomainNavigationHandler, which performs the SSO bounce automatically when CROSS_DOMAIN_NAVIGATION_ENABLED=true. Remove the manual redirect block and call this.<page>.navigate()."
+
+  - id: LN004
+    severity: error
+    appliesTo: page,step
+    description: "No raw navigation — use the inherited navigate(), never `.goto()` / `.waitForURL()`"
+    detect: "regex:\\.(goto|waitForURL)\\s*\\("
+    invertMatch: true
+    violation: "Raw navigation call (.goto() / .waitForURL()) — those exist only on the raw Playwright Page. Navigation goes through the inherited this.<page>.navigate() (no URL argument — it reads BASE_URL from config and handles cross-domain auth)."
+
   # ========================================================================
   # Step-definition rules (SD)
   # ========================================================================

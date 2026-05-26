@@ -232,10 +232,16 @@ export class CSLegacySignatureExtractor {
         }
 
         // Resolve + parse each helper invocation's class file, then extract
-        // the specific method body's actions. Also walk the helper file
-        // for transitive page-class references — page objects only used by
-        // helpers (e.g. LoginPage used inside OrdersHelper.setupLogin) would
-        // otherwise never appear in the analysis.
+        // the specific method body's actions. Walk ONLY the invoked method
+        // body for transitive page-class references — NOT the entire helper
+        // file. Project-wide shared utilities (support/factory classes that
+        // serve many modules) reference every page in the codebase, so
+        // scanning their full source bloats the signature with unrelated
+        // pages (e.g. 8 actually-needed pages reported as ~100+). The
+        // invoked method's body is the authoritative scope: any page
+        // referenced inside it is a real dependency; pages referenced
+        // elsewhere in the same utility belong to OTHER methods and are
+        // irrelevant to this test.
         const seenHelperKeys = new Set<string>();
         const helperPagesToInclude = new Set<string>();
         for (const h of helperInvocations) {
@@ -251,18 +257,36 @@ export class CSLegacySignatureExtractor {
                 filePath, h.helperClass, h.helperMethod,
             );
             if (helperSig) sig.helpers[key] = helperSig;
-            // Scan the helper file source for inventory page-class names.
-            try {
-                const helperSrc = fs.readFileSync(filePath, 'utf-8');
-                for (const p of inventory.pages) {
-                    if (!p.className) continue;
-                    if (pageClassesUsed.has(p.className)) continue;
-                    const re = new RegExp(`\\b${escapeRegex(p.className)}\\b`);
-                    if (re.test(helperSrc)) {
-                        helperPagesToInclude.add(p.className);
+            // Scan ONLY the invoked method body, not the entire helper file.
+            // extractHelperSignature already walked brace-by-brace to find
+            // startLine/endLine — slice the file to that range and search.
+            if (helperSig) {
+                try {
+                    const helperSrc = fs.readFileSync(filePath, 'utf-8');
+                    const allLines = helperSrc.split(/\r?\n/);
+                    // startLine/endLine are 1-indexed and bracket the body content
+                    // (lines BETWEEN the opening and closing braces).
+                    const bodyText = allLines
+                        .slice(Math.max(0, helperSig.startLine - 1), helperSig.endLine)
+                        .join('\n');
+                    for (const p of inventory.pages) {
+                        if (!p.className) continue;
+                        if (pageClassesUsed.has(p.className)) continue;
+                        // Match either the class-name token (`LoginPage`) — used
+                        // for static calls and type annotations — OR the
+                        // camelCase variable form (`loginPage`), which is how
+                        // page objects are typically referenced in helper-method
+                        // bodies (`loginPage.getTextBox().click()`).
+                        const camelCase = p.className.charAt(0).toLowerCase() + p.className.slice(1);
+                        const re = new RegExp(
+                            `\\b${escapeRegex(p.className)}\\b|\\b${escapeRegex(camelCase)}\\b`,
+                        );
+                        if (re.test(bodyText)) {
+                            helperPagesToInclude.add(p.className);
+                        }
                     }
-                }
-            } catch { /* ignore — helper unreadable */ }
+                } catch { /* ignore — helper unreadable */ }
+            }
         }
         for (const className of helperPagesToInclude) {
             const filePath = resolveClassPath(className, inventory);

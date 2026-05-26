@@ -2164,22 +2164,24 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
                                 <!-- Used columns table (always visible) -->
                                 <div id="used-columns-${scenarioId}">
-                                    <table style="width: 100%; border-collapse: collapse; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                                        <thead>
-                                            <tr style="background: #e9ecef;">
-                                                ${filteredHeaders.map((header: string) => `
-                                                    <th style="padding: 8px 12px; text-align: left; border: 1px solid #dee2e6; font-weight: 600; background: #d1f2eb;">${htmlEscape(header)} ✓</th>
-                                                `).join('')}
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            <tr style="background: white;">
-                                                ${filteredValues.map((value: string) => `
-                                                    <td style="padding: 8px 12px; border: 1px solid #dee2e6; font-family: monospace; font-size: 0.95em;">${htmlEscape(value)}</td>
-                                                `).join('')}
-                                            </tr>
-                                        </tbody>
-                                    </table>
+                                    <div style="overflow-x: auto; border: 1px solid #dee2e6; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                                        <table style="width: 100%; border-collapse: collapse;">
+                                            <thead>
+                                                <tr style="background: #e9ecef;">
+                                                    ${filteredHeaders.map((header: string) => `
+                                                        <th style="padding: 8px 12px; text-align: left; border: 1px solid #dee2e6; font-weight: 600; background: #d1f2eb; white-space: nowrap;">${htmlEscape(header)} ✓</th>
+                                                    `).join('')}
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <tr style="background: white;">
+                                                    ${filteredValues.map((value: string) => `
+                                                        <td style="padding: 8px 12px; border: 1px solid #dee2e6; font-family: monospace; font-size: 0.95em; white-space: nowrap;">${htmlEscape(value)}</td>
+                                                    `).join('')}
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
                                 </div>
 
                                 <!-- All columns table (hidden by default) -->

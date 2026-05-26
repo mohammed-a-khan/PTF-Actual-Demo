@@ -2,7 +2,7 @@
 name: db-migrator
 title: DB Migrator
 description: Converts legacy inline SQL / JDBC / Hibernate calls into CS Playwright framework pattern — named queries in the env file plus typed helper methods. Never fabricates a table name. Subagent of cs-playwright.
-model: 'Claude Sonnet 4.6'
+model: ['Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: yellow
 user-invocable: false
 tools:

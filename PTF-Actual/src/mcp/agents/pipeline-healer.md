@@ -2,7 +2,7 @@
 name: pipeline-healer
 title: Pipeline Healer
 description: Runs in-scope scenarios, classifies failures, edits the generated TypeScript / Gherkin / JSON files to apply memory-first or LLM-proposed fixes, audit-and-compile-gates every fix before apply, cascade-checks against baseline, retries ≤3 per failure / ≤20 global. Returns SUCCESS or ESCALATED. Subagent of cs-playwright.
-model: 'Claude Opus 4.6'
+model: ['Claude Opus 4.7 (copilot)', 'Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: red
 user-invocable: false
 tools:

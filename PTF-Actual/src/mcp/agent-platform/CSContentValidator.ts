@@ -25,7 +25,7 @@ export interface ContentViolation {
     line?: number;
 }
 
-interface TranslationFile {
+export interface TranslationFile {
     relativePath: string;
     kind: 'feature' | 'page' | 'steps' | 'data';
     content: string;
@@ -70,6 +70,9 @@ export class CSContentValidator {
         const all: ContentViolation[] = [];
         const declaredScenarios = new Set<string>();
         const stepDefTexts = new Set<string>();
+        // Pattern → list of step files declaring it. Used by cross-file
+        // gate 0c (duplicate step-def across files).
+        const stepDefByPattern = new Map<string, string[]>();
 
         for (const file of files) {
             all.push(...CSContentValidator.validateFile(file));
@@ -77,7 +80,81 @@ export class CSContentValidator {
                 CSContentValidator.collectScenarioStepText(file.content, declaredScenarios);
             }
             if (file.kind === 'steps') {
-                CSContentValidator.collectStepDefTexts(file.content, stepDefTexts);
+                const local = new Set<string>();
+                CSContentValidator.collectStepDefTexts(file.content, local);
+                for (const p of local) {
+                    stepDefTexts.add(p);
+                    const list = stepDefByPattern.get(p) ?? [];
+                    list.push(file.relativePath);
+                    stepDefByPattern.set(p, list);
+                }
+            }
+        }
+
+        // Cross-file gate 0c: duplicate @CSBDDStepDef patterns across files.
+        // Splitting a translation into multiple step files (e.g.
+        // `<module>.actions.steps.ts`, `<module>.validations.steps.ts`) is
+        // fine — but if the same `@CSBDDStepDef('I see {string}')` pattern
+        // appears in two files, BDD registration fails at runtime with
+        // "ambiguous step definition." Catch it at content-gate time so
+        // the agent dedupes before write rather than at execute.
+        for (const [pattern, paths] of stepDefByPattern.entries()) {
+            if (paths.length >= 2) {
+                all.push({
+                    relativePath: paths[0],
+                    ruleId: 'duplicate-step-def-across-files',
+                    severity: 'error',
+                    message:
+                        `@CSBDDStepDef pattern "${pattern}" is defined in ${paths.length} files: ` +
+                        `${paths.join(', ')}. Each step pattern must live in exactly one file or BDD ` +
+                        'registration throws "ambiguous step definition" at runtime. Move the duplicates ' +
+                        'into one canonical file (typically the first one alphabetically) and delete the rest.',
+                });
+            }
+        }
+
+        // Cross-file gate 0d: data-driven JSON has parameter columns
+        // (anything beyond scenarioId / scenarioName / runFlag) but the
+        // feature uses plain `Scenario:` (no Scenario Outline, no <placeholder>
+        // in step text). Either the feature should be a Scenario Outline
+        // wired to the JSON, or the JSON columns are unused — both shapes
+        // produce silent data drift. Flag at validate so the synthesizer
+        // converts to the data-driven shape (per ff-scenario-outline skill).
+        for (const dataFile of files.filter((f) => f.kind === 'data')) {
+            let dataRows: unknown[];
+            try {
+                const parsed = JSON.parse(dataFile.content);
+                if (!Array.isArray(parsed) || parsed.length === 0) continue;
+                dataRows = parsed;
+            } catch {
+                continue; // separate JSON-parse gate covers this
+            }
+            const ignored = new Set(['scenarioId', 'scenarioName', 'runFlag', 'runflag']);
+            const firstRow = dataRows[0] as Record<string, unknown>;
+            const paramColumns = Object.keys(firstRow).filter((k) => !ignored.has(k));
+            if (paramColumns.length === 0) continue;
+
+            for (const featureFile of files.filter((f) => f.kind === 'feature')) {
+                const blocks = CSContentValidator.splitScenarios(featureFile.content);
+                if (blocks.length === 0) continue;
+                const hasPlaceholderInStep = /^\s*(Given|When|Then|And|But)[^\n]*<\w+>/m.test(featureFile.content);
+                const hasOutline = blocks.some((b) => b.isOutline);
+                if (!hasOutline && !hasPlaceholderInStep) {
+                    all.push({
+                        relativePath: featureFile.relativePath,
+                        ruleId: 'plain-scenario-with-data-params',
+                        severity: 'error',
+                        message:
+                            `data file ${dataFile.relativePath} declares ${paramColumns.length} ` +
+                            `parameter column(s) (${paramColumns.slice(0, 5).join(', ')}` +
+                            `${paramColumns.length > 5 ? ', …' : ''}) but the feature uses plain ` +
+                            '`Scenario:` blocks with hardcoded data. Convert to `Scenario Outline:` ' +
+                            'with `<placeholder>` tokens referencing those columns + an `Examples:` ' +
+                            'block sourced from the JSON. See ff-scenario-outline skill.',
+                    });
+                }
+                // Note: the existing FF003 rule covers the `Examples:` JSON
+                // envelope shape; we do not duplicate that check here.
             }
         }
 
@@ -183,10 +260,19 @@ export class CSContentValidator {
      */
     private static cucumberToRegex(pattern: string): RegExp {
         let body = pattern.replace(/[.*+?^=!:${}()|[\]\\]/g, '\\$&');
-        body = body.replace(/\\\{string\\\}/g, '(?:"[^"]+"|\'[^\']+\')');
-        body = body.replace(/\\\{int\\\}/g, '\\d+');
-        body = body.replace(/\\\{float\\\}/g, '\\d+(?:\\.\\d+)?');
-        body = body.replace(/\\\{word\\\}/g, '\\S+');
+        // v1.39.5 — also accept Gherkin Scenario Outline `<placeholder>`
+        // syntax (with or without surrounding quotes) as a valid match for
+        // every Cucumber expression class. At runtime Gherkin substitutes
+        // `<param>` with the Examples-row value BEFORE the step-def regex
+        // runs, so the step-def matches the substituted value. But the
+        // content-gate validator sees the PRE-substitution text and must
+        // accept the placeholder shape OR every Scenario Outline step
+        // unconditionally fails `unmatched-feature-step`.
+        const PLACEHOLDER = '<[A-Za-z_][\\w-]*>';
+        body = body.replace(/\\\{string\\\}/g, `(?:"[^"]+"|'[^']+'|"${PLACEHOLDER}"|'${PLACEHOLDER}'|${PLACEHOLDER})`);
+        body = body.replace(/\\\{int\\\}/g, `(?:\\d+|${PLACEHOLDER})`);
+        body = body.replace(/\\\{float\\\}/g, `(?:\\d+(?:\\.\\d+)?|${PLACEHOLDER})`);
+        body = body.replace(/\\\{word\\\}/g, `(?:\\S+|${PLACEHOLDER})`);
         return new RegExp(`^${body}$`);
     }
 
@@ -409,11 +495,16 @@ export class CSContentValidator {
             // The token must look like a code identifier (CamelCase
             // ending in a known suffix, or a Java-style helper id) — not
             // every CamelCase noun in a sentence.
+            // Suffix list narrowed in v1.39.4: previous list included
+            // `Manager`, `Helper`, `Util`, `Service`, `Builder`, `Controller`,
+            // `Validator`, `Factory` — all common English nouns that produce
+            // false positives on legit user-action steps ("Account Manager",
+            // "Service Desk"). Only suffixes that are exclusively code-shape
+            // identifiers remain; code-style usage like `ClassName.method` is
+            // independently caught by rule 6c.
             const INTERNAL_ID_SUFFIXES = [
                 'Bean', 'Pojo', 'POJO', 'DTO', 'Dao', 'DAO',
-                'Manager', 'Helper', 'Util', 'Utility', 'Service',
-                'Repository', 'Controller', 'Validator',
-                'Factory', 'Builder', 'SupportMethod',
+                'SupportMethod',
             ];
             lines.forEach((ln, i) => {
                 const t = ln.trim();
@@ -628,6 +719,242 @@ export class CSContentValidator {
                     message: 'page object has no @CSGetElement fields and no methods',
                 });
             }
+
+            // ------------------------------------------------------------
+            // v1.39.2 — decorator-syntax + framework-wrapper enforcement
+            // ------------------------------------------------------------
+            // The synthesizer prompt was hotfixed in v1.38.9 to teach the
+            // correct `xpath:` shape, but the LLM occasionally still slips
+            // into the old `strategy:`/`locator:` pattern (it was the
+            // documented convention until last week). These content-gate
+            // rules catch any survivors at finalize time so the heal-loop's
+            // deterministic compile-fixer (CSHealLoop.applyDeterministicCompileFixes)
+            // can repair them before tsc fails.
+
+            // Rule 5a: @CSGetElement uses `strategy: 'xpath'` / `locator: '...'`
+            // — the CSElementOptions interface has neither property. The
+            // correct shape is `xpath: '...'` or `css: '...'` directly.
+            const strategyMatches = file.content.match(/@CSGetElement\s*\([^)]*strategy\s*:/g);
+            if (strategyMatches && strategyMatches.length > 0) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'csgetelement-wrong-shape',
+                    severity: 'error',
+                    message:
+                        `${strategyMatches.length} @CSGetElement decorator(s) use ` +
+                        '`strategy:`/`locator:` — these properties do not exist on CSElementOptions ' +
+                        "and produce compile errors. Use `xpath: '...'` (or `css: '...'`) directly. " +
+                        'See po-self-healing-element skill for the correct shape.',
+                });
+            }
+
+            // Rule 5b: alternativeLocators is an object array (e.g. `[{ strategy: 'css', locator: '...' }]`)
+            // instead of the required `string[]` with prefix syntax
+            // (`['css:input#id', 'xpath://input[@id="id"]']`).
+            const altObjectMatch = /alternativeLocators\s*:\s*\[\s*\{/.exec(file.content);
+            if (altObjectMatch) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'alternative-locators-wrong-shape',
+                    severity: 'error',
+                    message:
+                        '`alternativeLocators` must be `string[]` with prefix syntax ' +
+                        "(`['css:input#id', 'xpath://input[@id=\"id\"]']`), not an object array. " +
+                        'Object literals like `[{ strategy: \'css\', locator: \'...\' }]` do not compile.',
+                });
+            }
+
+            // Rule 5c: calls `.getAttributeValue(...)` — that method does not
+            // exist on CSWebElement. The correct method is `.getAttribute(name)`.
+            const getAttrValueMatches = file.content.match(/\.getAttributeValue\s*\(/g);
+            if (getAttrValueMatches && getAttrValueMatches.length > 0) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'non-existent-getAttributeValue',
+                    severity: 'error',
+                    message:
+                        `${getAttrValueMatches.length} call(s) to non-existent ` +
+                        '`.getAttributeValue(...)`. The CSWebElement method is `.getAttribute(name)` ' +
+                        '(no "Value" suffix). Compile errors guaranteed.',
+                });
+            }
+
+            // Rule 5d: swapped argument order on value-carrying *WithTimeout
+            // methods. CSWebElement signatures put the VALUE first and the
+            // timeout LAST — `fillWithTimeout(value, timeout)`,
+            // `typeWithTimeout(text, timeout)`, `selectOptionWithTimeout(values,
+            // timeout)`, etc. The LLM frequently emits them reversed
+            // (`fillWithTimeout(1000, value)`). None of these methods take a
+            // numeric literal as the first argument (the value is a string /
+            // string[] / boolean / file path), so a bare digit immediately
+            // after `(` is an unambiguous swapped-args bug. (Timeout-only
+            // methods like `clickWithTimeout(30000)` are intentionally NOT in
+            // this list — a numeric first arg is correct for those.)
+            const swappedTimeoutRe =
+                /\.(fill|type|pressSequentially|press|selectOption|uploadFiles|uploadFile|setChecked|getAttribute|dragTo|dispatchEvent)WithTimeout\s*\(\s*\d/g;
+            const swappedHits: string[] = [];
+            let swappedMatch: RegExpExecArray | null;
+            while ((swappedMatch = swappedTimeoutRe.exec(file.content)) !== null) {
+                swappedHits.push(`${swappedMatch[1]}WithTimeout`);
+            }
+            if (swappedHits.length > 0) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'swapped-withtimeout-args',
+                    severity: 'error',
+                    message:
+                        `${swappedHits.length} call(s) with swapped *WithTimeout arguments: ` +
+                        `${Array.from(new Set(swappedHits)).slice(0, 5).join(', ')}. ` +
+                        'These methods take the VALUE first and the timeout LAST — ' +
+                        '`fillWithTimeout(value, 5000)`, NOT `fillWithTimeout(5000, value)`. ' +
+                        'A numeric literal in the first argument position is always wrong here.',
+                });
+            }
+
+        }
+
+        // ----------------------------------------------------------------
+        // Rules 5e/5f apply to BOTH page and steps files. Step bodies that
+        // bypass the framework wrappers cause the same self-healing /
+        // reporting drift as page-object code that does it. Moved out of
+        // the `kind === 'page'` block so steps are covered too.
+        // ----------------------------------------------------------------
+        if (file.kind === 'page' || file.kind === 'steps') {
+            // Rule 5e: raw `this.page.locator(...)` / `.click()` / `.fill()` /
+            // `.type()` / `.hover()` / `.press()`. Every interaction MUST go
+            // through @CSGetElement-decorated property + inherited CSBasePage
+            // helpers — the wrapper tracks self-healing, screenshots,
+            // reporting, and waits. Raw Playwright calls bypass all of that.
+            const rawPageRe = /\bthis\.page\.(locator|click|fill|type|hover|press|check|uncheck|selectOption|dblclick|tap)\s*\(/g;
+            const rawPageHits: string[] = [];
+            let rawMatch: RegExpExecArray | null;
+            while ((rawMatch = rawPageRe.exec(file.content)) !== null) {
+                rawPageHits.push(`this.page.${rawMatch[1]}(`);
+            }
+            if (rawPageHits.length > 0) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'raw-playwright-api',
+                    severity: 'error',
+                    message:
+                        `${rawPageHits.length} raw Playwright call(s) in a ${file.kind} file: ` +
+                        `${Array.from(new Set(rawPageHits)).slice(0, 5).join(', ')}. ` +
+                        'Route interactions through @CSGetElement properties ' +
+                        '(`this.myButton.click()`, `this.userInput.fill(value)`) or ' +
+                        'inherited CSBasePage helpers. Raw `this.page.*` bypasses ' +
+                        'self-healing, reporting, and the wait pipeline.',
+                });
+            }
+
+            // Rule 5f: raw `this.page.once('dialog', ...)` or `dialog.accept()`
+            // / `dialog.dismiss()` instead of inherited helpers. CSBasePage
+            // exposes `acceptNextDialog()` / `dismissNextDialog()` — use them.
+            const rawDialogRe = /this\.page\.once\s*\(\s*['"`]dialog['"`]|dialog\.(accept|dismiss)\s*\(/;
+            if (rawDialogRe.test(file.content)) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'raw-dialog-handling',
+                    severity: 'error',
+                    message:
+                        `Raw Playwright dialog handling in a ${file.kind} file ` +
+                        '(`this.page.once("dialog", …)` or `dialog.accept()`/`dialog.dismiss()`). ' +
+                        'CSBasePage inherits `acceptNextDialog()` / `dismissNextDialog()` helpers — ' +
+                        'call those instead. See dialog-handling skill.',
+                });
+            }
+
+            // ----------------------------------------------------------------
+            // LOGIN / NAVIGATION rules (LN001-LN004). The single most common
+            // failure mode is a hand-rolled login step that escapes the
+            // framework: it grabs the raw Playwright Page via `.getPage()`,
+            // drives `rawPage.fill()/.click()/.goto()` directly, invents
+            // project-prefixed config keys, and re-implements SSO/Citrix
+            // redirect handling that CSBasePage.navigate() already does.
+            // ----------------------------------------------------------------
+
+            // LN001: `.getPage()` — the escape hatch to the raw Playwright
+            // Page. Rule 5e only catches `this.page.<method>()`; aliasing via
+            // `const rawPage = this.somePage.getPage()` slips past it. Cut the
+            // source: generated test code must never call `.getPage()`.
+            const getPageMatches = file.content.match(/\.getPage\s*\(\s*\)/g);
+            if (getPageMatches && getPageMatches.length > 0) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'LN001',
+                    severity: 'error',
+                    message:
+                        `${getPageMatches.length} call(s) to \`.getPage()\` in a ${file.kind} file. ` +
+                        'That returns the raw Playwright Page and every call on it bypasses ' +
+                        'self-healing, reporting, and waits. Drive interactions through ' +
+                        '@CSGetElement-decorated CSWebElement properties and inherited CSBasePage ' +
+                        'methods (navigate / acceptNextDialog / etc.). Never obtain a raw Page handle.',
+                });
+            }
+
+            // LN002: project-prefixed config keys. The canonical keys are
+            // `{config:BASE_URL}`, `{config:DEFAULT_USERNAME}`,
+            // `{config:DEFAULT_PASSWORD}`. The LLM invents
+            // `{config:CTSG_BASE_URL}` / `{config:<PROJECT>_USERNAME}` which
+            // never exist in any generated env file. (DEFAULT_ is the one
+            // legitimate prefix and is excluded.)
+            const badConfigKeyRe = /\{config:(?!DEFAULT_)[A-Z][A-Z0-9]*_(?:BASE_URL|USERNAME|PASSWORD)\}/g;
+            const badConfigHits = file.content.match(badConfigKeyRe);
+            if (badConfigHits && badConfigHits.length > 0) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'LN002',
+                    severity: 'error',
+                    message:
+                        `${badConfigHits.length} project-prefixed config key(s): ` +
+                        `${Array.from(new Set(badConfigHits)).slice(0, 5).join(', ')}. ` +
+                        'Use the canonical keys — `{config:BASE_URL}`, `{config:DEFAULT_USERNAME}`, ' +
+                        '`{config:DEFAULT_PASSWORD}`. Project-prefixed keys are never written to the ' +
+                        'generated env files and resolve to empty at runtime.',
+                });
+            }
+
+            // LN003: hand-rolled Citrix / NetScaler / LDAP SSO redirect code.
+            // CSBasePage.navigate() delegates to CSCrossDomainNavigationHandler
+            // which handles the SSO bounce automatically when
+            // CROSS_DOMAIN_NAVIGATION_ENABLED=true. Re-implementing it inline
+            // is both wrong and fragile.
+            const ssoRedirectRe = /nsg-x|LogonPoint|doAuthentication|NetScaler|ldap-non-prod/i;
+            if (ssoRedirectRe.test(file.content)) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'LN003',
+                    severity: 'error',
+                    message:
+                        `Hand-rolled SSO/Citrix/NetScaler redirect handling in a ${file.kind} file. ` +
+                        'CSBasePage.navigate() already delegates to CSCrossDomainNavigationHandler, ' +
+                        'which performs the SSO bounce automatically when ' +
+                        'CROSS_DOMAIN_NAVIGATION_ENABLED=true. Remove the manual redirect block and ' +
+                        'just call `this.<page>.navigate()`.',
+                });
+            }
+
+            // LN004: raw navigation — `.goto(...)` / `.waitForURL(...)`. These
+            // only exist on the raw Playwright Page. Navigation goes through
+            // the inherited CSBasePage.navigate() (reads BASE_URL from config).
+            const rawNavRe = /\.(goto|waitForURL)\s*\(/g;
+            const rawNavHits: string[] = [];
+            let rawNavMatch: RegExpExecArray | null;
+            while ((rawNavMatch = rawNavRe.exec(file.content)) !== null) {
+                rawNavHits.push(`.${rawNavMatch[1]}(`);
+            }
+            if (rawNavHits.length > 0) {
+                violations.push({
+                    relativePath: file.relativePath,
+                    ruleId: 'LN004',
+                    severity: 'error',
+                    message:
+                        `${rawNavHits.length} raw navigation call(s) in a ${file.kind} file: ` +
+                        `${Array.from(new Set(rawNavHits)).join(', ')}. ` +
+                        'Navigation uses the inherited `this.<page>.navigate()` (no URL argument — ' +
+                        'it reads BASE_URL from config and handles cross-domain auth). Raw ' +
+                        '`.goto()` / `.waitForURL()` bypass that pipeline.',
+                });
+            }
         }
 
         return violations;
@@ -733,8 +1060,34 @@ export class CSContentValidator {
             }
             if (current) {
                 if (/^Examples\s*:/.test(t)) {
-                    current.examplesLine = lines[i];
-                    current.examplesLineNum = i + 1;
+                    // Capture the WHOLE Examples block — not just the first
+                    // line. JSON envelope shape is commonly written across
+                    // multiple lines:
+                    //   Examples: {
+                    //     "type": "json",
+                    //     "source": "..."
+                    //   }
+                    // Accumulate lines from `Examples:` until either a brace
+                    // balance returns to zero (closing `}`) OR we hit the
+                    // next Scenario/Feature/Background.
+                    const startIdx = i;
+                    const accumulated: string[] = [lines[i]];
+                    let depth = 0;
+                    let sawOpen = false;
+                    for (const ch of lines[i]) {
+                        if (ch === '{') { depth++; sawOpen = true; }
+                        else if (ch === '}') depth--;
+                    }
+                    while (i + 1 < lines.length && sawOpen && depth > 0) {
+                        i++;
+                        accumulated.push(lines[i]);
+                        for (const ch of lines[i]) {
+                            if (ch === '{') depth++;
+                            else if (ch === '}') depth--;
+                        }
+                    }
+                    current.examplesLine = accumulated.join('\n');
+                    current.examplesLineNum = startIdx + 1;
                     continue;
                 }
                 if (/^(Scenario|Feature|Background|Rule)\b/.test(t)) {

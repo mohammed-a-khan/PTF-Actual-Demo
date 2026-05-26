@@ -216,9 +216,9 @@ Examples:
 
 Generated Files:
   .github/chatmodes/    Agent definition files for your IDE
+  .github/skills/       Pattern skills consumed by the agents
+  .github/copilot-instructions.md    Workspace-level Copilot rules
   .vscode/mcp.json      MCP server configuration (for VS Code)
-  specs/                Test plan directory for Planner agent
-  seed.spec.ts          Seed test file for agents
 
 Agents:
   - Planner:   Explores apps and generates test plans

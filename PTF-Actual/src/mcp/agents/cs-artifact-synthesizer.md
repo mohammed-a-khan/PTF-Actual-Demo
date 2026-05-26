@@ -2,7 +2,7 @@
 name: cs-artifact-synthesizer
 title: CS Artifact Synthesizer
 description: Sub-agent of cs-ai-auto-assist. Synthesizes test artifacts (feature, steps, page objects, data JSON) from the recorded analysis under content-gate enforcement, with patch-based corrections. Owns Phase 5 (translate) and Phase 6 (audit). Returns an artifact-report handoff block.
-model: 'Claude Sonnet 4.6'
+model: ['Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: green
 user-invocable: false
 tools:
@@ -101,6 +101,7 @@ steps-file queue items (`<module>-1.steps.ts`, `<module>-2.steps.ts`,
 
 ## STRICT feature-file rules
 
+- **Data-driven defaults to Scenario Outline.** If the scenario data JSON has parameter columns beyond `scenarioId` / `scenarioName` / `runFlag` — say `userId`, `costCenter`, `firstName` — the feature file MUST use `Scenario Outline:` with `<placeholder>` tokens referencing those columns. Plain `Scenario:` blocks with hardcoded data values (`Given I enter user "alice"` instead of `Given I enter user "<userId>"`) are rejected by the `plain-scenario-with-data-params` content-gate when data parameters exist.
 - `Scenario Outline:` ONLY when body references `<placeholder>` from Examples. Otherwise `Scenario:`.
 - Scenario Outline `Examples:` MUST be JSON envelope:
  `Examples: {"type":"json","source":"test/<project>/data/<module>/<module>-scenarios.json","path":"$","filter":"scenarioId=<id> AND runFlag=Yes"}`.
@@ -118,13 +119,30 @@ steps-file queue items (`<module>-1.steps.ts`, `<module>-2.steps.ts`,
 - Class properties with `@Page` / `@CSGetElement` use `!` non-null assertion.
 - `@StepDefinitions` no parens; `@CSBDDStepDef(...)` with parens.
 - Method signatures: `(message: string)` for `{string}`, `(value: number)` for `{int}`. NEVER `(ctx, ...)`.
+- **NO cross-file duplicate `@CSBDDStepDef` patterns.** If you split step files by category (`<module>.actions.steps.ts` / `<module>.validations.steps.ts`), each pattern lives in exactly one file. Cross-file duplicates throw "ambiguous step definition" at runtime and are rejected by the `duplicate-step-def-across-files` content-gate.
+- **Dialog handling uses inherited helpers.** Inside step bodies that interact with a page, call `await this.somePage.acceptNextDialog()` / `dismissNextDialog()` — those are inherited from `CSBasePage`. NEVER `this.page.once('dialog', d => d.accept())` from a step body — that's raw Playwright and bypasses the wrapper.
 
 ## STRICT page-object rules
 
 - Extends `CSBasePage`, decorated `@CSPage("kebab-case-key")`.
 - MUST implement `protected initializeElements(): void {}` (even if empty).
 - Elements declared with `@CSGetElement`; always include `waitForVisible: true`, `selfHeal: true`, ≥1 `alternativeLocators[]` entry.
-- XPath primary locator (`strategy: 'xpath'`). `alternativeLocators[]` for CSS variants.
+- XPath is the primary locator. The decorator shape MUST be `{ xpath: '...', ... }` — NEVER `{ strategy: 'xpath', locator: '...' }`. The properties `strategy` and `locator` do not exist on `CSElementOptions` and produce compile errors.
+- `alternativeLocators` is `string[]` (plain strings, NOT objects). Use `css:` / `xpath:` / `text:` / `role:` / `testid:` prefix to declare the alternative's strategy: `alternativeLocators: ['css:input#userId', "xpath://input[@name='userId']"]`. NEVER `[{ strategy: 'css', locator: '...' }]` — that array shape does not compile.
+- Method names: use `getAttribute(name)` (NOT `getAttributeValue(name)` — that method does not exist on `CSWebElement`).
+- Never use raw `this.page.locator(...)` / `this.page.click(...)` / `this.page.fill(...)` / `this.page.once('dialog', …)` inside a page object. All interactions go through `@CSGetElement` properties and the inherited `CSBasePage` helpers (`acceptNextDialog()`, `clickWithTimeout()`, etc.).
+
+Example (correct):
+```ts
+@CSGetElement({
+    xpath: "//input[@id='userId']",
+    description: 'User id input',
+    waitForVisible: true,
+    selfHeal: true,
+    alternativeLocators: ['css:input#userId', 'css:[name="userId"]']
+})
+userIdInput!: CSWebElement;
+```
 - All locators MUST come from `analysis.pages[].elements[].primaryLocator.value` (the legacy file's authoritative value). DO NOT invent XPaths.
 - Access elements as PROPERTIES (no parens): `this.myButton.click()` NOT `this.getMyButton().click()`.
 - Element count ≥ `analysis.pages[].elements.length` (the framework's signature gate enforces this).

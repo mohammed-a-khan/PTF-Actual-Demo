@@ -2,7 +2,7 @@
 name: data-ingestor
 title: Data Ingestor
 description: Converts legacy data files (xlsx, xml, csv, tsv, yaml, json, properties) into canonical scenarios JSON for the CS Playwright framework. Subagent of cs-playwright.
-model: 'GPT-5 mini'
+model: ['GPT-5 mini (copilot)', 'GPT-5 (copilot)', 'GPT-4.1 (copilot)']
 color: orange
 user-invocable: false
 tools:

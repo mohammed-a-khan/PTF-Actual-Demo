@@ -53,7 +53,7 @@ import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 // Public Types
 // ============================================================================
 
-/** The 9 pipeline phases. Names match the rebuild design exactly. */
+/** The 10 pipeline phases. Names match the rebuild design exactly. */
 export type RunPhase =
     | 'intake'
     | 'discover'
@@ -62,6 +62,7 @@ export type RunPhase =
     | 'translate'
     | 'audit'
     | 'write'
+    | 'preflight'
     | 'execute'
     | 'verify';
 
@@ -492,13 +493,27 @@ export class CSRunContext {
             'translate',
             'audit',
             'write',
+            'preflight',
             'execute',
             'verify',
         ];
     }
 
     public static phaseFolder(phase: RunPhase): string {
-        const idx = CSRunContext.allPhases().indexOf(phase);
+        // `preflight` was inserted between `write` (phase 7) and `execute`
+        // (phase 8). Keep `execute`/`verify` at 08-/09- so existing agent
+        // prompts + downstream tooling that hardcode those numeric prefixes
+        // (cs-resilience-engineer reads `08-execute/runs/<sc>/`, etc.) stay
+        // valid. The preflight phase parks off-grid as `07a-preflight/`.
+        if (phase === 'preflight') return '07a-preflight';
+        // For everything else, derive the prefix from the index in the
+        // pre-preflight ordering (so 'execute' = index 7 + 1 = 08, not 9).
+        const linearOrder: RunPhase[] = [
+            'intake', 'discover', 'analyze', 'plan', 'translate',
+            'audit', 'write', 'execute', 'verify',
+        ];
+        const idx = linearOrder.indexOf(phase);
+        if (idx === -1) return phase;
         const num = String(idx + 1).padStart(2, '0');
         return `${num}-${phase}`;
     }

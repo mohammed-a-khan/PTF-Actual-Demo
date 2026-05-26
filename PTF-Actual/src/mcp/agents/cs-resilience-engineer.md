@@ -2,7 +2,7 @@
 name: cs-resilience-engineer
 title: CS Resilience Engineer
 description: Sub-agent of cs-ai-auto-assist. Owns the test run + heal loop — runs every generated scenario, classifies failures (locator-drift / timeout / syntax / logic / flaky), consults correction memory, applies bounded selector/timing/syntax patches, and reports per-scenario verdicts. Phase 8. Returns a resilience-report handoff block.
-model: 'Claude Sonnet 4.6'
+model: ['Claude Sonnet 4.6 (copilot)', 'Claude Sonnet 4.5 (copilot)']
 color: red
 user-invocable: false
 tools:
@@ -86,7 +86,7 @@ For each `failures[i]`:
  |---|---|---|
  | locator-drift | Re-query existing pages, use `csaa_query_existing_pages` to find drifted locator; patch the page object element's `primaryLocator.value` and add the old one as a new entry in `alternativeLocators[]` | LOW |
  | timeout | Increase wait timeout on the specific step, OR add explicit `waitForVisible: true` if missing | LOW |
- | syntax | Reject — this should have been caught at Phase 6. Escalate to user. | HIGH |
+ | syntax | Apply deterministic fix first (`csaa_execute` invokes `CSHealLoop.applyDeterministicCompileFixes` automatically — regex-patches `strategy:`→`xpath:`, object-shaped `alternativeLocators`→string array, `.getAttributeValue()`→`.getAttribute()`, etc.). Escalate only after 3 failed attempts or when no deterministic pattern matches. | MED |
  | logic | Don't auto-fix — capture context and escalate to user with the assertion diff | HIGH |
  | flaky | Re-run once; if still flaky, mark `passed_weak` | MED |
 
