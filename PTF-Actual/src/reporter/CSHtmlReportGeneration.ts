@@ -11,6 +11,56 @@ let CSExcelReportGenerator: any = null;
 let CSPdfReportGenerator: any = null;
 import { CSAIReportAggregator } from './CSAIReportAggregator';
 import { collectFlakyData, generateFlakyCSS, generateFlakyNavItem, generateFlakySection } from './CSFlakyReportSection';
+import { CSReportTheme, generateRootCSS } from './theme';
+import {
+    generateAttentionHero,
+    generateQuarantineBanner,
+    generateClusterPreview,
+    generateDashboardHeroCSS,
+    renderScenarioHealthBadge,
+} from './CSDashboardHero';
+import {
+    renderStatusBadge,
+    generateA11yCSS,
+    generateModalA11yJS,
+    modalA11yAttrs,
+} from './CSReportA11y';
+import {
+    renderFailureSplitPane,
+    generateFailureSplitPaneCSS,
+} from './CSFailureSplitPane';
+import {
+    renderChartFallbackTable,
+    generateKbdNavCSS,
+    generateKeyboardNavJS,
+} from './CSReportKbdNav';
+import {
+    generateDarkModeCSS,
+    renderThemeToggleButton,
+    generateThemeToggleJS,
+} from './CSDarkMode';
+import {
+    renderHamburgerButton,
+    generateMobileCSS,
+    generateHamburgerJS,
+} from './CSReportMobile';
+import {
+    generateVirtualScrollCSS,
+    generateVirtualScrollJS,
+} from './CSReportVirtualScroll';
+// v1.43.0 Phase A — design system foundation. Tokens + primitives
+// emitted onto :root and made available report-wide. Surfaces are
+// NOT refactored in Phase A (intentional: zero visible change);
+// Phase B+ will opt existing renderers into the new primitives.
+import { generateDesignTokensCSS } from './CSReportDesign';
+import { generatePrimitivesCSS } from './CSReportPrimitives';
+import { renderDashboard, generateDashboardCSS } from './CSReportDashboard';
+import {
+    collectFailureClusters,
+    generateFailureClusterCSS,
+    generateFailureClusterNavItem,
+    generateFailureClusterSection,
+} from './CSFailureClusterSection';
 
 // Test result types
 interface TestStep {
@@ -26,6 +76,14 @@ interface TestStep {
         duration?: number;
         timestamp?: string;
         details?: any;
+    }>;
+    // v1.43.4 — uploads & downloads captured during this step.
+    attachments?: Array<{
+        type: 'screenshot' | 'upload' | 'download' | string;
+        path: string;          // filename relative to its category dir (uploads/<x> or downloads/<x>)
+        title?: string;        // display name
+        sizeBytes?: number;
+        timestamp?: string;
     }>;
 }
 
@@ -95,9 +153,16 @@ interface ExecutionHistory {
 }
 
 export class CSHtmlReportGenerator {
-    private static brandColor = '#93186C';
-    private static brandColorLight = '#b83395';
-    private static brandColorDark = '#6b1150';
+    // Brand colours are now driven by the report-theme singleton
+    // (`src/reporter/theme/`). Defaults align with the perf-app
+    // primary family (#4d004d). Consumers can override at run time
+    // via `CSReportTheme.getInstance().override({ brandColor: '…' })`.
+    // The three static getters below stay for any internal call site
+    // that still reads them directly — they always reflect the live
+    // theme, so an override updates them too.
+    private static get brandColor(): string { return CSReportTheme.getInstance().get().brandColor; }
+    private static get brandColorLight(): string { return CSReportTheme.getInstance().get().brandColorLight; }
+    private static get brandColorDark(): string { return CSReportTheme.getInstance().get().brandColorDark; }
     private static config = CSConfigurationManager.getInstance();
 
     /**
@@ -729,6 +794,14 @@ export class CSHtmlReportGenerator {
             flakyReportData = collectFlakyData(currentTestNames);
         } catch (e) { /* flaky module not available */ }
 
+        // Collect failure-cluster data (gated by FAILURE_CLUSTERING_ENABLED).
+        // When the clusterer is disabled or there are no failures, this
+        // returns null and the section render is a no-op.
+        let failureClusterData: any = null;
+        try {
+            failureClusterData = collectFailureClusters();
+        } catch (e) { /* failure cluster module not available */ }
+
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -741,9 +814,9 @@ export class CSHtmlReportGenerator {
     <script>
 ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     </script>
-    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/duration.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/relativeTime.js"></script>
+    <!-- v1.40.0: dayjs CDN scripts removed. The library was loaded for
+         two plugin-registration calls that nobody actually invoked.
+         Reports now render fully offline / behind firewalls. -->
 
     <style>
         ${this.generateEnhancedCSS()}
@@ -752,17 +825,17 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 <body>
     <div id="app">
         ${this.generateEnhancedHeader(suite, stats, logoBase64, terms)}
-        ${this.generateNavigation(terms)}
+        ${this.generateNavigation(terms, failureClusterData)}
 
         <main class="main-content">
             <!-- Dashboard View -->
             <div id="dashboard-view" class="view active">
-                ${this.generateEnhancedDashboard(stats, environment, artifacts, history, terms)}
+                ${this.generateEnhancedDashboard(stats, environment, artifacts, history, terms, flakyReportData, failureClusterData)}
             </div>
 
             <!-- Tests View -->
             <div id="tests-view" class="view">
-                ${this.generateEnhancedTestsView(suite, stats, terms)}
+                ${this.generateEnhancedTestsView(suite, stats, terms, flakyReportData)}
             </div>
 
             <!-- Timeline View -->
@@ -791,24 +864,27 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             </div>
 
             ${generateFlakySection(flakyReportData)}
+            ${generateFailureClusterSection(failureClusterData)}
         </main>
 
         ${this.generateFooter()}
     </div>
 
     <!-- Test Details Modal -->
-    <div id="test-modal" class="modal">
+    <div id="test-modal" class="modal" ${modalA11yAttrs('test-modal', 'test-modal-label')}>
         <div class="modal-content">
-            <span class="modal-close">&times;</span>
+            <h2 id="test-modal-label" class="sr-only">Test details</h2>
+            <button type="button" class="modal-close" aria-label="Close test details dialog">&times;</button>
             <div id="modal-body"></div>
         </div>
     </div>
 
     <!-- Screenshot Viewer Modal -->
-    <div id="screenshot-modal" class="modal">
+    <div id="screenshot-modal" class="modal" ${modalA11yAttrs('screenshot-modal', 'screenshot-modal-label')}>
         <div class="modal-content modal-large">
-            <span class="modal-close">&times;</span>
-            <img id="screenshot-img" src="" alt="Screenshot">
+            <h2 id="screenshot-modal-label" class="sr-only">Screenshot viewer</h2>
+            <button type="button" class="modal-close" aria-label="Close screenshot dialog">&times;</button>
+            <img id="screenshot-img" src="" alt="Screenshot" loading="lazy">
         </div>
     </div>
 
@@ -823,24 +899,18 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
      * Generate enhanced CSS styling
      */
     private static generateEnhancedCSS(): string {
+        // v1.40.0: the `:root` token block is generated from the
+        // CSReportTheme singleton so consumers can override brand /
+        // status colours at run time without forking source. The
+        // variable names emitted here are unchanged from the previous
+        // hardcoded block, so every `var(--brand-color)` / `var(--success-color)`
+        // rule below continues to work without per-rule edits.
+        const themeRoot = generateRootCSS(CSReportTheme.getInstance().get());
         return `
-        :root {
-            --brand-color: ${this.brandColor};
-            --brand-color-light: ${this.brandColorLight};
-            --brand-color-dark: ${this.brandColorDark};
-            --success-color: #10b981;
-            --danger-color: #ef4444;
-            --warning-color: #f59e0b;
-            --info-color: #3b82f6;
-            --background: #ffffff;
-            --surface: #f9fafb;
-            --surface-hover: #f3f4f6;
-            --text-primary: #111827;
-            --text-secondary: #6b7280;
-            --border: #e5e7eb;
-            --shadow: rgba(0, 0, 0, 0.1);
-            --shadow-lg: rgba(0, 0, 0, 0.2);
-        }
+        ${themeRoot}
+        ${generateDesignTokensCSS()}
+        ${generatePrimitivesCSS()}
+        ${generateDashboardCSS()}
 
         * {
             margin: 0;
@@ -1927,6 +1997,14 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         ${generateFlakyCSS()}
+        ${generateFailureClusterCSS()}
+        ${generateDashboardHeroCSS()}
+        ${generateA11yCSS()}
+        ${generateFailureSplitPaneCSS()}
+        ${generateKbdNavCSS()}
+        ${generateDarkModeCSS()}
+        ${generateMobileCSS()}
+        ${generateVirtualScrollCSS()}
         `;
     }
 
@@ -1951,6 +2029,8 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 <div class="header-info execution-info">
                     <div><strong>Started:</strong> ${new Date(suite.startTime).toLocaleString()}</div>
                     <div><strong>Duration:</strong> ${duration}</div>
+                    ${renderThemeToggleButton()}
+                    ${renderHamburgerButton()}
                 </div>
             </div>
         </header>`;
@@ -1959,10 +2039,10 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
     /**
      * Generate navigation with enhanced tabs
      */
-    private static generateNavigation(terms?: TestTerminology): string {
+    private static generateNavigation(terms?: TestTerminology, failureClusterData?: any): string {
         return `
         <nav class="nav">
-            <div class="nav-container">
+            <div class="nav-container" id="nav-container">
                 <div class="nav-item active" data-view="dashboard">
                     📊 Dashboard
                 </div>
@@ -1985,48 +2065,70 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     📎 Artifacts
                 </div>
                 ${generateFlakyNavItem()}
+                ${generateFailureClusterNavItem(failureClusterData)}
             </div>
         </nav>`;
     }
 
     /**
      * Generate enhanced dashboard with all requested features
+     *
+     * v1.40.2 — Phase 2 failure-first dashboard. The hero strip,
+     * quarantine banner, and cluster preview render *above* the
+     * legacy totals/charts so "what broke" is the first thing on
+     * screen. Each renderer returns '' when its underlying data is
+     * empty, so a clean run still gets a clean dashboard (hero only).
      */
-    private static generateEnhancedDashboard(stats: any, environment: any, artifacts: Artifacts, history: ExecutionHistory[], terms?: TestTerminology): string {
+    private static generateEnhancedDashboard(
+        stats: any,
+        environment: any,
+        artifacts: Artifacts,
+        history: ExecutionHistory[],
+        terms?: TestTerminology,
+        flakyReportData?: any,
+        failureClusterData?: any,
+    ): string {
         // Use default BDD terminology if not provided
         const t = terms || this.getTerminology('bdd');
+
+        // v1.43.0 — replaces v1.42.3's three stacked sections (hero
+        // strip + quarantine banner + cluster preview) AND the legacy
+        // .stats-grid below them with one cohesive shadcn-style
+        // summary block. Same data, displayed once, with hairline
+        // borders + soft shadow + tabular nums + micro-hints.
+        const dashboardBlock = renderDashboard({
+            stats: {
+                totalScenarios: stats.totalScenarios || 0,
+                passedScenarios: stats.passedScenarios || 0,
+                failedScenarios: stats.failedScenarios || 0,
+                skippedScenarios: stats.skippedScenarios || 0,
+                passRate: String(stats.passRate || '0'),
+                totalDuration: typeof stats.totalDuration === 'number' ? stats.totalDuration : 0,
+            },
+            flakyReportData,
+            failureClusterData,
+            history,
+        });
+
         return `
         <div class="dashboard-title">Test Execution Dashboard</div>
-        
-        <!-- Statistics Cards -->
-        <div class="stats-grid">
-            <div class="stat-card total">
-                <div class="stat-value">${stats.totalScenarios}</div>
-                <div class="stat-label">Total Tests</div>
-            </div>
-            <div class="stat-card passed">
-                <div class="stat-value">${stats.passedScenarios}</div>
-                <div class="stat-label">Passed</div>
-            </div>
-            <div class="stat-card failed">
-                <div class="stat-value">${stats.failedScenarios}</div>
-                <div class="stat-label">Failed</div>
-            </div>
-            <div class="stat-card skipped">
-                <div class="stat-value">${stats.skippedScenarios}</div>
-                <div class="stat-label">Skipped</div>
-            </div>
-            <div class="stat-card total">
-                <div class="stat-value">${stats.passRate}%</div>
-                <div class="stat-label">Pass Rate</div>
-            </div>
-        </div>
+
+        ${dashboardBlock}
 
         <!-- Charts Grid -->
         <div class="charts-grid">
             <div class="chart-container">
                 <div class="chart-title">Test Duration Distribution</div>
-                <canvas id="status-chart" class="chart-canvas"></canvas>
+                <canvas id="status-chart" class="chart-canvas" aria-describedby="status-chart-fallback"></canvas>
+                ${renderChartFallbackTable({
+                    caption: `Status distribution — ${stats.totalScenarios} total: ${stats.passedScenarios} passed, ${stats.failedScenarios} failed, ${stats.skippedScenarios} skipped`,
+                    headers: ['Status', 'Count'],
+                    rows: [
+                        ['Passed', stats.passedScenarios || 0],
+                        ['Failed', stats.failedScenarios || 0],
+                        ['Skipped', stats.skippedScenarios || 0],
+                    ],
+                }).replace('<table class="sr-only chart-fallback-table">', '<table id="status-chart-fallback" class="sr-only chart-fallback-table">')}
             </div>
             <div class="chart-container">
                 <div class="chart-title">Test Execution Summary</div>
@@ -2053,8 +2155,14 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
     /**
      * Generate enhanced tests view with hierarchical structure
+     *
+     * v1.40.3 — when `flakyReportData` is provided, each scenario row
+     * gets an inline health pill (Solid/Stable/Shaky/Flaky/Broken/Toxic/New)
+     * next to the existing pass/fail/skip status badge. New tests (no
+     * history) are deliberately left without a pill so the table stays
+     * clean on first-run repos.
      */
-    private static generateEnhancedTestsView(suite: TestSuite, stats: any, terms?: TestTerminology): string {
+    private static generateEnhancedTestsView(suite: TestSuite, stats: any, terms?: TestTerminology, flakyReportData?: any): string {
         // Use default BDD terminology if not provided
         const t = terms || this.getTerminology('bdd');
 
@@ -2094,10 +2202,11 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         const hierarchicalView = Array.from(featureGroups.entries()).map(([featureName, scenarios]) => {
             const scenarioItems = scenarios.map(scenario => `
-                <div class="scenario-item">
-                    <div class="scenario-header" onclick="toggleScenario(this)">
+                <div class="scenario-item" data-status="${scenario.status}" data-name="${attrEscape(String(scenario.name || '').toLowerCase())}">
+                    <div class="scenario-header" onclick="toggleScenario(this)" tabindex="0" role="button" aria-expanded="false" aria-label="${htmlEscape(scenario.name)} — ${scenario.status}, ${scenario.steps.length} ${t.steps.toLowerCase()}, press Enter to toggle">
                         <div>
-                            <span class="status-badge ${scenario.status}">${scenario.status}</span>
+                            ${renderStatusBadge(scenario.status)}
+                            ${renderScenarioHealthBadge(scenario.name, flakyReportData)}
                             <strong>${htmlEscape(scenario.name)}</strong>
                             <span class="text-muted">(${scenario.steps.length} ${t.steps.toLowerCase()})</span>
                         </div>
@@ -2243,7 +2352,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                     <div class="step-item ${step.status}">
                                         <div class="step-header" onclick="toggleStep(this)">
                                             <div>
-                                                <span class="status-badge ${step.status}">${step.status}</span>
+                                                ${renderStatusBadge(step.status)}
                                                 <span>${htmlEscape(step.name)}</span>
                                             </div>
                                             <div>
@@ -2255,6 +2364,13 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                             <div class="step-tabs">
                                                 <div class="step-tab active" onclick="showStepTab(this, '${scenarioUniqueId}-actions-${index}')">Actions</div>
                                                 <div class="step-tab" onclick="showStepTab(this, '${scenarioUniqueId}-screenshots-${index}')">Screenshots</div>
+                                                ${(() => {
+                                                    const fc = CSHtmlReportGenerator.countStepFiles(step);
+                                                    const total = fc.uploads + fc.downloads;
+                                                    return total > 0
+                                                        ? `<div class="step-tab" onclick="showStepTab(this, '${scenarioUniqueId}-files-${index}')">Files <span class="cs-step-tab-count">${total}</span></div>`
+                                                        : '';
+                                                })()}
                                                 <div class="step-tab" onclick="showStepTab(this, '${scenarioUniqueId}-error-${index}')">Error Details</div>
                                             </div>
                                             <div class="step-tab-content">
@@ -2266,6 +2382,12 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                                 <div class="step-tab-pane" id="${scenarioUniqueId}-screenshots-${index}">
                                                     ${this.generateStepScreenshots(step)}
                                                 </div>
+                                                ${(() => {
+                                                    const fc = CSHtmlReportGenerator.countStepFiles(step);
+                                                    return (fc.uploads + fc.downloads) > 0
+                                                        ? `<div class="step-tab-pane" id="${scenarioUniqueId}-files-${index}">${CSHtmlReportGenerator.generateStepFilesTab(step)}</div>`
+                                                        : '';
+                                                })()}
                                                 <div class="step-tab-pane" id="${scenarioUniqueId}-error-${index}">
                                                     <div class="error-details-container">
                                                         ${this.generateStepErrorDetails(step)}
@@ -2311,7 +2433,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                         <div class="step-header" onclick="toggleStep(this)" style="padding: 10px 14px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; background: ${isHookStep ? '#f1f3f4' : 'linear-gradient(to right, #f8f9fa, #ffffff)'}; border-bottom: 1px solid #eee;">
                                             <div style="display: flex; align-items: center; gap: 10px;">
                                                 ${hookBadge}
-                                                <span class="status-badge ${step.status}" style="font-size: 0.7em; padding: 3px 8px; border-radius: 3px;">${step.status}</span>
+                                                ${renderStatusBadge(step.status, 'status-badge--compact')}
                                                 <span style="font-weight: 600; font-size: 0.95em; ${isHookStep ? 'color: #5f6368; font-style: italic;' : 'color: #202124;'}">${htmlEscape(step.name)}</span>
                                             </div>
                                             <div style="display: flex; align-items: center; gap: 12px;">
@@ -2333,26 +2455,64 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                             }
                                             const hasError = !!step.error;
 
+                                            // v1.41.1: when a step failed, prepend a "Failure" tab
+                                            // that shows error + screenshot in a split-pane and
+                                            // becomes the default active tab. Non-failed steps see
+                                            // the unchanged Actions → Screenshots → Error Details order.
+                                            // v1.41.1: split-pane requires an error payload to be useful;
+                                            // screenshot-only failures stay on the existing Actions/Screenshots tabs.
+                                            const showFailureView = step.status === 'failed' && hasError;
+                                            const failureScreenshotSrc = step.screenshot
+                                                || (step.error && (step.error as any).screenshot)
+                                                || (step.actions && step.actions.find((a: any) => a.screenshot)?.screenshot)
+                                                || null;
+                                            const failureTabActive = showFailureView ? ' active' : '';
+                                            const actionsTabActive = showFailureView ? '' : ' active';
+                                            const actionsBorder = showFailureView ? 'transparent' : '#93186C';
+                                            const actionsColor = showFailureView ? '#495057' : '#93186C';
+                                            const actionsDisplay = showFailureView ? 'none' : 'block';
+
                                             return `
                                             <div class="step-details">
                                                 <div class="step-tabs" style="display: flex; background: #f8f9fa; border-bottom: 1px solid #dee2e6;">
-                                                    <div class="step-tab active" onclick="showStepTab(this, '${stepUniqueId}-actions')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid #93186C; font-size: 0.85em; font-weight: 700; color: #93186C;">
+                                                    ${showFailureView ? `
+                                                    <div class="step-tab active" onclick="showStepTab(this, '${stepUniqueId}-failure')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid #dc3545; font-size: 0.85em; font-weight: 700; color: #dc3545;">
+                                                        🔍 <strong>Failure</strong>
+                                                    </div>` : ''}
+                                                    <div class="step-tab${actionsTabActive}" onclick="showStepTab(this, '${stepUniqueId}-actions')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid ${actionsBorder}; font-size: 0.85em; font-weight: 700; color: ${actionsColor};">
                                                         📋 <strong>Actions</strong>${hasActions ? ` (${step.actions.length})` : ''}
                                                     </div>
                                                     <div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-screenshots')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: #495057;">
                                                         📷 <strong>Screenshots</strong>${hasScreenshot ? ' (1)' : ''}
                                                     </div>
+                                                    ${(() => {
+                                                        const fc = CSHtmlReportGenerator.countStepFiles(step);
+                                                        const total = fc.uploads + fc.downloads;
+                                                        return total > 0
+                                                            ? `<div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-files')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: #495057;">📁 <strong>Files</strong> <span class="cs-step-tab-count">${total}</span></div>`
+                                                            : '';
+                                                    })()}
                                                     <div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-error')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: ${hasError ? '#dc3545' : '#495057'};">
                                                         ${hasError ? '⚠️' : '✓'} <strong>Error Details</strong>
                                                     </div>
                                                 </div>
                                                 <div class="step-tab-content" style="padding: 12px;">
-                                                    <div id="${stepUniqueId}-actions" class="step-tab-pane active" style="display: block;">
+                                                    ${showFailureView ? `
+                                                    <div id="${stepUniqueId}-failure" class="step-tab-pane${failureTabActive}" style="display: block;">
+                                                        ${renderFailureSplitPane(step, failureScreenshotSrc)}
+                                                    </div>` : ''}
+                                                    <div id="${stepUniqueId}-actions" class="step-tab-pane${actionsTabActive}" style="display: ${actionsDisplay};">
                                                         ${hasActions ? this.generateStepActions(step) : '<div class="text-muted" style="color: #6c757d; font-style: italic;">No actions recorded</div>'}
                                                     </div>
                                                     <div id="${stepUniqueId}-screenshots" class="step-tab-pane" style="display: none;">
                                                         ${hasScreenshot ? this.generateStepScreenshots(step) : '<div class="text-muted" style="color: #6c757d; font-style: italic;">No screenshots captured</div>'}
                                                     </div>
+                                                    ${(() => {
+                                                        const fc = CSHtmlReportGenerator.countStepFiles(step);
+                                                        return (fc.uploads + fc.downloads) > 0
+                                                            ? `<div id="${stepUniqueId}-files" class="step-tab-pane" style="display: none;">${CSHtmlReportGenerator.generateStepFilesTab(step)}</div>`
+                                                            : '';
+                                                    })()}
                                                     <div id="${stepUniqueId}-error" class="step-tab-pane" style="display: none;">
                                                         ${hasError ? `
                                                         <div style="padding: 12px; background: #fff5f5; border-radius: 4px; border-left: 4px solid #dc3545;">
@@ -2505,7 +2665,104 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             `;
         }).join('');
 
-        return testMetrics + hierarchicalView;
+        // v1.43.3 — filter bar above the feature/scenario list
+        const passedCount  = stats.passedScenarios  || 0;
+        const failedCount  = stats.failedScenarios  || 0;
+        const skippedCount = stats.skippedScenarios || 0;
+        const totalCount   = stats.totalScenarios   || 0;
+        const filterBar = `
+        <div class="cs-tests-toolbar" role="toolbar" aria-label="Filter scenarios">
+            <div class="cs-tests-filter-group" role="group" aria-label="Filter by status">
+                <button type="button" class="cs-tests-chip cs-tests-chip--active" data-filter="all"
+                        aria-pressed="true">
+                    <span class="cs-tests-chip-label">All</span>
+                    <span class="cs-tests-chip-count">${totalCount}</span>
+                </button>
+                <button type="button" class="cs-tests-chip" data-filter="passed" aria-pressed="false">
+                    <span class="cs-tests-chip-dot" data-status="passed" aria-hidden="true"></span>
+                    <span class="cs-tests-chip-label">Passed</span>
+                    <span class="cs-tests-chip-count">${passedCount}</span>
+                </button>
+                <button type="button" class="cs-tests-chip" data-filter="failed" aria-pressed="false">
+                    <span class="cs-tests-chip-dot" data-status="failed" aria-hidden="true"></span>
+                    <span class="cs-tests-chip-label">Failed</span>
+                    <span class="cs-tests-chip-count">${failedCount}</span>
+                </button>
+                <button type="button" class="cs-tests-chip" data-filter="skipped" aria-pressed="false">
+                    <span class="cs-tests-chip-dot" data-status="skipped" aria-hidden="true"></span>
+                    <span class="cs-tests-chip-label">Skipped</span>
+                    <span class="cs-tests-chip-count">${skippedCount}</span>
+                </button>
+            </div>
+            <div class="cs-tests-search-wrap">
+                <span class="cs-tests-search-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>
+                    </svg>
+                </span>
+                <input type="search" id="test-search" class="cs-tests-search"
+                       placeholder="Search scenarios by name…"
+                       aria-label="Search scenarios by name">
+                <span id="cs-tests-empty" class="cs-tests-empty" hidden>
+                    No scenarios match this filter.
+                </span>
+            </div>
+        </div>`;
+
+        return testMetrics + filterBar + hierarchicalView;
+    }
+
+    /**
+     * v1.43.4 — count uploaded/downloaded files attached to a step.
+     */
+    private static countStepFiles(step: TestStep): { uploads: number; downloads: number } {
+        const a = step.attachments || [];
+        let uploads = 0, downloads = 0;
+        for (const f of a) {
+            if (!f || !f.type) continue;
+            if (f.type === 'upload')   uploads++;
+            if (f.type === 'download') downloads++;
+        }
+        return { uploads, downloads };
+    }
+
+    /**
+     * v1.43.4 — render the per-step Files tab content. Lists uploaded and
+     * downloaded files captured during the step as clickable links into
+     * the report's uploads/ and downloads/ folders.
+     *
+     * Relative paths assume the HTML report lives one level under the
+     * test-run base dir (i.e. `<run>/reports/<x>/index.html`). The framework
+     * writes files to `<run>/uploads/<name>` and `<run>/downloads/<name>`,
+     * so we link with `../../uploads/<name>` and `../../downloads/<name>`.
+     */
+    private static generateStepFilesTab(step: TestStep): string {
+        const items = (step.attachments || []).filter(
+            (a: any) => a && (a.type === 'upload' || a.type === 'download')
+        );
+        if (items.length === 0) {
+            return '<div class="text-muted" style="color: #6c757d; font-style: italic;">No files were uploaded or downloaded in this step.</div>';
+        }
+        const rows = items.map((a: any) => {
+            const folder = a.type === 'upload' ? 'uploads' : 'downloads';
+            const href = `../../${folder}/${encodeURIComponent(a.path)}`;
+            const icon = a.type === 'upload' ? '⬆️' : '⬇️';
+            const label = a.type === 'upload' ? 'Upload' : 'Download';
+            const size = (typeof a.sizeBytes === 'number' && a.sizeBytes > 0)
+                ? ` <span class="cs-step-file-size">(${this.formatFileSize(a.sizeBytes)})</span>`
+                : '';
+            const ts = a.timestamp ? `<span class="cs-step-file-time" title="${attrEscape(a.timestamp)}">${htmlEscape(new Date(a.timestamp).toLocaleTimeString())}</span>` : '';
+            const name = htmlEscape(a.title || a.path);
+            return `
+                <li class="cs-step-file" data-kind="${a.type}">
+                    <span class="cs-step-file-icon" aria-hidden="true">${icon}</span>
+                    <span class="cs-step-file-kind">${label}</span>
+                    <a class="cs-step-file-link" href="${href}" target="_blank" rel="noopener" download>${name}</a>
+                    ${size}
+                    ${ts}
+                </li>`;
+        }).join('');
+        return `<ul class="cs-step-files">${rows}</ul>`;
     }
 
     /**
@@ -2684,9 +2941,9 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                     <div style="margin-bottom: 0.5rem; color: var(--text-secondary); font-size: 0.9rem;">
                         ${step.status === 'failed' ? '📸 Failure Screenshot' : '📸 Step Screenshot'}
                     </div>
-                    <img src="${screenshotPath}" alt="Step Screenshot" 
-                         style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 15px var(--shadow); cursor: pointer;" 
-                         onclick="showScreenshotModal('${screenshotPath}')" 
+                    <img src="${screenshotPath}" alt="Step Screenshot" loading="lazy"
+                         style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 15px var(--shadow); cursor: pointer;"
+                         onclick="showScreenshotModal('${screenshotPath}')"
                          onerror="this.onerror=null; this.src='data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'200\' height=\'150\' viewBox=\'0 0 200 150\'%3E%3Crect width=\'200\' height=\'150\' fill=\'%23f0f0f0\'/%3E%3Ctext x=\'50%25\' y=\'50%25\' text-anchor=\'middle\' dy=\'.3em\' fill=\'%23999\' font-family=\'Arial\' font-size=\'14\'%3EScreenshot not found%3C/text%3E%3C/svg%3E';">
                 </div>
             `;
@@ -2885,7 +3142,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             }
 
             const contentHtml = isImage && att.path
-                ? '<img src="' + att.path + '" style="max-width: 100%; height: auto;" />'
+                ? '<img src="' + att.path + '" loading="lazy" style="max-width: 100%; height: auto;" />'
                 : '<pre style="margin: 0; font-size: 0.85em; white-space: pre-wrap; word-break: break-word;">' + htmlEscape(content) + '</pre>';
 
             return `
@@ -3640,10 +3897,10 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         const threads = workerEntries.map(entry => entry[1]);
         const workerIds = workerEntries.map(entry => entry[0]);
         return `
-        // Initialize dayjs plugins
-        dayjs.extend(dayjs_plugin_duration);
-        dayjs.extend(dayjs_plugin_relativeTime);
-        
+        // v1.40.0: dayjs plugin registrations removed — the library was
+        // a CDN dependency loaded for no functional purpose (no caller
+        // ever invoked the registered plugins).
+
         // Custom charts are ready to use
 
         // Global variables
@@ -4446,36 +4703,70 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 event.target.style.display = 'none';
             }
         });
+        ${generateModalA11yJS()}
+        ${generateKeyboardNavJS()}
+        ${generateThemeToggleJS()}
+        ${generateHamburgerJS()}
+        ${generateVirtualScrollJS()}
 
-        // Search functionality
-        const searchBox = document.getElementById('test-search');
-        if (searchBox) {
-            searchBox.addEventListener('input', function() {
-                const searchTerm = this.value.toLowerCase();
-                
-                document.querySelectorAll('.feature-item').forEach(feature => {
-                    const featureName = feature.querySelector('.feature-header').textContent.toLowerCase();
+        // v1.43.3 — Tests-tab filter chips + search (combined)
+        (function setupTestsFilter() {
+            const searchBox  = document.getElementById('test-search');
+            const chips      = document.querySelectorAll('.cs-tests-chip');
+            const emptyMsg   = document.getElementById('cs-tests-empty');
+            if (!searchBox && chips.length === 0) return;
+
+            let activeStatus = 'all';
+            let searchTerm   = '';
+
+            function applyFilters() {
+                let totalVisible = 0;
+                document.querySelectorAll('.feature-item').forEach(function (feature) {
                     const scenarios = feature.querySelectorAll('.scenario-item');
-                    let hasMatchingScenario = false;
-                    
-                    scenarios.forEach(scenario => {
-                        const scenarioName = scenario.querySelector('.scenario-header').textContent.toLowerCase();
-                        if (scenarioName.includes(searchTerm)) {
-                            scenario.style.display = 'block';
-                            hasMatchingScenario = true;
+                    let visibleInFeature = 0;
+                    scenarios.forEach(function (sc) {
+                        const status = sc.getAttribute('data-status') || '';
+                        const name   = sc.getAttribute('data-name') || '';
+                        const statusOk = (activeStatus === 'all') || (status === activeStatus);
+                        const searchOk = !searchTerm || name.indexOf(searchTerm) !== -1;
+                        if (statusOk && searchOk) {
+                            sc.style.display = '';
+                            visibleInFeature++;
+                            totalVisible++;
                         } else {
-                            scenario.style.display = 'none';
+                            sc.style.display = 'none';
                         }
                     });
-                    
-                    if (featureName.includes(searchTerm) || hasMatchingScenario) {
-                        feature.style.display = 'block';
-                    } else {
-                        feature.style.display = 'none';
-                    }
+                    feature.style.display = visibleInFeature > 0 ? '' : 'none';
+                });
+                if (emptyMsg) emptyMsg.hidden = totalVisible !== 0;
+            }
+
+            chips.forEach(function (chip) {
+                chip.addEventListener('click', function () {
+                    chips.forEach(function (c) {
+                        c.classList.remove('cs-tests-chip--active');
+                        c.setAttribute('aria-pressed', 'false');
+                    });
+                    chip.classList.add('cs-tests-chip--active');
+                    chip.setAttribute('aria-pressed', 'true');
+                    activeStatus = chip.getAttribute('data-filter') || 'all';
+                    applyFilters();
                 });
             });
-        }
+
+            if (searchBox) {
+                let t = null;
+                searchBox.addEventListener('input', function () {
+                    if (t) clearTimeout(t);
+                    const v = this.value;
+                    t = setTimeout(function () {
+                        searchTerm = String(v || '').toLowerCase().trim();
+                        applyFilters();
+                    }, 120);
+                });
+            }
+        })();
 
         // Render custom test execution heat map
         function renderTestExecutionHeatMap(canvas, scenarios) {

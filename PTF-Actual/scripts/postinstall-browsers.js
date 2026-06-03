@@ -1,159 +1,239 @@
 #!/usr/bin/env node
 /**
- * Smart Playwright Browser Installation Script
- * Only installs browsers that are missing or outdated
+ * Smart Playwright browser installer (postinstall hook).
  *
- * This script runs as postinstall in consumer projects.
- * npm sets cwd to the package root when running postinstall.
+ * Runs after `npm install` in consumer projects. Decides whether to
+ * download Playwright's browser binaries before the first test run.
+ *
+ * History
+ * -------
+ * Prior to v1.42.3 this script asked "does *any* directory whose name
+ * starts with `chromium` exist?". That returned true even when the
+ * directory belonged to a previous Playwright version (e.g. the
+ * cached `chromium-1148` from an old install, while the upgraded
+ * Playwright now wants `chromium-1223`). Consumers then hit
+ *
+ *   browserType.launch: Executable doesn't exist at
+ *   .../ms-playwright/chromium-1223/chrome-win64/chrome.exe
+ *
+ * on the first run.
+ *
+ * v1.42.3 fixes the check by reading the **expected** revisions out
+ * of `playwright-core/browsers.json` and verifying that the exact
+ * `<name>-<revision>` directory exists with content. If we can't
+ * read `browsers.json` (very old Playwright, broken install), we
+ * fall back to always invoking `npx playwright install`, which is
+ * idempotent — it skips browsers already present.
+ *
+ * Environment escape hatches
+ * --------------------------
+ *   CS_SKIP_BROWSER_INSTALL=1     skip the script entirely (CI that
+ *                                 manages browsers separately)
+ *   PLAYWRIGHT_BROWSERS_PATH=...  honoured — we look there for the
+ *                                 cache (same rule Playwright uses)
  */
+
+'use strict';
 
 const { execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-// Ensure we're running from the correct context
-const SCRIPT_DIR = __dirname;
-const PACKAGE_ROOT = path.dirname(SCRIPT_DIR);
+// ── Escape hatch ────────────────────────────────────────────────
+if (process.env.CS_SKIP_BROWSER_INSTALL === '1') {
+    console.log('CS_SKIP_BROWSER_INSTALL=1 — skipping browser install check.');
+    process.exit(0);
+}
 
-// Required browsers for the framework
-const REQUIRED_BROWSERS = ['chromium', 'firefox', 'webkit'];
+// Browsers we ship with by default. Matches the legacy behaviour
+// (chromium / firefox / webkit) plus the headless-shell variant
+// Playwright now installs alongside chromium since ~1.49.
+const REQUIRED_BROWSERS = new Set([
+    'chromium',
+    'chromium-headless-shell',
+    'firefox',
+    'webkit',
+]);
 
-// Get Playwright browser installation path
+// ── Cache path resolution ───────────────────────────────────────
+
 function getPlaywrightBrowserPath() {
-    // Playwright stores browsers in ~/.cache/ms-playwright on Linux/Mac
-    // or %LOCALAPPDATA%\ms-playwright on Windows
+    // Honour the official override first.
+    if (process.env.PLAYWRIGHT_BROWSERS_PATH &&
+        process.env.PLAYWRIGHT_BROWSERS_PATH !== '0') {
+        return process.env.PLAYWRIGHT_BROWSERS_PATH;
+    }
     if (process.platform === 'win32') {
         return path.join(process.env.LOCALAPPDATA || '', 'ms-playwright');
-    } else {
-        return path.join(os.homedir(), '.cache', 'ms-playwright');
     }
+    if (process.platform === 'darwin') {
+        return path.join(os.homedir(), 'Library', 'Caches', 'ms-playwright');
+    }
+    return path.join(os.homedir(), '.cache', 'ms-playwright');
 }
 
-// Check if a specific browser is installed
-function isBrowserInstalled(browserName) {
-    const browserPath = getPlaywrightBrowserPath();
+// ── Expected-revision lookup ────────────────────────────────────
 
-    if (!fs.existsSync(browserPath)) {
-        return false;
+/**
+ * Walk up from the consumer's cwd looking for a `node_modules/playwright-core`
+ * with a `browsers.json` next to it. We can't `require('playwright-core/...')`
+ * directly because the consumer might not have @playwright/test as a direct
+ * dep — they might pull it through us.
+ *
+ * Returns `{ path, data }` or null if not found.
+ */
+function readBrowsersJson() {
+    const candidates = [];
+    // Consumer cwd (npm sets this to the project root during postinstall)
+    let cwd = process.cwd();
+    for (let i = 0; i < 8; i++) {
+        candidates.push(path.join(cwd, 'node_modules', 'playwright-core', 'browsers.json'));
+        const parent = path.dirname(cwd);
+        if (parent === cwd) break;
+        cwd = parent;
     }
+    // Fall back to this package's own playwright-core (when running
+    // out of a fresh install where peer deps haven't materialised yet).
+    candidates.push(path.join(__dirname, '..', 'node_modules', 'playwright-core', 'browsers.json'));
 
-    try {
-        const dirs = fs.readdirSync(browserPath);
-        // Look for directories starting with the browser name
-        // e.g., chromium-1148, firefox-1456, webkit-2104
-        const browserDir = dirs.find(dir => dir.toLowerCase().startsWith(browserName.toLowerCase()));
-
-        if (browserDir) {
-            const fullPath = path.join(browserPath, browserDir);
-            // Check if directory exists and has content
-            if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
-                const contents = fs.readdirSync(fullPath);
-                return contents.length > 0;
+    for (const p of candidates) {
+        try {
+            if (fs.existsSync(p)) {
+                const raw = fs.readFileSync(p, 'utf-8');
+                const parsed = JSON.parse(raw);
+                if (parsed && Array.isArray(parsed.browsers)) {
+                    return { path: p, data: parsed };
+                }
             }
+        } catch (_err) {
+            // Try next candidate
         }
-        return false;
-    } catch (error) {
-        return false;
     }
+    return null;
 }
 
-// Get installed browser version
-function getInstalledBrowserVersion(browserName) {
-    const browserPath = getPlaywrightBrowserPath();
+/**
+ * Return the list of `{ name, revision }` entries we need installed,
+ * filtered to the REQUIRED_BROWSERS we ship by default. Returns null
+ * if browsers.json couldn't be located — caller should fall back to
+ * "just run `npx playwright install` unconditionally."
+ */
+function getExpectedBrowsers() {
+    const found = readBrowsersJson();
+    if (!found) return null;
 
-    if (!fs.existsSync(browserPath)) {
-        return null;
+    const wanted = [];
+    for (const b of found.data.browsers) {
+        if (!REQUIRED_BROWSERS.has(b.name)) continue;
+        if (b.installByDefault === false) continue;
+        if (!b.revision) continue;
+        wanted.push({ name: b.name, revision: String(b.revision) });
     }
+    return { browsersJsonPath: found.path, wanted };
+}
 
+// ── Per-browser presence check ──────────────────────────────────
+
+/**
+ * For a given expected `{ name, revision }`, return true if the
+ * exact `<cache>/<name>-<revision>` directory exists and has any
+ * files in it. We don't probe the executable path itself —
+ * Playwright's directory layout differs per OS — but a missing or
+ * empty directory is a reliable "needs install" signal.
+ */
+function isExactBrowserInstalled(cachePath, name, revision) {
+    if (!cachePath || !fs.existsSync(cachePath)) return false;
+    const dir = path.join(cachePath, `${name}-${revision}`);
+    if (!fs.existsSync(dir)) return false;
     try {
-        const dirs = fs.readdirSync(browserPath);
-        const browserDir = dirs.find(dir => dir.toLowerCase().startsWith(browserName.toLowerCase()));
-
-        if (browserDir) {
-            // Extract version from directory name (e.g., chromium-1148 -> 1148)
-            const match = browserDir.match(/\d+/);
-            return match ? match[0] : null;
-        }
-        return null;
-    } catch (error) {
-        return null;
-    }
-}
-
-// Check which browsers need to be installed
-function getMissingBrowsers() {
-    const missing = [];
-
-    for (const browser of REQUIRED_BROWSERS) {
-        if (!isBrowserInstalled(browser)) {
-            missing.push(browser);
-        }
-    }
-
-    return missing;
-}
-
-// Install specific browsers
-function installBrowsers(browsers) {
-    if (browsers.length === 0) {
-        return true;
-    }
-
-    const browserList = browsers.join(' ');
-    console.log(`Installing browsers: ${browserList}`);
-
-    try {
-        execSync(`npx playwright install ${browserList}`, {
-            stdio: 'inherit',
-            env: { ...process.env }
-        });
-        return true;
-    } catch (error) {
-        console.error(`Failed to install browsers: ${error.message}`);
+        const stat = fs.statSync(dir);
+        if (!stat.isDirectory()) return false;
+        return fs.readdirSync(dir).length > 0;
+    } catch (_err) {
         return false;
     }
 }
 
-// Main function
+// ── Installer ───────────────────────────────────────────────────
+
+function runPlaywrightInstall(args) {
+    const cmd = ['npx', 'playwright', 'install', ...args].join(' ');
+    console.log(`> ${cmd}`);
+    try {
+        execSync(cmd, { stdio: 'inherit', env: { ...process.env } });
+        return true;
+    } catch (err) {
+        console.error(`Browser install failed: ${err.message}`);
+        return false;
+    }
+}
+
+// ── Main ────────────────────────────────────────────────────────
+
 function main() {
+    const cachePath = getPlaywrightBrowserPath();
     console.log('Checking Playwright browser installation...');
-    console.log(`Browser cache path: ${getPlaywrightBrowserPath()}`);
+    console.log(`  Cache path: ${cachePath}`);
 
-    // Check each browser
-    const status = {};
-    for (const browser of REQUIRED_BROWSERS) {
-        const installed = isBrowserInstalled(browser);
-        const version = getInstalledBrowserVersion(browser);
-        status[browser] = { installed, version };
+    const expected = getExpectedBrowsers();
 
-        if (installed) {
-            console.log(`  ✓ ${browser}: installed (build ${version || 'unknown'})`);
-        } else {
-            console.log(`  ✗ ${browser}: not installed`);
-        }
-    }
-
-    // Get missing browsers
-    const missingBrowsers = getMissingBrowsers();
-
-    if (missingBrowsers.length === 0) {
-        console.log('\nAll required browsers are already installed. Skipping download.');
+    // Fallback path: no browsers.json reachable. Trust `npx playwright
+    // install` to do the right thing (it's idempotent).
+    if (!expected) {
+        console.log('  Could not locate playwright-core/browsers.json.');
+        console.log('  Falling back to: npx playwright install (idempotent).');
+        runPlaywrightInstall([]);
         return;
     }
 
-    console.log(`\nMissing browsers: ${missingBrowsers.join(', ')}`);
-    console.log('Installing missing browsers...\n');
+    console.log(`  Expected revisions read from: ${expected.browsersJsonPath}`);
 
-    const success = installBrowsers(missingBrowsers);
+    const missing = [];
+    for (const { name, revision } of expected.wanted) {
+        const ok = isExactBrowserInstalled(cachePath, name, revision);
+        if (ok) {
+            console.log(`  ✓ ${name}@${revision}: present`);
+        } else {
+            console.log(`  ✗ ${name}@${revision}: MISSING`);
+            // Pass the user-facing name to `playwright install`. The
+            // `chromium-headless-shell` revision rides along with
+            // `chromium` so we don't request it separately.
+            const installName = name === 'chromium-headless-shell' ? 'chromium' : name;
+            if (!missing.includes(installName)) missing.push(installName);
+        }
+    }
 
-    if (success) {
-        console.log('\nBrowser installation complete.');
+    if (missing.length === 0) {
+        console.log('All required browsers already present at the expected revisions.');
+        return;
+    }
+
+    console.log(`\nInstalling: ${missing.join(', ')}`);
+    const ok = runPlaywrightInstall(missing);
+    if (ok) {
+        console.log('Browser install complete.');
     } else {
-        console.error('\nBrowser installation failed. You may need to run: npx playwright install');
-        // Don't exit with error to avoid breaking npm install
+        console.error(
+            'Browser install failed. Run manually before your first test:\n' +
+            '  npx playwright install ' + missing.join(' '),
+        );
+        // Don't fail the npm install — surface the message but exit 0
+        // so the consumer can still see other postinstall output.
     }
 }
 
-// Run
-main();
+// Only auto-run when invoked directly (e.g. via npm postinstall).
+// `require()` from a test must not trigger a real install.
+if (require.main === module) {
+    main();
+}
+
+// Exported for unit tests (postinstall-browsers-smoke).
+module.exports = {
+    getPlaywrightBrowserPath,
+    readBrowsersJson,
+    getExpectedBrowsers,
+    isExactBrowserInstalled,
+    REQUIRED_BROWSERS,
+};

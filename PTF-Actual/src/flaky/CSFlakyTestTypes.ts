@@ -32,6 +32,17 @@ export interface FlakinessAnalysis {
     testId: string;
     testName: string;
     score: number;
+    /**
+     * Lower bound of the 95% Wilson score confidence interval on the
+     * underlying fail-rate, expressed on the same 0-100 scale as `score`.
+     * Wide [confidenceLow, confidenceHigh] = small sample, uncertain.
+     */
+    confidenceLow: number;
+    /**
+     * Upper bound of the 95% Wilson score confidence interval on the
+     * underlying fail-rate, expressed on the same 0-100 scale as `score`.
+     */
+    confidenceHigh: number;
     totalRuns: number;
     passRate: number;
     pattern: 'stable' | 'intermittent' | 'trending_failure' | 'timing_dependent' | 'data_dependent' | 'unknown';

@@ -272,6 +272,7 @@ export class CSFlakyTestDetector {
         // getFlakinessScore() return the latest value too.
         record.flakinessScore = score;
         const passRate = record.totalRuns > 0 ? (record.passCount / record.totalRuns) * 100 : 0;
+        const { low: confidenceLow, high: confidenceHigh } = this.computeConfidenceInterval(record);
 
         // Duration statistics
         const durations = record.results.map(r => r.duration);
@@ -300,6 +301,8 @@ export class CSFlakyTestDetector {
             testId,
             testName: record.name,
             score,
+            confidenceLow,
+            confidenceHigh,
             totalRuns: record.totalRuns,
             passRate: Math.round(passRate * 100) / 100,
             pattern,
@@ -412,17 +415,25 @@ export class CSFlakyTestDetector {
     // ==========================================================================
 
     /**
-     * Compute health score: failRate × 100
+     * Compute health score using a Beta-Binomial posterior mean.
+     *
      * 0 = perfectly healthy (every run passed)
      * 100 = toxic (every run failed)
      *
-     * Earlier versions of this method computed "minority count" as a
-     * proxy for inconsistency, which incorrectly labelled tests that
-     * had failed every run as "Solid" (because all-fails has zero
-     * variance from the majority). The new formula collapses health
-     * onto a single intuitive axis: how often does this test actually
-     * fail? Trend / pattern detection still surface alternation and
-     * regression direction separately on the report.
+     * Earlier versions used the raw fail rate `failCount / total`. That
+     * formula collapses health onto a single intuitive axis but is
+     * noisy on small samples — a single run that was 1-pass-1-fail
+     * scored 50 ("Broken") even though we genuinely had no idea yet.
+     *
+     * The new formula uses a Beta-Binomial model with a uniform
+     * Beta(α₀=1, β₀=1) prior:
+     *   posterior fail-rate = (1 + failCount) / (2 + totalNonSkipped)
+     *
+     * This is Laplace-smoothing: with zero runs the score is 50 (no
+     * info), with one pass it's ~33, with one fail ~66, and as runs
+     * accumulate the score converges to the raw fail rate. The 95%
+     * Wilson score interval (exposed alongside the score in
+     * `analyzeFlakiness`) tells the reader how confident we are.
      *
      * Score ranges (matching HEALTH_LEVELS in CSFlakyReportSection):
      *      0       Solid    (perfect record)
@@ -434,10 +445,43 @@ export class CSFlakyTestDetector {
      */
     private computeScore(record: FlakyTestRecord): number {
         const results = record.results.filter(r => r.status !== 'skipped');
-        if (results.length < 2) return 0;
+        if (results.length === 0) return 0;
 
         const failCount = results.filter(r => r.status === 'failed').length;
-        return Math.round((failCount / results.length) * 100);
+        // Beta-Binomial posterior mean with uniform Beta(1, 1) prior.
+        // Equivalent to Laplace smoothing: (failCount + 1) / (total + 2).
+        const posteriorMean = (failCount + 1) / (results.length + 2);
+        return Math.round(posteriorMean * 100);
+    }
+
+    /**
+     * Compute the 95% Wilson score confidence interval for the
+     * underlying fail-rate, on the same 0-100 scale as `score`.
+     * Used by `analyzeFlakiness` to expose how certain (or uncertain)
+     * the score is given the sample size.
+     *
+     * Wilson score is more robust than the normal approximation when
+     * the rate is near 0 or 1 — exactly the cases we care about
+     * (tests that always pass or always fail). Closed-form, no
+     * external stats library required.
+     */
+    private computeConfidenceInterval(record: FlakyTestRecord): { low: number; high: number } {
+        const results = record.results.filter(r => r.status !== 'skipped');
+        const n = results.length;
+        if (n === 0) {
+            // No data — interval is the full [0, 100] range.
+            return { low: 0, high: 100 };
+        }
+        const failCount = results.filter(r => r.status === 'failed').length;
+        const pHat = failCount / n;
+        const z = 1.96; // 95% confidence
+        const z2 = z * z;
+        const denom = 1 + z2 / n;
+        const center = (pHat + z2 / (2 * n)) / denom;
+        const margin = (z / denom) * Math.sqrt((pHat * (1 - pHat)) / n + z2 / (4 * n * n));
+        const low = Math.max(0, center - margin);
+        const high = Math.min(1, center + margin);
+        return { low: Math.round(low * 100), high: Math.round(high * 100) };
     }
 
     // ==========================================================================

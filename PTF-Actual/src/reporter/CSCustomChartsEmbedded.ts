@@ -147,33 +147,57 @@ class CSChart {
             }
         }
 
+        // v1.39.20: when a bar chart's labels won't fit at 0° rotation we
+        // pre-compute how much bottom padding the rotated labels need and
+        // shrink the plotting area accordingly. This runs at layout time
+        // (before render) so the bars draw inside the smaller area, not
+        // on top of the rotated labels.
+        let xAxisExtra = 30;  // baseline (unchanged for clean single-feature reports)
+        if (this.type === 'bar' && this.data?.labels?.length) {
+            // Measure label widths with the same font the renderer uses so
+            // the layout decision matches the actual draw.
+            this.ctx.save();
+            this.ctx.font = '11px Arial';
+            const labelWidths = this.data.labels.map(l => this.ctx.measureText(l).width);
+            this.ctx.restore();
+            const plotWidth = legendPosition === 'right'
+                ? this.canvas.width - padding * 2 - legendWidth
+                : this.canvas.width - padding * 2;
+            const layout = CSChart.computeXAxisLabelLayout({
+                barCount: this.data.labels.length,
+                chartWidth: plotWidth,
+                labelWidths,
+                maxRotationOverride: this.options.scales?.x?.ticks?.maxRotation,
+            });
+            xAxisExtra = 30 + layout.extraBottomPadding;
+        }
+
         // Calculate chart area based on legend position
         if (legendPosition === 'right') {
-            // Ensure chart uses most of the available space
             this.chartArea = {
                 x: padding,
                 y: padding,
                 width: this.canvas.width - padding * 2 - legendWidth,
-                height: this.canvas.height - padding * 2
+                height: this.canvas.height - padding * 2 - (xAxisExtra - 30),
             };
             this.legendArea = {
-                x: this.canvas.width - legendWidth + 10,  // Small gap from chart
+                x: this.canvas.width - legendWidth + 10,
                 y: padding,
                 width: legendWidth - padding - 10,
-                height: this.canvas.height - padding * 2
+                height: this.canvas.height - padding * 2,
             };
         } else {
             this.chartArea = {
                 x: padding,
                 y: padding,
                 width: this.canvas.width - padding * 2,
-                height: this.canvas.height - padding * 2 - legendHeight - 30 // Extra space for x-axis labels
+                height: this.canvas.height - padding * 2 - legendHeight - xAxisExtra,
             };
             this.legendArea = {
                 x: padding,
                 y: this.canvas.height - legendHeight,
                 width: this.canvas.width - padding * 2,
-                height: legendHeight
+                height: legendHeight,
             };
         }
     }
@@ -453,8 +477,30 @@ class CSChart {
             }
         }
 
-        // Draw x-axis labels
+        // Draw x-axis labels (v1.39.20: adaptive thinning + auto-rotation)
+        this.ctx.font = '11px Arial';
+        const labelWidths = this.data.labels.map(l => this.ctx.measureText(l).width);
+        const layout = CSChart.computeXAxisLabelLayout({
+            barCount,
+            chartWidth: this.chartArea.width,
+            labelWidths,
+            maxRotationOverride: this.options.scales?.x?.ticks?.maxRotation,
+        });
+
+        // Per-label horizontal slot the truncation has to fit into. At 0°
+        // rotation the slot is the bar's footprint; when rotation kicks
+        // in we can afford a wider label since it leans into the vertical
+        // axis instead of competing with siblings for horizontal room.
+        const truncateBudget = layout.rotation === 0
+            ? Math.max(20, totalBarWidth - 4)
+            : Math.max(40, totalBarWidth * 3);
+
         for (let labelIndex = 0; labelIndex < barCount; labelIndex++) {
+            // Skip every Nth label per layout decision, but always anchor
+            // the first and last so the axis reads as continuous.
+            const isAnchor = labelIndex === 0 || labelIndex === barCount - 1;
+            if (!isAnchor && layout.skipRate > 1 && labelIndex % layout.skipRate !== 0) continue;
+
             const x = this.chartArea.x + labelIndex * totalBarWidth + totalBarWidth / 2;
 
             this.ctx.save();
@@ -462,22 +508,22 @@ class CSChart {
             this.ctx.font = '11px Arial';
 
             const label = this.data.labels[labelIndex];
-            const truncatedLabel = label.length > 20 ? label.substring(0, 20) + '...' : label;
+            // Measured-width truncation (was naive char-count truncation
+            // before — `truncateText()` was defined but never called here).
+            const drawnLabel = this.truncateText(label, truncateBudget);
 
             // Position labels below the chart with proper spacing
             this.ctx.translate(x, this.chartArea.y + this.chartArea.height + 10);
 
-            // Check for rotation - ensure labels are always drawn
-            if (this.options.scales?.x?.ticks?.maxRotation) {
-                this.ctx.rotate(-Math.PI * this.options.scales.x.ticks.maxRotation / 180);
+            if (layout.rotation !== 0) {
+                this.ctx.rotate(-Math.PI * layout.rotation / 180);
                 this.ctx.textAlign = 'right';
                 this.ctx.textBaseline = 'middle';
-                // Draw full label for timeline chart without truncation to show scenario names
-                this.ctx.fillText(label, 0, 0);
+                this.ctx.fillText(drawnLabel, 0, 0);
             } else {
                 this.ctx.textAlign = 'center';
                 this.ctx.textBaseline = 'top';
-                this.ctx.fillText(truncatedLabel, 0, 0);
+                this.ctx.fillText(drawnLabel, 0, 0);
             }
 
             this.ctx.restore();
@@ -743,22 +789,29 @@ class CSChart {
                 }
             });
         } else {
-            // Horizontal legend at the bottom
-            const itemsPerRow = Math.min(items.length, 5);
-            const rows = Math.ceil(items.length / itemsPerRow);
-            const itemWidth = this.legendArea.width / itemsPerRow;
+            // Horizontal legend at the bottom (v1.39.20: width-adaptive
+            // packing + "+N more" overflow chip).
             const rowHeight = 25;
+            this.ctx.font = '12px Arial';
+            const legendLayout = CSChart.computeLegendLayout({
+                itemCount: items.length,
+                legendWidth: this.legendArea.width,
+                legendHeight: this.legendArea.height,
+                itemMinWidth: 130,
+                rowHeight,
+            });
+            const { itemsPerRow, maxVisible, overflowCount } = legendLayout;
+            const itemWidth = this.legendArea.width / Math.max(1, itemsPerRow);
 
-            items.forEach((label, index) => {
+            for (let index = 0; index < maxVisible; index++) {
+                const label = items[index];
                 const row = Math.floor(index / itemsPerRow);
                 const col = index % itemsPerRow;
                 const x = this.legendArea.x + col * itemWidth;
                 const y = this.legendArea.y + row * rowHeight + 10;
 
-                // Draw color box
+                // Color marker
                 this.ctx.fillStyle = Array.isArray(colors[index]) ? colors[index][0] as string : colors[index] as string || '#000';
-
-                // Use circle for pie/doughnut, square for others
                 if (this.type === 'doughnut' || this.type === 'pie') {
                     this.ctx.beginPath();
                     this.ctx.arc(x + 8, y + 8, 6, 0, Math.PI * 2);
@@ -767,13 +820,53 @@ class CSChart {
                     this.ctx.fillRect(x, y, 15, 15);
                 }
 
-                // Draw label
+                // Label — measured-width truncation against the slot it
+                // actually has, not a naive char count.
                 this.ctx.fillStyle = '#666';
                 this.ctx.font = '12px Arial';
                 this.ctx.textAlign = 'left';
-                const truncatedLabel = label.length > 15 ? label.substring(0, 15) + '...' : label;
-                this.ctx.fillText(truncatedLabel, x + 20, y + 12);
-            });
+                const slotForText = Math.max(20, itemWidth - 24);
+                this.ctx.fillText(this.truncateText(label, slotForText), x + 20, y + 12);
+            }
+
+            // "+N more" overflow chip — better than the silent clipping
+            // we had before. Drawn in the last slot of the last visible
+            // row. The full list is exposed via canvas DOM dataset so
+            // consumer tooling / a future hover overlay can surface it.
+            if (overflowCount > 0) {
+                const slotIndex = maxVisible;  // next free slot
+                const row = Math.floor(slotIndex / itemsPerRow);
+                const col = slotIndex % itemsPerRow;
+                const x = this.legendArea.x + col * itemWidth;
+                const y = this.legendArea.y + row * rowHeight + 10;
+                const chipText = `+${overflowCount} more`;
+
+                // Pill background
+                this.ctx.fillStyle = '#e5e7eb';
+                const chipWidth = Math.min(itemWidth - 8, this.ctx.measureText(chipText).width + 16);
+                this.roundRect(x, y, chipWidth, 16, 8);
+                this.ctx.fill();
+
+                // Pill text
+                this.ctx.fillStyle = '#374151';
+                this.ctx.font = 'bold 11px Arial';
+                this.ctx.textAlign = 'left';
+                this.ctx.textBaseline = 'middle';
+                this.ctx.fillText(chipText, x + 8, y + 8);
+                this.ctx.textBaseline = 'alphabetic';
+
+                // Surface the hidden labels on the canvas element itself
+                // so consumers can wire a hover overlay without us having
+                // to ship one here. Keeps the chart self-contained.
+                try {
+                    const hidden = items.slice(maxVisible).join('|');
+                    this.canvas.setAttribute('data-legend-overflow', hidden);
+                    this.canvas.setAttribute('title',
+                        (this.canvas.getAttribute('title') || '') +
+                        (this.canvas.getAttribute('title') ? '\n' : '') +
+                        `Hidden legend items: ${items.slice(maxVisible).join(', ')}`);
+                } catch { /* canvas may not be in a DOM during tests */ }
+            }
         }
     }
 
@@ -786,6 +879,116 @@ class CSChart {
             truncated = truncated.substring(0, truncated.length - 1);
         }
         return truncated + '...';
+    }
+
+    // ========================================================================
+    // Label / legend layout intelligence (v1.39.20)
+    //
+    // Both helpers are pure: they take measurements as input and return
+    // layout decisions as output. No canvas, no DOM. That makes the
+    // overlap-prevention math testable in plain Node without headless
+    // browser tooling.
+    // ========================================================================
+
+    /**
+     * Decide how the x-axis labels of a bar chart should be drawn given
+     * the available horizontal space and the measured width of each
+     * label string. Returns:
+     *  - `skipRate`: draw every Nth label (always anchor index 0 and the
+     *    last label so the axis still reads as continuous)
+     *  - `rotation`: 0 / 45 / 90 degrees, auto-chosen when the caller
+     *    didn't pin one
+     *  - `extraBottomPadding`: extra pixels the chart area should give
+     *    up so rotated labels have somewhere to live
+     */
+    public static computeXAxisLabelLayout(opts: {
+        barCount: number;
+        chartWidth: number;
+        labelWidths: number[];
+        maxRotationOverride?: number;
+    }): { skipRate: number; rotation: 0 | 45 | 90; extraBottomPadding: number } {
+        const { barCount, chartWidth, labelWidths } = opts;
+        if (barCount <= 0 || chartWidth <= 0) {
+            return { skipRate: 1, rotation: 0, extraBottomPadding: 0 };
+        }
+        const maxLabelWidth = Math.max(0, ...labelWidths);
+        const totalLabelWidth = labelWidths.reduce((a, b) => a + b, 0) + (barCount - 1) * 8;
+        const slotWidth = chartWidth / barCount;
+
+        // Decide rotation. Caller override wins; otherwise pick the
+        // smallest rotation that keeps total horizontal footprint inside
+        // the chart, escalating only when the cheaper option overflows.
+        let rotation: 0 | 45 | 90;
+        if (opts.maxRotationOverride !== undefined) {
+            rotation = opts.maxRotationOverride >= 75 ? 90
+                     : opts.maxRotationOverride >= 30 ? 45
+                     : 0;
+        } else if (totalLabelWidth > chartWidth * 2 || maxLabelWidth > slotWidth * 3) {
+            rotation = 90;
+        } else if (totalLabelWidth > chartWidth * 1.3 || maxLabelWidth > slotWidth) {
+            rotation = 45;
+        } else {
+            rotation = 0;
+        }
+
+        // Decide skip rate based on rotation. At 0° we need full label
+        // width per slot; at 45° the diagonal footprint is sin(45)·w; at
+        // 90° we only need a single character-height per label.
+        let perLabelFootprint: number;
+        if (rotation === 0) {
+            perLabelFootprint = maxLabelWidth + 8;
+        } else if (rotation === 45) {
+            perLabelFootprint = Math.max(20, maxLabelWidth * 0.45);
+        } else {
+            perLabelFootprint = 16;
+        }
+        const labelsThatFit = Math.max(1, Math.floor(chartWidth / perLabelFootprint));
+        const skipRate = barCount > labelsThatFit ? Math.ceil(barCount / labelsThatFit) : 1;
+
+        // Decide extra bottom padding. 45° wedges need ~0.7·w of vertical
+        // room; 90° labels need their full width as height. Cap so a
+        // pathological label doesn't eat the chart.
+        let extraBottomPadding = 0;
+        if (rotation === 45) {
+            extraBottomPadding = Math.min(80, Math.ceil(maxLabelWidth * 0.7));
+        } else if (rotation === 90) {
+            extraBottomPadding = Math.min(120, Math.ceil(maxLabelWidth));
+        }
+
+        return { skipRate, rotation, extraBottomPadding };
+    }
+
+    /**
+     * Decide how a horizontal-bottom legend should pack its items. With
+     * the old hard-coded "5 per row, two rows" rule, anything past the
+     * 10th item was silently clipped off the bottom of the canvas. Now
+     * we pack to the available width and reserve the last visible slot
+     * for a "+N more" overflow chip when items don't fit.
+     */
+    public static computeLegendLayout(opts: {
+        itemCount: number;
+        legendWidth: number;
+        legendHeight: number;
+        itemMinWidth?: number;
+        rowHeight?: number;
+    }): { itemsPerRow: number; maxVisible: number; overflowCount: number } {
+        const itemMinWidth = opts.itemMinWidth ?? 130;
+        const rowHeight = opts.rowHeight ?? 25;
+        if (opts.itemCount <= 0 || opts.legendWidth <= 0 || opts.legendHeight <= 0) {
+            return { itemsPerRow: 1, maxVisible: 0, overflowCount: 0 };
+        }
+        const itemsPerRow = Math.max(
+            1,
+            Math.min(opts.itemCount, Math.floor(opts.legendWidth / itemMinWidth)),
+        );
+        const maxRows = Math.max(1, Math.floor(opts.legendHeight / rowHeight));
+        const capacity = itemsPerRow * maxRows;
+        if (opts.itemCount <= capacity) {
+            return { itemsPerRow, maxVisible: opts.itemCount, overflowCount: 0 };
+        }
+        // Reserve the last visible slot for the "+N more" chip.
+        const maxVisible = Math.max(0, capacity - 1);
+        return { itemsPerRow, maxVisible, overflowCount: opts.itemCount - maxVisible };
     }
 
     private handleMouseMove(x: number, y: number): void {

@@ -71,6 +71,13 @@ export class CSBDDRunner {
     private browserManager: any; // CSBrowserManager - lazy loaded
     private resultsManager: CSTestResultsManager;
     private failedScenarios: Array<{scenario: string, feature: string, error: string}> = [];
+    /**
+     * When impact-only mode is on, this is the set of test ids the
+     * analyzer chose to run. `shouldExecuteScenario` consults it so
+     * unaffected scenarios are skipped quietly. Null = mode off (run
+     * everything).
+     */
+    private impactOnlyTestIds: Set<string> | null = null;
     private testSuite: ProfessionalTestSuite;
     private currentFeature: TestFeature | null = null;
     private currentScenario: TestScenario | null = null;
@@ -437,6 +444,29 @@ export class CSBDDRunner {
                 dashboard.notifyExecutionStart(plannedScenarios);
             } catch (e) { /* dashboard not available */ }
 
+            // Impact-only mode: if enabled, compute which scenarios to keep
+            // based on the git diff against IMPACT_BASE_REF. shouldExecuteScenario
+            // then consults `impactOnlyTestIds`. When the analyzer returns null
+            // (mode disabled / no data / git failed), the runner falls through to
+            // a full run.
+            try {
+                const { CSImpactAnalyzer } = require('../impact/CSImpactAnalyzer');
+                const analyzer = CSImpactAnalyzer.getInstance();
+                if (analyzer.isOnlyModeEnabled()) {
+                    const allTestIds: string[] = [];
+                    for (const f of features) {
+                        for (const s of (f.scenarios || [])) {
+                            if (s.name) allTestIds.push(s.name);
+                        }
+                    }
+                    const filter = analyzer.computeFilter(allTestIds);
+                    if (filter) {
+                        this.impactOnlyTestIds = filter.affectedTestIds;
+                        CSReporter.info(`[ImpactAnalyzer] ${filter.summary}`);
+                    }
+                }
+            } catch (e) { /* impact analyzer not available */ }
+
             // Execute features
             if (options.dryRun) {
                 await this.dryRun(features);
@@ -462,6 +492,76 @@ export class CSBDDRunner {
                     CSReporter.debug(`Flaky test summary saved to ${flakyDir}/flaky-summary.json`);
                 }
             } catch (e) { /* flaky flush failed */ }
+
+            // Flush smart-retry bandit history to disk (only loaded if the
+            // bandit was active during the run — otherwise nothing to do).
+            try {
+                const { CSSmartRetryEngine } = require('../retry/CSSmartRetryEngine');
+                const engine = CSSmartRetryEngine.getInstance();
+                if (engine.isEnabled()) {
+                    engine.flush();
+                    CSReporter.debug('Smart-retry bandit history flushed');
+                }
+            } catch (e) { /* smart-retry flush failed */ }
+
+            // Flush visual-AI adaptive tolerance store to disk (only when the
+            // learned-tolerance feature is enabled — otherwise the store has
+            // never been written to and there's nothing to flush).
+            try {
+                const { CSVisualBaselineStore } = require('../visual/CSVisualBaselineStore');
+                const store = CSVisualBaselineStore.getInstance();
+                if (store.isEnabled()) {
+                    store.flush();
+                    CSReporter.debug('Visual-AI baseline-tolerance store flushed');
+                }
+            } catch (e) { /* visual baseline store flush failed */ }
+
+            // Flush impact-collector data to disk (only loaded if collection
+            // was enabled during the run — otherwise nothing to do).
+            try {
+                const { CSImpactCollector } = require('../impact/CSImpactCollector');
+                const collector = CSImpactCollector.getInstance();
+                if (collector.isCollectionEnabled()) {
+                    collector.flush();
+                    CSReporter.debug('Test-impact data flushed');
+                }
+            } catch (e) { /* impact collector flush failed */ }
+
+            // Flush wait-predictor data to disk (only meaningful if
+            // WAIT_PREDICTOR_ENABLED was true during the run).
+            try {
+                const { CSWaitPredictor } = require('../wait/CSWaitPredictor');
+                const predictor = CSWaitPredictor.getInstance();
+                if (predictor.isEnabled()) {
+                    predictor.flush();
+                    CSReporter.debug('Wait-predictor data flushed');
+                }
+            } catch (e) { /* wait predictor flush failed */ }
+
+            // Run failure clustering at end of run and save the report (gated
+            // by FAILURE_CLUSTERING_ENABLED). The HTML reporter picks this up
+            // via collectFailureClusters() too — saving here gives a stable
+            // JSON artifact alongside the other AI/ML stores.
+            try {
+                const { CSFailureClusterer } = require('../clustering/CSFailureClusterer');
+                const clusterer = CSFailureClusterer.getInstance();
+                if (clusterer.isEnabled()) {
+                    const clusterReport = clusterer.cluster();
+                    if (clusterReport) {
+                        const flakyDir = this.resultsManager.getDirectories().flaky;
+                        const fsLocal = require('fs');
+                        const pathLocal = require('path');
+                        if (!fsLocal.existsSync(flakyDir)) fsLocal.mkdirSync(flakyDir, { recursive: true });
+                        fsLocal.writeFileSync(
+                            pathLocal.join(flakyDir, 'failure-clusters.json'),
+                            JSON.stringify(clusterReport, null, 2),
+                        );
+                        CSReporter.debug(
+                            `Failure clusters saved: ${clusterReport.clusterCount} cluster(s), ${clusterReport.outlierCount} outlier(s) over ${clusterReport.totalFailures} failure(s)`,
+                        );
+                    }
+                }
+            } catch (e) { /* failure clustering save failed */ }
 
             // Generate reports only if parallel execution didn't already generate them
             if (!this.parallelExecutionDone) {
@@ -882,6 +982,41 @@ export class CSBDDRunner {
             const scenarioFilter = options.scenario.toLowerCase();
             if (!scenario.name.toLowerCase().includes(scenarioFilter)) {
                 return false;
+            }
+        }
+
+        // Impact-only mode — when active, only run scenarios the analyzer
+        // identified as affected by the diff. Scenarios with no recorded
+        // impact data are already included in `impactOnlyTestIds` (safer
+        // default — see CSImpactAnalyzer).
+        if (this.impactOnlyTestIds && !this.impactOnlyTestIds.has(scenario.name)) {
+            return false;
+        }
+
+        // Quarantine auto-skip — gated by FLAKY_QUARANTINE_ENFORCE (default off
+        // for backward compatibility). When enabled, tests whose flakiness
+        // score exceeds FLAKY_QUARANTINE_THRESHOLD are skipped with a clear
+        // log entry, unless tagged `@no-quarantine`.
+        const enforceQuarantine = this.config.getBoolean('FLAKY_QUARANTINE_ENFORCE', false);
+        if (enforceQuarantine) {
+            const skipQuarantineTag = allTags.some(t =>
+                /^@?no-quarantine$/i.test(t) || /^@?ignore-quarantine$/i.test(t)
+            );
+            if (!skipQuarantineTag) {
+                try {
+                    if (!CSFlakyTestDetector) {
+                        CSFlakyTestDetector = require('../flaky/CSFlakyTestDetector').CSFlakyTestDetector;
+                    }
+                    const detector = CSFlakyTestDetector.getInstance();
+                    if (detector.isQuarantined(scenario.name)) {
+                        const score = detector.getFlakinessScore(scenario.name);
+                        CSReporter.warn(
+                            `[FlakyQuarantine] Skipping '${scenario.name}' — flakiness score ${score} exceeds quarantine threshold. ` +
+                            `Tag with @no-quarantine to override, or set FLAKY_QUARANTINE_ENFORCE=false.`
+                        );
+                        return false;
+                    }
+                } catch (e) { /* detector unavailable — fall through */ }
             }
         }
 
@@ -1392,6 +1527,40 @@ export class CSBDDRunner {
         if (iterationNumber && totalIterations && totalIterations > 1) {
             scenarioName = `${scenarioName}_Iteration-${iterationNumber}`;
         }
+
+        // Impact collector: snapshot require.cache before the scenario runs
+        // (gated by IMPACT_COLLECT). Only runs on the first attempt — retries
+        // would double-count file loads.
+        if (!isRetryAttempt) {
+            try {
+                const { CSImpactCollector } = require('../impact/CSImpactCollector');
+                CSImpactCollector.getInstance().startScenario(scenarioName);
+            } catch (e) { /* impact collector not available */ }
+        }
+
+        // Adaptive retry budget — gated by FLAKY_ADAPTIVE_RETRY (default off
+        // for backward compatibility). When enabled, scenarios known to be
+        // flaky get extra retries up to the analyzer's suggestedRetryCount.
+        // Only applies on the first attempt, not on retry recursion.
+        if (!isRetryAttempt && this.config.getBoolean('FLAKY_ADAPTIVE_RETRY', false)) {
+            try {
+                if (!CSFlakyTestDetector) {
+                    CSFlakyTestDetector = require('../flaky/CSFlakyTestDetector').CSFlakyTestDetector;
+                }
+                const detector = CSFlakyTestDetector.getInstance();
+                const analysis = detector.analyzeFlakiness(scenarioName);
+                if (analysis && analysis.suggestedRetryCount > 0) {
+                    const current = options.retry || 0;
+                    if (analysis.suggestedRetryCount > current) {
+                        CSReporter.info(
+                            `[FlakyAdaptiveRetry] '${scenarioName}' has flakiness score ${analysis.score} ` +
+                            `(${analysis.pattern}); raising retry budget from ${current} to ${analysis.suggestedRetryCount}.`
+                        );
+                        options.retry = analysis.suggestedRetryCount;
+                    }
+                }
+            } catch (e) { /* detector unavailable — keep configured retry */ }
+        }
         
         CSReporter.startScenario(scenarioName);
 
@@ -1559,6 +1728,13 @@ export class CSBDDRunner {
                 detector.recordTestResult(scenarioName, scenarioName, featureFile, 'passed', Date.now() - scenarioStartTime);
             } catch (e) { /* flaky detection not available */ }
 
+            // Impact collector: stop + merge files this scenario touched.
+            try {
+                const { CSImpactCollector } = require('../impact/CSImpactCollector');
+                const featureFile2 = (feature as any).file || feature.name || 'unknown';
+                CSImpactCollector.getInstance().stopScenario(scenarioName, scenarioName, featureFile2);
+            } catch (e) { /* impact collector not available */ }
+
             // ADO: After scenario hook - passed
             const duration = Date.now() - scenarioStartTime;  // Calculate accurate duration from scenario start
             const artifacts = this.collectScenarioArtifacts();
@@ -1616,6 +1792,30 @@ export class CSBDDRunner {
                 const featureFile = (feature as any).file || feature.name || 'unknown';
                 detector.recordTestResult(scenarioName, scenarioName, featureFile, 'failed', Date.now() - scenarioStartTime, error.message);
             } catch (e) { /* flaky detection not available */ }
+
+            // Impact collector: stop + merge even on failure — knowing which
+            // files a failing test loaded is still useful for the next PR.
+            try {
+                const { CSImpactCollector } = require('../impact/CSImpactCollector');
+                const featureFile2 = (feature as any).file || feature.name || 'unknown';
+                CSImpactCollector.getInstance().stopScenario(scenarioName, scenarioName, featureFile2);
+            } catch (e) { /* impact collector not available */ }
+
+            // Record failure for end-of-run clustering (gated by FAILURE_CLUSTERING_ENABLED).
+            try {
+                const { CSFailureClusterer } = require('../clustering/CSFailureClusterer');
+                const clusterer = CSFailureClusterer.getInstance();
+                if (clusterer.isEnabled()) {
+                    const featureFile = (feature as any).file || feature.name || 'unknown';
+                    clusterer.recordFailure({
+                        testId: scenarioName,
+                        testName: scenarioName,
+                        featureFile,
+                        errorMessage: error.message || String(error),
+                        stackTrace: (error as Error).stack || undefined,
+                    });
+                }
+            } catch (e) { /* failure clustering not available */ }
 
             // DISABLED: Scenario-level screenshot on failure
             // Step-level screenshots are already captured for failures
@@ -1731,27 +1931,59 @@ export class CSBDDRunner {
                     willRetryAfterFailure = true;  // Set flag so finally block knows not to add scenario
                     CSReporter.info(`Retrying scenario (attempt ${options.retry})...`);
 
-                    // CRITICAL: Clear browser context before retry to avoid stale state
-                    // This ensures login page loads correctly instead of staying logged in
+                    // Smart-retry bandit (SMART_RETRY_ENABLED, default off):
+                    // pick a tactic per failure signature and track recovery
+                    // rate. When disabled, the legacy behaviour is preserved
+                    // — always clear the browser context before the retry.
+                    let smartRetrySignature = '';
+                    let smartRetryTactic: any = null;
+                    let smartRetryEngine: any = null;
+                    let smartRetryEnabled = false;
                     try {
-                        const browserManager = (await import('../browser/CSBrowserManager')).CSBrowserManager.getInstance();
-                        const context = await browserManager.getContext();
-                        if (context) {
-                            CSReporter.debug('[Retry] Clearing browser context (cookies, storage, cache)...');
-                            await context.clearCookies();
-                            await context.clearPermissions();
-                            // Clear local/session storage via page
-                            const pages = context.pages();
-                            for (const page of pages) {
-                                await page.evaluate(() => {
-                                    localStorage.clear();
-                                    sessionStorage.clear();
-                                }).catch(() => {});
-                            }
-                            CSReporter.debug('[Retry] Browser context cleared successfully');
+                        const { CSSmartRetryEngine } = require('../retry/CSSmartRetryEngine');
+                        smartRetryEngine = CSSmartRetryEngine.getInstance();
+                        smartRetryEnabled = smartRetryEngine.isEnabled();
+                    } catch (e) { /* module unavailable — fall through to legacy */ }
+
+                    const browserManager = (await import('../browser/CSBrowserManager')).CSBrowserManager.getInstance();
+
+                    if (smartRetryEnabled && smartRetryEngine) {
+                        try {
+                            smartRetrySignature = smartRetryEngine.buildSignature(error);
+                            const decision = smartRetryEngine.chooseTactic(smartRetrySignature);
+                            smartRetryTactic = decision.tactic;
+                            CSReporter.info(
+                                `[SmartRetry] signature=${smartRetrySignature.slice(0, 8)} ` +
+                                `tactic=${decision.tactic} reason=${decision.reason} ` +
+                                `(${decision.totalAttempts} prior attempts for this signature)`
+                            );
+                            await smartRetryEngine.executeTactic(decision.tactic, browserManager);
+                        } catch (e) {
+                            CSReporter.debug(`[SmartRetry] Failed to apply tactic: ${e}`);
+                            smartRetryTactic = null;
                         }
-                    } catch (e) {
-                        CSReporter.debug(`[Retry] Could not clear browser context: ${e}`);
+                    }
+
+                    if (!smartRetryEnabled || !smartRetryTactic) {
+                        // Legacy path: always clear the browser context before retry.
+                        try {
+                            const context = await browserManager.getContext();
+                            if (context) {
+                                CSReporter.debug('[Retry] Clearing browser context (cookies, storage, cache)...');
+                                await context.clearCookies();
+                                await context.clearPermissions();
+                                const pages = context.pages();
+                                for (const page of pages) {
+                                    await page.evaluate(() => {
+                                        localStorage.clear();
+                                        sessionStorage.clear();
+                                    }).catch(() => {});
+                                }
+                                CSReporter.debug('[Retry] Browser context cleared successfully');
+                            }
+                        } catch (e) {
+                            CSReporter.debug(`[Retry] Could not clear browser context: ${e}`);
+                        }
                     }
 
                     await this.executeSingleScenario(
@@ -1766,6 +1998,28 @@ export class CSBDDRunner {
                         usedColumns,
                         true  // Mark as retry attempt
                     );
+
+                    // Record the bandit outcome — did the retry chain ultimately
+                    // recover the test? The deepest recursive call has already
+                    // logged the final pass/fail into the flaky detector, so we
+                    // can inspect the last status for this scenario.
+                    if (smartRetryEnabled && smartRetryEngine && smartRetryTactic && smartRetrySignature) {
+                        try {
+                            if (!CSFlakyTestDetector) {
+                                CSFlakyTestDetector = require('../flaky/CSFlakyTestDetector').CSFlakyTestDetector;
+                            }
+                            const detector = CSFlakyTestDetector.getInstance();
+                            const history = detector.getTestHistory(scenarioName);
+                            const recovered = history.length > 0
+                                && history[history.length - 1].status === 'passed';
+                            smartRetryEngine.recordOutcome(smartRetrySignature, smartRetryTactic, recovered);
+                            CSReporter.debug(
+                                `[SmartRetry] Recorded outcome: signature=${smartRetrySignature.slice(0, 8)} ` +
+                                `tactic=${smartRetryTactic} recovered=${recovered}`
+                            );
+                        } catch (e) { /* outcome recording is best-effort */ }
+                    }
+
                     return; // Return after retry, don't throw
                 } else {
                     // Don't retry - log detailed failure and continue to failure handling
@@ -1871,6 +2125,24 @@ export class CSBDDRunner {
                                 path: screenshotFilename,
                                 title: `Step ${index + 1} Screenshot`
                             });
+                        }
+
+                        // v1.43.4 — surface uploaded / downloaded files captured
+                        // during this step. CSBrowserManager + CSWebElement.setInputFiles
+                        // push entries onto scenarioContext.currentStepFiles, and
+                        // addStepResult snapshots them onto stepResult.files.
+                        const stepFiles = (matchingStep as any)?.files;
+                        if (Array.isArray(stepFiles)) {
+                            for (const f of stepFiles) {
+                                if (!f || !f.path) continue;
+                                attachments.push({
+                                    type: f.kind === 'upload' ? 'upload' : 'download',
+                                    path: path.basename(String(f.path)),
+                                    title: f.name || path.basename(String(f.path)),
+                                    sizeBytes: f.sizeBytes,
+                                    timestamp: f.timestamp
+                                });
+                            }
                         }
 
                         // Merge actions from scenarioContext (has ✓/✗/ℹ prefixes) with CSReporter actions
@@ -2133,6 +2405,11 @@ export class CSBDDRunner {
 
             // Clear actions before step execution for BDD action tracking
             this.scenarioContext.clearCurrentStepActions();
+            // v1.43.4 — also clear per-step file attachments so uploads/
+            // downloads from the previous step don't leak into this one.
+            if (typeof (this.scenarioContext as any).clearCurrentStepFiles === 'function') {
+                (this.scenarioContext as any).clearCurrentStepFiles();
+            }
 
             // Execute the step
             await executeStep(stepText, step.keyword.trim(), this.context, dataTable?.raw(), step.docString);
@@ -2141,6 +2418,19 @@ export class CSBDDRunner {
             // Pass collected actions to step result for HTML report icons
             const stepActions = this.scenarioContext.getCurrentStepActions();
             this.scenarioContext.addStepResult(`${step.keyword} ${stepText}`, 'passed', duration, undefined, stepActions);
+
+            // Wait-predictor: record a successful observation for this
+            // step signature so future runs can learn a tighter budget.
+            try {
+                const { CSWaitPredictor } = require('../wait/CSWaitPredictor');
+                const predictor = CSWaitPredictor.getInstance();
+                if (predictor.isEnabled()) {
+                    predictor.observe(
+                        predictor.canonicaliseStep(step.keyword, stepText),
+                        duration, true,
+                    );
+                }
+            } catch (e) { /* predictor unavailable — never block the runner */ }
             
             // Capture screenshot on step success if enabled
             if (this.config.get('SCREENSHOT_CAPTURE_MODE', 'on-failure') === 'always' || 
@@ -2175,6 +2465,21 @@ export class CSBDDRunner {
         } catch (error: any) {
             const duration = Date.now() - stepStartTime;
             const stepFullText = `${step.keyword} ${stepText}`;
+
+            // Wait-predictor: record a failed observation so the failure
+            // rate per signature stays accurate. We pass the elapsed
+            // duration even though it's an error path — that's the
+            // budget the step actually consumed before giving up.
+            try {
+                const { CSWaitPredictor } = require('../wait/CSWaitPredictor');
+                const predictor = CSWaitPredictor.getInstance();
+                if (predictor.isEnabled()) {
+                    predictor.observe(
+                        predictor.canonicaliseStep(step.keyword, stepText),
+                        duration, false,
+                    );
+                }
+            } catch (e) { /* predictor unavailable — never block the runner */ }
 
             // ATTEMPT AI HEALING (ONLY FOR UI STEPS)
             // AI automatically detects if this is a UI step and only activates healing for UI failures

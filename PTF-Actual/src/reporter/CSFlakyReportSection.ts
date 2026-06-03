@@ -27,13 +27,18 @@ interface HealthConfig {
     cssClass: string;
 }
 
+// v1.40.1: colour values are CSS-var references — consumer overrides
+// via `CSReportTheme.override({ healthBands: { … } })` flow through to
+// every health badge without per-rule edits, because the values land
+// in inline `style="background:…;color:…"` attributes that resolve
+// against the report's :root token block.
 const HEALTH_LEVELS: Array<{ maxScore: number; config: HealthConfig }> = [
-    { maxScore: 0,   config: { icon: '✅', label: 'Solid',   color: '#166534', bgColor: '#dcfce7', cssClass: 'health-solid' } },
-    { maxScore: 10,  config: { icon: '✅', label: 'Stable',  color: '#166534', bgColor: '#dcfce7', cssClass: 'health-stable' } },
-    { maxScore: 25,  config: { icon: '🟡', label: 'Shaky',   color: '#854d0e', bgColor: '#fef9c3', cssClass: 'health-shaky' } },
-    { maxScore: 40,  config: { icon: '🟠', label: 'Flaky',   color: '#9a3412', bgColor: '#ffedd5', cssClass: 'health-flaky' } },
-    { maxScore: 60,  config: { icon: '🔴', label: 'Broken',  color: '#991b1b', bgColor: '#fee2e2', cssClass: 'health-broken' } },
-    { maxScore: 100, config: { icon: '⛔', label: 'Toxic',   color: '#7f1d1d', bgColor: '#fecaca', cssClass: 'health-toxic' } },
+    { maxScore: 0,   config: { icon: '✅', label: 'Solid',   color: 'var(--health-solid-fg)',  bgColor: 'var(--health-solid-bg)',  cssClass: 'health-solid' } },
+    { maxScore: 10,  config: { icon: '✅', label: 'Stable',  color: 'var(--health-stable-fg)', bgColor: 'var(--health-stable-bg)', cssClass: 'health-stable' } },
+    { maxScore: 25,  config: { icon: '🟡', label: 'Shaky',   color: 'var(--health-shaky-fg)',  bgColor: 'var(--health-shaky-bg)',  cssClass: 'health-shaky' } },
+    { maxScore: 40,  config: { icon: '🟠', label: 'Flaky',   color: 'var(--health-flaky-fg)',  bgColor: 'var(--health-flaky-bg)',  cssClass: 'health-flaky' } },
+    { maxScore: 60,  config: { icon: '🔴', label: 'Broken',  color: 'var(--health-broken-fg)', bgColor: 'var(--health-broken-bg)', cssClass: 'health-broken' } },
+    { maxScore: 100, config: { icon: '⛔', label: 'Toxic',   color: 'var(--health-toxic-fg)',  bgColor: 'var(--health-toxic-bg)',  cssClass: 'health-toxic' } },
 ];
 
 function getHealthConfig(score: number): HealthConfig {
@@ -55,7 +60,11 @@ interface FailureCategory {
 }
 
 function categorizeErrors(errors: string[]): FailureCategory {
-    if (errors.length === 0) return { category: 'None', icon: '✅', color: '#22c55e', fixSuggestion: '' };
+    // v1.40.1: colour values are CSS-var references against the
+    // `--category-*` token block emitted by `generateRootCSS()`.
+    // Consumer overrides via `CSReportTheme.override({ failureCategories:
+    // { … } })` flow through every category badge automatically.
+    if (errors.length === 0) return { category: 'None', icon: '✅', color: 'var(--category-none)', fixSuggestion: '' };
 
     const combined = errors.join(' ').toLowerCase();
 
@@ -63,7 +72,7 @@ function categorizeErrors(errors: string[]): FailureCategory {
         return {
             category: 'Timeout',
             icon: '⏱️',
-            color: '#f59e0b',
+            color: 'var(--category-timeout)',
             fixSuggestion: 'Add explicit waits (waitForSelector, waitForLoadState) before the failing action. Consider increasing step timeout.',
         };
     }
@@ -71,7 +80,7 @@ function categorizeErrors(errors: string[]): FailureCategory {
         return {
             category: 'Element Not Found',
             icon: '🔍',
-            color: '#f97316',
+            color: 'var(--category-element-not-found)',
             fixSuggestion: 'Element locator may be fragile. Use data-testid or getByRole instead of CSS selectors. Enable selfHeal: true on @CSGetElement.',
         };
     }
@@ -79,7 +88,7 @@ function categorizeErrors(errors: string[]): FailureCategory {
         return {
             category: 'Assertion Failed',
             icon: '❌',
-            color: '#ef4444',
+            color: 'var(--category-assertion-failed)',
             fixSuggestion: 'Assertion depends on dynamic data. Use data-driven approach or add tolerance for variable values.',
         };
     }
@@ -87,7 +96,7 @@ function categorizeErrors(errors: string[]): FailureCategory {
         return {
             category: 'Network/Navigation',
             icon: '🌐',
-            color: '#8b5cf6',
+            color: 'var(--category-network-navigation)',
             fixSuggestion: 'Network instability. Add retry logic for navigation. Verify server is available before test.',
         };
     }
@@ -95,7 +104,7 @@ function categorizeErrors(errors: string[]): FailureCategory {
         return {
             category: 'Page Lifecycle',
             icon: '🔄',
-            color: '#6366f1',
+            color: 'var(--category-page-lifecycle)',
             fixSuggestion: 'Page navigated or closed during action. Add waitForLoadState("networkidle") after navigations.',
         };
     }
@@ -103,14 +112,15 @@ function categorizeErrors(errors: string[]): FailureCategory {
         return {
             category: 'Click Intercepted',
             icon: '🖱️',
-            color: '#ec4899',
+            // Click-intercepted reuses the "other" colour — not common enough to merit its own token.
+            color: 'var(--category-other)',
             fixSuggestion: 'Element is behind an overlay, popup, or spinner. Dismiss modal/wait for spinner before clicking.',
         };
     }
     return {
         category: 'Other',
         icon: '❓',
-        color: '#64748b',
+        color: 'var(--category-unknown)',
         fixSuggestion: 'Review the error messages manually to identify the root cause.',
     };
 }
@@ -120,27 +130,30 @@ function categorizeErrors(errors: string[]): FailureCategory {
 // ============================================================================
 
 function getTrend(results: any[]): { arrow: string; label: string; color: string } {
-    if (!results || results.length < 3) return { arrow: '—', label: 'Need more data', color: '#94a3b8' };
+    // v1.40.1: trend / confidence colours flow through the theme too
+    // — Improving = success token, Degrading = danger, Steady / no-data
+    // = unknown category. Consumers swap these centrally via override.
+    if (!results || results.length < 3) return { arrow: '—', label: 'Need more data', color: 'var(--category-unknown)' };
 
     const recent = results.slice(-3);
     const previous = results.slice(-6, -3);
-    if (previous.length < 2) return { arrow: '—', label: 'Building history', color: '#94a3b8' };
+    if (previous.length < 2) return { arrow: '—', label: 'Building history', color: 'var(--category-unknown)' };
 
     const recentPassRate = recent.filter((r: any) => r.status === 'passed').length / recent.length;
     const prevPassRate = previous.filter((r: any) => r.status === 'passed').length / previous.length;
     const diff = recentPassRate - prevPassRate;
 
-    if (diff > 0.1) return { arrow: '↗', label: 'Improving', color: '#22c55e' };
-    if (diff < -0.1) return { arrow: '↘', label: 'Degrading', color: '#ef4444' };
-    return { arrow: '→', label: 'Steady', color: '#64748b' };
+    if (diff > 0.1) return { arrow: '↗', label: 'Improving', color: 'var(--success-color)' };
+    if (diff < -0.1) return { arrow: '↘', label: 'Degrading', color: 'var(--danger-color)' };
+    return { arrow: '→', label: 'Steady', color: 'var(--category-unknown)' };
 }
 
 function getConfidence(totalRuns: number): { level: string; color: string; percent: number } {
-    if (totalRuns <= 1) return { level: 'None', color: '#94a3b8', percent: 0 };
-    if (totalRuns <= 3) return { level: 'Low', color: '#f59e0b', percent: 25 };
-    if (totalRuns <= 7) return { level: 'Medium', color: '#3b82f6', percent: 60 };
-    if (totalRuns <= 15) return { level: 'High', color: '#22c55e', percent: 85 };
-    return { level: 'Very High', color: '#166534', percent: 100 };
+    if (totalRuns <= 1) return { level: 'None', color: 'var(--category-unknown)', percent: 0 };
+    if (totalRuns <= 3) return { level: 'Low', color: 'var(--warning-color)', percent: 25 };
+    if (totalRuns <= 7) return { level: 'Medium', color: 'var(--info-color)', percent: 60 };
+    if (totalRuns <= 15) return { level: 'High', color: 'var(--success-color)', percent: 85 };
+    return { level: 'Very High', color: 'var(--health-solid-fg)', percent: 100 };
 }
 
 function getDurationInsight(results: any[]): string | null {
@@ -220,10 +233,10 @@ export function collectFlakyData(currentTestNames?: string[]): any {
                     pattern: 'new',
                     patternDescription: 'First run — no history yet',
                     recommendation: 'new',
-                    trend: { arrow: '🆕', label: 'First run', color: '#3b82f6' },
-                    confidence: { level: 'None', color: '#94a3b8', percent: 0 },
-                    health: { icon: '🆕', label: 'New', color: '#1e40af', bgColor: '#dbeafe', cssClass: 'health-new' },
-                    failureCategory: { category: 'None', icon: '✅', color: '#22c55e', fixSuggestion: '' },
+                    trend: { arrow: '🆕', label: 'First run', color: 'var(--info-color)' },
+                    confidence: { level: 'None', color: 'var(--category-unknown)', percent: 0 },
+                    health: { icon: '🆕', label: 'New', color: 'var(--health-new-fg)', bgColor: 'var(--health-new-bg)', cssClass: 'health-new' },
+                    failureCategory: { category: 'None', icon: '✅', color: 'var(--category-none)', fixSuggestion: '' },
                     durationInsight: null,
                     lastError: null,
                     runHistory: [],
@@ -290,10 +303,10 @@ export function generateFlakyCSS(): string {
             flex: 1; min-width: 90px; background: #f8fafc; border: 1px solid #e2e8f0;
             border-radius: 10px; padding: 14px; text-align: center;
         }
-        .metric-card-flaky .metric-value { font-size: 1.6rem; font-weight: 700; color: #22c55e; }
-        .metric-card-flaky.warning .metric-value { color: #f59e0b; }
-        .metric-card-flaky.danger .metric-value { color: #ef4444; }
-        .metric-card-flaky.info .metric-value { color: #3b82f6; }
+        .metric-card-flaky .metric-value { font-size: 1.6rem; font-weight: 700; color: var(--success-color); }
+        .metric-card-flaky.warning .metric-value { color: var(--warning-color); }
+        .metric-card-flaky.danger .metric-value { color: var(--danger-color); }
+        .metric-card-flaky.info .metric-value { color: var(--info-color); }
         .metric-card-flaky .metric-label { font-size: 0.78rem; color: #64748b; margin-top: 2px; }
 
         /* Failure category pills */
@@ -304,13 +317,46 @@ export function generateFlakyCSS(): string {
             background: #f1f5f9; border: 1px solid #e2e8f0;
         }
 
-        .flaky-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
-        .flaky-table th {
-            background: #f1f5f9; padding: 10px 10px; text-align: left;
-            font-weight: 600; color: #334155; border-bottom: 2px solid #e2e8f0; font-size: 0.78rem;
+        /* v1.43.4 — visible grid borders so rows/columns are scannable. */
+        .flaky-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 0.82rem;
+            border: 1px solid var(--border, #cbd5e1);
+            border-radius: 8px;
+            overflow: hidden;
+            background: var(--surface, white);
         }
-        .flaky-table td { padding: 8px 10px; border-bottom: 1px solid #f1f5f9; color: #475569; vertical-align: top; }
-        .flaky-table tr:hover { background: #f8fafc; }
+        .flaky-table th, .flaky-table td {
+            border-right: 1px solid var(--border, #e2e8f0);
+            border-bottom: 1px solid var(--border, #e2e8f0);
+        }
+        .flaky-table th:last-child, .flaky-table td:last-child { border-right: none; }
+        .flaky-table tbody tr:last-child td { border-bottom: none; }
+        .flaky-table th {
+            background: var(--surface-hover, #f1f5f9);
+            padding: 10px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-primary, #334155);
+            font-size: 0.78rem;
+            position: sticky;
+            top: 0;
+            border-bottom: 2px solid var(--border, #cbd5e1);
+        }
+        .flaky-table td {
+            padding: 10px;
+            color: var(--text-secondary, #475569);
+            vertical-align: top;
+        }
+        .flaky-table tbody tr:nth-child(even) td {
+            background: color-mix(in oklab, var(--surface-hover, #f8fafc) 40%, transparent);
+        }
+        @supports not (background: color-mix(in oklab, red 50%, blue)) {
+            .flaky-table tbody tr:nth-child(even) td { background: #fafbfc; }
+        }
+        .flaky-table tbody tr:hover td { background: var(--surface-hover, #f1f5f9); }
 
         .health-badge {
             display: inline-flex; align-items: center; gap: 4px;
@@ -327,8 +373,8 @@ export function generateFlakyCSS(): string {
             width: 12px; height: 12px; border-radius: 2px; display: flex;
             align-items: center; justify-content: center; font-size: 8px;
         }
-        .run-dot.pass { background: #dcfce7; color: #166534; }
-        .run-dot.fail { background: #fee2e2; color: #991b1b; }
+        .run-dot.pass { background: var(--health-solid-bg); color: var(--health-solid-fg); }
+        .run-dot.fail { background: var(--health-broken-bg); color: var(--health-broken-fg); }
 
         .trend-badge { font-size: 0.75rem; display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; }
         .confidence-bar { display: flex; align-items: center; gap: 4px; }
@@ -341,13 +387,13 @@ export function generateFlakyCSS(): string {
         .detail-row { font-size: 0.75rem; color: #64748b; margin-top: 2px; line-height: 1.4; }
         .detail-row .detail-icon { margin-right: 4px; }
         .error-snippet {
-            font-family: monospace; font-size: 0.7rem; color: #991b1b;
+            font-family: monospace; font-size: 0.7rem; color: var(--health-broken-fg);
             background: #fef2f2; padding: 4px 8px; border-radius: 4px; margin-top: 4px;
             white-space: pre-wrap; word-break: break-all; max-height: 60px; overflow: hidden;
         }
         .fix-suggestion {
-            font-size: 0.72rem; color: #1e40af; background: #eff6ff;
-            padding: 4px 8px; border-radius: 4px; margin-top: 4px; border-left: 3px solid #3b82f6;
+            font-size: 0.72rem; color: var(--health-new-fg); background: var(--health-new-bg);
+            padding: 4px 8px; border-radius: 4px; margin-top: 4px; border-left: 3px solid var(--info-color);
         }
 
         .health-new-row { opacity: 0.65; }
@@ -412,11 +458,11 @@ export function generateFlakySection(flakyData: any): string {
     const legendHTML = `
         <div class="score-legend">
             <span style="font-weight:600;color:#334155;margin-right:6px;" title="The percentage of historical runs that failed. 0 = perfect, 100 = always fails.">Score:</span>
-            <span class="legend-item" title="0% failure rate — passes every run"><span class="legend-dot" style="background:#22c55e"></span> 0-10 Stable</span>
-            <span class="legend-item" title="11-25% failure rate — occasional failure"><span class="legend-dot" style="background:#eab308"></span> 11-25 Shaky</span>
-            <span class="legend-item" title="26-40% failure rate — fails about a third of runs"><span class="legend-dot" style="background:#f97316"></span> 26-40 Flaky</span>
-            <span class="legend-item" title="41-60% failure rate — fails as often as it passes"><span class="legend-dot" style="background:#ef4444"></span> 41-60 Broken</span>
-            <span class="legend-item" title="61-100% failure rate — almost always fails, treat as a real regression"><span class="legend-dot" style="background:#7f1d1d"></span> 61+ Toxic</span>
+            <span class="legend-item" title="0% failure rate — passes every run"><span class="legend-dot" style="background:var(--health-stable-fg)"></span> 0-10 Stable</span>
+            <span class="legend-item" title="11-25% failure rate — occasional failure"><span class="legend-dot" style="background:var(--health-shaky-fg)"></span> 11-25 Shaky</span>
+            <span class="legend-item" title="26-40% failure rate — fails about a third of runs"><span class="legend-dot" style="background:var(--health-flaky-fg)"></span> 26-40 Flaky</span>
+            <span class="legend-item" title="41-60% failure rate — fails as often as it passes"><span class="legend-dot" style="background:var(--health-broken-fg)"></span> 41-60 Broken</span>
+            <span class="legend-item" title="61-100% failure rate — almost always fails, treat as a real regression"><span class="legend-dot" style="background:var(--health-toxic-fg)"></span> 61+ Toxic</span>
             <span style="margin-left:12px;font-weight:600;color:#334155;" title="How much to trust this row's analysis, based on the depth of historical data behind it.">Confidence:</span>
             <span class="legend-item" title="2-3 runs of history — too little signal, do not act on these rows yet">Low (2-3 runs)</span>
             <span class="legend-item" title="4-7 runs of history — usable signal, treat as advisory">Med (4-7)</span>
@@ -432,9 +478,21 @@ export function generateFlakySection(flakyData: any): string {
         const trend = t.trend || { arrow: '—', label: '', color: '#94a3b8' };
         const confidence = t.confidence || { level: 'None', color: '#94a3b8', percent: 0 };
         const barScore = isNew ? 0 : Math.min(t.score, 100);
-        const barColor = isNew ? '#93c5fd' : health.color;
+        const barColor = isNew ? 'var(--health-new-bg)' : health.color;
         const scoreDisplay = isNew ? '—' : t.score;
         const passRateDisplay = isNew ? '—' : `${(t.passRate ?? 0).toFixed(0)}%`;
+        // 95% Wilson confidence interval on the underlying fail-rate (0-100 scale).
+        // Wide interval = small sample, less certain. Rendered as a translucent
+        // band on the score-bar so the reader can see how much trust to put in
+        // the headline score.
+        const ciLow = isNew ? null : (typeof t.confidenceLow === 'number' ? t.confidenceLow : null);
+        const ciHigh = isNew ? null : (typeof t.confidenceHigh === 'number' ? t.confidenceHigh : null);
+        const hasCI = ciLow !== null && ciHigh !== null;
+        const ciLeft = hasCI ? Math.max(0, Math.min(100, ciLow as number)) : 0;
+        const ciWidth = hasCI ? Math.max(0, Math.min(100, (ciHigh as number) - (ciLow as number))) : 0;
+        const ciTitle = hasCI
+            ? `Score ${t.score} (95% CI: ${ciLow}–${ciHigh} on a 0-100 scale; based on ${t.totalRuns} run${t.totalRuns === 1 ? '' : 's'})`
+            : `Score ${scoreDisplay}`;
 
         // Run history dots
         const dots = (t.runHistory || []).map((r: string) =>
@@ -483,9 +541,12 @@ export function generateFlakySection(flakyData: any): string {
                     </span>
                 </td>
                 <td>
-                    <div class="score-bar-container">
+                    <div class="score-bar-container" title="${htmlEscape(ciTitle)}">
                         <span class="score-value" style="color:${barColor}">${scoreDisplay}</span>
-                        <div class="score-bar"><div class="score-bar-fill" style="width:${barScore}%;background:${barColor}"></div></div>
+                        <div class="score-bar" style="position:relative">
+                            <div class="score-bar-fill" style="width:${barScore}%;background:${barColor}"></div>
+                            ${hasCI ? `<div class="score-bar-ci" style="position:absolute;top:0;height:100%;left:${ciLeft}%;width:${ciWidth}%;background:${barColor};opacity:0.25;border-left:1px solid ${barColor};border-right:1px solid ${barColor}"></div>` : ''}
+                        </div>
                     </div>
                 </td>
                 <td>${passRateDisplay}${!isNew && t.totalRuns ? ` <span style="font-size:0.68rem;color:#94a3b8">(${t.totalRuns})</span>` : ''}</td>

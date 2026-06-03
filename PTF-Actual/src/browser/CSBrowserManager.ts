@@ -1143,6 +1143,19 @@ export class CSBrowserManager {
                 // Track the download for test verification
                 resultsManager.addDownloadedFile(savePath, finalFilename, suggestedFilename);
 
+                // v1.43.4 — also pin this download to the current step so
+                // the HTML report can render a per-step "Files" tab. Lazy
+                // require avoids a circular import on framework startup.
+                try {
+                    const { CSScenarioContext } = require('../bdd/CSScenarioContext');
+                    const ctx = CSScenarioContext.getInstance();
+                    let sizeBytes: number | undefined;
+                    try { sizeBytes = require('fs').statSync(savePath).size; } catch (_e) {}
+                    ctx.addStepFile('download', savePath, suggestedFilename, sizeBytes);
+                } catch (_e) {
+                    // Don't fail the download if step tracking is unavailable.
+                }
+
                 CSReporter.pass(`Download saved: ${savePath}`);
             } catch (error: any) {
                 // Don't fail the test if download handling fails

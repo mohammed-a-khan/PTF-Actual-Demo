@@ -15,3 +15,11 @@ export { CSNetworkIdleTracker, NetworkIdleOptions } from './CSNetworkIdleTracker
 export { CSSpinnerDetector, SpinnerDetectorOptions } from './CSSpinnerDetector';
 export { CSAnimationDetector, AnimationDetectorOptions } from './CSAnimationDetector';
 export { CSSmartPoller, SmartPollOptions, PollResult, BackoffStrategy } from './CSSmartPoller';
+
+// Wait-time predictor (data-driven per-signature budgets)
+export { CSWaitPredictor } from './CSWaitPredictor';
+export type {
+    WaitSignatureStats,
+    WaitPrediction,
+    WaitDataStore,
+} from './CSWaitTypes';

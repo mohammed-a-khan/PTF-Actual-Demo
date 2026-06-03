@@ -86,6 +86,13 @@ export class HtmlSanitizer {
     }
 }
 
-export const htmlEscape = HtmlSanitizer.escape;
-export const jsEscape = HtmlSanitizer.escapeJsString;
-export const attrEscape = HtmlSanitizer.escapeAttribute;
+// v1.43.3 — bind to the class so static-method `this` references survive
+// destructured imports. Without this, calling `attrEscape(x)` as a free
+// function leaves `this` undefined inside `escapeAttribute`, which then
+// calls `this.escape(text)` and crashes ("Cannot read properties of
+// undefined (reading 'escape')"). v1.42.3 baseline never tripped this
+// because the only attrEscape callsites were inside video/track tags
+// gated on data that the smoke fixture didn't provide.
+export const htmlEscape = HtmlSanitizer.escape.bind(HtmlSanitizer);
+export const jsEscape   = HtmlSanitizer.escapeJsString.bind(HtmlSanitizer);
+export const attrEscape = HtmlSanitizer.escapeAttribute.bind(HtmlSanitizer);

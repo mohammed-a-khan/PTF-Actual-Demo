@@ -16,6 +16,59 @@ import { CSFrameResolver, FrameInput } from './CSFrameResolver';
 // Lazy load smart wait engine to avoid circular dependencies
 let CSSmartWaitEngine: any = null;
 
+// ============================================================================
+// v1.43.4 — Upload-side step tracking
+// ----------------------------------------------------------------------------
+// When setInputFiles() succeeds, copy each uploaded source file (or inline
+// buffer) into <reportRun>/uploads/<filename> and register it on the current
+// step so the HTML report can render a per-step "Files" tab with a working
+// download link. Failures here MUST NOT break the upload itself — every path
+// is wrapped and swallowed.
+// ============================================================================
+function trackStepUploads(
+    files: string | string[]
+         | { name: string; mimeType: string; buffer: Buffer }
+         | Array<{ name: string; mimeType: string; buffer: Buffer }>
+): void {
+    const fs = require('fs');
+    const path = require('path');
+
+    let uploadsDir: string;
+    try {
+        const { CSTestResultsManager } = require('../reporter/CSTestResultsManager');
+        const dirs = CSTestResultsManager.getInstance().getDirectories();
+        uploadsDir = path.join(dirs.base, 'uploads');
+        if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+    } catch (_e) {
+        return;
+    }
+
+    const list = Array.isArray(files) ? files : [files];
+    const { CSScenarioContext } = require('../bdd/CSScenarioContext');
+    const ctx = CSScenarioContext.getInstance();
+
+    for (const entry of list) {
+        try {
+            if (typeof entry === 'string') {
+                if (!fs.existsSync(entry)) continue;
+                const fileName = path.basename(entry);
+                const dest = path.join(uploadsDir, fileName);
+                try { fs.copyFileSync(entry, dest); } catch (_e) {}
+                const sizeBytes = (() => { try { return fs.statSync(dest).size; } catch (_e) { return undefined; } })();
+                ctx.addStepFile('upload', dest, fileName, sizeBytes);
+            } else if (entry && (entry as any).buffer) {
+                const inline = entry as { name: string; mimeType: string; buffer: Buffer };
+                const fileName = inline.name || `upload-${Date.now()}.bin`;
+                const dest = path.join(uploadsDir, fileName);
+                try { fs.writeFileSync(dest, inline.buffer); } catch (_e) {}
+                ctx.addStepFile('upload', dest, fileName, inline.buffer?.length);
+            }
+        } catch (_e) {
+            // Tracking failures are silently ignored.
+        }
+    }
+}
+
 // ============================================
 // COMPLETE TYPE DEFINITIONS FOR ALL OPTIONS
 // ============================================
@@ -1507,6 +1560,13 @@ export class CSWebElement {
         return this.executeAction('Set input files', async () => {
             const locator = await this.getLocator();
             await locator.setInputFiles(files, options);
+            // v1.43.4 — record uploaded files against the current step so the
+            // HTML report can list them in the per-step "Files" tab.
+            try {
+                trackStepUploads(files);
+            } catch (_e) {
+                // Tracking must never break the upload.
+            }
         });
     }
 

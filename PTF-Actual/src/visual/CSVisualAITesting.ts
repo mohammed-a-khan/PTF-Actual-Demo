@@ -9,12 +9,17 @@ import {
     SmartVisualResult,
     SmartVisualOptions,
     PerceptualHashOptions,
+    DctPerceptualHashOptions,
+    SSIMOptions,
     StructuralComparisonOptions,
     LayoutChange,
     LayoutElementInfo,
     StructuralBaseline,
     PerceptualBaseline
 } from './CSVisualAITypes';
+import { computeSSIM } from './CSVisualSSIM';
+import { computeDctPerceptualHash, dctPerceptualHashDistance } from './CSVisualDctPHash';
+import { CSVisualBaselineStore } from './CSVisualBaselineStore';
 
 /**
  * CSVisualAITesting - Enhanced Visual Comparison with AI Strategies
@@ -40,12 +45,21 @@ export class CSVisualAITesting {
     private diffDir!: string;
     private perceptualThreshold: number;
     private layoutTolerance: number;
+    /** B2: max Hamming distance for the DCT-pHash to pass. */
+    private dctThreshold: number;
+    /** B2: minimum mean-SSIM score for the SSIM comparison to pass. */
+    private ssimThreshold: number;
 
     private constructor() {
         this.config = CSConfigurationManager.getInstance();
         this.enabled = this.config.getBoolean('VISUAL_AI_ENABLED', true);
         this.perceptualThreshold = this.config.getNumber('VISUAL_AI_PERCEPTUAL_THRESHOLD', 5);
         this.layoutTolerance = this.config.getNumber('VISUAL_AI_LAYOUT_TOLERANCE', 10);
+        // B2 defaults — DCT-pHash is more sensitive than the average-hash variant,
+        // so a slightly higher tolerance still rejects real changes; SSIM ≥ 0.99 is
+        // the practical "no human-perceivable change" boundary.
+        this.dctThreshold = this.config.getNumber('VISUAL_AI_DCT_THRESHOLD', 8);
+        this.ssimThreshold = this.config.getNumber('VISUAL_AI_SSIM_THRESHOLD', 0.99);
         this.initializeDirectories();
     }
 
@@ -229,6 +243,172 @@ export class CSVisualAITesting {
             }
         }
         return distance;
+    }
+
+    // =========================================================================
+    // B2: DCT-based perceptual hash comparison
+    // =========================================================================
+
+    /**
+     * Compare a page screenshot against baseline using a DCT-based
+     * perceptual hash. More robust than the average-hash variant
+     * (`comparePerceptual`) — captures low-frequency structural
+     * content, so small rotations/crops and brightness/contrast
+     * shifts don't flip the hash.
+     *
+     * Stores the hash as `${snapshotName}.dct-phash` (separate from
+     * the existing `.phash` aHash baseline so both can coexist).
+     */
+    public async comparePerceptualDct(
+        page: Page,
+        snapshotName: string,
+        options?: DctPerceptualHashOptions & { fullPage?: boolean; clip?: { x: number; y: number; width: number; height: number } }
+    ): Promise<{ passed: boolean; hammingDistance: number; maxDistance: number; threshold: number; adaptive: boolean; message: string }> {
+        if (!this.enabled) {
+            return { passed: true, hammingDistance: 0, maxDistance: 64, threshold: 0, adaptive: false, message: 'Visual AI testing is disabled' };
+        }
+
+        CSReporter.startStep(`DCT-pHash comparison: ${snapshotName}`);
+
+        try {
+            const screenshotBuffer = await page.screenshot({
+                fullPage: options?.fullPage !== false,
+                type: 'png',
+                ...(options?.clip ? { clip: options.clip, fullPage: false } : {})
+            });
+
+            const currentHash = await computeDctPerceptualHash(screenshotBuffer);
+            if (!currentHash) {
+                CSReporter.fail('DCT-pHash compute failed');
+                CSReporter.endStep('fail');
+                return { passed: false, hammingDistance: 64, maxDistance: 64, threshold: 0, adaptive: false, message: 'Failed to compute DCT-pHash' };
+            }
+
+            const actualHashPath = path.join(this.actualDir, `${snapshotName}.dct-phash`);
+            fs.writeFileSync(actualHashPath, JSON.stringify({ hash: currentHash, timestamp: new Date().toISOString() }, null, 2));
+
+            const baselineHashPath = path.join(this.baselineDir, `${snapshotName}.dct-phash`);
+            if (!fs.existsSync(baselineHashPath)) {
+                fs.writeFileSync(baselineHashPath, JSON.stringify({ hash: currentHash, timestamp: new Date().toISOString() }, null, 2));
+                CSReporter.warn(`DCT-pHash baseline created for: ${snapshotName}`);
+                CSReporter.endStep('pass');
+                return { passed: true, hammingDistance: 0, maxDistance: 64, threshold: 0, adaptive: false, message: 'Baseline created' };
+            }
+
+            const baselineData: { hash: string } = JSON.parse(fs.readFileSync(baselineHashPath, 'utf-8'));
+            const hammingDistance = dctPerceptualHashDistance(baselineData.hash, currentHash);
+
+            // Threshold resolution: adaptive (from baseline store) > options > config default.
+            const staticThreshold = options?.threshold ?? this.dctThreshold;
+            const adaptive = CSVisualBaselineStore.getInstance().getAdaptiveThreshold(snapshotName, 'phash-dct');
+            const threshold = adaptive !== null ? Math.round(adaptive) : staticThreshold;
+            const passed = hammingDistance >= 0 && hammingDistance <= threshold;
+
+            // Feed stable scores back to the baseline store so future
+            // runs converge on a learned tolerance.
+            if (passed) {
+                CSVisualBaselineStore.getInstance().recordStableScore(
+                    snapshotName, 'phash-dct', 'lower-is-better', hammingDistance,
+                );
+            }
+
+            const message = passed
+                ? `DCT-pHash match passed (distance: ${hammingDistance}/64, threshold: ${threshold}${adaptive !== null ? ', adaptive' : ''})`
+                : `DCT-pHash match failed (distance: ${hammingDistance}/64, threshold: ${threshold}${adaptive !== null ? ', adaptive' : ''})`;
+
+            if (passed) {
+                CSReporter.pass(message);
+                CSReporter.endStep('pass');
+            } else {
+                CSReporter.fail(message);
+                CSReporter.endStep('fail');
+            }
+            return { passed, hammingDistance, maxDistance: 64, threshold, adaptive: adaptive !== null, message };
+        } catch (error: any) {
+            CSReporter.fail(`DCT-pHash comparison error: ${error.message}`);
+            CSReporter.endStep('fail');
+            throw error;
+        }
+    }
+
+    // =========================================================================
+    // B2: SSIM comparison
+    // =========================================================================
+
+    /**
+     * Compare a page screenshot against the existing pixel baseline
+     * (the `${snapshotName}.png` written by `comparePixelHash`) via
+     * Mean SSIM. SSIM correlates with human perception of image
+     * quality — anti-aliasing noise scores near 1, real structural
+     * change scores well below 0.95.
+     */
+    public async compareSSIM(
+        page: Page,
+        snapshotName: string,
+        options?: SSIMOptions & { fullPage?: boolean; clip?: { x: number; y: number; width: number; height: number } }
+    ): Promise<{ passed: boolean; score: number; threshold: number; adaptive: boolean; message: string }> {
+        if (!this.enabled) {
+            return { passed: true, score: 1, threshold: 0, adaptive: false, message: 'Visual AI testing is disabled' };
+        }
+
+        CSReporter.startStep(`SSIM comparison: ${snapshotName}`);
+
+        try {
+            const currentBuffer = await page.screenshot({
+                fullPage: options?.fullPage !== false,
+                type: 'png',
+                ...(options?.clip ? { clip: options.clip, fullPage: false } : {})
+            });
+
+            const baselinePngPath = path.join(this.baselineDir, `${snapshotName}.png`);
+            if (!fs.existsSync(baselinePngPath)) {
+                fs.writeFileSync(baselinePngPath, currentBuffer);
+                CSReporter.warn(`SSIM baseline PNG created for: ${snapshotName}`);
+                CSReporter.endStep('pass');
+                return { passed: true, score: 1, threshold: 0, adaptive: false, message: 'Baseline created' };
+            }
+
+            const baselineBuffer = fs.readFileSync(baselinePngPath);
+            const score = await computeSSIM(baselineBuffer, currentBuffer, {
+                width: options?.width,
+                height: options?.height,
+            });
+
+            if (score < 0) {
+                CSReporter.fail('SSIM compute failed');
+                CSReporter.endStep('fail');
+                return { passed: false, score: 0, threshold: 0, adaptive: false, message: 'Failed to compute SSIM' };
+            }
+
+            // Threshold resolution: adaptive (from baseline store) > options > config default.
+            const staticThreshold = options?.threshold ?? this.ssimThreshold;
+            const adaptive = CSVisualBaselineStore.getInstance().getAdaptiveThreshold(snapshotName, 'ssim');
+            const threshold = adaptive !== null ? adaptive : staticThreshold;
+            const passed = score >= threshold;
+
+            if (passed) {
+                CSVisualBaselineStore.getInstance().recordStableScore(
+                    snapshotName, 'ssim', 'higher-is-better', score,
+                );
+            }
+
+            const message = passed
+                ? `SSIM match passed (score: ${score.toFixed(4)}, threshold: ${threshold.toFixed(4)}${adaptive !== null ? ', adaptive' : ''})`
+                : `SSIM match failed (score: ${score.toFixed(4)}, threshold: ${threshold.toFixed(4)}${adaptive !== null ? ', adaptive' : ''})`;
+
+            if (passed) {
+                CSReporter.pass(message);
+                CSReporter.endStep('pass');
+            } else {
+                CSReporter.fail(message);
+                CSReporter.endStep('fail');
+            }
+            return { passed, score, threshold, adaptive: adaptive !== null, message };
+        } catch (error: any) {
+            CSReporter.fail(`SSIM comparison error: ${error.message}`);
+            CSReporter.endStep('fail');
+            throw error;
+        }
     }
 
     // =========================================================================
@@ -616,6 +796,39 @@ export class CSVisualAITesting {
                 fullPage: options?.fullPage
             });
 
+            // B2: Optional DCT-pHash tier. Runs when caller passes `perceptualDct`
+            // options OR when the global `VISUAL_AI_DCT_ENABLED` config is on.
+            const dctEnabled = options?.perceptualDct !== undefined
+                || this.config.getBoolean('VISUAL_AI_DCT_ENABLED', false);
+            let perceptualDctResult: { passed: boolean; hammingDistance: number; maxDistance: number; threshold: number; adaptive: boolean } | undefined;
+            if (dctEnabled) {
+                const r = await this.comparePerceptualDct(page, snapshotName, {
+                    threshold: options?.perceptualDct?.threshold,
+                    fullPage: options?.fullPage,
+                });
+                perceptualDctResult = {
+                    passed: r.passed,
+                    hammingDistance: r.hammingDistance,
+                    maxDistance: r.maxDistance,
+                    threshold: r.threshold,
+                    adaptive: r.adaptive,
+                };
+            }
+
+            // B2: Optional SSIM tier. Same gating pattern.
+            const ssimEnabled = options?.ssim !== undefined
+                || this.config.getBoolean('VISUAL_AI_SSIM_ENABLED', false);
+            let ssimResult: { passed: boolean; score: number; threshold: number; adaptive: boolean } | undefined;
+            if (ssimEnabled) {
+                const r = await this.compareSSIM(page, snapshotName, {
+                    threshold: options?.ssim?.threshold,
+                    width: options?.ssim?.width,
+                    height: options?.ssim?.height,
+                    fullPage: options?.fullPage,
+                });
+                ssimResult = { passed: r.passed, score: r.score, threshold: r.threshold, adaptive: r.adaptive };
+            }
+
             // Run structural comparison
             const structuralResult = await this.compareStructural(page, snapshotName, {
                 ignorePositionChanges: options?.structural?.ignorePositionChanges,
@@ -624,25 +837,38 @@ export class CSVisualAITesting {
                 fullPage: options?.fullPage
             });
 
-            // Determine verdict
+            // Determine verdict. Tier order from fastest/strictest to slowest/most-tolerant:
+            //   pixel-hash  -> aHash perceptual  -> DCT-pHash  -> SSIM  -> structural
+            // The first tier that says "match" wins. If the cheaper tiers say "different"
+            // but a more accurate tier (DCT-pHash or SSIM) confirms match within tolerance,
+            // we still call it a pass with a "cosmetic_only" verdict.
             let verdict: SmartVisualResult['verdict'];
             let passed: boolean;
             let message: string;
             const recommendations: string[] = [];
 
+            const perceptuallyClean = perceptualResult.passed
+                || (perceptualDctResult ? perceptualDctResult.passed : false)
+                || (ssimResult ? ssimResult.passed : false);
+
             if (pixelResult.passed) {
                 verdict = 'identical';
                 passed = true;
                 message = `Page '${snapshotName}' is visually identical to baseline`;
-            } else if (perceptualResult.passed) {
+            } else if (perceptuallyClean) {
                 verdict = 'cosmetic_only';
                 passed = true;
-                message = `Page '${snapshotName}' has cosmetic-only differences (anti-aliasing, font rendering). Pixel diff: ${pixelResult.diffPercentage.toFixed(2)}%`;
-                recommendations.push('Cosmetic differences detected — likely sub-pixel rendering. Consider updating pixel baseline if this is expected.');
+                const tier = perceptualResult.passed ? 'aHash'
+                    : (perceptualDctResult && perceptualDctResult.passed) ? 'DCT-pHash'
+                    : 'SSIM';
+                message = `Page '${snapshotName}' has cosmetic-only differences (${tier} within tolerance). Pixel diff: ${pixelResult.diffPercentage.toFixed(2)}%`;
+                recommendations.push(`Cosmetic differences confirmed by ${tier} — likely sub-pixel rendering or anti-aliasing.`);
             } else if (structuralResult.passed) {
                 verdict = 'visual_change';
                 passed = false;
-                message = `Page '${snapshotName}' has visual changes but DOM structure is intact. Perceptual distance: ${perceptualResult.hammingDistance}/${perceptualResult.maxDistance}`;
+                const dctNote = perceptualDctResult ? `, DCT-pHash distance: ${perceptualDctResult.hammingDistance}/${perceptualDctResult.maxDistance}` : '';
+                const ssimNote = ssimResult ? `, SSIM: ${ssimResult.score.toFixed(4)}` : '';
+                message = `Page '${snapshotName}' has visual changes but DOM structure is intact. aHash distance: ${perceptualResult.hammingDistance}/${perceptualResult.maxDistance}${dctNote}${ssimNote}`;
                 recommendations.push('Visual styling has changed but page structure is the same. This may be a CSS/theme change.');
                 recommendations.push('Run with updateBaseline: true if the visual change is intentional.');
             } else {
@@ -668,6 +894,8 @@ export class CSVisualAITesting {
                     hammingDistance: perceptualResult.hammingDistance,
                     maxDistance: perceptualResult.maxDistance
                 },
+                perceptualDctResult,
+                ssimResult,
                 structuralResult: {
                     passed: structuralResult.passed,
                     ariaChanges: structuralResult.ariaChanges,

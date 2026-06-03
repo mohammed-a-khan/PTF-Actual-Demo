@@ -20,6 +20,19 @@ export class CSScenarioContext {
     }> = [];
     private static bddReporterHooked: boolean = false;
 
+    // v1.43.4 — files uploaded / downloaded during the current step.
+    // CSBrowserManager.setupDownloadListener pushes downloads here; the
+    // upload wrapper in CSWebElement.setInputFiles pushes uploads here.
+    // CSBDDRunner snapshots this array into step.attachments after each
+    // step finishes, then clearCurrentStepFiles() runs before the next.
+    private currentStepFiles: Array<{
+        kind: 'upload' | 'download';
+        name: string;       // display name (filename)
+        path: string;       // absolute filesystem path
+        timestamp: string;
+        sizeBytes?: number;
+    }> = [];
+
     private constructor() {}
     
     public static getInstance(): CSScenarioContext {
@@ -94,7 +107,7 @@ export class CSScenarioContext {
     
     // Step result tracking
     public addStepResult(step: string, status: 'passed' | 'failed' | 'skipped', duration: number, screenshot?: string, actions?: any[], diagnostics?: any): void {
-        const stepResult = {
+        const stepResult: any = {
             step,
             status,
             duration,
@@ -102,6 +115,11 @@ export class CSScenarioContext {
             actions: actions || [],
             diagnostics: diagnostics || this.currentStep?.diagnostics
         };
+        // v1.43.4 — snapshot uploaded/downloaded files captured during this
+        // step so the HTML report can surface them in a per-step Files tab.
+        if (this.currentStepFiles && this.currentStepFiles.length > 0) {
+            stepResult.files = [...this.currentStepFiles];
+        }
         this.stepResults.push(stepResult);
         // Don't clear currentStep here - it needs to be available for screenshot attachment in catch block
         // Clear will be done manually after screenshot is attached
@@ -287,6 +305,36 @@ export class CSScenarioContext {
 
     public clearCurrentStepActions(): void {
         this.currentStepActions = [];
+    }
+
+    // v1.43.4 — per-step file attachment tracking (uploads/downloads).
+    public addStepFile(kind: 'upload' | 'download', filePath: string, displayName?: string, sizeBytes?: number): void {
+        try {
+            const path = require('path');
+            this.currentStepFiles.push({
+                kind,
+                name: displayName || path.basename(String(filePath)),
+                path: String(filePath),
+                timestamp: new Date().toISOString(),
+                sizeBytes
+            });
+        } catch (_e) {
+            // Never let an instrumentation push break the step.
+        }
+    }
+
+    public getCurrentStepFiles(): Array<{
+        kind: 'upload' | 'download';
+        name: string;
+        path: string;
+        timestamp: string;
+        sizeBytes?: number;
+    }> {
+        return [...this.currentStepFiles];
+    }
+
+    public clearCurrentStepFiles(): void {
+        this.currentStepFiles = [];
     }
 
     /**
