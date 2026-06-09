@@ -13,9 +13,11 @@ import { CSAIReportAggregator } from './CSAIReportAggregator';
 import { collectFlakyData, generateFlakyCSS, generateFlakyNavItem, generateFlakySection } from './CSFlakyReportSection';
 import { CSReportTheme, generateRootCSS } from './theme';
 import {
-    generateAttentionHero,
-    generateQuarantineBanner,
-    generateClusterPreview,
+    // v1.43.0 replaced generateAttentionHero / generateQuarantineBanner /
+    // generateClusterPreview with renderDashboard() in CSReportDashboard.
+    // The functions still exist in CSDashboardHero.ts (unused) — left in
+    // place so the old hero can be reinstated if needed. Imports removed
+    // here because they had zero callers (audit 2026-06-03).
     generateDashboardHeroCSS,
     renderScenarioHealthBadge,
 } from './CSDashboardHero';
