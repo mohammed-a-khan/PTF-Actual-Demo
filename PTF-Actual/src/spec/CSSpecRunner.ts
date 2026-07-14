@@ -2218,8 +2218,12 @@ export class CSSpecRunner {
             }
 
             const dirs = this.resultsManager.getDirectories();
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const sanitizedName = testName.replace(/[^a-zA-Z0-9]/g, '-').replace(/-{2,}/g, '-').substring(0, 80);
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+            const sanitizedName = testName
+                .replace(/[^a-zA-Z0-9]/g, '-')
+                .replace(/-{2,}/g, '-')
+                .replace(/^-+|-+$/g, '')
+                .substring(0, 40);
             const filename = `${sanitizedName}-${timestamp}.png`;
             const fullPath = path.join(dirs.screenshots, filename);
 

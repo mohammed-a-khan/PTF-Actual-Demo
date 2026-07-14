@@ -115,8 +115,12 @@ export class CSExpect {
                 fs.mkdirSync(screenshotDir, { recursive: true });
             }
 
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const sanitizedDesc = description.replace(/[^a-zA-Z0-9]/g, '-').replace(/-{2,}/g, '-').substring(0, 80);
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+            const sanitizedDesc = description
+                .replace(/[^a-zA-Z0-9]/g, '-')
+                .replace(/-{2,}/g, '-')
+                .replace(/^-+|-+$/g, '')
+                .substring(0, 40);
             const filename = `assertion-${sanitizedDesc}-${timestamp}.png`;
             const screenshotPath = path.join(screenshotDir, filename);
 
