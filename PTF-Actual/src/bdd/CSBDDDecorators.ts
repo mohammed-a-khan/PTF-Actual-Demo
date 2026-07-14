@@ -210,8 +210,21 @@ export async function executeStep(
     const matches = stepText.match(regex);
     const args: any[] = [];
 
+    // Extract the type hints in pattern-order so we know which capture is a
+    // {string}/{word} (keep verbatim) vs {int}/{float} (coerce). Without this,
+    // any digits-only string param (e.g. "0448") would be blindly parsed to a
+    // number and lose its leading zero.
+    const typeHints: string[] = [];
+    if (typeof stepDef.pattern === 'string') {
+        const typeRegex = /\{(string|int|float|word)\}/g;
+        let hintMatch: RegExpExecArray | null;
+        while ((hintMatch = typeRegex.exec(stepDef.pattern)) !== null) {
+            typeHints.push(hintMatch[1]);
+        }
+    }
+
     if (matches && matches.length > 1) {
-        // Extract captured groups, converting types as needed
+        let paramIndex = 0;
         for (let i = 1; i < matches.length; i++) {
             let value = matches[i];
 
@@ -229,12 +242,16 @@ export async function executeStep(
                 value = CSValueResolver.resolve(value, context);
             }
 
-            // Check if it's a number after resolution
-            if (/^\d+$/.test(value)) {
+            const hint = typeHints[paramIndex];
+            paramIndex++;
+
+            if (hint === 'int') {
                 args.push(parseInt(value, 10));
-            } else if (/^\d*\.\d+$/.test(value)) {
+            } else if (hint === 'float') {
                 args.push(parseFloat(value));
             } else {
+                // {string}, {word}, raw regex, or unknown token — never coerce.
+                // Preserves leading zeros, negative-signed digits, etc.
                 args.push(value);
             }
         }
