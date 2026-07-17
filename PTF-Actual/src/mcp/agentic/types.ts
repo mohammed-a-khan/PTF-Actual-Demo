@@ -30,13 +30,17 @@ export type SDLCMode =
     | 'heal'
     | 'triage'
     | 'regression'
+    | 'pr_impact'
     | 'performance'
     | 'audit'
     | 'accessibility'
     | 'security'
     | 'ado_plan'
+    | 'ado_automate'
     | 'release'
-    | 'load';
+    | 'load'
+    | 'source'
+    | 'defect';
 
 /** Input field types renderable both as elicitation forms and text menus. */
 export type FieldType = 'string' | 'enum' | 'boolean' | 'number';

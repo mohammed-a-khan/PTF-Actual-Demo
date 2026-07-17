@@ -1192,22 +1192,41 @@ stage({
                 summary: 'heal loop delegated',
                 handoff: {
                     handoffId: 'heal.loop',
+                    packs: ['browser'],
                     instruction:
                         `Heal failing tests for project ${str(inputs.project)}` +
                         (str(inputs.target) ? ` (target: ${str(inputs.target)})` : ' (latest failed run)') +
-                        `. Per failure: re-run with bdd_run_feature, classify (locator drift / ` +
-                        'timing / data / real bug), fix ONLY page-object locators or waits ' +
-                        '(never assertions), re-run to confirm. Use browser tools to inspect ' +
-                        `the live DOM when locators drifted. HARD LIMIT: at most ${Math.min(remaining, 3)} ` +
-                        'cycles per scenario. If a failure looks like a real application bug, ' +
-                        'leave it failing and note it. Then report back via csaa_advance.',
+                        '. For EACH failure, first DIAGNOSE the real cause by re-running with ' +
+                        'bdd_run_feature and inspecting the captured error + the live app with the ' +
+                        'browser tools (browser_launch/navigate/snapshot). Classify into ONE of:\n' +
+                        '  • locator_drift — element moved/renamed: fix the page-object locator ' +
+                        '(add/repair alternativeLocators; use browser_generate_locator on the live DOM).\n' +
+                        '  • timing_flake — element not ready: add/adjust explicit waits in the page ' +
+                        'object (never blind sleeps).\n' +
+                        '  • workflow_change — the APPLICATION FLOW changed (a step was added, removed, ' +
+                        'reordered, a new dialog/redirect appeared): RE-EXPLORE the affected workflow ' +
+                        'in the browser, then update the step definition sequence AND the .feature ' +
+                        'steps AND any new/removed page objects to match the new flow. This is the ' +
+                        'main thing older heals missed — do not just patch a locator when the flow ' +
+                        'itself moved.\n' +
+                        '  • data_issue — the test data no longer satisfies preconditions: re-resolve ' +
+                        'it DB-first (SELECT only) then UI-create, exactly like authoring.\n' +
+                        '  • env_config — wrong env/URL/credential/config: surface it, do not fake a fix.\n' +
+                        '  • assertion_outdated — the expected value legitimately changed with the app: ' +
+                        'update the assertion to the new correct expectation ONLY when the live app ' +
+                        'confirms the new value is correct (cite it); otherwise treat as app_bug.\n' +
+                        '  • real_app_bug — the app is genuinely wrong: leave the test failing, do NOT ' +
+                        'weaken it, and record it for a defect.\n' +
+                        'After each fix, re-run to confirm green. NEVER weaken or delete an assertion ' +
+                        `just to pass. HARD LIMIT: at most ${Math.min(remaining, 3)} cycles per scenario. ` +
+                        'Then report back via csaa_advance with per-failure category + what you changed.',
                     nextSuggestedTool: 'bdd_run_feature',
                     nextSuggestedArgs: {
                         path:
                             str(inputs.target) ||
                             path.join(ctx.workspaceRoot, 'test', str(inputs.project), 'features'),
                     },
-                    doneWhen: 'every targeted failure is healed, classified as app bug, or out of cycles',
+                    doneWhen: 'every targeted failure is healed (locator/timing/workflow/data), classified as app bug, or out of cycles',
                     reportSchema: HEAL_REPORT_SCHEMA,
                 },
             };
@@ -1279,7 +1298,7 @@ const TRIAGE_SCHEMA: JsonSchema = {
                     signature: { type: 'string' },
                     category: {
                         type: 'string',
-                        enum: ['locator_drift', 'timing_flake', 'test_data', 'environment', 'app_bug', 'test_bug'],
+                        enum: ['locator_drift', 'timing_flake', 'workflow_change', 'test_data', 'environment', 'assertion_outdated', 'app_bug', 'test_bug'],
                     },
                     rootCause: { type: 'string' },
                     suggestedFix: { type: 'string' },
@@ -1773,6 +1792,36 @@ const EXPLORE_REPORT_SCHEMA: JsonSchema = {
             },
         },
         workflowsCovered: { type: 'array', items: { type: 'string' } },
+        /**
+         * The actual end-to-end journeys walked, each as an ordered list of
+         * observed steps. This is what makes generation grounded-not-assumed:
+         * the .feature scenarios and step sequences are built from THESE
+         * observed steps, not invented.
+         */
+        workflows: {
+            type: 'array',
+            items: {
+                type: 'object',
+                required: ['name', 'steps'],
+                properties: {
+                    name: { type: 'string' },
+                    steps: {
+                        type: 'array',
+                        minItems: 1,
+                        items: {
+                            type: 'object',
+                            required: ['action', 'observed'],
+                            properties: {
+                                action: { type: 'string' },      // what the tester did
+                                target: { type: 'string' },      // element/page acted on
+                                data: { type: 'string' },        // value entered (never a secret)
+                                observed: { type: 'string' },    // what the app actually did next
+                            },
+                        },
+                    },
+                },
+            },
+        },
         notes: { type: 'string' },
     },
 };
@@ -1785,14 +1834,18 @@ stage({
         const inputs = ctx.session.inputs;
         const source = str(inputs.appUrl) || str(inputs.source) || str(inputs.legacyPath);
         const isUrl = /^https?:\/\//i.test(str(inputs.appUrl)) || /^https?:\/\//i.test(str(inputs.source));
+        const resolvedUrl = str(inputs.appUrl) || (/^https?:\/\//i.test(str(inputs.source)) ? str(inputs.source) : '');
         if (ctx.handoffReport === undefined) {
-            if (!isUrl) {
+            if (!resolvedUrl) {
+                // app.context should have elicited a URL. If there genuinely is
+                // none (pure doc/description source), note it — generation will
+                // be grounded in the document, and the user is told locators are
+                // best-effort until the app is available.
                 return {
                     status: 'complete',
-                    summary: 'no app URL provided — skipping live exploration (grounding comes from source/docs)',
+                    summary: 'no application URL available — proceeding from document/source grounding; live-verified locators unavailable',
                 };
             }
-            const url = /^https?:\/\//i.test(str(inputs.appUrl)) ? str(inputs.appUrl) : str(inputs.source);
             return {
                 status: 'handoff',
                 summary: 'live exploration delegated',
@@ -1800,18 +1853,27 @@ stage({
                     handoffId: 'author.explore',
                     packs: ['browser'],
                     instruction:
-                        `Explore the application at ${url} exactly like a human tester: ` +
-                        'browser_launch (headless), browser_navigate, then walk each workflow ' +
-                        'relevant to the requested scope. On every distinct page: browser_snapshot, ' +
-                        'identify the interactive elements, and use browser_generate_locator for a ' +
-                        'stable primary locator plus at least one alternative per interactive element. ' +
-                        'If login is required, use the {config:DEFAULT_USERNAME}/{config:DEFAULT_PASSWORD} ' +
-                        'convention — NEVER type literal credentials into this report. ' +
-                        'Keep it bounded: max 12 pages, max 25 elements per page. ' +
+                        `Explore the application at ${resolvedUrl} exactly like a human tester doing a ` +
+                        'manual test pass BEFORE writing any automation. browser_launch (headless), ' +
+                        'browser_navigate, then WALK EACH in-scope workflow END TO END — actually ' +
+                        'perform the steps (click, type, submit) and OBSERVE what the app does at ' +
+                        'each step. Record every workflow as an ordered `steps` list (action + ' +
+                        'target + observed result) in the report — these observed steps become the ' +
+                        '.feature scenario steps, so DO NOT invent or assume any step you did not ' +
+                        'actually perform and see. On every distinct page: browser_snapshot, identify ' +
+                        'the interactive elements, and browser_generate_locator for a stable primary ' +
+                        'locator PLUS at least one alternative each. ' +
+                        (str(inputs.authRequired) === 'yes'
+                            ? 'Login IS required: authenticate using the ' +
+                              '{config:DEFAULT_USERNAME}/{config:DEFAULT_PASSWORD} convention to reach ' +
+                              'the protected workflows. '
+                            : '') +
+                        'NEVER type or record literal credentials/secrets in the report — use the ' +
+                        '{config:...} placeholders. Bound it: max 15 pages, max 25 elements/page. ' +
                         'Then call csaa_advance with the report per reportSchema.',
                     nextSuggestedTool: 'browser_launch',
                     nextSuggestedArgs: { headless: true },
-                    doneWhen: 'all in-scope workflows walked and every visited page captured with elements',
+                    doneWhen: 'every in-scope workflow walked end-to-end with its step sequence + every visited page captured',
                     reportSchema: EXPLORE_REPORT_SCHEMA,
                 },
             };
@@ -2186,12 +2248,16 @@ stage({
                     handoffId: 'adoplan.context',
                     packs: ['ado'],
                     instruction:
-                        `Gather ADO context: ado_work_items_get for story ${storyId} (include ` +
-                        'title, description, Microsoft.VSTS.Common.AcceptanceCriteria), ' +
-                        'ado_test_plans_list for available plans, ado_test_suites_list for the ' +
-                        'most relevant plan(s), and ado_test_suite_test_cases_list for the suite ' +
-                        'that matches this story (to avoid duplicate cases). Strip HTML from ' +
-                        'text fields. Then csaa_advance with the report per reportSchema.',
+                        `Gather FULL ADO context for story ${storyId}: ado_work_items_get and read ` +
+                        'ALL of it — title, System.Description (the full description, not just a ' +
+                        'summary), Microsoft.VSTS.Common.AcceptanceCriteria, ' +
+                        'Microsoft.VSTS.TCM.ReproSteps if present, priority, tags, and area/iteration ' +
+                        'path. Also pull its comments (ado_work_items_query or the work-item ' +
+                        'comments tool) and linked/child items for extra requirements context — a ' +
+                        'story\'s real behaviour often lives in the description and comments, not ' +
+                        'only the acceptance criteria. Then ado_test_plans_list, ado_test_suites_list ' +
+                        'for the relevant plan(s), and ado_test_suite_test_cases_list for the matching ' +
+                        'suite (to avoid duplicate cases). Strip HTML. Then csaa_advance per reportSchema.',
                     nextSuggestedTool: 'ado_work_items_get',
                     nextSuggestedArgs: { id: Number(storyId) || storyId },
                     doneWhen: 'story + plans + suites (+ existing cases where found) collected',
@@ -2322,9 +2388,11 @@ stage({
                 envelope: makeEnvelope(
                     ctx,
                     'compose-ado-cases',
-                    'Design ADO test cases for the story in the grounding artifact: one case ' +
-                        'per acceptance criterion plus the negative/edge cases a senior QA ' +
-                        'would add. Every step needs a concrete action AND a verifiable ' +
+                    'Design ADO test cases for the story in the grounding artifact. Derive cases ' +
+                        'from the FULL story — acceptance criteria AND the behaviours described in ' +
+                        'the description, repro steps and comments (not just the AC bullets) — plus ' +
+                        'the negative/edge cases a senior QA would add. Every step needs a concrete ' +
+                        'action AND a verifiable ' +
                         'expected result (no "verify it works"). Do NOT duplicate any title in ' +
                         'existingCases — extend coverage instead. Priority: 1 = must-run smoke. ' +
                         'Return JSON per responseSchema.',
@@ -2862,6 +2930,877 @@ stage({
             status: 'complete',
             summary: `native perf scenario written: ${path.relative(ctx.workspaceRoot, specPath)}`,
             artifacts: [specPath, runbook],
+        };
+    },
+});
+
+// ---------------------------------------------------------------------------
+// App context — elicit the application URL (and whether login is needed)
+// BEFORE exploration, so we never generate on assumptions about the app.
+// ---------------------------------------------------------------------------
+
+stage({
+    id: 'app.context',
+    kind: 'elicit',
+    title: 'Application access',
+    run: (ctx: StageContext): StageOutcome => {
+        const inputs = ctx.session.inputs;
+        const haveUrl =
+            /^https?:\/\//i.test(str(inputs.appUrl)) ||
+            /^https?:\/\//i.test(str(inputs.source)) ||
+            /^https?:\/\//i.test(str(inputs.targetUrl));
+        // If we already have a URL and auth is already answered, nothing to ask.
+        if (haveUrl && inputs.authRequired !== undefined) {
+            if (!inputs.appUrl && /^https?:\/\//i.test(str(inputs.source))) {
+                ctx.session.inputs.appUrl = str(inputs.source);
+            }
+            return { status: 'complete', summary: 'app context already provided' };
+        }
+        if (ctx.answers === undefined) {
+            const fields: Array<Record<string, unknown>> = [];
+            if (!haveUrl) {
+                fields.push({
+                    id: 'appUrl',
+                    title: 'Application URL',
+                    description:
+                        'The running application URL I should open and traverse to see the real ' +
+                        'workflows before writing any tests. Leave blank only if there is no ' +
+                        'running app (I will then work from the document/source instead).',
+                    type: 'string',
+                    required: false,
+                });
+            }
+            fields.push({
+                id: 'authRequired',
+                title: 'Does reaching the workflows require login?',
+                description:
+                    'If yes, I use the encrypted {config:DEFAULT_USERNAME}/{config:DEFAULT_PASSWORD} ' +
+                    'values from your project config to sign in — never plaintext credentials in chat. ' +
+                    'Make sure those are set (npx cs-playwright-framework encrypt-value) before running.',
+                type: 'enum',
+                required: true,
+                options: ['yes', 'no'],
+                optionTitles: ['Yes — login needed', 'No — public/no auth'],
+                default: 'no',
+            });
+            return {
+                status: 'question',
+                summary: 'awaiting app URL / auth',
+                question: {
+                    questionId: 'app.context',
+                    message:
+                        'To automate this the way a real tester would, I need to open the ' +
+                        'application and walk the workflows myself first.',
+                    fields: fields as never,
+                },
+            };
+        }
+        const a = ctx.answers;
+        if (str(a.appUrl)) ctx.session.inputs.appUrl = str(a.appUrl);
+        ctx.session.inputs.authRequired = str(a.authRequired) || 'no';
+        return {
+            status: 'complete',
+            summary: `app context: url=${ctx.session.inputs.appUrl ? 'provided' : 'none'}, auth=${ctx.session.inputs.authRequired}`,
+        };
+    },
+});
+
+// ---------------------------------------------------------------------------
+// Source-code automation — no requirements, no ADO: read the app's OWN source,
+// derive the real workflows, then explore + author against them.
+// ---------------------------------------------------------------------------
+
+stage({
+    id: 'source.analyze',
+    kind: 'deterministic',
+    title: 'Analyze application source',
+    run: (ctx: StageContext): StageOutcome => {
+        const srcPath = str(ctx.session.inputs.sourcePath) || str(ctx.session.inputs.source);
+        if (!srcPath || !fs.existsSync(srcPath)) {
+            return {
+                status: 'blocked',
+                summary: 'source path not found',
+                blockedReason: `Application source path not found: "${srcPath}". Provide the path to the app's source code.`,
+            };
+        }
+        const stat = fs.statSync(srcPath);
+        const files = stat.isFile()
+            ? [srcPath]
+            : walkFiles(srcPath, ['.ts', '.tsx', '.js', '.jsx', '.vue', '.cs', '.java', '.py', '.html', '.cshtml', '.razor'], 1200);
+        // Deterministic signal extraction: routes, components, forms, endpoints.
+        const routes = new Set<string>();
+        const forms = new Set<string>();
+        const endpoints = new Set<string>();
+        const components = new Set<string>();
+        const routeRe = /(?:path|route|@RequestMapping|@GetMapping|@PostMapping|Route\()\s*[:(]?\s*['"`]([^'"`]{1,80})['"`]/g;
+        const epRe = /(?:fetch|axios\.[a-z]+|http\.[a-z]+|HttpGet|HttpPost)\s*\(?\s*['"`]([/][^'"`]{1,80})['"`]/g;
+        for (const f of files) {
+            let c = '';
+            try { c = fs.readFileSync(f, 'utf-8').slice(0, 20000); } catch { continue; }
+            const base = path.basename(f);
+            if (/\.(tsx|jsx|vue|razor|cshtml|component\.ts)$/.test(base) || /Component|Page|View/.test(base)) {
+                components.add(base);
+            }
+            if (/<form|onSubmit|formGroup|ngSubmit|asp-action/.test(c)) forms.add(path.relative(srcPath, f));
+            let m: RegExpExecArray | null;
+            while ((m = routeRe.exec(c)) !== null) if (m[1].startsWith('/') || /^[a-z]/i.test(m[1])) routes.add(m[1]);
+            while ((m = epRe.exec(c)) !== null) endpoints.add(m[1]);
+        }
+        const sourceMap = {
+            sourcePath: srcPath,
+            filesScanned: files.length,
+            routes: Array.from(routes).slice(0, 100),
+            forms: Array.from(forms).slice(0, 60),
+            apiEndpoints: Array.from(endpoints).slice(0, 100),
+            components: Array.from(components).slice(0, 120),
+        };
+        const artifact = ctx.writeArtifact('source-map.json', JSON.stringify(sourceMap, null, 2));
+        return {
+            status: 'complete',
+            summary: `source analyzed: ${files.length} files, ${routes.size} routes, ${forms.size} forms, ${endpoints.size} endpoints`,
+            artifacts: [artifact],
+        };
+    },
+});
+
+const SOURCE_WORKFLOWS_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['workflows'],
+    properties: {
+        workflows: {
+            type: 'array',
+            minItems: 1,
+            items: {
+                type: 'object',
+                required: ['name', 'entryRoute', 'priority', 'summary'],
+                properties: {
+                    name: { type: 'string', minLength: 4 },
+                    entryRoute: { type: 'string' },
+                    priority: { type: 'string', enum: ['P1', 'P2', 'P3'] },
+                    summary: { type: 'string' },
+                    happyPath: { type: 'array', items: { type: 'string' } },
+                },
+            },
+        },
+        appType: { type: 'string' },
+    },
+};
+
+stage({
+    id: 'source.workflows',
+    kind: 'cognitive',
+    title: 'Derive workflows from source',
+    run: (ctx: StageContext): StageOutcome => {
+        const mapArtifact = ctx.session.artifacts.find((a) => a.endsWith('source-map.json'));
+        if (ctx.submission === undefined) {
+            return {
+                status: 'envelope',
+                summary: 'awaiting derived workflows',
+                envelope: makeEnvelope(
+                    ctx,
+                    'derive-workflows-from-source',
+                    'You are reverse-engineering the USER-FACING workflows of an application from ' +
+                        'its own source code so they can be automated. Read the source-map at ' +
+                        'groundingPath (routes, forms, components, endpoints) AND read the actual ' +
+                        'source files it references for the important flows. Identify the real ' +
+                        'end-user journeys (e.g. login, search, create-order, checkout), each with ' +
+                        'its entry route and a happy-path outline. Prioritise by how central the ' +
+                        'flow is to the app. These become the exploration targets and, after live ' +
+                        'exploration, the automated scenarios. Return JSON per responseSchema.',
+                    SOURCE_WORKFLOWS_SCHEMA,
+                    { groundingPath: mapArtifact, skills: skillHints('workflow scenario page object design') },
+                ),
+            };
+        }
+        const derived = ctx.submission as Record<string, unknown>;
+        const wfs = (derived.workflows as Array<Record<string, unknown>>) ?? [];
+        // Seed the exploration scope from the derived workflows.
+        ctx.session.inputs.exploreScope = wfs.map((w) => str(w.name)).join('; ');
+        const artifact = ctx.writeArtifact('derived-workflows.json', JSON.stringify(derived, null, 2));
+        return {
+            status: 'complete',
+            summary: `derived ${wfs.length} workflows from source`,
+            artifacts: [artifact],
+        };
+    },
+});
+
+// ---------------------------------------------------------------------------
+// Defect-driven — read a defect + its repro, find the existing test, and
+// either fix it to cover the defect or author a new regression test.
+// ---------------------------------------------------------------------------
+
+const DEFECT_FETCH_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['id', 'title', 'reproSteps'],
+    properties: {
+        id: { type: 'number' },
+        title: { type: 'string' },
+        description: { type: 'string' },
+        reproSteps: { type: 'array', items: { type: 'string' } },
+        expected: { type: 'string' },
+        actual: { type: 'string' },
+        area: { type: 'string' },
+        attachments: { type: 'array', items: { type: 'string' } },
+        linkedTestCaseIds: { type: 'array', items: { type: 'number' } },
+    },
+};
+
+stage({
+    id: 'defect.fetch',
+    kind: 'handoff',
+    title: 'Fetch defect + reproduction',
+    run: (ctx: StageContext): StageOutcome => {
+        if (ctx.handoffReport === undefined) {
+            const defectId = str(ctx.session.inputs.defectId);
+            const guard = CSGuardrailEngine.preflight('ado_plan', { project: str(ctx.session.inputs.project) }, ctx.workspaceRoot);
+            const blocker = guard.find((w) => w.startsWith('BLOCKER:'));
+            if (blocker && /^[0-9]+$/.test(defectId)) {
+                return { status: 'blocked', summary: 'ADO config needed', blockedReason: blocker.replace(/^BLOCKER:\s*/, '') };
+            }
+            return {
+                status: 'handoff',
+                summary: 'defect fetch delegated',
+                handoff: {
+                    handoffId: 'defect.fetch',
+                    packs: ['ado'],
+                    instruction:
+                        `Fetch defect/bug ${defectId} from ADO: ado_work_items_get (title, ` +
+                        'description, Microsoft.VSTS.TCM.ReproSteps, System.AreaPath, ' +
+                        'Microsoft.VSTS.Common.Priority). Read the FULL description and repro steps ' +
+                        '(strip HTML), not just the title. If the bug has linked test cases or ' +
+                        'attachments (repro screenshots/logs), list them. Return JSON per ' +
+                        'responseSchema. If the defect id is a plain description rather than an ADO ' +
+                        'id, synthesize the same shape from that text.',
+                    nextSuggestedTool: 'ado_work_items_get',
+                    nextSuggestedArgs: { id: Number(defectId) || defectId },
+                    doneWhen: 'defect details + reproduction steps collected',
+                    reportSchema: DEFECT_FETCH_SCHEMA,
+                },
+            };
+        }
+        const artifact = ctx.writeArtifact('defect.json', JSON.stringify(ctx.handoffReport, null, 2));
+        const steps = (ctx.handoffReport.reproSteps as string[]) ?? [];
+        return { status: 'complete', summary: `defect fetched: ${steps.length} repro steps`, artifacts: [artifact] };
+    },
+});
+
+const DEFECT_LOCATE_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['decision'],
+    properties: {
+        decision: { type: 'string', enum: ['fix_existing', 'author_new'] },
+        existingTest: {
+            type: 'object',
+            properties: {
+                featureFile: { type: 'string' },
+                scenarioName: { type: 'string' },
+                stepFiles: { type: 'array', items: { type: 'string' } },
+                pageObjects: { type: 'array', items: { type: 'string' } },
+            },
+        },
+        rationale: { type: 'string' },
+        regressionScenario: { type: 'string' },
+    },
+};
+
+stage({
+    id: 'defect.locate',
+    kind: 'cognitive',
+    title: 'Locate existing test or decide new',
+    run: (ctx: StageContext): StageOutcome => {
+        if (ctx.submission === undefined) {
+            const project = str(ctx.session.inputs.project);
+            const inventory = CSRepoInventory.inventory(project, { workspaceRoot: ctx.workspaceRoot });
+            const invPath = ctx.writeArtifact('defect-inventory.json', JSON.stringify(inventory, null, 2));
+            const defectPath = ctx.session.artifacts.find((a) => a.endsWith('defect.json'));
+            return {
+                status: 'envelope',
+                summary: 'awaiting locate decision',
+                envelope: makeEnvelope(
+                    ctx,
+                    'locate-test-for-defect',
+                    'Decide how to cover this defect with automation. Read the defect at the ' +
+                        'defect.json grounding path and the existing test inventory at the inventory ' +
+                        'grounding path. If an existing scenario already exercises the same workflow ' +
+                        'the defect is in, choose fix_existing and identify its feature file, ' +
+                        'scenario, step files and page objects (so the next stage repairs/extends it ' +
+                        'to assert the fixed behaviour). If nothing covers it, choose author_new and ' +
+                        'give a one-line regression scenario title that reproduces the defect. ' +
+                        'Return JSON per responseSchema.',
+                    DEFECT_LOCATE_SCHEMA,
+                    { groundingPaths: [defectPath, invPath], skills: skillHints('scenario step page object regression') },
+                ),
+            };
+        }
+        const d = ctx.submission as Record<string, unknown>;
+        ctx.session.inputs.defectDecision = str(d.decision);
+        const artifact = ctx.writeArtifact('defect-plan.json', JSON.stringify(d, null, 2));
+        return { status: 'complete', summary: `defect coverage: ${str(d.decision)}`, artifacts: [artifact] };
+    },
+});
+
+stage({
+    id: 'defect.resolve',
+    kind: 'handoff',
+    title: 'Fix or author regression test',
+    run: (ctx: StageContext): StageOutcome => {
+        if (ctx.handoffReport === undefined) {
+            const decision = str(ctx.session.inputs.defectDecision) || 'author_new';
+            const grounding = ctx.session.artifacts.filter(
+                (a) => a.endsWith('defect.json') || a.endsWith('defect-plan.json') || a.endsWith('captured-pages.json'),
+            );
+            return {
+                status: 'handoff',
+                summary: 'defect resolution delegated',
+                handoff: {
+                    handoffId: 'defect.resolve',
+                    packs: ['authoring', 'quality', 'execution'],
+                    instruction:
+                        (decision === 'fix_existing'
+                            ? 'Repair/extend the existing test identified in defect-plan.json so it ' +
+                              'now asserts the DEFECT IS FIXED (it should fail against the buggy ' +
+                              'behaviour and pass once fixed). Update the page objects/steps as needed.'
+                            : 'Author a NEW regression test that reproduces the defect from its repro ' +
+                              'steps and asserts the correct expected behaviour, following the normal ' +
+                              'csaa_* authoring chain grounded in the captured exploration.') +
+                        ' Grounding artifacts: ' + grounding.join(', ') + '. ' +
+                        'Then EXECUTE it with bdd_run_feature to confirm it behaves correctly, and ' +
+                        'tag the scenario with @defect_<id>. Report via csaa_advance.',
+                    nextSuggestedTool: decision === 'fix_existing' ? 'csaa_query_existing_pages' : 'csaa_discover',
+                    nextSuggestedArgs: {},
+                    doneWhen: 'the regression test exists, is tagged, and has been executed',
+                    reportSchema: {
+                        type: 'object',
+                        required: ['outcome', 'testPath'],
+                        properties: {
+                            outcome: { type: 'string', enum: ['fixed', 'authored', 'blocked'] },
+                            testPath: { type: 'string' },
+                            executed: { type: 'boolean' },
+                            passed: { type: 'boolean' },
+                            notes: { type: 'string' },
+                        },
+                    },
+                },
+            };
+        }
+        const r = ctx.handoffReport;
+        if (str(r.outcome) === 'blocked') {
+            return { status: 'blocked', summary: 'defect resolution blocked', blockedReason: str(r.notes) || 'could not resolve defect' };
+        }
+        const artifact = ctx.writeArtifact('defect-resolution.json', JSON.stringify(r, null, 2));
+        return {
+            status: 'complete',
+            summary: `defect ${str(r.outcome)}: ${str(r.testPath)}${r.executed ? (r.passed ? ' (passing)' : ' (still failing — likely real bug)') : ''}`,
+            artifacts: [artifact],
+        };
+    },
+});
+
+// ---------------------------------------------------------------------------
+// ADO automate — given a test PLAN, drill down: pick suite(s), pick the exact
+// test cases to automate, fetch their steps, then author automation for them.
+// ---------------------------------------------------------------------------
+
+const ADO_SUITES_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['suites'],
+    properties: {
+        planName: { type: 'string' },
+        suites: {
+            type: 'array',
+            items: {
+                type: 'object',
+                required: ['id', 'name'],
+                properties: {
+                    id: { type: 'number' },
+                    name: { type: 'string' },
+                    caseCount: { type: 'number' },
+                },
+            },
+        },
+    },
+};
+
+stage({
+    id: 'adoauto.suites',
+    kind: 'handoff',
+    title: 'List suites in the plan',
+    run: (ctx: StageContext): StageOutcome => {
+        if (ctx.handoffReport === undefined) {
+            const planId = str(ctx.session.inputs.planId);
+            return {
+                status: 'handoff',
+                summary: 'ADO suites fetch delegated',
+                handoff: {
+                    handoffId: 'adoauto.suites',
+                    packs: ['ado'],
+                    instruction:
+                        `List the test suites under ADO test plan ${planId}: ado_test_suites_list ` +
+                        `(planId ${planId}). Include each suite's id, name, and test-case count. ` +
+                        'Return JSON per responseSchema, then csaa_advance.',
+                    nextSuggestedTool: 'ado_test_suites_list',
+                    nextSuggestedArgs: { planId: Number(planId) || planId },
+                    doneWhen: 'all suites under the plan listed',
+                    reportSchema: ADO_SUITES_SCHEMA,
+                },
+            };
+        }
+        const artifact = ctx.writeArtifact('ado-suites.json', JSON.stringify(ctx.handoffReport, null, 2));
+        const suites = (ctx.handoffReport.suites as unknown[]) ?? [];
+        return { status: 'complete', summary: `${suites.length} suites in plan`, artifacts: [artifact] };
+    },
+});
+
+stage({
+    id: 'adoauto.pick_suite',
+    kind: 'elicit',
+    title: 'Pick suite to automate',
+    run: (ctx: StageContext): StageOutcome => {
+        const suitesArtifact = ctx.session.artifacts.find((a) => a.endsWith('ado-suites.json'));
+        let suites: Array<{ id: number; name: string; caseCount?: number }> = [];
+        if (suitesArtifact && fs.existsSync(suitesArtifact)) {
+            try { suites = JSON.parse(fs.readFileSync(suitesArtifact, 'utf-8')).suites ?? []; } catch { /* */ }
+        }
+        if (ctx.answers === undefined) {
+            if (suites.length === 0) {
+                return { status: 'blocked', summary: 'no suites', blockedReason: 'No test suites found in that plan.' };
+            }
+            return {
+                status: 'question',
+                summary: 'awaiting suite pick',
+                question: {
+                    questionId: 'adoauto.suite',
+                    message: 'Which test suite do you want to automate?',
+                    fields: [{
+                        id: 'suiteId',
+                        title: 'Suite',
+                        description: 'Suite whose test cases will be automated.',
+                        type: 'enum',
+                        required: true,
+                        options: suites.map((s) => String(s.id)),
+                        optionTitles: suites.map((s) => `${s.name}${s.caseCount ? ` (${s.caseCount} cases)` : ''}`),
+                    }] as never,
+                },
+            };
+        }
+        ctx.session.inputs.suiteId = str(ctx.answers.suiteId);
+        return { status: 'complete', summary: `suite ${str(ctx.answers.suiteId)} selected` };
+    },
+});
+
+const ADO_CASES_LIST_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['cases'],
+    properties: {
+        cases: {
+            type: 'array',
+            items: {
+                type: 'object',
+                required: ['id', 'title'],
+                properties: {
+                    id: { type: 'number' },
+                    title: { type: 'string' },
+                    steps: {
+                        type: 'array',
+                        items: {
+                            type: 'object',
+                            properties: { action: { type: 'string' }, expected: { type: 'string' } },
+                        },
+                    },
+                },
+            },
+        },
+    },
+};
+
+stage({
+    id: 'adoauto.cases',
+    kind: 'handoff',
+    title: 'List test cases in the suite',
+    run: (ctx: StageContext): StageOutcome => {
+        if (ctx.handoffReport === undefined) {
+            const planId = str(ctx.session.inputs.planId);
+            const suiteId = str(ctx.session.inputs.suiteId);
+            return {
+                status: 'handoff',
+                summary: 'ADO cases fetch delegated',
+                handoff: {
+                    handoffId: 'adoauto.cases',
+                    packs: ['ado'],
+                    instruction:
+                        `List the test cases in ADO plan ${planId} suite ${suiteId}: ` +
+                        'ado_test_suite_test_cases_list, then for each case ado_work_items_get to ' +
+                        'read its Microsoft.VSTS.TCM.Steps (parse the Steps XML into action/expected ' +
+                        'pairs). Return JSON per responseSchema, then csaa_advance.',
+                    nextSuggestedTool: 'ado_test_suite_test_cases_list',
+                    nextSuggestedArgs: { planId: Number(planId) || planId, suiteId: Number(suiteId) || suiteId },
+                    doneWhen: 'all cases in the suite listed with their steps',
+                    reportSchema: ADO_CASES_LIST_SCHEMA,
+                },
+            };
+        }
+        const artifact = ctx.writeArtifact('ado-suite-cases.json', JSON.stringify(ctx.handoffReport, null, 2));
+        const cases = (ctx.handoffReport.cases as unknown[]) ?? [];
+        return { status: 'complete', summary: `${cases.length} cases in suite`, artifacts: [artifact] };
+    },
+});
+
+stage({
+    id: 'adoauto.pick_cases',
+    kind: 'elicit',
+    title: 'Pick test cases to automate',
+    run: (ctx: StageContext): StageOutcome => {
+        const casesArtifact = ctx.session.artifacts.find((a) => a.endsWith('ado-suite-cases.json'));
+        let cases: Array<{ id: number; title: string }> = [];
+        if (casesArtifact && fs.existsSync(casesArtifact)) {
+            try { cases = JSON.parse(fs.readFileSync(casesArtifact, 'utf-8')).cases ?? []; } catch { /* */ }
+        }
+        if (ctx.answers === undefined) {
+            if (cases.length === 0) {
+                return { status: 'blocked', summary: 'no cases', blockedReason: 'No test cases found in that suite.' };
+            }
+            // Offer an "all" option plus each case; multi-select is not always
+            // available in the text fallback, so accept a comma list too.
+            return {
+                status: 'question',
+                summary: 'awaiting case pick',
+                question: {
+                    questionId: 'adoauto.cases',
+                    message: `Which test cases should I automate? (${cases.length} available — choose "all" or list ids)`,
+                    fields: [{
+                        id: 'caseSelection',
+                        title: 'Test cases',
+                        description: 'Enter "all", or a comma-separated list of case ids (e.g. "1024,1025").',
+                        type: 'string',
+                        required: true,
+                        default: 'all',
+                    }] as never,
+                },
+            };
+        }
+        const sel = str(ctx.answers.caseSelection).trim().toLowerCase();
+        const chosen = sel === 'all' || sel === ''
+            ? cases.map((c) => c.id)
+            : sel.split(/[,\s]+/).map((n) => Number(n)).filter((n) => cases.some((c) => c.id === n));
+        ctx.session.inputs.selectedCaseIds = chosen.join(',');
+        // Seed the authoring scope so explore + pipeline know what to build.
+        ctx.session.inputs.exploreScope = cases
+            .filter((c) => chosen.includes(c.id))
+            .map((c) => c.title)
+            .join('; ');
+        return { status: 'complete', summary: `${chosen.length} test cases selected to automate` };
+    },
+});
+
+// ---------------------------------------------------------------------------
+// PR-impact — read a pull request (or commit), map its changed source files to
+// the existing tests, classify each change as run-existing / needs-update /
+// needs-new (the regression candidates), and optionally run the covered set.
+// ---------------------------------------------------------------------------
+
+const PRIMPACT_FETCH_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['changedPaths'],
+    properties: {
+        title: { type: 'string' },
+        description: { type: 'string' },
+        sourceBranch: { type: 'string' },
+        targetBranch: { type: 'string' },
+        changedPaths: { type: 'array', items: { type: 'string' } },
+        changes: {
+            type: 'array',
+            items: {
+                type: 'object',
+                required: ['path'],
+                properties: {
+                    path: { type: 'string' },
+                    changeType: { type: 'string' },
+                },
+            },
+        },
+        reviewNotes: { type: 'array', items: { type: 'string' } },
+    },
+};
+
+stage({
+    id: 'primpact.fetch',
+    kind: 'handoff',
+    title: 'Fetch PR / commit changed files',
+    run: (ctx: StageContext): StageOutcome => {
+        if (ctx.handoffReport === undefined) {
+            const inputs = ctx.session.inputs;
+            const repo = str(inputs.repositoryId);
+            const prId = str(inputs.pullRequestId);
+            const commitId = str(inputs.commitId);
+            // ADO must be configured to reach the PR/commit.
+            const guard = CSGuardrailEngine.preflight('pr_impact', { project: str(inputs.project) }, ctx.workspaceRoot);
+            const blocker = guard.find((w) => w.startsWith('BLOCKER:'));
+            if (blocker) {
+                return { status: 'blocked', summary: 'ADO config needed', blockedReason: blocker.replace(/^BLOCKER:\s*/, '') };
+            }
+            const usePr = prId !== '';
+            return {
+                status: 'handoff',
+                summary: 'PR/commit fetch delegated',
+                handoff: {
+                    handoffId: 'primpact.fetch',
+                    packs: ['ado'],
+                    instruction: usePr
+                        ? `Read pull request ${prId} in repository "${repo}". Call ado_pull_requests_get ` +
+                          `(title, description, sourceRefName, targetRefName), then ` +
+                          `ado_pull_request_get_changes to get the changed files (the changedPaths ` +
+                          `array is the key output), and ado_pull_request_threads_list for any reviewer ` +
+                          `notes that hint at risk. Return JSON per responseSchema — changedPaths MUST ` +
+                          `be the real changed source paths from the PR.`
+                        : `Get the changed files of commit ${commitId} in repository "${repo}" via ` +
+                          `ado_commit_changes. Return JSON per responseSchema with changedPaths set to ` +
+                          `the real changed source paths.`,
+                    nextSuggestedTool: usePr ? 'ado_pull_request_get_changes' : 'ado_commit_changes',
+                    nextSuggestedArgs: usePr
+                        ? { repositoryId: repo, pullRequestId: Number(prId) || prId }
+                        : { repositoryId: repo, commitId },
+                    doneWhen: 'the changed source paths (and PR title/description) are collected',
+                    reportSchema: PRIMPACT_FETCH_SCHEMA,
+                },
+            };
+        }
+        const r = ctx.handoffReport;
+        const changed = (r.changedPaths as string[]) ?? [];
+        if (changed.length === 0) {
+            return {
+                status: 'blocked',
+                summary: 'no changed files',
+                blockedReason: 'The PR/commit reported no changed files — nothing to analyse for regression impact.',
+            };
+        }
+        ctx.session.inputs.changedPathCount = changed.length;
+        const artifact = ctx.writeArtifact('pr-changes.json', JSON.stringify(r, null, 2));
+        return { status: 'complete', summary: `fetched ${changed.length} changed file(s)`, artifacts: [artifact] };
+    },
+});
+
+const PRIMPACT_MAP_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['candidates', 'summary'],
+    properties: {
+        candidates: {
+            type: 'array',
+            minItems: 1,
+            items: {
+                type: 'object',
+                required: ['changeArea', 'classification', 'reason'],
+                properties: {
+                    changeArea: { type: 'string' },
+                    changedPaths: { type: 'array', items: { type: 'string' } },
+                    classification: {
+                        type: 'string',
+                        enum: ['run_existing', 'needs_update', 'needs_new'],
+                    },
+                    existingTests: { type: 'array', items: { type: 'string' } },
+                    reason: { type: 'string' },
+                    priority: { type: 'string', enum: ['P1', 'P2', 'P3'] },
+                },
+            },
+        },
+        runSelection: {
+            type: 'object',
+            properties: {
+                tags: { type: 'string' },
+                featurePaths: { type: 'array', items: { type: 'string' } },
+            },
+        },
+        summary: { type: 'string' },
+    },
+};
+
+stage({
+    id: 'primpact.map',
+    kind: 'cognitive',
+    title: 'Map changes to tests & classify regression candidates',
+    run: (ctx: StageContext): StageOutcome => {
+        if (ctx.submission === undefined) {
+            const project = str(ctx.session.inputs.project);
+            const inventory = CSRepoInventory.inventory(project, { workspaceRoot: ctx.workspaceRoot });
+            const invPath = ctx.writeArtifact('pr-impact-inventory.json', JSON.stringify(inventory, null, 2));
+            const changesPath = ctx.session.artifacts.find((a) => a.endsWith('pr-changes.json'));
+            return {
+                status: 'envelope',
+                summary: 'awaiting regression-candidate mapping',
+                envelope: makeEnvelope(
+                    ctx,
+                    'map-pr-impact',
+                    'You are identifying the regression candidates for a code change. Read the ' +
+                        'changed files at the pr-changes.json grounding path and the existing test ' +
+                        'inventory (features/scenarios/pages/steps) at the inventory grounding path. ' +
+                        'Group the changed source paths into meaningful change areas, and for EACH area ' +
+                        'decide one of:\n' +
+                        '  • run_existing — an existing scenario already covers this behaviour: list the ' +
+                        'exact feature file(s)/scenario(s) in existingTests. These are what to execute.\n' +
+                        '  • needs_update — a test exists but the change alters the flow/contract so the ' +
+                        'test must be updated first: list the affected test(s) and say what changed.\n' +
+                        '  • needs_new — no test covers this change: it is a coverage gap that needs a ' +
+                        'new test authored.\n' +
+                        'Base every mapping on the ACTUAL inventory — do not invent test paths. Set ' +
+                        'runSelection.featurePaths to the real .feature paths of the run_existing set ' +
+                        '(and/or a runSelection.tags expression). Assign a priority per candidate. ' +
+                        'Return JSON per responseSchema.',
+                    PRIMPACT_MAP_SCHEMA,
+                    {
+                        groundingPaths: [changesPath, invPath],
+                        project,
+                        skills: skillHints('regression impact analysis coverage mapping change'),
+                    },
+                ),
+            };
+        }
+        const m = ctx.submission as Record<string, unknown>;
+        const candidates = (m.candidates as Array<Record<string, unknown>>) ?? [];
+        const byClass = (c: string) => candidates.filter((x) => str(x.classification) === c);
+        const runExisting = byClass('run_existing');
+        const needsUpdate = byClass('needs_update');
+        const needsNew = byClass('needs_new');
+
+        const runSel = (m.runSelection as Record<string, unknown>) ?? {};
+        const featurePaths = ((runSel.featurePaths as string[]) ?? []).filter(Boolean);
+        ctx.session.inputs.selectedFeatures = featurePaths.join(',');
+        if (str(runSel.tags)) ctx.session.inputs.tags = str(runSel.tags);
+        ctx.session.inputs.coveredCount = runExisting.length;
+        ctx.session.inputs.updateCount = needsUpdate.length;
+        ctx.session.inputs.newCount = needsNew.length;
+
+        const row = (c: Record<string, unknown>) =>
+            `| ${c.priority ?? '-'} | ${str(c.changeArea).replace(/\|/g, '\\|')} | ${((c.existingTests as string[]) ?? []).join('<br>').replace(/\|/g, '\\|') || '—'} | ${str(c.reason).replace(/\|/g, '\\|')} |`;
+        const md = [
+            `# Regression candidates — ${str(ctx.session.inputs.project)}`,
+            '',
+            str(m.summary ?? ''),
+            '',
+            `**Changed files:** ${Number(ctx.session.inputs.changedPathCount) || 0} · ` +
+                `**Run existing:** ${runExisting.length} · **Needs update:** ${needsUpdate.length} · ` +
+                `**Needs new:** ${needsNew.length}`,
+            '',
+            '## ✅ Run existing (regression set to execute)',
+            '| Priority | Change area | Existing test(s) | Why |',
+            '|---|---|---|---|',
+            ...(runExisting.length ? runExisting.map(row) : ['| — | none | — | — |']),
+            '',
+            '## ✏️ Needs update (existing test must change first)',
+            '| Priority | Change area | Existing test(s) | What changed |',
+            '|---|---|---|---|',
+            ...(needsUpdate.length ? needsUpdate.map(row) : ['| — | none | — | — |']),
+            '',
+            '## ➕ Needs new (coverage gap)',
+            '| Priority | Change area | Existing test(s) | Why a new test |',
+            '|---|---|---|---|',
+            ...(needsNew.length ? needsNew.map(row) : ['| — | none | — | — |']),
+        ];
+        const jsonPath = ctx.writeArtifact('regression-candidates.json', JSON.stringify(m, null, 2));
+        const mdPath = ctx.writeArtifact('REGRESSION-CANDIDATES.md', md.join('\n') + '\n');
+        return {
+            status: 'complete',
+            summary: `regression candidates: ${runExisting.length} run / ${needsUpdate.length} update / ${needsNew.length} new`,
+            artifacts: [jsonPath, mdPath],
+        };
+    },
+});
+
+stage({
+    id: 'primpact.decide',
+    kind: 'elicit',
+    title: 'Run the covered regression set?',
+    run: (ctx: StageContext): StageOutcome => {
+        const covered = Number(ctx.session.inputs.coveredCount) || 0;
+        const update = Number(ctx.session.inputs.updateCount) || 0;
+        const gap = Number(ctx.session.inputs.newCount) || 0;
+        if (ctx.answers === undefined) {
+            return {
+                status: 'question',
+                summary: 'awaiting run decision',
+                question: {
+                    questionId: 'primpact.run',
+                    message:
+                        `Regression analysis: ${covered} covered test(s) to run, ${update} to update, ` +
+                        `${gap} coverage gap(s) to author. ` +
+                        (covered > 0
+                            ? 'Run the covered regression set now, or stop with the plan only?'
+                            : 'No existing tests directly cover these changes. Stop with the plan (there is nothing to run)?'),
+                    fields: [
+                        {
+                            id: 'decision',
+                            title: 'Next step',
+                            description: 'Run the covered set now, or produce the plan only.',
+                            type: 'enum',
+                            required: true,
+                            options: covered > 0 ? ['run_now', 'plan_only', 'cancel'] : ['plan_only', 'cancel'],
+                            optionTitles:
+                                covered > 0
+                                    ? ['Run the covered tests now', 'Plan only (do not run)', 'Cancel']
+                                    : ['Plan only (do not run)', 'Cancel'],
+                            default: covered > 0 ? 'run_now' : 'plan_only',
+                        },
+                    ],
+                },
+            };
+        }
+        const decision = str(ctx.answers.decision) || 'plan_only';
+        if (decision === 'cancel') {
+            return { status: 'blocked', summary: 'user cancelled', blockedReason: 'PR-impact analysis cancelled by user.' };
+        }
+        ctx.session.inputs.primpactDecision = decision;
+        return { status: 'complete', summary: `decision: ${decision}` };
+    },
+});
+
+stage({
+    id: 'primpact.run',
+    kind: 'handoff',
+    title: 'Execute covered regression set (optional)',
+    run: (ctx: StageContext): StageOutcome => {
+        const decision = str(ctx.session.inputs.primpactDecision) || 'plan_only';
+        const selected = str(ctx.session.inputs.selectedFeatures);
+        // Plan-only (or nothing covered): no execution, no tokens.
+        if (decision !== 'run_now' || !selected) {
+            return {
+                status: 'complete',
+                summary: decision === 'run_now' ? 'no covered features to run — plan delivered' : 'plan only — not executed',
+            };
+        }
+        if (ctx.handoffReport === undefined) {
+            const inputs = ctx.session.inputs;
+            const project = str(inputs.project);
+            const guard = CSGuardrailEngine.checkAction('bdd_run_feature', { environment: str(inputs.environment) });
+            if (!guard.ok) {
+                return { status: 'blocked', summary: 'constitutional block', blockedReason: guard.reason };
+            }
+            return {
+                status: 'handoff',
+                summary: 'covered regression execution delegated',
+                handoff: {
+                    handoffId: 'primpact.run',
+                    packs: ['execution'],
+                    instruction:
+                        `Set environment PROJECT=${project}` +
+                        (str(inputs.environment) ? ` ENVIRONMENT=${str(inputs.environment)}` : '') +
+                        `, then execute ONLY the covered regression set with bdd_run_feature` +
+                        (str(inputs.tags) ? ` using tags "${str(inputs.tags)}"` : '') +
+                        '. The exact feature paths are in regression-candidates.json (the run_existing ' +
+                        'set). Do not fix failures here — collect results and report totals via ' +
+                        'csaa_advance.',
+                    nextSuggestedTool: 'bdd_run_feature',
+                    nextSuggestedArgs: {
+                        path: selected,
+                        ...(str(inputs.tags) ? { tags: str(inputs.tags) } : {}),
+                    },
+                    doneWhen: 'the covered regression features executed once',
+                    reportSchema: RUN_REPORT_SCHEMA,
+                },
+            };
+        }
+        const r = ctx.handoffReport;
+        return {
+            status: 'complete',
+            summary: `executed: ${Number(r.passed) || 0}/${Number(r.total) || 0} passed, ${Number(r.failed) || 0} failed`,
         };
     },
 });

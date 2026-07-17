@@ -44,6 +44,11 @@ class AzureDevOpsClient {
         this.proxyAgent = AzureDevOpsClient.resolveProxyAgent();
     }
 
+    /** The configured project name — used to scope search/core queries. */
+    getProject(): string {
+        return this.config.project;
+    }
+
     /**
      * Build an HTTP(S)/SOCKS proxy agent from the same `ADO_PROXY_*` config
      * the framework's CSADOClient honours, so ADO calls work behind a
@@ -1309,10 +1314,399 @@ const adoBranchesListTool = adoCommonParams(defineTool())
     .build();
 
 // ============================================================================
+// Repo content + deep work-item analysis (parity with the official MS ADO MCP
+// server's repo file read + work-item comments/revisions — used by the
+// source-code, defect, and deep-analysis modes).
+// ============================================================================
+
+const adoRepoGetFileContentTool = adoCommonParams(defineTool())
+    .name('ado_repo_get_file_content')
+    .title('Get Repo File Content')
+    .description('Get the content of a file in an Azure DevOps Git repository at a given path/branch.')
+    .openWorld()
+    .category('cicd')
+    .stringParam('repositoryId', 'Repository ID or name', { required: true })
+    .stringParam('filePath', 'Path to the file (e.g. /src/app/login.component.ts)', { required: true })
+    .stringParam('branch', 'Branch name (defaults to the default branch)')
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        const p = encodeURIComponent(String(params.filePath));
+        let route = `repositories/${params.repositoryId}/items?path=${p}&includeContent=true`;
+        if (params.branch) route += `&versionDescriptor.version=${encodeURIComponent(String(params.branch))}&versionDescriptor.versionType=branch`;
+        context.log('info', `Getting file content ${params.filePath}`);
+        const response = await client.gitRequest('GET', route);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to get file content: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { content?: string; [k: string]: unknown };
+        return createJsonResult({ path: params.filePath, content: data.content ?? data });
+    })
+    .readOnly()
+    .build();
+
+const adoRepoListDirectoryTool = adoCommonParams(defineTool())
+    .name('ado_repo_list_directory')
+    .title('List Repo Directory')
+    .description('List files and folders under a path in an Azure DevOps Git repository (one level or recursive).')
+    .openWorld()
+    .category('cicd')
+    .stringParam('repositoryId', 'Repository ID or name', { required: true })
+    .stringParam('scopePath', 'Directory path to list (e.g. /src). Defaults to repo root.')
+    .stringParam('recursionLevel', 'none | oneLevel | full', { enum: ['none', 'oneLevel', 'full'], default: 'oneLevel' })
+    .stringParam('branch', 'Branch name (defaults to the default branch)')
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        const scope = encodeURIComponent(String(params.scopePath || '/'));
+        const rec = String(params.recursionLevel || 'oneLevel');
+        let route = `repositories/${params.repositoryId}/items?scopePath=${scope}&recursionLevel=${rec}`;
+        if (params.branch) route += `&versionDescriptor.version=${encodeURIComponent(String(params.branch))}&versionDescriptor.versionType=branch`;
+        context.log('info', `Listing repo directory ${params.scopePath || '/'}`);
+        const response = await client.gitRequest('GET', route);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list directory: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { value?: Array<{ path: string; isFolder?: boolean; gitObjectType?: string }>; count?: number };
+        const items = (data.value ?? []).map((i) => ({ path: i.path, isFolder: i.isFolder || i.gitObjectType === 'tree' }));
+        return createJsonResult({ items, count: items.length });
+    })
+    .readOnly()
+    .build();
+
+const adoWitListCommentsTool = adoCommonParams(defineTool())
+    .name('ado_work_item_comments_list')
+    .title('List Work Item Comments')
+    .description('List all comments on a work item (story/bug) — often carries requirements/repro detail beyond the description.')
+    .openWorld()
+    .category('cicd')
+    .numberParam('id', 'Work item ID', { required: true, integer: true })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', `Listing comments for work item ${params.id}`);
+        const response = await client.witRequest('GET', `workItems/${params.id}/comments`);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list comments: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { comments?: Array<{ text?: string; createdBy?: { displayName?: string } }>; count?: number };
+        return createJsonResult({
+            comments: (data.comments ?? []).map((c) => ({ by: c.createdBy?.displayName, text: c.text })),
+            count: data.count ?? (data.comments?.length ?? 0),
+        });
+    })
+    .readOnly()
+    .build();
+
+const adoWitListRevisionsTool = adoCommonParams(defineTool())
+    .name('ado_work_item_revisions_list')
+    .title('List Work Item Revisions')
+    .description('List the revision history of a work item — useful to see how requirements/repro evolved.')
+    .openWorld()
+    .category('cicd')
+    .numberParam('id', 'Work item ID', { required: true, integer: true })
+    .numberParam('top', 'Max revisions to return', { integer: true, default: 20 })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', `Listing revisions for work item ${params.id}`);
+        const response = await client.witRequest('GET', `workItems/${params.id}/revisions?$top=${params.top || 20}`);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list revisions: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { value?: unknown[]; count?: number };
+        return createJsonResult({ revisions: data.value ?? [], count: data.count ?? (data.value?.length ?? 0) });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
+// PR diff / changes, commits, search, wiki, core — full parity with the
+// official MS ADO MCP server. These power the PR-impact regression mode
+// (map a PR's changed files → the tests that cover them).
+// ============================================================================
+
+const adoPullRequestIterationsListTool = adoCommonParams(defineTool())
+    .name('ado_pull_request_iterations_list')
+    .title('List Pull Request Iterations')
+    .description('List the iterations (pushes) of a pull request. The latest iteration id is used to fetch the full changed-file set.')
+    .openWorld()
+    .category('cicd')
+    .stringParam('repositoryId', 'Repository ID or name', { required: true })
+    .numberParam('pullRequestId', 'Pull request ID', { required: true, integer: true })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', `Listing iterations for PR ${params.pullRequestId}`);
+        const response = await client.gitRequest('GET', `repositories/${params.repositoryId}/pullRequests/${params.pullRequestId}/iterations`);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list PR iterations: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { value?: Array<{ id: number; createdDate?: string; description?: string }>; count?: number };
+        const iterations = (data.value ?? []).map((i) => ({ id: i.id, createdDate: i.createdDate, description: i.description }));
+        return createJsonResult({ iterations, count: iterations.length, latestIterationId: iterations.length ? iterations[iterations.length - 1].id : null });
+    })
+    .readOnly()
+    .build();
+
+const adoPullRequestGetChangesTool = adoCommonParams(defineTool())
+    .name('ado_pull_request_get_changes')
+    .title('Get Pull Request Changed Files')
+    .description('Get the changed files (adds/edits/deletes) of a pull request. This is the primary input to regression-candidate analysis: it tells you exactly which source paths a PR touches so you can map them to existing tests.')
+    .openWorld()
+    .category('cicd')
+    .stringParam('repositoryId', 'Repository ID or name', { required: true })
+    .numberParam('pullRequestId', 'Pull request ID', { required: true, integer: true })
+    .numberParam('iterationId', 'Iteration id to diff (defaults to the latest iteration)', { integer: true })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        let iterationId = params.iterationId as number | undefined;
+        if (!iterationId) {
+            const iters = await client.gitRequest('GET', `repositories/${params.repositoryId}/pullRequests/${params.pullRequestId}/iterations`);
+            if (iters.statusCode !== 200) {
+                return createErrorResult(`Failed to resolve latest iteration: ${JSON.stringify(iters.data)}`);
+            }
+            const iv = (iters.data as { value?: Array<{ id: number }> }).value ?? [];
+            if (!iv.length) return createErrorResult('Pull request has no iterations (no changes).');
+            iterationId = iv[iv.length - 1].id;
+        }
+        context.log('info', `Getting changes for PR ${params.pullRequestId} iteration ${iterationId}`);
+        const response = await client.gitRequest('GET', `repositories/${params.repositoryId}/pullRequests/${params.pullRequestId}/iterations/${iterationId}/changes`);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to get PR changes: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { changeEntries?: Array<{ item?: { path?: string; isFolder?: boolean }; changeType?: string }> };
+        const changes = (data.changeEntries ?? [])
+            .filter((c) => c.item && !c.item.isFolder && c.item.path)
+            .map((c) => ({ path: c.item!.path, changeType: c.changeType }));
+        return createJsonResult({ iterationId, changes, changedPaths: changes.map((c) => c.path), count: changes.length });
+    })
+    .readOnly()
+    .build();
+
+const adoPullRequestThreadsListTool = adoCommonParams(defineTool())
+    .name('ado_pull_request_threads_list')
+    .title('List Pull Request Threads')
+    .description('List the review comment threads on a pull request (reviewer feedback, file-anchored discussion). Used by pr_review and regression analysis.')
+    .openWorld()
+    .category('cicd')
+    .stringParam('repositoryId', 'Repository ID or name', { required: true })
+    .numberParam('pullRequestId', 'Pull request ID', { required: true, integer: true })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', `Listing threads for PR ${params.pullRequestId}`);
+        const response = await client.gitRequest('GET', `repositories/${params.repositoryId}/pullRequests/${params.pullRequestId}/threads`);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list PR threads: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { value?: Array<{ id: number; status?: string; threadContext?: { filePath?: string }; comments?: Array<{ author?: { displayName?: string }; content?: string }> }> };
+        const threads = (data.value ?? []).map((t) => ({
+            id: t.id,
+            status: t.status,
+            filePath: t.threadContext?.filePath,
+            comments: (t.comments ?? []).map((c) => ({ by: c.author?.displayName, text: c.content })),
+        }));
+        return createJsonResult({ threads, count: threads.length });
+    })
+    .readOnly()
+    .build();
+
+const adoCommitsListTool = adoCommonParams(defineTool())
+    .name('ado_commits_list')
+    .title('List Repository Commits')
+    .description('List commits in a repository (optionally on a branch). Used to drive regression analysis from a commit range rather than a PR.')
+    .openWorld()
+    .category('cicd')
+    .stringParam('repositoryId', 'Repository ID or name', { required: true })
+    .stringParam('branch', 'Branch name to list commits from (defaults to the default branch)')
+    .numberParam('top', 'Max commits to return', { integer: true, default: 20 })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        let route = `repositories/${params.repositoryId}/commits?$top=${params.top || 20}`;
+        if (params.branch) route += `&searchCriteria.itemVersion.version=${encodeURIComponent(String(params.branch))}`;
+        context.log('info', `Listing commits for ${params.repositoryId}`);
+        const response = await client.gitRequest('GET', route);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list commits: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { value?: Array<{ commitId: string; comment?: string; author?: { name?: string; date?: string } }>; count?: number };
+        const commits = (data.value ?? []).map((c) => ({ commitId: c.commitId, comment: c.comment, author: c.author?.name, date: c.author?.date }));
+        return createJsonResult({ commits, count: commits.length });
+    })
+    .readOnly()
+    .build();
+
+const adoCommitChangesTool = adoCommonParams(defineTool())
+    .name('ado_commit_changes')
+    .title('Get Commit Changed Files')
+    .description('Get the changed files of a single commit — the commit-level equivalent of ado_pull_request_get_changes for regression analysis.')
+    .openWorld()
+    .category('cicd')
+    .stringParam('repositoryId', 'Repository ID or name', { required: true })
+    .stringParam('commitId', 'Commit SHA', { required: true })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', `Getting changes for commit ${params.commitId}`);
+        const response = await client.gitRequest('GET', `repositories/${params.repositoryId}/commits/${params.commitId}/changes`);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to get commit changes: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { changes?: Array<{ item?: { path?: string; isFolder?: boolean }; changeType?: string }> };
+        const changes = (data.changes ?? [])
+            .filter((c) => c.item && !c.item.isFolder && c.item.path)
+            .map((c) => ({ path: c.item!.path, changeType: c.changeType }));
+        return createJsonResult({ changes, changedPaths: changes.map((c) => c.path), count: changes.length });
+    })
+    .readOnly()
+    .build();
+
+const adoSearchCodeTool = adoCommonParams(defineTool())
+    .name('ado_search_code')
+    .title('Search Code')
+    .description('Search source code across the project (Azure DevOps code search). Used to find which existing test files reference a changed source path/symbol.')
+    .openWorld()
+    .category('cicd')
+    .stringParam('searchText', 'Text/symbol to search for (e.g. a changed file name or class)', { required: true })
+    .numberParam('top', 'Max results', { integer: true, default: 25 })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', `Code search: ${params.searchText}`);
+        const body = {
+            searchText: params.searchText,
+            $top: params.top || 25,
+            filters: { Project: [client.getProject()] },
+        };
+        const response = await client.searchRequest('codesearchresults', body);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Code search failed: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { results?: Array<{ fileName?: string; path?: string; repository?: { name?: string }; matches?: unknown }>; count?: number };
+        const results = (data.results ?? []).map((r) => ({ fileName: r.fileName, path: r.path, repository: r.repository?.name }));
+        return createJsonResult({ results, count: data.count ?? results.length });
+    })
+    .readOnly()
+    .build();
+
+const adoSearchWorkItemsTool = adoCommonParams(defineTool())
+    .name('ado_search_work_items')
+    .title('Search Work Items')
+    .description('Full-text search across work items (stories, bugs, tasks). Used to find related requirements/defects for a change.')
+    .openWorld()
+    .category('cicd')
+    .stringParam('searchText', 'Text to search for', { required: true })
+    .numberParam('top', 'Max results', { integer: true, default: 25 })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', `Work item search: ${params.searchText}`);
+        const body = {
+            searchText: params.searchText,
+            $top: params.top || 25,
+            filters: { 'System.TeamProject': [client.getProject()] },
+        };
+        const response = await client.searchRequest('workitemsearchresults', body);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Work item search failed: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { results?: Array<{ fields?: Record<string, unknown> }>; count?: number };
+        const results = (data.results ?? []).map((r) => ({
+            id: r.fields?.['system.id'],
+            title: r.fields?.['system.title'],
+            type: r.fields?.['system.workitemtype'],
+            state: r.fields?.['system.state'],
+        }));
+        return createJsonResult({ results, count: data.count ?? results.length });
+    })
+    .readOnly()
+    .build();
+
+const adoWikiListTool = adoCommonParams(defineTool())
+    .name('ado_wiki_list')
+    .title('List Wikis')
+    .description('List the wikis in the project (parity with the official ADO MCP server). Wikis often hold requirement/design docs.')
+    .openWorld()
+    .category('cicd')
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', 'Listing wikis');
+        const response = await client.request('GET', 'wiki/wikis');
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list wikis: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { value?: Array<{ id: string; name: string; mappedPath?: string }>; count?: number };
+        const wikis = (data.value ?? []).map((w) => ({ id: w.id, name: w.name, mappedPath: w.mappedPath }));
+        return createJsonResult({ wikis, count: wikis.length });
+    })
+    .readOnly()
+    .build();
+
+const adoWikiPageGetTool = adoCommonParams(defineTool())
+    .name('ado_wiki_page_get')
+    .title('Get Wiki Page Content')
+    .description('Get the content of a wiki page by path — used to read requirement/design docs stored in an ADO wiki.')
+    .openWorld()
+    .category('cicd')
+    .stringParam('wikiId', 'Wiki id or name', { required: true })
+    .stringParam('path', 'Page path (e.g. /Requirements/Login)', { required: true })
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        const p = encodeURIComponent(String(params.path));
+        context.log('info', `Getting wiki page ${params.path}`);
+        const response = await client.request('GET', `wiki/wikis/${params.wikiId}/pages?path=${p}&includeContent=true`);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to get wiki page: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { content?: string; path?: string };
+        return createJsonResult({ path: data.path ?? params.path, content: data.content ?? '' });
+    })
+    .readOnly()
+    .build();
+
+const adoCoreProjectsListTool = adoCommonParams(defineTool())
+    .name('ado_core_projects_list')
+    .title('List Projects')
+    .description('List the projects in the organization (core parity). Useful to discover the correct project name before other calls.')
+    .openWorld()
+    .category('cicd')
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        context.log('info', 'Listing projects');
+        const response = await client.orgRequest('GET', 'projects');
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list projects: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { value?: Array<{ id: string; name: string; state?: string }>; count?: number };
+        const projects = (data.value ?? []).map((p) => ({ id: p.id, name: p.name, state: p.state }));
+        return createJsonResult({ projects, count: projects.length });
+    })
+    .readOnly()
+    .build();
+
+const adoCoreTeamsListTool = adoCommonParams(defineTool())
+    .name('ado_core_teams_list')
+    .title('List Project Teams')
+    .description('List the teams in a project (core parity).')
+    .openWorld()
+    .category('cicd')
+    .stringParam('projectId', 'Project id or name (defaults to the configured project)')
+    .handler(async (params, context) => {
+        const client = getClient(params);
+        const projectId = String(params.projectId || client.getProject());
+        context.log('info', `Listing teams for project ${projectId}`);
+        const response = await client.orgRequest('GET', `projects/${encodeURIComponent(projectId)}/teams`);
+        if (response.statusCode !== 200) {
+            return createErrorResult(`Failed to list teams: ${JSON.stringify(response.data)}`);
+        }
+        const data = response.data as { value?: Array<{ id: string; name: string }>; count?: number };
+        const teams = (data.value ?? []).map((t) => ({ id: t.id, name: t.name }));
+        return createJsonResult({ teams, count: teams.length });
+    })
+    .readOnly()
+    .build();
+
+// ============================================================================
 // Export all Azure DevOps tools
 // ============================================================================
 
 export const azureDevOpsTools: MCPToolDefinition[] = [
+    adoRepoGetFileContentTool,
+    adoRepoListDirectoryTool,
+    adoWitListCommentsTool,
+    adoWitListRevisionsTool,
     // Pipelines
     adoPipelinesListTool,
     adoPipelinesRunTool,
@@ -1343,6 +1737,25 @@ export const azureDevOpsTools: MCPToolDefinition[] = [
     adoPullRequestsGetTool,
     adoPullRequestsCreateTool,
     adoPullRequestsCommentTool,
+    adoPullRequestIterationsListTool,
+    adoPullRequestGetChangesTool,
+    adoPullRequestThreadsListTool,
+
+    // Commits (PR-impact / regression inputs)
+    adoCommitsListTool,
+    adoCommitChangesTool,
+
+    // Search (code / work items)
+    adoSearchCodeTool,
+    adoSearchWorkItemsTool,
+
+    // Wiki
+    adoWikiListTool,
+    adoWikiPageGetTool,
+
+    // Core (projects / teams)
+    adoCoreProjectsListTool,
+    adoCoreTeamsListTool,
 
     // Test Plans / Suites / Suite-Cases
     adoTestPlansListTool,

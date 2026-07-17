@@ -107,7 +107,7 @@ const PACKS: PackSpec[] = [
     },
     {
         name: 'ado',
-        summary: 'Azure DevOps: pipelines, builds, PRs, work items, test runs and publishing.',
+        summary: 'Azure DevOps: pipelines, builds, PRs (incl. changed-file diffs, iterations, threads), commits, work items, test plans/suites/cases, repo files, code/work-item search, wiki, projects/teams, test runs and publishing.',
         load: () => require('../tools/cicd/CSMCPAzureDevOpsTools').azureDevOpsTools,
     },
     {

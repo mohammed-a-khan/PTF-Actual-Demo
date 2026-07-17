@@ -1,7 +1,7 @@
 /**
  * Agentic SDLC Platform — Mode Catalog
  *
- * Single source of truth for the thirteen SDLC modes: their user-facing
+ * Single source of truth for the SDLC modes: their user-facing
  * titles, the inputs each mode collects, the capability packs each mode
  * activates, and the ordered stage graph the playbook engine runs.
  *
@@ -157,7 +157,7 @@ export const MODE_DEFINITIONS: ModeDefinition[] = [
             },
         ],
         toolPacks: ['authoring', 'quality'],
-        stages: ['posture', 'author.intake', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
+        stages: ['posture', 'author.intake', 'app.context', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
     },
     {
         mode: 'migrate',
@@ -184,7 +184,7 @@ export const MODE_DEFINITIONS: ModeDefinition[] = [
             },
         ],
         toolPacks: ['authoring', 'quality'],
-        stages: ['posture', 'author.intake', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
+        stages: ['posture', 'author.intake', 'app.context', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
     },
     {
         mode: 'review',
@@ -305,6 +305,39 @@ export const MODE_DEFINITIONS: ModeDefinition[] = [
         stages: ['regression.impact', 'regression.confirm', 'run.execute', 'run.report', 'finalize'],
     },
     {
+        mode: 'pr_impact',
+        title: 'PR impact — regression candidates from a pull request',
+        summary: 'Read an ADO pull request (or commit), map its changed files to your existing tests, and classify each change as run-existing / needs-update / needs-new (the regression candidates). Optionally runs the covered set.',
+        inputs: [
+            PROJECT_FIELD,
+            {
+                id: 'repositoryId',
+                title: 'Repository',
+                description: 'Azure DevOps repository id or name that holds the PR/commit.',
+                type: 'string',
+                required: true,
+            },
+            {
+                id: 'pullRequestId',
+                title: 'Pull request id',
+                description: 'The PR to analyse. Leave empty if you are analysing a commit instead.',
+                type: 'string',
+                required: false,
+                pattern: '^[0-9]+$',
+            },
+            {
+                id: 'commitId',
+                title: 'Commit SHA (alternative to PR)',
+                description: 'Analyse a single commit instead of a PR. Ignored when a pull request id is given.',
+                type: 'string',
+                required: false,
+            },
+            ENVIRONMENT_FIELD,
+        ],
+        toolPacks: [],
+        stages: ['posture', 'primpact.fetch', 'primpact.map', 'primpact.decide', 'primpact.run', 'finalize'],
+    },
+    {
         mode: 'performance',
         title: 'Performance — timing analysis & perf run',
         summary: 'Run a perf-focused pass, extract step/scenario timings, find hotspots and slow-trend outliers.',
@@ -393,6 +426,83 @@ export const MODE_DEFINITIONS: ModeDefinition[] = [
         ],
         toolPacks: [],
         stages: ['adoplan.context', 'adoplan.select', 'adoplan.compose', 'adoplan.create', 'finalize'],
+    },
+    {
+        mode: 'ado_automate',
+        title: 'Automate ADO test cases — plan → suite → cases → tests',
+        summary: 'Point at an ADO test plan, pick a suite, pick the exact test cases, and the agent explores the live app and generates automation for those cases.',
+        inputs: [
+            PROJECT_FIELD,
+            {
+                id: 'planId',
+                title: 'Test plan id',
+                description: 'The ADO test plan id to drill into.',
+                type: 'string',
+                required: true,
+                pattern: '^[0-9]+$',
+            },
+            ENVIRONMENT_FIELD,
+            {
+                id: 'appUrl',
+                title: 'Application URL (optional)',
+                description: 'Live app URL — the agent will ask if omitted.',
+                type: 'string',
+                required: false,
+            },
+        ],
+        toolPacks: ['authoring', 'quality'],
+        stages: ['posture', 'adoauto.suites', 'adoauto.pick_suite', 'adoauto.cases', 'adoauto.pick_cases', 'app.context', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
+    },
+    {
+        mode: 'source',
+        title: 'From source — automate an app from its source code',
+        summary: 'No requirements or ADO needed: reads the application source, derives the real workflows, explores the running app, and generates full automation.',
+        inputs: [
+            PROJECT_FIELD,
+            {
+                id: 'sourcePath',
+                title: 'Application source path',
+                description: 'Path to the application (product) source code to analyze.',
+                type: 'string',
+                required: true,
+            },
+            MODULE_FIELD,
+            ENVIRONMENT_FIELD,
+            {
+                id: 'appUrl',
+                title: 'Application URL (optional)',
+                description: 'Running app URL — the agent will ask if omitted.',
+                type: 'string',
+                required: false,
+            },
+        ],
+        toolPacks: ['authoring', 'quality'],
+        stages: ['posture', 'source.analyze', 'source.workflows', 'app.context', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
+    },
+    {
+        mode: 'defect',
+        title: 'Defect — reproduce/fix a bug with a regression test',
+        summary: 'Reads a defect and its reproduction steps, finds the existing test (or authors a new regression), grounds it in live exploration, and runs it.',
+        inputs: [
+            PROJECT_FIELD,
+            {
+                id: 'defectId',
+                title: 'Defect / bug id',
+                description: 'ADO bug id (or a description of the defect if no id).',
+                type: 'string',
+                required: true,
+            },
+            ENVIRONMENT_FIELD,
+            {
+                id: 'appUrl',
+                title: 'Application URL (optional)',
+                description: 'Running app URL — the agent will ask if omitted.',
+                type: 'string',
+                required: false,
+            },
+        ],
+        toolPacks: ['authoring', 'quality', 'execution'],
+        stages: ['posture', 'defect.fetch', 'defect.locate', 'app.context', 'author.explore', 'defect.resolve', 'finalize'],
     },
     {
         mode: 'release',

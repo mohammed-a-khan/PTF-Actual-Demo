@@ -317,7 +317,7 @@ export class CSGuardrailEngine {
         };
 
         const planUsesAdo = mode === 'plan' && String(inputs.source ?? '') === 'ado_plan';
-        const adoModes = new Set(['ado_plan']);
+        const adoModes = new Set(['ado_plan', 'pr_impact']);
         const adoOptional = planUsesAdo ? new Set(['plan']) : new Set(['release']);
         const gitModes = new Set(['pr_review', 'regression']);
         const runModes = new Set(['run', 'heal', 'regression', 'performance']);

@@ -114,7 +114,10 @@ mode and inputs for you.
 
 | Mode | What it does | You provide | You get |
 |---|---|---|---|
-| **ADO test plan** | Fetches a story from Azure DevOps, designs full-coverage test cases from its acceptance criteria (plus the negative/edge cases a senior QA adds), creates them in ADO with proper Steps XML, and attaches them to the suite **you pick from a live-discovered dropdown** | project, story id | Test cases live in your ADO suite + design artifact |
+| **ADO test plan** | Fetches a story from Azure DevOps — reads its **full description, repro steps and comments**, not just acceptance criteria — designs full-coverage test cases, creates them in ADO with proper Steps XML, and attaches them to the suite **you pick from a live-discovered dropdown** | project, story id | Test cases live in your ADO suite + design artifact |
+| **ADO automate** | Point at a **test plan id** → the agent lists the **suites** (you pick one) → lists that suite's **test cases** (you pick which to automate, or "all") → fetches their steps → explores the live app → generates automation for exactly those cases | project, plan id | Runnable CS-framework tests for the selected ADO cases |
+| **Source** | No requirements, no ADO — just the **application's source code**: the agent reads the source, derives the real user workflows, opens the running app, walks them, and generates complete automation | project, source path | Full test suite derived from the app itself |
+| **Defect** | Give a **bug id** (or description): the agent reads the defect + **reproduction steps** + comments, finds the existing test covering that area (or plans a new regression), grounds it in live exploration, fixes/authors it, tags it `@defect_<id>`, and runs it | project, defect id | A regression test that reproduces/guards the defect |
 | **Release** | Evidence-based go/no-go: local run evidence + flaky-candidate detection + open ADO bugs → gated verdict where every gate cites its evidence; `conditional_go` requires explicit conditions | project, release name | `RELEASE-DECISION.md` sign-off report |
 
 ---
@@ -127,10 +130,13 @@ tester follows:
 1. **Read before write** — the `posture` stage inventories `test/<project>` first.
    Fresh repo → scaffold everything. Existing repo → **reuse and extend** existing pages
    and steps; duplication is a gate violation, not a style preference.
-2. **See the app before scripting it** — given an app URL, the agent opens the
-   application, walks the workflows, and captures every page's elements with a stable
-   primary locator **plus alternatives** (feeding self-healing). Captured pages are the
-   source of truth for generated page objects.
+2. **Ask, then see the app before scripting it** — if you didn't give an app URL, the agent
+   **asks for it** (and whether login is needed) first. Then it opens the application and
+   **walks each workflow end-to-end like a manual test pass**, recording the *observed* steps
+   and capturing every page's elements with a stable primary locator **plus alternatives**
+   (feeding self-healing). The generated scenarios come from what it actually saw — it **never
+   generates on assumptions**. If login is needed it signs in with your encrypted
+   `{config:DEFAULT_USERNAME}`/`{config:DEFAULT_PASSWORD}` — never plaintext in chat.
 3. **Data comes from reality** — for each scenario the agent connects to your project
    database, discovers the schema, and looks for **existing rows** with SELECT queries.
    Only when no suitable data exists does it plan **UI-driven data creation** as setup
