@@ -13,6 +13,9 @@ backup_framework/
 Backup*/
 BACKUP*/
 
+# Agentic session state (per-run artifacts, not source)
+Agent-Processing/
+
 # Test results and reports
 test-results/
 playwright-report/

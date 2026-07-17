@@ -246,7 +246,7 @@ export function generatePrimitivesCSS(): string {
     .cs-badge-text { line-height: 1.4; }
     /* Subtle (default) */
     .cs-badge--subtle.cs-badge--neutral { background: var(--surface-hover, var(--cs-zinc-100)); color: var(--text-primary); }
-    .cs-badge--subtle.cs-badge--brand   { background: var(--cs-brand-soft); color: var(--brand-color); }
+    .cs-badge--subtle.cs-badge--brand   { background: var(--cs-brand-soft); color: var(--brand-text, var(--brand-color)); }
     .cs-badge--subtle.cs-badge--success { background: var(--cs-success-soft); color: var(--success-color); }
     .cs-badge--subtle.cs-badge--warning { background: var(--cs-warning-soft); color: var(--warning-color); }
     .cs-badge--subtle.cs-badge--danger  { background: var(--cs-danger-soft);  color: var(--danger-color);  }
@@ -262,7 +262,7 @@ export function generatePrimitivesCSS(): string {
     /* Outline */
     .cs-badge--outline { background: transparent; border: 1px solid currentColor; }
     .cs-badge--outline.cs-badge--neutral { color: var(--text-secondary); }
-    .cs-badge--outline.cs-badge--brand   { color: var(--brand-color); }
+    .cs-badge--outline.cs-badge--brand   { color: var(--brand-text, var(--brand-color)); }
     .cs-badge--outline.cs-badge--success { color: var(--success-color); }
     .cs-badge--outline.cs-badge--warning { color: var(--warning-color); }
     .cs-badge--outline.cs-badge--danger  { color: var(--danger-color); }

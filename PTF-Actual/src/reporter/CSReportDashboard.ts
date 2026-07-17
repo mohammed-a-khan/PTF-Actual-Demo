@@ -581,7 +581,7 @@ export function generateDashboardCSS(): string {
         display: inline-block;
         margin-top: var(--cs-space-2);
         font-size: var(--cs-text-sm);
-        color: var(--brand-color);
+        color: var(--brand-text, var(--brand-color));
         text-decoration: none;
     }
     .cs-cluster-more:hover { text-decoration: underline; }

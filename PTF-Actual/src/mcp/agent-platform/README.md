@@ -1,3 +1,11 @@
+> **⚠️ ARCHITECTURE NOTE (v3 redesign).** The user-facing entry point is now the
+> single `cs-ai-auto-assist` agent backed by the agentic engine in
+> `src/mcp/agentic/` (5 meta-tools, 13 SDLC modes, lazy capability packs, live
+> guardrails) — see `MCP_AGENTIC_REDESIGN.md` at the repo root. The `csaa_*`
+> primitives documented here remain the authoring/migration backbone and are
+> loaded on demand as the `authoring` pack. Parts of this README describing
+> mode handlers/composers predate the M1 rebuild and are historical.
+
 # CS-AI-Auto-Assist — Agent Platform
 
 The agent platform is the orchestration shell that turns the framework's

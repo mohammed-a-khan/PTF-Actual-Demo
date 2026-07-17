@@ -368,7 +368,7 @@ export function generateDashboardHeroCSS(): string {
     .dash-cp-file { color: var(--text-secondary); font-size: 0.74rem; margin-left: 4px; }
     .dash-cp-more { color: var(--text-secondary); font-style: italic; }
     .dash-cp-footer { margin-top: 10px; text-align: right; }
-    .dash-cp-link { color: var(--brand-color); font-weight: 600; text-decoration: none; font-size: 0.86rem; }
+    .dash-cp-link { color: var(--brand-text, var(--brand-color)); font-weight: 600; text-decoration: none; font-size: 0.86rem; }
     .dash-cp-link:hover { text-decoration: underline; }
 
     /* v1.40.3 — per-row health pill in the Tests view */

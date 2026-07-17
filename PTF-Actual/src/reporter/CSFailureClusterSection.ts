@@ -114,6 +114,37 @@ export function generateFailureClusterCSS(): string {
         .fc-empty {
             color: #64748b; font-style: italic; padding: 8px 0;
         }
+
+        /* Dark-mode overrides — this section uses a hardcoded light slate
+           palette with zero var() usage, so it stayed fully light. Remap the
+           neutral surfaces/text/borders to theme tokens. The orange cluster
+           heads stay vivid (they read on both backgrounds). */
+        ${fcDarkOverrides('[data-theme="dark"]')}
+        @media (prefers-color-scheme: dark) {
+            ${fcDarkOverrides(':root:not([data-theme="light"])')}
+        }
+    `;
+}
+
+/** Repaint the failure-cluster section's hardcoded slate palette to tokens. */
+function fcDarkOverrides(scope: string): string {
+    return `
+        ${scope} .fc-summary-card { background: var(--surface); border-color: var(--border); }
+        ${scope} .fc-summary-num { color: var(--text-primary); }
+        ${scope} .fc-summary-label { color: var(--text-secondary); }
+        ${scope} .fc-cluster { border-color: var(--border); }
+        ${scope} .fc-cluster-head { background: var(--surface-hover); border-bottom-color: var(--border); }
+        ${scope} .fc-cluster-id { color: #fdba74; }
+        ${scope} .fc-cluster-rep { color: var(--text-primary); }
+        ${scope} .fc-cluster-body { background: var(--surface); }
+        ${scope} .fc-shared-frames { color: var(--text-secondary); background: var(--code-bg, var(--surface-hover)); border-color: var(--border); }
+        ${scope} .fc-member { border-top-color: var(--border); }
+        ${scope} .fc-member-name { color: var(--text-primary); }
+        ${scope} .fc-member-file { color: var(--text-secondary); }
+        ${scope} .fc-outlier-block { background: var(--surface); border-color: var(--border); }
+        ${scope} .fc-outlier-head { color: var(--text-secondary); }
+        ${scope} .fc-outlier { border-top-color: var(--border); }
+        ${scope} .fc-empty { color: var(--text-secondary); }
     `;
 }
 

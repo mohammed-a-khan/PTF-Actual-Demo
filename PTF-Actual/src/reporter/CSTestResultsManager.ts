@@ -6,6 +6,7 @@ import { execSync } from 'child_process';
 let archiver: any = null;
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from './CSReporter';
+import { boundedNameSegment } from '../utils/CSArtifactNaming';
 
 export type CaptureMode = 'always' | 'on-failure' | 'on-success' | 'never';
 
@@ -185,7 +186,9 @@ export class CSTestResultsManager {
      */
     public getArtifactPath(type: 'video' | 'screenshot' | 'trace' | 'har', scenarioName: string, status?: 'pass' | 'fail'): string {
         const dirs = this.getDirectories();
-        const sanitizedName = scenarioName.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 50);
+        // Bound the name so the full path stays under Windows MAX_PATH (260) —
+        // long scenario names otherwise break the CI "zip results" step.
+        const sanitizedName = boundedNameSegment(scenarioName);
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const statusPrefix = status ? `${status}-` : '';
         

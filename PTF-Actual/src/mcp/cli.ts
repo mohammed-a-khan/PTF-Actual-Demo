@@ -12,7 +12,13 @@
  * @module CSMCPCLI
  */
 
-import { createFullMCPServer, createMCPServerWithTools, CSMCPServerConfig, ToolCategory } from './index';
+import {
+    createAgenticMCPServer,
+    createFullMCPServer,
+    createMCPServerWithTools,
+    CSMCPServerConfig,
+    ToolCategory,
+} from './index';
 import { generateAgents } from './agents/generateAgents';
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 
@@ -26,6 +32,8 @@ const VALID_TOOLS: ToolCategory[] = [
 ];
 
 interface CLIOptions {
+    /** agentic = 5 meta-tools + lazy packs (default); classic = eager registration */
+    profile: 'agentic' | 'classic';
     tools: ToolCategory[] | 'all';
     logLevel: 'debug' | 'info' | 'warning' | 'error';
     version: boolean;
@@ -34,6 +42,7 @@ interface CLIOptions {
 
 function parseArgs(args: string[]): CLIOptions {
     const options: CLIOptions = {
+        profile: 'agentic',
         tools: 'all',
         logLevel: 'info',
         version: false,
@@ -42,6 +51,12 @@ function parseArgs(args: string[]): CLIOptions {
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
+
+        if (arg.startsWith('--profile=')) {
+            const p = arg.split('=')[1];
+            if (p === 'agentic' || p === 'classic') options.profile = p;
+            continue;
+        }
 
         switch (arg) {
             case '--help':
@@ -54,8 +69,17 @@ function parseArgs(args: string[]): CLIOptions {
                 options.version = true;
                 break;
 
+            case '--profile':
+            case '-p': {
+                const p = args[++i];
+                if (p === 'agentic' || p === 'classic') options.profile = p;
+                break;
+            }
+
             case '--tools':
             case '-t':
+                // Selecting explicit tool categories implies the classic profile.
+                options.profile = 'classic';
                 const toolsArg = args[++i];
                 if (toolsArg === 'all') {
                     options.tools = 'all';
@@ -97,18 +121,26 @@ Zero-dependency implementation using only Node.js built-ins.
 140+ tools across 10 categories for comprehensive test automation.
 
 Usage:
-  cs-playwright-mcp [options]              # Start MCP server
-  cs-playwright-mcp init-agents [options]  # Initialize AI agents
+  cs-playwright-mcp [options]              # Start MCP server (agentic profile)
+  cs-playwright-mcp init-agents [options]  # Initialize the cs-ai-auto-assist agent
 
 Commands:
-  init-agents     Initialize Playwright Test Agents (Planner, Generator, Healer)
-                  Use --loop=vscode|claude|opencode to specify IDE
+  init-agents     Materialize the single cs-ai-auto-assist agent, skills,
+                  copilot-instructions.md and mcp.json into a consumer repo.
+                  Use --loop=vscode|jetbrains|claude|opencode to pick the IDE.
                   Example: cs-playwright-mcp init-agents --loop=vscode
 
 Options:
   -h, --help              Show this help message
   -v, --version           Show version number
-  -t, --tools <list>      Tool categories to enable (comma-separated)
+  -p, --profile <name>    Server profile (default: agentic)
+                            agentic  5 meta-tools (cs_ai_auto_assist, csaa_advance,
+                                     csaa_submit, csaa_status, csaa_toolpack);
+                                     240+ tools load on demand via capability
+                                     packs — smallest possible tool context,
+                                     lowest AI-credit consumption
+                            classic  previous eager registration of every tool
+  -t, --tools <list>      (classic) Tool categories to enable (comma-separated)
                           Options: browser, bdd, database, cicd, network,
                                    analytics, security, multiagent,
                                    environment, generation, testing, all
@@ -176,21 +208,22 @@ const VERSION = '1.0.0';
 // ============================================================================
 
 function handleInitAgents(args: string[]): void {
-    let loop: 'vscode' | 'claude' | 'opencode' = 'vscode';
+    let loop: 'vscode' | 'jetbrains' | 'claude' | 'opencode' = 'vscode';
     let force = false;
     let targetDir = process.cwd();
+    const validLoops = ['vscode', 'jetbrains', 'claude', 'opencode'];
 
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
 
         if (arg === '--loop' || arg === '-l') {
             const loopArg = args[++i];
-            if (['vscode', 'claude', 'opencode'].includes(loopArg)) {
+            if (validLoops.includes(loopArg)) {
                 loop = loopArg as typeof loop;
             }
         } else if (arg.startsWith('--loop=')) {
             const loopArg = arg.split('=')[1];
-            if (['vscode', 'claude', 'opencode'].includes(loopArg)) {
+            if (validLoops.includes(loopArg)) {
                 loop = loopArg as typeof loop;
             }
         } else if (arg === '--force' || arg === '-f') {
@@ -206,24 +239,29 @@ Usage:
   cs-playwright-mcp init-agents [options]
 
 Options:
-  --loop, -l <type>   IDE/client type: vscode, claude, opencode (default: vscode)
+  --loop, -l <type>   IDE/client type: vscode, jetbrains, claude, opencode
+                      (default: vscode)
   --force, -f         Overwrite existing files
   --help, -h          Show this help message
 
 Examples:
   cs-playwright-mcp init-agents --loop=vscode
+  cs-playwright-mcp init-agents --loop=jetbrains
   cs-playwright-mcp init-agents --loop=claude --force
 
 Generated Files:
-  .github/chatmodes/    Agent definition files for your IDE
-  .github/skills/       Pattern skills consumed by the agents
+  .github/agents/       The single "CS AI Auto-Assist" agent definition
+  .github/skills/       Pattern skills consumed on demand
   .github/copilot-instructions.md    Workspace-level Copilot rules
-  .vscode/mcp.json      MCP server configuration (for VS Code)
+  .vscode/mcp.json      MCP server configuration (vscode loop)
+  ./mcp.json            MCP server configuration (jetbrains/claude/opencode)
 
-Agents:
-  - Planner:   Explores apps and generates test plans
-  - Generator: Converts plans to Playwright tests
-  - Healer:    Debugs and fixes failing tests
+The agent:
+  CS AI Auto-Assist — one agent for the complete test SDLC. Users pick a
+  mode from a menu (plan, analyze, design, author, migrate, review,
+  pr_review, run, heal, triage, regression, performance, audit) and provide
+  inputs; the server-side engine orchestrates everything else with live
+  guardrails and AI-credit budgets.
 `);
             process.exit(0);
         } else if (!arg.startsWith('-')) {
@@ -247,14 +285,19 @@ Target: ${targetDir}
         }
     }
 
+    const ideName =
+        loop === 'vscode' ? 'VS Code'
+        : loop === 'jetbrains' ? 'your JetBrains IDE'
+        : loop === 'claude' ? 'Claude Code'
+        : 'OpenCode';
     console.log(`
 Done! Generated ${files.length} files.
 
 Next steps:
-1. Open your IDE (${loop === 'vscode' ? 'VS Code' : loop === 'claude' ? 'Claude Code' : 'OpenCode'})
-2. Start a chat with the Planner agent to create a test plan
-3. Use the Generator agent to create tests from the plan
-4. Use the Healer agent to fix any failing tests
+1. Open ${ideName} and reload so Copilot picks up .github/agents/
+2. Select the "CS AI Auto-Assist" agent in Copilot Chat
+3. Just say hi — it shows the SDLC menu and takes it from there.
+   No prompt writing needed: pick a mode, fill in the inputs, watch STATUS.md.
 `);
     process.exit(errors.length > 0 ? 1 : 0);
 }
@@ -309,9 +352,14 @@ async function main(): Promise<void> {
         workingDirectory: process.cwd(),
     };
 
-    // Create server with appropriate tools
+    // Create server with the selected profile.
+    //   agentic (default): 5 meta-tools; capability packs load on demand and
+    //                      the host is notified via tools/list_changed.
+    //   classic:           previous behavior — eager registration.
     let server;
-    if (options.tools === 'all') {
+    if (options.profile === 'agentic') {
+        server = createAgenticMCPServer(config);
+    } else if (options.tools === 'all') {
         server = createFullMCPServer(config);
     } else {
         server = createMCPServerWithTools(options.tools, config);

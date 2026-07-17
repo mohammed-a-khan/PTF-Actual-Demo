@@ -38,6 +38,19 @@ export { healLoopTools, registerHealLoopTools } from './tools/heal-loop/CSMCPHea
 // Rebuild M1: monolithic generation removed; primitives land in M2-M10.
 export { csAiAutoAssistTools } from './agent-platform';
 
+// Export the v3 agentic platform (single-agent SDLC orchestration,
+// lazy tool packs, live guardrails). See MCP_AGENTIC_REDESIGN.md.
+export {
+    agenticMetaTools,
+    registerAgenticTools,
+    CSSDLCCatalog,
+    CSToolPacks,
+    CSSessionStore,
+    CSGuardrailEngine,
+    CSPlaybookEngine,
+    CSPlaybooks,
+} from './agentic';
+
 // Export resources and prompts
 export { resourceDefinitions, resourceTemplateDefinitions, registerResources } from './resources/CSMCPResources';
 export { promptDefinitions, registerPrompts } from './prompts/CSMCPPrompts';
@@ -88,6 +101,28 @@ export type ToolCategory =
     | 'codegen'
     | 'testing'
     | 'audit';
+
+/**
+ * Create the v3 agentic MCP server — the DEFAULT profile.
+ *
+ * Registers only the five cs_ai_auto_assist meta-tools plus prompts and
+ * resources. The 240+ concrete tools stay out of the host's context until
+ * a session's mode (or an explicit csaa_toolpack call) activates their
+ * capability pack, at which point the server emits
+ * `notifications/tools/list_changed`.
+ */
+export function createAgenticMCPServer(config?: CSMCPServerConfig): CSMCPServer {
+    const server = new CSMCPServer(config);
+    const registry = server.getToolRegistry();
+
+    const { registerAgenticTools } = require('./agentic') as typeof import('./agentic');
+    registerAgenticTools(registry, () => server.notifyToolsChanged());
+
+    registerResources(server);
+    registerPrompts(server);
+
+    return server;
+}
 
 /**
  * Create and configure a fully-loaded MCP server with all tools

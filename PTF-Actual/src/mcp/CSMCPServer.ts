@@ -74,6 +74,7 @@ export class CSMCPServer {
     private config: Required<CSMCPServerConfig>;
 
     private clientInfo: MCPClientInfo | null = null;
+    private clientCapabilities: Record<string, unknown> = {};
     private initialized: boolean = false;
 
     private resources: Map<string, MCPResourceDefinition> = new Map();
@@ -333,8 +334,11 @@ export class CSMCPServer {
         capabilities: MCPCapabilities;
         serverInfo: MCPServerInfo;
     }> {
-        // Store client info
+        // Store client info + declared capabilities (drives whether tools are
+        // offered sampling/elicitation contexts — see createToolContext).
         this.clientInfo = params.clientInfo as MCPClientInfo;
+        this.clientCapabilities =
+            (params.capabilities as Record<string, unknown> | undefined) ?? {};
 
         this.log('info', `Client connected: ${this.clientInfo?.name || 'unknown'}`);
 
@@ -488,13 +492,21 @@ export class CSMCPServer {
     // ========================================================================
 
     private createToolContext(): MCPToolContext {
-        const samplingClient: MCPSamplingClient = {
-            createMessage: (request: MCPSamplingRequest) => this.requestSampling(request),
-        };
+        // Sampling and elicitation are CLIENT capabilities (server → client
+        // requests). Only hand tools those clients when the connected host
+        // declared support during initialize — otherwise a tool would fire a
+        // request the host can never answer and stall until timeout. Tools
+        // detect absence (context.elicitation === undefined) and use their
+        // text-fallback paths instead.
+        const samplingClient: MCPSamplingClient | undefined =
+            this.clientCapabilities.sampling !== undefined
+                ? { createMessage: (request: MCPSamplingRequest) => this.requestSampling(request) }
+                : undefined;
 
-        const elicitationClient: MCPElicitationClient = {
-            create: (request: MCPElicitationRequest) => this.requestElicitation(request),
-        };
+        const elicitationClient: MCPElicitationClient | undefined =
+            this.clientCapabilities.elicitation !== undefined
+                ? { create: (request: MCPElicitationRequest) => this.requestElicitation(request) }
+                : undefined;
 
         return {
             server: this.serverContext,

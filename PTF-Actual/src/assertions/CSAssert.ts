@@ -5,6 +5,7 @@ import { CSTestResultsManager } from '../reporter/CSTestResultsManager';
 import { CSScenarioContext } from '../bdd/CSScenarioContext';
 import * as fs from 'fs';
 import * as path from 'path';
+import { safeArtifactFilename } from '../utils/CSArtifactNaming';
 
 /**
  * Custom Assert class for CS Framework
@@ -60,12 +61,14 @@ export class CSAssert {
             }
 
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
-            const sanitizedName = testName
-                .replace(/[^a-zA-Z0-9]/g, '-')
-                .replace(/-{2,}/g, '-')
-                .replace(/^-+|-+$/g, '')
-                .substring(0, 40);
-            const filename = `assert-fail-${sanitizedName}-${timestamp}.png`;
+            // Bound the name so the full path stays under Windows MAX_PATH (260),
+            // otherwise the CI "zip results" step fails on long screenshot paths.
+            const filename = safeArtifactFilename({
+                name: testName,
+                prefix: 'assert-fail-',
+                timestamp,
+                ext: '.png',
+            });
             const screenshotPath = path.join(screenshotDir, filename);
 
             // Take screenshot immediately

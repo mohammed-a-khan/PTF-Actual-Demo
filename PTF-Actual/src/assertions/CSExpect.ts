@@ -6,6 +6,7 @@ import { CSScenarioContext } from '../bdd/CSScenarioContext';
 import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import * as fs from 'fs';
 import * as path from 'path';
+import { safeArtifactFilename } from '../utils/CSArtifactNaming';
 
 /**
  * Custom Expect wrapper for CS Framework
@@ -116,12 +117,14 @@ export class CSExpect {
             }
 
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
-            const sanitizedDesc = description
-                .replace(/[^a-zA-Z0-9]/g, '-')
-                .replace(/-{2,}/g, '-')
-                .replace(/^-+|-+$/g, '')
-                .substring(0, 40);
-            const filename = `assertion-${sanitizedDesc}-${timestamp}.png`;
+            // Bound the name so the full path stays under Windows MAX_PATH (260),
+            // otherwise the CI "zip results" step fails on long screenshot paths.
+            const filename = safeArtifactFilename({
+                name: description,
+                prefix: 'assertion-',
+                timestamp,
+                ext: '.png',
+            });
             const screenshotPath = path.join(screenshotDir, filename);
 
             // Take screenshot with error handling

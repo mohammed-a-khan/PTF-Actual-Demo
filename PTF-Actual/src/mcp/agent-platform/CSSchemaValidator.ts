@@ -71,6 +71,22 @@ export class CSSchemaValidator {
             }
         }
 
+        // Numeric constraints
+        if (typeof data === 'number') {
+            if (schema.minimum !== undefined && data < schema.minimum) {
+                errors.push({
+                    path,
+                    message: `value ${data} below minimum ${schema.minimum}`,
+                });
+            }
+            if (schema.maximum !== undefined && data > schema.maximum) {
+                errors.push({
+                    path,
+                    message: `value ${data} above maximum ${schema.maximum}`,
+                });
+            }
+        }
+
         // Array constraints
         if (Array.isArray(data)) {
             if (schema.minItems !== undefined && data.length < schema.minItems) {

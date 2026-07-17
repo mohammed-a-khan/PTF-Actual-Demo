@@ -12,6 +12,7 @@ import { CSConfigurationManager } from '../core/CSConfigurationManager';
 import { CSReporter } from '../reporter/CSReporter';
 import { CSSelfHealingEngine } from '../self-healing/CSSelfHealingEngine';
 import { CSFrameResolver, FrameInput } from './CSFrameResolver';
+import { boundedNameSegment } from '../utils/CSArtifactNaming';
 
 // Lazy load smart wait engine to avoid circular dependencies
 let CSSmartWaitEngine: any = null;
@@ -753,10 +754,11 @@ export class CSWebElement {
 
                 CSReporter.pass(`${actionName} successful on ${this.description} (${duration}ms)`);
 
-                // Take screenshot if configured
+                // Take screenshot if configured. Bound the name so the full
+                // path stays under Windows MAX_PATH (260) — see CSArtifactNaming.
                 if (options?.screenshot || this.options.screenshot) {
                     await this.screenshot({
-                        path: `screenshots/${actionName.replace(/\s+/g, '_')}_${Date.now()}.png`
+                        path: `screenshots/${boundedNameSegment(actionName)}_${Date.now()}.png`
                     });
                 }
 

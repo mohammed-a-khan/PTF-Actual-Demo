@@ -112,7 +112,7 @@ export function generateVirtualScrollCSS(): string {
     .vscroll-status-text { flex: 1 1 auto; }
     .vscroll-status-action {
         background: transparent;
-        color: var(--brand-color);
+        color: var(--brand-text, var(--brand-color));
         border: 1px solid var(--brand-color);
         border-radius: 4px;
         padding: 3px 10px;

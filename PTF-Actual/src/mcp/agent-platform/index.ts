@@ -17,12 +17,6 @@ export * from './types';
 export { CSIntentRouter } from './CSIntentRouter';
 export { CSClarificationAgent } from './CSClarificationAgent';
 export {
-    CSExecutionGate,
-    ExecutionGateResult,
-    ExecutionGateFailure,
-} from './CSExecutionGate';
-export { CSResultJudge } from './CSResultJudge';
-export {
     CSConstitutionalSafety,
     CONSTITUTIONAL_RULES,
     ConstitutionalRule,
@@ -45,40 +39,10 @@ export {
     AdoCommonParams,
 } from './CSAdoCreateBackFlow';
 export {
-    CSMigrationCache,
-    MigrationCacheLookupRequest,
-    MigrationCacheLookupResult,
-    MigrationCacheStoreRequest,
-} from './CSMigrationCache';
-export {
-    CSRunTrace,
-    RunTraceKind,
-    RunTraceEntry,
-} from './CSRunTrace';
-export {
-    CSProvenanceSigner,
-    ProvenanceMetadata,
-    SignedProvenance,
-    VerifyResult,
-} from './CSProvenanceSigner';
-export {
-    CSHealLoop,
-    HealLoopResult,
-    HealLoopOptions,
-    HealAttempt,
-} from './CSHealLoop';
-export {
     CSElicitation,
     ElicitOption,
     ElicitOutcome,
 } from './CSElicitation';
-export {
-    CSLiveAppContext,
-    LiveAppContext,
-    LiveAppContextOutcome,
-    LiveAppEntryFlow,
-} from './CSLiveAppContext';
-export { CSPreGateAudit, PreGateAuditResult } from './CSPreGateAudit';
 export { CSRepoInventory } from './CSRepoInventory';
 
 // Rebuild M2-M4 — per-run artefact context, gate engine, status writer.
@@ -90,16 +54,6 @@ export {
     RunSnapshot,
     TimelineEvent,
 } from './CSRunContext';
-export {
-    CSGateEngine,
-    GateCheckResult,
-    GateResolveResult,
-    GateRunOptions,
-    GateRunOutcome,
-    ResolutionAttempt,
-    ExhaustedDecision,
-    ExhaustedOutcome,
-} from './CSGateEngine';
 export { CSStatusWriter } from './CSStatusWriter';
 
 // Rebuild M5-M10 — discovery, analyzer, semantic reuse, translator, write-with-audit, heal classifier.

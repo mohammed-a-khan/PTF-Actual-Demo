@@ -31,7 +31,14 @@ interface AgentDefinition {
     instructions: string;
 }
 
-type LoopType = 'vscode' | 'claude' | 'opencode';
+type LoopType = 'vscode' | 'jetbrains' | 'claude' | 'opencode';
+
+/**
+ * v3 (agentic redesign): the ONLY user-facing agent. Every other embedded
+ * agent definition is legacy — kept in AGENT_CONTENT for the classic server
+ * profile's documentation, but no longer materialized into consumer repos.
+ */
+const GENERATED_AGENTS: readonly string[] = ['cs-ai-auto-assist'];
 
 // ============================================================================
 // Simple YAML Frontmatter Parser (zero-dependency)
@@ -148,6 +155,10 @@ function qualifyToolName(tool: string, serverName: string): string {
     // Already a wildcard or explicitly server-qualified — pass through.
     if (tool.includes('/')) return tool;
     if (BUILTIN_TOOL_ALIASES.has(tool)) return tool;
+    // Naming the MCP server itself grants ALL its tools — required for the
+    // agentic profile, where capability-pack tools appear dynamically via
+    // tools/list_changed and can't be enumerated statically.
+    if (tool === serverName) return tool;
     return `${serverName}/${tool}`;
 }
 
@@ -219,7 +230,7 @@ function generateMCPConfig(serverName: string, loop: LoopType): object {
             },
         };
     } else {
-        // Claude Code and OpenCode use "mcpServers"
+        // JetBrains Copilot, Claude Code and OpenCode use "mcpServers"
         return {
             mcpServers: {
                 [serverName]: { command, args },
@@ -259,23 +270,19 @@ These rules apply to every Copilot interaction in this repository. Custom agents
 - SQL is never inline; always a named query in the env file, invoked via \`CSDBUtils\`
 - Schema references are verified via \`schema_lookup\` before SQL is written; unverified tables emit \`-- SCHEMA REFERENCE NEEDED\` and escalate
 
-## Pipeline invocation
+## The one agent: CS AI Auto-Assist
 
-- \`@cs-playwright migrate <file>\` or \`@cs-playwright automate <url>\` triggers the full closed-loop pipeline
-- Per-file human-gate handoffs are mandatory — never auto-advance without the user pressing "Approve + next"
-- Never perform git operations
+There is exactly ONE agent for everything test-related: **\`@CS AI Auto-Assist\`**.
+It covers the complete SDLC through a menu of 13 modes — plan, analyze, design,
+author, migrate, review, PR review, run, heal, triage, regression, performance,
+audit. Users pick a mode and provide inputs; they never write prompts, and the
+server-side engine drives orchestration, guardrails and AI-credit budgets.
 
-## Which agent should I use?
-
-| When you want to… | Use |
-|---|---|
-| Migrate a legacy file, or automate a new app end-to-end, with audit + test-run + heal + 9 commit-ready gates | \`@cs-playwright\` (orchestrated pipeline, halts per file) |
-| Plan tests by exploring an app (no migration) | \`@CS Playwright Planner\` (legacy, manual) |
-| Generate BDD code from a manual test plan | \`@CS Playwright Generator\` (legacy, manual) |
-| Fix one broken test quickly (no pipeline gates) | \`@CS Playwright Healer\` (legacy, manual) |
-| General Q&A, browser automation, DB query, API call, CI/CD task | \`@CS Playwright Assistant\` (catch-all) |
-
-Subagents (\`analyzer\`, \`data-ingestor\`, \`db-migrator\`, \`locator-reconciler\`, \`pipeline-generator\`, \`pipeline-healer\`) are invoked only by \`@cs-playwright\` — do not invoke them directly. (commit, push, stage, stash)
+- Invoke it for ANY test-automation request. Do not hand-roll test code in
+  plain Copilot chat — the agent's audit gates exist for a reason.
+- Never perform git operations (commit, push, stage, stash) on the user's behalf.
+- Blocked states (\`BLOCKED_NEED_HUMAN\`, budget blocks) are surfaced verbatim
+  and wait for the user — never worked around.
 
 ## Loading pattern skills
 
@@ -389,12 +396,12 @@ export function generateAgents(
         return { files, errors };
     }
 
-    // Delete only OUR existing agent files before creating new ones
-    // Other tools may have their own agent files — leave those untouched
-    // Use the canonical AGENT_NAMES from embeddedAgentContent so adding a new
-    // agent definition automatically includes it in generation — no second array to update.
+    // Delete only OUR existing agent files before creating new ones.
+    // AGENT_NAMES (every embedded agent, including the retired multi-agent
+    // set) drives cleanup so upgrading removes stale v1/v2 agents; only
+    // GENERATED_AGENTS is materialized.
     const agents: readonly string[] = AGENT_NAMES;
-    const csAgentPrefix = 'CS Playwright '; // Our VS Code .agent.md title prefix
+    const csAgentPrefix = 'CS '; // Our VS Code .agent.md title prefix ("CS Playwright …", "CS AI …")
 
     try {
         const existingFiles = fs.readdirSync(agentsDir);
@@ -412,7 +419,7 @@ export function generateAgents(
         errors.push(`Warning: Could not clean existing agents: ${err.message}`);
     }
 
-    for (const agentName of agents) {
+    for (const agentName of GENERATED_AGENTS) {
         try {
             // Try embedded content first (works in published npm package)
             // Fall back to .md file on disk (works in development mode)
@@ -437,6 +444,9 @@ export function generateAgents(
 
             switch (loop) {
                 case 'vscode':
+                case 'jetbrains':
+                    // JetBrains Copilot consumes the same .github/agents/*.agent.md
+                    // custom-agent format as VS Code.
                     agentContent = generateVSCodeChatmode(agent, serverName);
                     agentFileName = `${agent.title}.agent.md`;
                     break;
@@ -478,6 +488,13 @@ export function generateAgents(
         fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2));
         files.push(mcpConfigPath);
         console.log(`  ${mcpExisted ? 'Updated' : 'Created'} mcp.json`);
+        if (loop === 'jetbrains') {
+            console.log(
+                '  JetBrains note: register the server once in the IDE — ' +
+                'GitHub Copilot plugin → Settings → MCP → add the contents of ./mcp.json ' +
+                '(or copy it to the Copilot plugin\'s mcp.json location).',
+            );
+        }
     }
 
     // Write workspace-level copilot-instructions.md (default: skip if exists)

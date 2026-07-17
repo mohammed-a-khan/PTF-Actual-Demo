@@ -257,6 +257,20 @@ class CSChart {
         animate();
     }
 
+    /**
+     * Read a CSS theme variable at draw time so axis/grid/legend colours
+     * follow light/dark mode. Falls back to the original hardcoded colour
+     * when the variable is absent, keeping light mode byte-identical.
+     */
+    private themeColor(varName: string, fallback: string): string {
+        try {
+            const v = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+            return v || fallback;
+        } catch {
+            return fallback;
+        }
+    }
+
     private render(): void {
         // Clear canvas
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -444,7 +458,7 @@ class CSChart {
                 // Draw total value on top of the stacked bar
                 if (this.animationProgress >= 1 && totalValue > 0) {
                     const totalY = this.chartArea.y + this.chartArea.height - 60 - stackedHeight;
-                    this.ctx.fillStyle = '#374151';
+                    this.ctx.fillStyle = this.themeColor('--text-primary', '#374151');
                     this.ctx.font = 'bold 13px Arial';
                     this.ctx.textAlign = 'center';
                     this.ctx.textBaseline = 'bottom';
@@ -468,7 +482,7 @@ class CSChart {
 
                     // Draw value on top
                     if (this.animationProgress >= 1 && value > 0) {
-                        this.ctx.fillStyle = '#666';
+                        this.ctx.fillStyle = this.themeColor('--text-secondary', '#666');
                         this.ctx.font = 'bold 11px Arial';
                         this.ctx.textAlign = 'center';
                         this.ctx.fillText(value.toString(), barX + barWidth / 2, barY - 5);
@@ -504,7 +518,7 @@ class CSChart {
             const x = this.chartArea.x + labelIndex * totalBarWidth + totalBarWidth / 2;
 
             this.ctx.save();
-            this.ctx.fillStyle = '#666';
+            this.ctx.fillStyle = this.themeColor('--text-secondary', '#666');
             this.ctx.font = '11px Arial';
 
             const label = this.data.labels[labelIndex];
@@ -620,7 +634,7 @@ class CSChart {
         // Draw labels with rotation to prevent overlap
         this.data.labels.forEach((label, index) => {
             const x = this.chartArea.x + index * pointSpacing;
-            this.ctx.fillStyle = '#666';
+            this.ctx.fillStyle = this.themeColor('--text-secondary', '#666');
             this.ctx.font = '10px Arial';
 
             // Skip some labels if there are too many
@@ -661,7 +675,7 @@ class CSChart {
         // Draw secondary y-axis on the right
         const x = this.chartArea.x + this.chartArea.width;
 
-        this.ctx.strokeStyle = '#9ca3af';
+        this.ctx.strokeStyle = this.themeColor('--border', '#9ca3af');
         this.ctx.lineWidth = 1;
         this.ctx.beginPath();
         this.ctx.moveTo(x, this.chartArea.y);
@@ -674,7 +688,7 @@ class CSChart {
             const y = this.chartArea.y + (i / steps) * (this.chartArea.height - 60);
             const value = Math.round(maxValue * (1 - i / steps));
 
-            this.ctx.fillStyle = '#666';
+            this.ctx.fillStyle = this.themeColor('--text-secondary', '#666');
             this.ctx.font = '10px Arial';
             this.ctx.textAlign = 'left';
             this.ctx.fillText(value.toString(), x + 5, y + 3);
@@ -691,7 +705,7 @@ class CSChart {
             this.ctx.beginPath();
             this.ctx.moveTo(this.chartArea.x, y);
             this.ctx.lineTo(this.chartArea.x + this.chartArea.width, y);
-            this.ctx.strokeStyle = '#e5e7eb';
+            this.ctx.strokeStyle = this.themeColor('--border', '#e5e7eb');
             this.ctx.lineWidth = 1;
 
             // Dashed lines
@@ -701,7 +715,7 @@ class CSChart {
 
             // Draw y-axis label
             const value = Math.round((maxValue * i) / gridLines);
-            this.ctx.fillStyle = '#666';
+            this.ctx.fillStyle = this.themeColor('--text-secondary', '#666');
             this.ctx.font = '11px Arial';
             this.ctx.textAlign = 'right';
             this.ctx.fillText(value.toString(), this.chartArea.x - 10, y + 3);
@@ -712,7 +726,7 @@ class CSChart {
         this.ctx.moveTo(this.chartArea.x, this.chartArea.y);
         this.ctx.lineTo(this.chartArea.x, this.chartArea.y + this.chartArea.height - 40);
         this.ctx.lineTo(this.chartArea.x + this.chartArea.width, this.chartArea.y + this.chartArea.height - 40);
-        this.ctx.strokeStyle = '#9ca3af';
+        this.ctx.strokeStyle = this.themeColor('--border', '#9ca3af');
         this.ctx.lineWidth = 1;
         this.ctx.stroke();
     }
@@ -757,7 +771,7 @@ class CSChart {
                 }
 
                 // Draw label
-                this.ctx.fillStyle = '#666';
+                this.ctx.fillStyle = this.themeColor('--text-secondary', '#666');
                 this.ctx.font = '11px Arial';
                 this.ctx.textAlign = 'left';
 
@@ -822,7 +836,7 @@ class CSChart {
 
                 // Label — measured-width truncation against the slot it
                 // actually has, not a naive char count.
-                this.ctx.fillStyle = '#666';
+                this.ctx.fillStyle = this.themeColor('--text-secondary', '#666');
                 this.ctx.font = '12px Arial';
                 this.ctx.textAlign = 'left';
                 const slotForText = Math.max(20, itemWidth - 24);
@@ -842,13 +856,13 @@ class CSChart {
                 const chipText = `+${overflowCount} more`;
 
                 // Pill background
-                this.ctx.fillStyle = '#e5e7eb';
+                this.ctx.fillStyle = this.themeColor('--surface-hover', '#e5e7eb');
                 const chipWidth = Math.min(itemWidth - 8, this.ctx.measureText(chipText).width + 16);
                 this.roundRect(x, y, chipWidth, 16, 8);
                 this.ctx.fill();
 
                 // Pill text
-                this.ctx.fillStyle = '#374151';
+                this.ctx.fillStyle = this.themeColor('--text-primary', '#374151');
                 this.ctx.font = 'bold 11px Arial';
                 this.ctx.textAlign = 'left';
                 this.ctx.textBaseline = 'middle';

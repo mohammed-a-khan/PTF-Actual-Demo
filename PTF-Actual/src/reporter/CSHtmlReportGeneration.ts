@@ -910,6 +910,27 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         const themeRoot = generateRootCSS(CSReportTheme.getInstance().get());
         return `
         ${themeRoot}
+
+        /* ── Semantic surface/brand tokens (light defaults) ──────────────
+           These give the many hardcoded 'white' / '#f8f9fa' / brand-as-text
+           colours a single variable to flip in dark mode. Light values here
+           are IDENTICAL to the previous hardcoded colours, so light mode is
+           unchanged; CSDarkMode overrides them for dark. */
+        :root {
+            --card-bg: #ffffff;          /* was: background: var(--card-bg) */
+            --subtle-bg: #f8f9fa;        /* was: #f8f9fa side panels  */
+            --code-bg: #f9fafb;          /* was: #f9fafb code / <pre> */
+            --subtle-border: var(--subtle-border);    /* was: #dee2e6 / #e5e7eb     */
+            --muted-text: #6b7280;       /* was: #6b7280 / #495057     */
+            --brand-text: var(--brand-color);  /* brand as TEXT (readable in both modes) */
+            --body-gradient: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            /* Light defaults for the dark-only helpers (see CSDarkMode):
+               in light mode cards keep their existing borderless look, and
+               charts keep the brand colour — so light mode is unchanged. */
+            --card-border: var(--subtle-border);
+            --chart-bar: var(--brand-color);
+        }
+
         ${generateDesignTokensCSS()}
         ${generatePrimitivesCSS()}
         ${generateDashboardCSS()}
@@ -922,12 +943,17 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            background: var(--body-gradient);
             color: var(--text-primary);
             line-height: 1.6;
             min-height: 100vh;
             font-size: 14px;
         }
+
+        /* Readable text selection in both themes (was unstyled → brand-on-dark
+           selection was illegible). */
+        ::selection { background: var(--brand-color); color: #ffffff; }
+        ::-moz-selection { background: var(--brand-color); color: #ffffff; }
 
         #app {
             min-height: 100vh;
@@ -964,6 +990,13 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             text-align: center;
         }
 
+        /* "Executed by" sits directly under the report title, centered. */
+        .header-executed-by {
+            margin-top: 6px;
+            font-size: 0.85rem;
+            opacity: 0.9;
+        }
+
         .header-info {
             justify-self: end;
             text-align: right;
@@ -985,7 +1018,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         /* Navigation Styles */
         .nav {
-            background: white;
+            background: var(--card-bg);
             box-shadow: 0 2px 10px var(--shadow);
             position: sticky;
             top: 0;
@@ -1013,12 +1046,12 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         .nav-item:hover {
             background: var(--surface-hover);
-            color: var(--brand-color);
+            color: var(--brand-text);
         }
 
         .nav-item.active {
             border-bottom-color: var(--brand-color);
-            color: var(--brand-color);
+            color: var(--brand-text);
             background: var(--surface);
         }
 
@@ -1068,7 +1101,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         /* Enhanced Stat Cards */
         .stat-card {
-            background: white;
+            background: var(--card-bg);
             border-radius: 12px;
             padding: 1.5rem;
             box-shadow: 0 4px 15px var(--shadow);
@@ -1123,7 +1156,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         .chart-container {
-            background: white;
+            background: var(--card-bg);
             border-radius: 12px;
             padding: 1.5rem;
             box-shadow: 0 4px 15px var(--shadow);
@@ -1144,7 +1177,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         /* Card Styles */
         .card {
-            background: white;
+            background: var(--card-bg);
             border-radius: 12px;
             box-shadow: 0 4px 15px var(--shadow);
             overflow: hidden;
@@ -1177,7 +1210,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         /* Hierarchical Test View */
         .feature-item {
-            background: white;
+            background: var(--card-bg);
             border-radius: 12px;
             margin-bottom: 1.5rem;
             box-shadow: 0 4px 15px var(--shadow);
@@ -1185,9 +1218,9 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         .feature-header {
-            background: white;
+            background: var(--card-bg);
             color: #333;
-            border: 1px solid #e5e7eb;
+            border: 1px solid var(--subtle-border);
             padding: 1rem 1.5rem;
             cursor: pointer;
             display: flex;
@@ -1230,7 +1263,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         .scenario-steps {
             display: none;
-            background: white;
+            background: var(--card-bg);
             padding: 12px 16px 12px 24px;
         }
 
@@ -1241,7 +1274,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         .step-item {
             border-left: 4px solid var(--border);
             margin: 0.5rem 1.5rem;
-            background: #fafafa;
+            background: var(--subtle-bg);
             border-radius: 8px;
             overflow: hidden;
         }
@@ -1261,7 +1294,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         .step-details {
             display: none;
-            background: white;
+            background: var(--card-bg);
             border-top: 1px solid var(--border);
         }
 
@@ -1289,7 +1322,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         .step-tab.active {
             border-bottom-color: var(--brand-color);
-            color: var(--brand-color);
+            color: var(--brand-text);
         }
 
         .step-tab-content {
@@ -1386,7 +1419,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         .metric-card {
-            background: white;
+            background: var(--card-bg);
             padding: 1.5rem;
             border-radius: 12px;
             box-shadow: 0 4px 15px var(--shadow);
@@ -1395,7 +1428,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         .metric-value {
             font-size: 2rem;
             font-weight: 700;
-            color: var(--brand-color);
+            color: var(--brand-text);
         }
 
         .metric-label {
@@ -1436,7 +1469,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         /* Environment Sections */
         .env-section {
-            background: white;
+            background: var(--card-bg);
             border-radius: 12px;
             padding: 1.5rem;
             margin-bottom: 1.5rem;
@@ -1509,7 +1542,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         .artifact-name {
             font-weight: 500;
-            color: var(--brand-color);
+            color: var(--brand-text);
             text-decoration: none;
             word-break: break-all;
         }
@@ -1534,7 +1567,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         .failure-chart {
-            background: white;
+            background: var(--card-bg);
             padding: 1.5rem;
             border-radius: 12px;
             box-shadow: 0 4px 15px var(--shadow);
@@ -1751,7 +1784,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         .modal-content {
-            background: white;
+            background: var(--card-bg);
             margin: 5% auto;
             padding: 2rem;
             border-radius: 12px;
@@ -1871,7 +1904,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         .ai-stats-container {
-            background: white;
+            background: var(--card-bg);
             border-radius: 12px;
             padding: 2rem;
             box-shadow: 0 4px 15px var(--shadow);
@@ -1933,7 +1966,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         .ai-section {
-            background: white;
+            background: var(--card-bg);
             border-radius: 12px;
             padding: 1.5rem;
             box-shadow: 0 2px 10px var(--shadow);
@@ -1942,7 +1975,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         .ai-section h3 {
             margin-bottom: 1rem;
-            color: var(--brand-color);
+            color: var(--brand-text);
         }
 
         /* AI Strategy Tables */
@@ -1962,7 +1995,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         .ai-timeline-table td {
             padding: 0.75rem 1rem;
             text-align: left;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid var(--subtle-border);
         }
 
         .ai-strategy-table th,
@@ -2007,7 +2040,51 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         ${generateDarkModeCSS()}
         ${generateMobileCSS()}
         ${generateVirtualScrollCSS()}
+        ${CSHtmlReportGenerator.generateCardBorderDarkCSS()}
         `;
+    }
+
+    /**
+     * Dark-mode-only card/section borders. In light mode these containers rely
+     * on a drop-shadow for elevation — but shadows are invisible on a dark
+     * canvas, so the cards looked like scattered numbers. Here every card and
+     * section gets a bright, clearly-visible neutral outline (var(--card-border),
+     * NOT the brand colour) in dark mode only. Light mode is untouched.
+     */
+    private static generateCardBorderDarkCSS(): string {
+        const cards = [
+            '.stat-card', '.chart-container', '.card', '.feature-item',
+            '.metric-card', '.env-section', '.modal-content', '.ai-stats-container',
+            '.ai-section', '.scenario-steps', '.step-details', '.failure-chart',
+            '.timeline-chart-container', '.metric-card-flaky', '.fc-summary-card',
+            '.fc-cluster', '.fc-outlier-block', '.attachment-item',
+            // Timeline tab cards/sections:
+            '.timeline-info', '.timeline-details', '.thread-details',
+        ];
+        const rule = (scope: string): string =>
+            cards.map((c) => `${scope} ${c}`).join(',\n        ') +
+            ` {\n            border: 1px solid var(--card-border) !important;\n            box-shadow: 0 2px 8px rgba(0,0,0,0.5);\n        }`;
+        // Scenario rows keep their status-coloured LEFT accent, so only the
+        // other three edges get the neutral card border.
+        const scenarioRule = (scope: string): string =>
+            `${scope} .timeline-scenario {
+            border-top: 1px solid var(--card-border);
+            border-right: 1px solid var(--card-border);
+            border-bottom: 1px solid var(--card-border);
+        }`;
+        return `
+        /* v1.44 — visible card/section borders in dark mode only */
+        ${rule('[data-theme="dark"]')}
+        ${scenarioRule('[data-theme="dark"]')}
+        @media (prefers-color-scheme: dark) {
+            ${rule(':root:not([data-theme="light"])')}
+            ${scenarioRule(':root:not([data-theme="light"])')}
+        }
+        /* Reinforce the stat-card's left accent so all four edges show. */
+        [data-theme="dark"] .stat-card { border-left-width: 4px !important; border-left-color: var(--brand-text) !important; }
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) .stat-card { border-left-width: 4px !important; border-left-color: var(--brand-text) !important; }
+        }`;
     }
 
     /**
@@ -2015,7 +2092,8 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
      */
     private static generateEnhancedHeader(suite: TestSuite, stats: any, logoBase64: string = '', terms?: TestTerminology): string {
         const duration = this.formatDuration(suite.duration || 0);
-        
+        const executedBy = this.resolveExecutedBy();
+
         return `
         <header class="header">
             <div class="header-content">
@@ -2027,6 +2105,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 </div>
                 <div class="header-title">
                     <h1>CS Playwright Test Automation Report</h1>
+                    ${executedBy ? `<div class="header-executed-by"><strong>Executed by:</strong> ${htmlEscape(executedBy)}</div>` : ''}
                 </div>
                 <div class="header-info execution-info">
                     <div><strong>Started:</strong> ${new Date(suite.startTime).toLocaleString()}</div>
@@ -2036,6 +2115,32 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 </div>
             </div>
         </header>`;
+    }
+
+    /**
+     * Resolve the "Executed by" user for the report header. Same value shown
+     * in the Environment tab → Runtime Information (os.userInfo().username),
+     * but prefers a CI-provided identity when running in a pipeline so the
+     * report shows the real person/service that triggered the run.
+     */
+    private static resolveExecutedBy(): string {
+        try {
+            const ciUser =
+                this.config.get('EXECUTED_BY', '') ||
+                process.env.EXECUTED_BY ||              // explicit override
+                process.env.BUILD_REQUESTEDFOR ||       // Azure DevOps
+                process.env.GITHUB_ACTOR ||             // GitHub Actions
+                process.env.GITLAB_USER_NAME ||         // GitLab CI
+                '';
+            if (ciUser && ciUser.trim().length > 0) return ciUser.trim();
+            try {
+                const u = require('os').userInfo().username;
+                if (u && String(u).trim().length > 0) return String(u).trim();
+            } catch { /* os.userInfo can throw in some sandboxes */ }
+            return process.env.USER || process.env.USERNAME || '';
+        } catch {
+            return '';
+        }
     }
 
     /**
@@ -2237,12 +2342,12 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                             });
 
                             return `
-                            <div class="test-data-container" style="padding: 10px 15px; background: #f8f9fa; border-left: 3px solid #6c757d; margin: 10px 15px 15px 15px; font-size: 0.9em; border-radius: 4px;">
-                                <div style="font-weight: bold; color: #495057; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                            <div class="test-data-container" style="padding: 10px 15px; background: var(--subtle-bg); border-left: 3px solid #6c757d; margin: 10px 15px 15px 15px; font-size: 0.9em; border-radius: 4px;">
+                                <div style="font-weight: bold; color: var(--muted-text); margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
                                     <div>
                                         📊 Test Data (Iteration ${td.iterationNumber} of ${td.totalIterations})
                                         ${td.source ? `
-                                            <span style="font-weight: normal; font-size: 0.9em; color: #6c757d; margin-left: 10px;">
+                                            <span style="font-weight: normal; font-size: 0.9em; color: var(--muted-text); margin-left: 10px;">
                                                 ${td.source.type === 'csv' ?
                                                     `📄 CSV: ${htmlEscape(td.source.file || 'inline')}${td.source.delimiter && td.source.delimiter !== ',' ? ` | Delimiter: "${htmlEscape(td.source.delimiter)}"` : ''}${td.source.filter ? ` | Filter: ${htmlEscape(td.source.filter)}` : ''}` :
                                                   td.source.type === 'excel' || td.source.type === 'xlsx' ?
@@ -2275,19 +2380,19 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
                                 <!-- Used columns table (always visible) -->
                                 <div id="used-columns-${scenarioId}">
-                                    <div style="overflow-x: auto; border: 1px solid #dee2e6; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+                                    <div style="overflow-x: auto; border: 1px solid var(--subtle-border); border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
                                         <table style="width: 100%; border-collapse: collapse;">
                                             <thead>
-                                                <tr style="background: #e9ecef;">
+                                                <tr style="background: var(--subtle-bg);">
                                                     ${filteredHeaders.map((header: string) => `
-                                                        <th style="padding: 8px 12px; text-align: left; border: 1px solid #dee2e6; font-weight: 600; background: #d1f2eb; white-space: nowrap;">${htmlEscape(header)} ✓</th>
+                                                        <th style="padding: 8px 12px; text-align: left; border: 1px solid var(--subtle-border); font-weight: 600; background: #d1f2eb; white-space: nowrap;">${htmlEscape(header)} ✓</th>
                                                     `).join('')}
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                <tr style="background: white;">
+                                                <tr style="background: var(--card-bg);">
                                                     ${filteredValues.map((value: string) => `
-                                                        <td style="padding: 8px 12px; border: 1px solid #dee2e6; font-family: monospace; font-size: 0.95em; white-space: nowrap;">${htmlEscape(value)}</td>
+                                                        <td style="padding: 8px 12px; border: 1px solid var(--subtle-border); font-family: monospace; font-size: 0.95em; white-space: nowrap;">${htmlEscape(value)}</td>
                                                     `).join('')}
                                                 </tr>
                                             </tbody>
@@ -2298,17 +2403,17 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                 <!-- All columns table (hidden by default) -->
                                 ${hasUnusedColumns ? `
                                 <div id="all-columns-${scenarioId}" style="display: none; margin-top: 10px;">
-                                    <div style="margin-bottom: 5px; font-size: 0.85em; color: #6c757d;">
+                                    <div style="margin-bottom: 5px; font-size: 0.85em; color: var(--muted-text);">
                                         <strong>All Available Columns:</strong> (✓ = used in scenario, ✗ = unused)
                                     </div>
-                                    <div style="max-height: 400px; overflow-x: auto; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 4px;">
+                                    <div style="max-height: 400px; overflow-x: auto; overflow-y: auto; border: 1px solid var(--subtle-border); border-radius: 4px;">
                                         <table style="width: 100%; border-collapse: collapse;">
-                                            <thead style="position: sticky; top: 0; background: white; z-index: 10;">
-                                                <tr style="background: #e9ecef;">
+                                            <thead style="position: sticky; top: 0; background: var(--card-bg); z-index: 10;">
+                                                <tr style="background: var(--subtle-bg);">
                                                     ${td.headers.map((header: string, idx: number) => {
                                                         const isUsed = usedColumns.includes(header);
                                                         return `
-                                                            <th style="padding: 8px 12px; text-align: left; border: 1px solid #dee2e6; font-weight: 600;
+                                                            <th style="padding: 8px 12px; text-align: left; border: 1px solid var(--subtle-border); font-weight: 600;
                                                                        background: ${isUsed ? '#d1f2eb' : '#f8f9fa'};
                                                                        color: ${isUsed ? '#155724' : '#6c757d'};
                                                                        white-space: nowrap;">
@@ -2319,13 +2424,13 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                <tr style="background: white;">
+                                                <tr style="background: var(--card-bg);">
                                                     ${td.values.map((value: string, idx: number) => {
                                                         const isUsed = usedColumns.includes(td.headers[idx]);
                                                         const header = td.headers[idx];
                                                         const maskedValue = secretMasker.maskIfSecret(value, header);
                                                         return `
-                                                            <td style="padding: 8px 12px; border: 1px solid #dee2e6;
+                                                            <td style="padding: 8px 12px; border: 1px solid var(--subtle-border);
                                                                        font-family: monospace; font-size: 0.9em;
                                                                        background: ${isUsed ? '#f6ffed' : 'white'};
                                                                        color: ${isUsed ? '#000' : '#6c757d'};
@@ -2432,15 +2537,15 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
                                 return `
                                     <div class="step-item ${step.status}" style="margin-left: ${indent}px; border-left: 3px solid ${stepBorderColor}; margin-bottom: 8px; border-radius: 4px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08);">
-                                        <div class="step-header" onclick="toggleStep(this)" style="padding: 10px 14px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; background: ${isHookStep ? '#f1f3f4' : 'linear-gradient(to right, #f8f9fa, #ffffff)'}; border-bottom: 1px solid #eee;">
+                                        <div class="step-header" onclick="toggleStep(this)" style="padding: 10px 14px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; background: ${isHookStep ? 'var(--subtle-bg)' : 'linear-gradient(to right, var(--subtle-bg), var(--card-bg))'}; border-bottom: 1px solid var(--subtle-border);">
                                             <div style="display: flex; align-items: center; gap: 10px;">
                                                 ${hookBadge}
                                                 ${renderStatusBadge(step.status, 'status-badge--compact')}
-                                                <span style="font-weight: 600; font-size: 0.95em; ${isHookStep ? 'color: #5f6368; font-style: italic;' : 'color: #202124;'}">${htmlEscape(step.name)}</span>
+                                                <span style="font-weight: 600; font-size: 0.95em; ${isHookStep ? 'color: var(--muted-text); font-style: italic;' : 'color: var(--text-primary);'}">${htmlEscape(step.name)}</span>
                                             </div>
                                             <div style="display: flex; align-items: center; gap: 12px;">
-                                                <span class="text-muted" style="font-size: 0.8em; background: #e8eaed; padding: 2px 8px; border-radius: 10px;">${CSHtmlReportGenerator.formatDuration(step.duration || 0)}</span>
-                                                ${(hasActions || step.error) ? '<span class="toggle-icon" style="font-size: 0.7em; color: #5f6368;">▶</span>' : ''}
+                                                <span class="text-muted" style="font-size: 0.8em; background: var(--subtle-bg); padding: 2px 8px; border-radius: 10px;">${CSHtmlReportGenerator.formatDuration(step.duration || 0)}</span>
+                                                ${(hasActions || step.error) ? '<span class="toggle-icon" style="font-size: 0.7em; color: var(--muted-text);">▶</span>' : ''}
                                             </div>
                                         </div>
                                         ${(hasActions || step.error || step.screenshot) ? (() => {
@@ -2476,7 +2581,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
                                             return `
                                             <div class="step-details">
-                                                <div class="step-tabs" style="display: flex; background: #f8f9fa; border-bottom: 1px solid #dee2e6;">
+                                                <div class="step-tabs" style="display: flex; background: var(--subtle-bg); border-bottom: 1px solid var(--subtle-border);">
                                                     ${showFailureView ? `
                                                     <div class="step-tab active" onclick="showStepTab(this, '${stepUniqueId}-failure')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid #dc3545; font-size: 0.85em; font-weight: 700; color: #dc3545;">
                                                         🔍 <strong>Failure</strong>
@@ -2484,14 +2589,14 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                                     <div class="step-tab${actionsTabActive}" onclick="showStepTab(this, '${stepUniqueId}-actions')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid ${actionsBorder}; font-size: 0.85em; font-weight: 700; color: ${actionsColor};">
                                                         📋 <strong>Actions</strong>${hasActions ? ` (${step.actions.length})` : ''}
                                                     </div>
-                                                    <div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-screenshots')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: #495057;">
+                                                    <div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-screenshots')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: var(--muted-text);">
                                                         📷 <strong>Screenshots</strong>${hasScreenshot ? ' (1)' : ''}
                                                     </div>
                                                     ${(() => {
                                                         const fc = CSHtmlReportGenerator.countStepFiles(step);
                                                         const total = fc.uploads + fc.downloads;
                                                         return total > 0
-                                                            ? `<div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-files')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: #495057;">📁 <strong>Files</strong> <span class="cs-step-tab-count">${total}</span></div>`
+                                                            ? `<div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-files')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: var(--muted-text);">📁 <strong>Files</strong> <span class="cs-step-tab-count">${total}</span></div>`
                                                             : '';
                                                     })()}
                                                     <div class="step-tab" onclick="showStepTab(this, '${stepUniqueId}-error')" style="padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 0.85em; font-weight: 700; color: ${hasError ? '#dc3545' : '#495057'};">
@@ -2504,10 +2609,10 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                                         ${renderFailureSplitPane(step, failureScreenshotSrc)}
                                                     </div>` : ''}
                                                     <div id="${stepUniqueId}-actions" class="step-tab-pane${actionsTabActive}" style="display: ${actionsDisplay};">
-                                                        ${hasActions ? this.generateStepActions(step) : '<div class="text-muted" style="color: #6c757d; font-style: italic;">No actions recorded</div>'}
+                                                        ${hasActions ? this.generateStepActions(step) : '<div class="text-muted" style="color: var(--muted-text); font-style: italic;">No actions recorded</div>'}
                                                     </div>
                                                     <div id="${stepUniqueId}-screenshots" class="step-tab-pane" style="display: none;">
-                                                        ${hasScreenshot ? this.generateStepScreenshots(step) : '<div class="text-muted" style="color: #6c757d; font-style: italic;">No screenshots captured</div>'}
+                                                        ${hasScreenshot ? this.generateStepScreenshots(step) : '<div class="text-muted" style="color: var(--muted-text); font-style: italic;">No screenshots captured</div>'}
                                                     </div>
                                                     ${(() => {
                                                         const fc = CSHtmlReportGenerator.countStepFiles(step);
@@ -2523,7 +2628,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                                             ${step.error.stack ? `
                                                             <div style="margin-top: 12px;">
                                                                 <div style="font-weight: 600; color: #dc3545; margin-bottom: 4px;">Stack Trace:</div>
-                                                                <pre style="background: #f8f8f8; padding: 8px; border-radius: 4px; font-size: 0.8em; overflow-x: auto; color: #666;">${htmlEscape(step.error.stack)}</pre>
+                                                                <pre style="background: var(--subtle-bg); padding: 8px; border-radius: 4px; font-size: 0.8em; overflow-x: auto; color: #666;">${htmlEscape(step.error.stack)}</pre>
                                                             </div>
                                                             ` : ''}
                                                         </div>
@@ -2555,11 +2660,11 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                 ].every((h: any) => h.status === 'passed');
 
                                 html += `
-                                    <div class="hooks-section" style="margin-bottom: 12px; border: 1px solid #dee2e6; border-radius: 4px; background: #f8f9fa;">
+                                    <div class="hooks-section" style="margin-bottom: 12px; border: 1px solid var(--subtle-border); border-radius: 4px; background: var(--subtle-bg);">
                                         <div class="step-header" onclick="toggleStep(this)" style="padding: 8px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
                                             <div style="display: flex; align-items: center; gap: 8px;">
                                                 <span class="toggle-icon" style="font-size: 0.7em;">▶</span>
-                                                <span style="font-weight: 500; color: #495057;">🔧 Setup & Teardown Hooks</span>
+                                                <span style="font-weight: 500; color: var(--muted-text);">🔧 Setup & Teardown Hooks</span>
                                                 <span style="font-size: 0.75em; padding: 2px 6px; border-radius: 3px; background: ${allHooksPassed ? '#d4edda' : '#f8d7da'}; color: ${allHooksPassed ? '#155724' : '#721c24'};">
                                                     ${allHooksPassed ? 'All Passed' : 'Has Failures'}
                                                 </span>
@@ -2613,8 +2718,8 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                         const totalDur = tl.reduce((sum: number, s: any) => sum + s.durationSec, 0) || 1;
                         const playerId = 'avp-' + Math.random().toString(36).substr(2, 9);
                         return `
-                        <div class="annotated-video-player" id="${playerId}" style="margin: 12px 15px; padding: 12px; background: #f8f9fa; border-radius: 6px; border: 1px solid #dee2e6;">
-                            <div style="font-weight: 600; font-size: 0.9em; color: #495057; margin-bottom: 8px;">
+                        <div class="annotated-video-player" id="${playerId}" style="margin: 12px 15px; padding: 12px; background: var(--subtle-bg); border-radius: 6px; border: 1px solid var(--subtle-border);">
+                            <div style="font-weight: 600; font-size: 0.9em; color: var(--muted-text); margin-bottom: 8px;">
                                 🎬 Annotated Video Playback
                             </div>
                             <video controls width="100%" style="border-radius: 4px; background: #000;" crossorigin="anonymous">
@@ -2630,7 +2735,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                     return `<div class="tl-step" data-time="${s.startSec}" title="${htmlEscape(s.name)} (${s.durationSec}s)" style="display: flex; align-items: center; justify-content: center; font-size: 11px; min-width: 20px; width: ${widthPct}%; background: ${bgColor}; color: white; transition: opacity 0.2s;" onmouseover="this.style.opacity='0.8'" onmouseout="this.style.opacity='1'"><span style="margin-right: 2px;">${icon}</span><span>${s.index}</span></div>`;
                                 }).join('')}
                             </div>
-                            <div class="step-timeline-detail" style="font-size: 12px; color: #64748b; margin-top: 6px; min-height: 20px;"></div>
+                            <div class="step-timeline-detail" style="font-size: 12px; color: var(--muted-text); margin-top: 6px; min-height: 20px;"></div>
                         </div>
                         `;
                     })()}
@@ -2653,7 +2758,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                             <span style="margin-left: 0.5rem;">
                                 ${passedCount > 0 ? `<span style="color: #28a745; font-weight: 500;">${passedCount} passed</span>` : ''}
                                 ${failedCount > 0 ? `<span style="color: #dc3545; font-weight: 500; margin-left: 0.5rem;">${failedCount} failed</span>` : ''}
-                                ${skippedCount > 0 ? `<span style="color: #6c757d; font-weight: 500; margin-left: 0.5rem;">${skippedCount} skipped</span>` : ''}
+                                ${skippedCount > 0 ? `<span style="color: var(--muted-text); font-weight: 500; margin-left: 0.5rem;">${skippedCount} skipped</span>` : ''}
                             </span>
                         </div>
                         <div>
@@ -2743,7 +2848,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             (a: any) => a && (a.type === 'upload' || a.type === 'download')
         );
         if (items.length === 0) {
-            return '<div class="text-muted" style="color: #6c757d; font-style: italic;">No files were uploaded or downloaded in this step.</div>';
+            return '<div class="text-muted" style="color: var(--muted-text); font-style: italic;">No files were uploaded or downloaded in this step.</div>';
         }
         const rows = items.map((a: any) => {
             const folder = a.type === 'upload' ? 'uploads' : 'downloads';
@@ -3069,7 +3174,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                             <span class="error-title">Stack Trace</span>
                         </div>
                         <div class="stack-trace">
-                            <pre style="white-space: pre-wrap; word-wrap: break-word; margin: 0; padding: 1rem; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 4px; font-size: 0.85rem; color: #6b7280; max-height: 400px; overflow-y: auto;">${htmlEscape(stackTrace.trim())}</pre>
+                            <pre style="white-space: pre-wrap; word-wrap: break-word; margin: 0; padding: 1rem; background: var(--code-bg); border: 1px solid var(--subtle-border); border-radius: 4px; font-size: 0.85rem; color: #6b7280; max-height: 400px; overflow-y: auto;">${htmlEscape(stackTrace.trim())}</pre>
                         </div>
                     </div>
                 `;
@@ -3148,8 +3253,8 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 : '<pre style="margin: 0; font-size: 0.85em; white-space: pre-wrap; word-break: break-word;">' + htmlEscape(content) + '</pre>';
 
             return `
-                <div class="attachment-item" style="background: white; border: 1px solid #dee2e6; border-radius: 4px; overflow: hidden; min-width: 200px; max-width: 400px;">
-                    <div style="padding: 8px 12px; background: #e9ecef; border-bottom: 1px solid #dee2e6; display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleAttachment('${attachId}')">
+                <div class="attachment-item" style="background: var(--card-bg); border: 1px solid var(--subtle-border); border-radius: 4px; overflow: hidden; min-width: 200px; max-width: 400px;">
+                    <div style="padding: 8px 12px; background: var(--subtle-bg); border-bottom: 1px solid var(--subtle-border); display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleAttachment('${attachId}')">
                         <span style="font-weight: 500;">${icon} ${htmlEscape(att.name)}</span>
                         <span class="toggle-icon" style="font-size: 0.7em;">▶</span>
                     </div>
@@ -3161,7 +3266,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }).join('');
 
         return `
-            <div class="attachments-section" style="margin: 15px; padding: 12px; background: #f8f9fa; border-radius: 6px; border-left: 3px solid #17a2b8;">
+            <div class="attachments-section" style="margin: 15px; padding: 12px; background: var(--subtle-bg); border-radius: 6px; border-left: 3px solid #17a2b8;">
                 <div style="font-weight: 600; color: #17a2b8; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
                     📎 Attachments (${attachments.length})
                 </div>
@@ -3328,13 +3433,13 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             }
             
             .timeline-stat .stat-value {
-                color: var(--brand-color);
+                color: var(--brand-text);
                 font-weight: 700;
                 font-size: 1.2rem;
             }
             
             .timeline-chart-container {
-                background: white;
+                background: var(--card-bg);
                 border: 1px solid var(--border);
                 border-radius: 12px;
                 padding: 2rem;
@@ -3377,7 +3482,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             }
             
             .thread-details h4 {
-                color: var(--brand-color);
+                color: var(--brand-text);
                 margin-bottom: 1rem;
             }
             
@@ -3391,7 +3496,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 padding: 0.75rem;
                 border-radius: 6px;
                 border-left: 4px solid;
-                background: white;
+                background: var(--card-bg);
             }
             
             .timeline-scenario.passed { border-left-color: var(--success-color); }
@@ -3847,8 +3952,8 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 <p>
                     Generated by <strong>CS Playwright Test Automation Framework v2.0</strong> |
                     ${new Date().toLocaleString()} |
-                    <a href="#" onclick="window.print()" style="color: var(--brand-color); text-decoration: none;">🖨️ Print Report</a> |
-                    <a href="report-data.json" download style="color: var(--brand-color); text-decoration: none;">💾 Export JSON</a>
+                    <a href="#" onclick="window.print()" style="color: var(--brand-text); text-decoration: none;">🖨️ Print Report</a> |
+                    <a href="report-data.json" download style="color: var(--brand-text); text-decoration: none;">💾 Export JSON</a>
                 </p>
             </div>
         </footer>`;
@@ -3931,9 +4036,27 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             });
         });
 
+        // Re-render charts when the colour theme changes so canvas charts
+        // (which bake their palette at draw time) pick up dark/light colours.
+        window.addEventListener('cs-theme-changed', function() {
+            setTimeout(() => { try { initializeChartsForView(currentChartView); } catch(e) {} }, 60);
+        });
+        // Also react to system dark/light changes when in "auto" mode.
+        try {
+            if (window.matchMedia) {
+                window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
+                    if (!document.documentElement.hasAttribute('data-theme')) {
+                        setTimeout(() => { try { initializeChartsForView(currentChartView); } catch(e) {} }, 60);
+                    }
+                });
+            }
+        } catch(e) { /* ignore */ }
+
         // Initialize charts based on active view
+        let currentChartView = 'dashboard';
         function initializeChartsForView(viewName) {
             try {
+                currentChartView = viewName;
                 // Clear existing charts when switching views
                 Object.keys(charts).forEach(key => {
                     try { if (charts[key] && charts[key].destroy) charts[key].destroy(); } catch(e) {}
@@ -3992,7 +4115,15 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 'failed': '#ef4444',
                 'skipped': '#f59e0b'
             };
-            
+
+            // Theme-aware colours (canvas can't use CSS vars directly, so read
+            // them at draw time — this flips the timeline to dark correctly).
+            const _tcs = getComputedStyle(document.documentElement);
+            const tlSurface = _tcs.getPropertyValue('--card-bg').trim() || '#ffffff';
+            const tlBorder  = _tcs.getPropertyValue('--border').trim() || '#e5e7eb';
+            const tlText    = _tcs.getPropertyValue('--text-primary').trim() || '#1f2937';
+            const tlMuted   = _tcs.getPropertyValue('--text-secondary').trim() || '#6b7280';
+
             // Find min and max times
             let minTime = Infinity;
             let maxTime = -Infinity;
@@ -4025,24 +4156,24 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             // Clear canvas and add background
             ctx.clearRect(0, 0, chartWidth, chartHeight);
 
-            // Draw white background
-            ctx.fillStyle = '#ffffff';
+            // Draw themed background (flips to dark surface in dark mode)
+            ctx.fillStyle = tlSurface;
             ctx.fillRect(0, 0, chartWidth, chartHeight);
 
             // Draw border
-            ctx.strokeStyle = '#e5e7eb';
+            ctx.strokeStyle = tlBorder;
             ctx.lineWidth = 1;
             ctx.strokeRect(0, 0, chartWidth, chartHeight);
 
             // Draw chart title
-            ctx.fillStyle = '#1f2937';
+            ctx.fillStyle = tlText;
             ctx.font = 'bold 14px Arial';
             ctx.textAlign = 'center';
             ctx.fillText('Test Execution Timeline', chartWidth / 2, 15);
 
             // Check if we have valid time range
             if (!isFinite(minTime) || !isFinite(maxTime) || totalDuration <= 0) {
-                ctx.fillStyle = '#6b7280';
+                ctx.fillStyle = tlMuted;
                 ctx.font = '14px Arial';
                 ctx.textAlign = 'center';
                 ctx.fillText('No timeline data available', chartWidth / 2, chartHeight / 2);
@@ -4054,7 +4185,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                 const y = topMargin + threadIndex * (barHeight + barGap);
 
                 // Draw thread label with better font
-                ctx.fillStyle = '#333';
+                ctx.fillStyle = tlText;
                 ctx.font = '11px Arial';
                 ctx.textAlign = 'right';
                 // Use actual worker ID from workerIds array
@@ -4106,25 +4237,25 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             });
             
             // Draw time axis
-            ctx.strokeStyle = '#ddd';
+            ctx.strokeStyle = tlBorder;
             ctx.beginPath();
             ctx.moveTo(leftMargin, chartHeight - 30);
             ctx.lineTo(chartWidth - rightMargin, chartHeight - 30);
             ctx.stroke();
-            
+
             // Draw time labels
             const timePoints = 5;
             for (let i = 0; i <= timePoints; i++) {
                 const x = leftMargin + (i / timePoints) * (chartWidth - leftMargin - rightMargin);
                 const time = minTime + (i / timePoints) * totalDuration;
-                
-                ctx.strokeStyle = '#ddd';
+
+                ctx.strokeStyle = tlBorder;
                 ctx.beginPath();
                 ctx.moveTo(x, chartHeight - 35);
                 ctx.lineTo(x, chartHeight - 25);
                 ctx.stroke();
-                
-                ctx.fillStyle = '#666';
+
+                ctx.fillStyle = tlMuted;
                 ctx.font = '10px Arial';
                 ctx.textAlign = 'center';
                 ctx.fillText(new Date(time).toLocaleTimeString(), x, chartHeight - 10);
@@ -4456,7 +4587,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                         datasets: [{
                             label: 'Usage Count',
                             data: tagData.map(t => t.count),
-                            backgroundColor: '${this.brandColor}',
+                            backgroundColor: (getComputedStyle(document.documentElement).getPropertyValue('--chart-bar').trim() || '${this.brandColor}'),
                             borderRadius: 4
                         }]
                     },

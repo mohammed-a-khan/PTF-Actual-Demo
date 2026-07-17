@@ -54,18 +54,29 @@ export interface DarkThemeOverrides {
     border: string;
     shadow: string;
     shadowLg: string;
+    /** Brand colour when used as TEXT — a light tint so it stays readable
+     *  on the dark surface (the base --brand-color, e.g. #4d004d, is far too
+     *  dark to read on #0f0f12). */
+    brandText: string;
+    /** Page backdrop gradient in dark mode (replaces the light blue one). */
+    bodyGradient: string;
     healthBands: ReportThemeTokens['healthBands'];
 }
 
 export const CS_DEFAULT_DARK_OVERRIDES: DarkThemeOverrides = {
-    background: '#0f0f12',
-    surface: '#1a1a1f',
-    surfaceHover: '#26262d',
-    textPrimary: '#f3f4f6',
-    textSecondary: '#9ca3af',
-    border: '#374151',
-    shadow: 'rgba(0, 0, 0, 0.35)',
-    shadowLg: 'rgba(0, 0, 0, 0.6)',
+    // Professional slate-based dark palette. Surfaces stay deep so cards read
+    // as elevated; text and borders are deliberately BRIGHT (not the dull
+    // grays of the first pass) so nothing looks washed out.
+    background: '#0f1117',
+    surface: '#1c2130',
+    surfaceHover: '#272e40',
+    textPrimary: '#f8fafc',      // crisp near-white (was #f3f4f6)
+    textSecondary: '#cbd5e1',    // bright slate-300 (was dull #9ca3af)
+    border: '#4b5563',           // visible base border (was faint #374151)
+    shadow: 'rgba(0, 0, 0, 0.45)',
+    shadowLg: 'rgba(0, 0, 0, 0.7)',
+    brandText: '#e0a3e0',        // slightly brighter readable brand tint
+    bodyGradient: 'linear-gradient(135deg, #0b0d13 0%, #161b26 100%)',
     // Health-band pairs need dark equivalents: the pastel light-mode
     // backgrounds (#dcfce7, #fef9c3, …) become unreadable on a dark
     // surface, so we pair muted dark bg with a brighter fg.
@@ -116,7 +127,25 @@ export function generateDarkModeCSS(dark: DarkThemeOverrides = CS_DEFAULT_DARK_O
         --health-toxic-bg: ${dark.healthBands.toxic.bg};
         --health-toxic-fg: ${dark.healthBands.toxic.fg};
         --health-new-bg: ${dark.healthBands.new.bg};
-        --health-new-fg: ${dark.healthBands.new.fg};`;
+        --health-new-fg: ${dark.healthBands.new.fg};
+        /* Semantic surface/brand tokens — dark equivalents of the light
+           defaults declared in the report's :root. These flip the many
+           formerly-hardcoded 'white' / '#f8f9fa' surfaces and make the
+           brand colour readable when used as TEXT on a dark background. */
+        --card-bg: ${dark.surface};
+        --subtle-bg: ${dark.surfaceHover};
+        --code-bg: #12161f;
+        --subtle-border: ${dark.border};
+        --muted-text: ${dark.textSecondary};
+        --brand-text: ${dark.brandText};
+        --body-gradient: ${dark.bodyGradient};
+        /* Bright, clearly-visible outline for every card/section in dark mode
+           (light mode leaves cards borderless, relying on shadow). NOT the
+           brand colour — a neutral bright slate so cards read as cards. */
+        --card-border: #5b6577;
+        /* Chart series colour — brand purple is too dark on the dark canvas,
+           so bars/lines use a bright cyan-blue in dark mode. */
+        --chart-bar: #38bdf8;`;
 
     return `
     /* v1.42.0 — Phase 4a dark mode */
@@ -225,6 +254,11 @@ export function generateThemeToggleJS(): string {
                 } else {
                     root.setAttribute('data-theme', mode);
                 }
+                // Notify canvas charts (which bake colours at draw time) so
+                // they can re-render with the new theme's palette.
+                try {
+                    window.dispatchEvent(new CustomEvent('cs-theme-changed', { detail: { mode: mode } }));
+                } catch (e) { /* older engines: ignore */ }
                 var btn = document.getElementById('theme-toggle');
                 if (btn) {
                     var icon = btn.querySelector('.theme-toggle-icon');

@@ -397,6 +397,28 @@ export function generateFlakyCSS(): string {
         }
 
         .health-new-row { opacity: 0.65; }
+
+        /* Dark-mode overrides — this section hardcodes a light slate palette
+           that the token system can't reach, so it stayed light while the
+           rest of the report darkened. Remap the neutral surfaces/text to
+           the theme tokens for both manual and system dark. */
+        ${flakyDarkOverrides('[data-theme="dark"]')}
+        @media (prefers-color-scheme: dark) {
+            ${flakyDarkOverrides(':root:not([data-theme="light"])')}
+        }
+    `;
+}
+
+/** Repaint this section's hardcoded slate colours to theme tokens. */
+function flakyDarkOverrides(scope: string): string {
+    return `
+        ${scope} .stability-section h3 { color: var(--text-primary); }
+        ${scope} .stability-subtitle { color: var(--text-secondary); }
+        ${scope} .score-legend { background: var(--surface); border-color: var(--border); }
+        ${scope} .legend-item { color: var(--text-secondary); }
+        ${scope} .metric-card-flaky { background: var(--surface); border-color: var(--border); }
+        ${scope} .metric-card-flaky .metric-label { color: var(--text-secondary); }
+        ${scope} .failure-cat-pill { background: var(--surface-hover); border-color: var(--border); color: var(--text-primary); }
     `;
 }
 

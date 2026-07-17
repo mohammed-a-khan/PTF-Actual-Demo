@@ -36,10 +36,73 @@ interface AzureDevOpsApiResponse {
 class AzureDevOpsClient {
     private config: AzureDevOpsConfig;
     private baseUrl: string;
+    private proxyAgent: https.Agent | undefined;
 
     constructor(config: AzureDevOpsConfig) {
         this.config = config;
         this.baseUrl = config.baseUrl || 'https://dev.azure.com';
+        this.proxyAgent = AzureDevOpsClient.resolveProxyAgent();
+    }
+
+    /**
+     * Build an HTTP(S)/SOCKS proxy agent from the same `ADO_PROXY_*` config
+     * the framework's CSADOClient honours, so ADO calls work behind a
+     * corporate proxy. Returns undefined when proxying is disabled or the
+     * host is unresolved. Failures are swallowed — a missing proxy agent
+     * just means a direct connection is attempted.
+     */
+    private static resolveProxyAgent(): https.Agent | undefined {
+        try {
+            const cfg = CSConfigurationManager.getInstance();
+            const enabled = cfg.getBoolean
+                ? cfg.getBoolean('ADO_PROXY_ENABLED', false)
+                : String(cfg.get('ADO_PROXY_ENABLED', 'false')).toLowerCase() === 'true';
+            // Also honour standard env proxies when ADO_PROXY_* is unset.
+            const envProxy =
+                process.env.HTTPS_PROXY ||
+                process.env.https_proxy ||
+                process.env.HTTP_PROXY ||
+                process.env.http_proxy;
+            if (!enabled && !envProxy) return undefined;
+
+            let proxyUrl: string;
+            if (enabled) {
+                const protocol = cfg.get('ADO_PROXY_PROTOCOL', 'http');
+                const host = cfg.get('ADO_PROXY_HOST', '');
+                const port = cfg.getNumber ? cfg.getNumber('ADO_PROXY_PORT', 8080) : 8080;
+                if (!host) return envProxy ? AzureDevOpsClient.agentFor(envProxy) : undefined;
+                const authRequired = cfg.getBoolean
+                    ? cfg.getBoolean('ADO_PROXY_AUTH_REQUIRED', false)
+                    : false;
+                let auth = '';
+                if (authRequired) {
+                    const user = cfg.get('ADO_PROXY_USERNAME', '');
+                    const pass = cfg.get('ADO_PROXY_PASSWORD', '');
+                    if (user && pass) auth = `${encodeURIComponent(user)}:${encodeURIComponent(pass)}@`;
+                }
+                proxyUrl = `${protocol}://${auth}${host}:${port}`;
+            } else {
+                proxyUrl = envProxy as string;
+            }
+            return AzureDevOpsClient.agentFor(proxyUrl);
+        } catch {
+            return undefined;
+        }
+    }
+
+    private static agentFor(proxyUrl: string): https.Agent | undefined {
+        try {
+            if (/^socks/i.test(proxyUrl)) {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                const { SocksProxyAgent } = require('socks-proxy-agent');
+                return new SocksProxyAgent(proxyUrl) as unknown as https.Agent;
+            }
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { HttpsProxyAgent } = require('https-proxy-agent');
+            return new HttpsProxyAgent(proxyUrl) as unknown as https.Agent;
+        } catch {
+            return undefined;
+        }
     }
 
     /**
@@ -68,6 +131,9 @@ class AzureDevOpsClient {
                 'Content-Type': contentType,
                 'Authorization': `Basic ${Buffer.from(`:${this.config.personalAccessToken}`).toString('base64')}`,
             },
+            // Route through the corporate proxy when ADO_PROXY_* / HTTPS_PROXY
+            // is configured (matches the framework's CSADOClient behaviour).
+            ...(this.proxyAgent ? { agent: this.proxyAgent } : {}),
         };
 
         return new Promise((resolve, reject) => {
