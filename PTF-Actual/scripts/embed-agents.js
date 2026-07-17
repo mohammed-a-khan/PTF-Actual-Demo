@@ -17,34 +17,13 @@ const path = require('path');
 const agentsDir = path.join(__dirname, '..', 'src', 'mcp', 'agents');
 const outputFile = path.join(agentsDir, 'embeddedAgentContent.ts');
 const agentNames = [
-    // Legacy standalone agents (user-invocable)
-    'planner',
-    'generator',
-    'healer',
-    'assistant',
-    // Pipeline orchestrator (user-invocable)
-    'cs-playwright',
-    // CS-AI-Auto-Assist orchestrator (user-invocable, single-prompt)
+    // The single user-facing agent. The agentic redesign moved all
+    // orchestration server-side (the cs_ai_auto_assist + csaa_* meta-tools),
+    // so the legacy multi-agent set (planner/generator/healer/assistant/
+    // cs-playwright/cs-ai-auto-assist-v2 and their subagents) is retired and
+    // no longer embedded. Stale copies previously materialized into a user's
+    // repo are still swept on upgrade via RETIRED_AGENTS in generateAgents.ts.
     'cs-ai-auto-assist',
-    // CS-AI-Auto-Assist v2 — slim orchestrator that delegates to v1.39 sub-agents
-    'cs-ai-auto-assist-v2',
-    // Pipeline subagents (user-invocable: false, delegated via runSubagent)
-    'analyzer',
-    'data-ingestor',
-    'db-migrator',
-    'locator-reconciler',
-    'pipeline-generator',
-    'pipeline-healer',
-    // Agent platform subagent (user-invocable: false, delegated by cs_test_agent)
-    'clarification',
-    // CS-AI-Auto-Assist v1.39 sub-agents (user-invocable: false, called by orchestrator via `agent` tool)
-    'cs-scope-mapper',
-    'cs-bdd-author',
-    'cs-artifact-synthesizer',
-    'cs-vault-writer',
-    'cs-resilience-engineer',
-    'cs-trust-arbiter',
-    'cs-preflight-auditor',
 ];
 
 // kebab-case filename → camelCase TS identifier

@@ -14,7 +14,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { AGENT_CONTENT, AGENT_NAMES } from './embeddedAgentContent';
+import { AGENT_CONTENT } from './embeddedAgentContent';
 import { SKILL_CONTENT, SKILL_NAMES } from '../skills/embeddedSkillContent';
 
 // ============================================================================
@@ -34,11 +34,41 @@ interface AgentDefinition {
 type LoopType = 'vscode' | 'jetbrains' | 'claude' | 'opencode';
 
 /**
- * v3 (agentic redesign): the ONLY user-facing agent. Every other embedded
- * agent definition is legacy — kept in AGENT_CONTENT for the classic server
- * profile's documentation, but no longer materialized into consumer repos.
+ * v3 (agentic redesign): the ONLY user-facing agent that is materialized into
+ * a consumer repo. All orchestration is server-side (cs_ai_auto_assist +
+ * csaa_* meta-tools), so there are no other agents.
  */
 const GENERATED_AGENTS: readonly string[] = ['cs-ai-auto-assist'];
+
+/**
+ * Names of the retired legacy agents (the pre-redesign multi-agent set). Their
+ * .md sources and embedded content are gone, but an upgrade from an older
+ * install must still SWEEP any stale `<name>.chatmode.md` these versions
+ * materialized into a consumer's repo. This is a names-only list — it carries
+ * no content and nothing is generated from it; it only drives deletion.
+ */
+const RETIRED_AGENTS: readonly string[] = [
+    'planner',
+    'generator',
+    'healer',
+    'assistant',
+    'cs-playwright',
+    'cs-ai-auto-assist-v2',
+    'analyzer',
+    'data-ingestor',
+    'db-migrator',
+    'locator-reconciler',
+    'pipeline-generator',
+    'pipeline-healer',
+    'clarification',
+    'cs-scope-mapper',
+    'cs-bdd-author',
+    'cs-artifact-synthesizer',
+    'cs-vault-writer',
+    'cs-resilience-engineer',
+    'cs-trust-arbiter',
+    'cs-preflight-auditor',
+];
 
 // ============================================================================
 // Simple YAML Frontmatter Parser (zero-dependency)
@@ -397,10 +427,10 @@ export function generateAgents(
     }
 
     // Delete only OUR existing agent files before creating new ones.
-    // AGENT_NAMES (every embedded agent, including the retired multi-agent
-    // set) drives cleanup so upgrading removes stale v1/v2 agents; only
-    // GENERATED_AGENTS is materialized.
-    const agents: readonly string[] = AGENT_NAMES;
+    // The generated agent PLUS every retired legacy name drives cleanup, so
+    // upgrading from an older multi-agent install removes stale v1/v2 agents;
+    // only GENERATED_AGENTS is materialized afterwards.
+    const agents: readonly string[] = [...GENERATED_AGENTS, ...RETIRED_AGENTS];
     const csAgentPrefix = 'CS '; // Our VS Code .agent.md title prefix ("CS Playwright …", "CS AI …")
 
     try {
