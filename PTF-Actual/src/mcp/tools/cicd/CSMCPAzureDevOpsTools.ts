@@ -50,6 +50,73 @@ class AzureDevOpsClient {
     }
 
     /**
+     * Org-scoped request (no project segment) — for core APIs like
+     * `/{org}/_apis/projects` and `/{org}/_apis/projects/{id}/teams`.
+     */
+    async orgRequest(
+        method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+        path: string,
+        body?: unknown,
+        apiVersion: string = '7.1',
+    ): Promise<AzureDevOpsApiResponse> {
+        const url = new URL(`${this.baseUrl}/${this.config.organization}/_apis/${path}`);
+        url.searchParams.set('api-version', apiVersion);
+        return this.execute(url, method, body, 'application/json');
+    }
+
+    /**
+     * Search request — Azure DevOps search lives on a different host
+     * (`almsearch.dev.azure.com`). Code / work-item / wiki search POST here.
+     */
+    async searchRequest(
+        path: string,
+        body: unknown,
+        apiVersion: string = '7.1',
+    ): Promise<AzureDevOpsApiResponse> {
+        const url = new URL(`https://almsearch.dev.azure.com/${this.config.organization}/${this.config.project}/_apis/search/${path}`);
+        url.searchParams.set('api-version', apiVersion);
+        return this.execute(url, 'POST', body, 'application/json');
+    }
+
+    /** Shared proxy-aware HTTP executor used by orgRequest / searchRequest. */
+    private execute(
+        url: URL,
+        method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
+        body?: unknown,
+        contentType: string = 'application/json',
+    ): Promise<AzureDevOpsApiResponse> {
+        const options: https.RequestOptions = {
+            hostname: url.hostname,
+            port: url.port || 443,
+            path: `${url.pathname}${url.search}`,
+            method,
+            headers: {
+                'Content-Type': contentType,
+                'Authorization': `Basic ${Buffer.from(`:${this.config.personalAccessToken}`).toString('base64')}`,
+            },
+            ...(this.proxyAgent ? { agent: this.proxyAgent } : {}),
+        };
+
+        return new Promise((resolve, reject) => {
+            const req = https.request(options, (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
+                res.on('end', () => {
+                    try {
+                        const jsonData = data ? JSON.parse(data) : {};
+                        resolve({ statusCode: res.statusCode || 500, data: jsonData });
+                    } catch {
+                        resolve({ statusCode: res.statusCode || 500, data: { raw: data } });
+                    }
+                });
+            });
+            req.on('error', (error) => reject(error));
+            if (body) req.write(JSON.stringify(body));
+            req.end();
+        });
+    }
+
+    /**
      * Build an HTTP(S)/SOCKS proxy agent from the same `ADO_PROXY_*` config
      * the framework's CSADOClient honours, so ADO calls work behind a
      * corporate proxy. Returns undefined when proxying is disabled or the
