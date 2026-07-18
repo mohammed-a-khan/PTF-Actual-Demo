@@ -1321,7 +1321,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         }
 
         .step-tab.active {
-            border-bottom-color: var(--brand-color);
+            border-bottom-color: var(--brand-text);
             color: var(--brand-text);
         }
 
@@ -3200,7 +3200,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
                 errorLogs.forEach(log => {
                     const cleanLog = log.replace(/\x1b\[[0-9;]*m/g, '');
-                    errorContent += `<div class="log-entry error" style="padding: 0.5rem; margin: 0.25rem 0; background: #fef2f2; border-left: 3px solid #ef4444;">${cleanLog}</div>`;
+                    errorContent += `<div class="log-entry error" style="padding: 0.5rem; margin: 0.25rem 0; background: #fef2f2; border-left: 3px solid #ef4444; color: #991b1b;">${cleanLog}</div>`;
                 });
 
                 errorContent += `
@@ -3218,7 +3218,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
         return `
             <style>
                 .error-details-section { margin-bottom: 1.5rem; }
-                .error-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; font-weight: 600; color: #374151; }
+                .error-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; font-weight: 600; color: var(--text-primary); }
                 .error-icon { font-size: 1.25rem; }
                 .error-title { font-size: 1rem; }
             </style>
@@ -4764,18 +4764,20 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
             const stepDetails = tabElement.closest('.step-details');
             if (!stepDetails) return;
 
-            // Remove active class and styling from all tabs in this step
+            // Remove active class from all tabs in this step. Clear any inline
+            // colour/border so the theme-aware .step-tab / .step-tab.active CSS
+            // governs — hardcoded colours here made the tabs invisible in dark mode.
             stepDetails.querySelectorAll('.step-tab').forEach(tab => {
                 tab.classList.remove('active');
-                // Reset inline border style for spec runner tabs
-                tab.style.borderBottom = '2px solid transparent';
-                tab.style.color = '#495057';
+                tab.style.borderBottom = '';
+                tab.style.color = '';
             });
 
-            // Add active class and styling to clicked tab
+            // Activate the clicked tab — its colour + underline come from the
+            // CSS tokens (--brand-text), which are readable in both themes.
             tabElement.classList.add('active');
-            tabElement.style.borderBottom = '2px solid #93186C';
-            tabElement.style.color = '#93186C';
+            tabElement.style.borderBottom = '';
+            tabElement.style.color = '';
 
             // Hide all tab panes in this step
             stepDetails.querySelectorAll('.step-tab-pane').forEach(pane => {
