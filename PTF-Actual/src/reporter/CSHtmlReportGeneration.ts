@@ -1219,7 +1219,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
 
         .feature-header {
             background: var(--card-bg);
-            color: #333;
+            color: var(--text-primary);
             border: 1px solid var(--subtle-border);
             padding: 1rem 1.5rem;
             cursor: pointer;
@@ -2385,7 +2385,7 @@ ${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
                                             <thead>
                                                 <tr style="background: var(--subtle-bg);">
                                                     ${filteredHeaders.map((header: string) => `
-                                                        <th style="padding: 8px 12px; text-align: left; border: 1px solid var(--subtle-border); font-weight: 600; background: #d1f2eb; white-space: nowrap;">${htmlEscape(header)} ✓</th>
+                                                        <th style="padding: 8px 12px; text-align: left; border: 1px solid var(--subtle-border); font-weight: 600; background: #d1f2eb; color: #155724; white-space: nowrap;">${htmlEscape(header)} ✓</th>
                                                     `).join('')}
                                                 </tr>
                                             </thead>
