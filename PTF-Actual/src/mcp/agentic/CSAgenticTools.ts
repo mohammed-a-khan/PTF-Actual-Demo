@@ -21,7 +21,7 @@ import { MCPToolContext, MCPToolDefinition, MCPToolResult } from '../types/CSMCP
 
 import { CSSDLCCatalog } from './CSSDLCCatalog';
 import { CSSessionStore } from './CSSessionStore';
-import { CSGuardrailEngine } from './CSGuardrailEngine';
+import { CSGuardrailEngine, GUARDRAIL_LIMITS } from './CSGuardrailEngine';
 import { CSInteract } from './CSInteract';
 import { CSPlaybookEngine } from './CSPlaybookEngine';
 import { CSToolPacks } from './CSToolPacks';
@@ -67,6 +67,24 @@ function loadSession(
     const id = String(sessionId ?? '').trim();
     if (!id) return null;
     return CSSessionStore.load(id, workspaceRoot(context));
+}
+
+/**
+ * Re-take this session's pack holds (idempotent per owner). Called on every
+ * session-loading path — resume, csaa_advance, csaa_submit — so that after a
+ * server restart the natural next call finds its pack tools registered again,
+ * not just the cs_ai_auto_assist resume branch.
+ */
+function ensureSessionPacks(session: SessionRecord, packsRef: CSToolPacks): void {
+    if (session.state === 'CANCELLED' || session.state === 'COMPLETE') return;
+    const modeDef = CSSDLCCatalog.get(session.mode);
+    if (!modeDef) return;
+    const needed = new Set<string>([
+        ...modeDef.toolPacks,
+        ...(session.activatedPacks ?? []),
+    ]);
+    for (const p of needed) packsRef.activate(p, session.sessionId);
+    if (session.packsReleased && needed.size > 0) session.packsReleased = false;
 }
 
 const NO_SESSION: AgenticToolResult = {
@@ -212,6 +230,15 @@ const frontDoorTool = defineTool()
             meter(session, params);
 
             if (action === 'cancel') {
+                if (session.state === 'CANCELLED' || session.state === 'COMPLETE') {
+                    return jsonResult({
+                        ok: true,
+                        sessionId: session.sessionId,
+                        state: session.state,
+                        action: 'done',
+                        note: `session already ${session.state}`,
+                    });
+                }
                 CSSessionStore.transition(session, 'CANCELLED', 'cancelled by user');
                 const modeDef = CSSDLCCatalog.get(session.mode);
                 if (modeDef) engineRef.releasePacks(session, modeDef.toolPacks);
@@ -225,23 +252,37 @@ const frontDoorTool = defineTool()
             }
 
             if (action === 'extend_budget') {
-                CSGuardrailEngine.extendBudget(session);
+                // Terminal sessions are not resurrectable — an extend on a
+                // cancelled session would re-run stages whose packs are gone.
+                if (session.state === 'CANCELLED' || session.state === 'COMPLETE') {
+                    return jsonResult({
+                        ok: false,
+                        sessionId: session.sessionId,
+                        state: session.state,
+                        action: 'stop',
+                        blockedReason: `Session is ${session.state} — its budget cannot be extended. Start a new session.`,
+                    });
+                }
+                const extended = CSGuardrailEngine.extendBudget(session);
+                if (!extended.ok) {
+                    return jsonResult({
+                        ok: false,
+                        sessionId: session.sessionId,
+                        state: session.state,
+                        action: 'stop',
+                        blockedReason: extended.reason,
+                    });
+                }
                 session.blockedReason = undefined;
+                ensureSessionPacks(session, packsRef);
                 CSSessionStore.transition(session, 'ACTIVE', 'budget extended by user');
                 return jsonResult(await engineRef.advance(session, context, root));
             }
 
-            // resume (explicit or implicit via sessionId). Re-activate packs
-            // idempotently — repeated resumes must not inflate ref counts.
-            const modeDef = CSSDLCCatalog.get(session.mode);
-            if (modeDef && !session.packsReleased) {
-                const needed = session.activatedPacks?.length
-                    ? session.activatedPacks
-                    : modeDef.toolPacks;
-                for (const p of needed) {
-                    if (!packsRef.isActive(p)) packsRef.activate(p);
-                }
-            }
+            // resume (explicit or implicit via sessionId). Owner-attributed
+            // activation is idempotent per session, so repeated resumes are
+            // safe and a post-restart resume reliably re-takes its packs.
+            ensureSessionPacks(session, packsRef);
             CSSessionStore.save(session);
             return jsonResult(engineRef.reEmit(session));
         }
@@ -337,13 +378,42 @@ const advanceTool = defineTool()
     .objectParam('report', 'Completion report for the outstanding handoff.')
     .objectParam('answers', 'Answers for the outstanding question, keyed by field id.')
     .handler(async (params, context): Promise<MCPToolResult> => {
-        const { engine: engineRef } = requireEngine();
+        const { engine: engineRef, packs: packsRef } = requireEngine();
         const session = loadSession(params.sessionId, context);
         if (!session) return jsonResult(NO_SESSION);
         meter(session, params);
+        ensureSessionPacks(session, packsRef);
 
         const report = params.report as Record<string, unknown> | undefined;
         const answers = params.answers as Record<string, string | number | boolean> | undefined;
+
+        // Validate answers against the outstanding question's contract —
+        // enum answers must be one of the declared options, required fields
+        // must be present. Off-menu strings would otherwise flow raw into
+        // stage logic (e.g. an arbitrary suiteId).
+        if (session.state === 'AWAITING_ANSWER' && answers && session.pendingQuestion) {
+            const problems: string[] = [];
+            for (const f of session.pendingQuestion.fields) {
+                const v = answers[f.id];
+                if (v === undefined || v === null || v === '') {
+                    if (f.required && f.default === undefined) problems.push(`${f.id}: required`);
+                    continue;
+                }
+                if (f.type === 'enum' && f.options && !f.options.includes(String(v))) {
+                    problems.push(`${f.id}: "${String(v)}" must be one of ${f.options.join(', ')}`);
+                }
+            }
+            if (problems.length > 0) {
+                return jsonResult({
+                    ok: false,
+                    sessionId: session.sessionId,
+                    state: session.state,
+                    action: 'ask_user',
+                    question: session.pendingQuestion,
+                    blockedReason: `Answers failed validation: ${problems.join('; ')}`,
+                });
+            }
+        }
 
         if (session.state === 'AWAITING_HANDOFF' && report && session.pendingHandoff) {
             const gate = CSGuardrailEngine.validateSubmission(
@@ -390,14 +460,46 @@ const submitTool = defineTool()
     .booleanParam('part', 'True when this call carries a non-final chunk.', { default: false })
     .booleanParam('final', 'True when the buffered payload is complete.', { default: true })
     .handler(async (params, context): Promise<MCPToolResult> => {
-        const { engine: engineRef } = requireEngine();
+        const { engine: engineRef, packs: packsRef } = requireEngine();
         const session = loadSession(params.sessionId, context);
         if (!session) return jsonResult(NO_SESSION);
         meter(session, params);
+        ensureSessionPacks(session, packsRef);
 
         const chunk = String(params.payload ?? '');
         const isPart = params.part === true;
         const isFinal = params.final !== false && !isPart;
+
+        // Chunk-path guards: the buffer is persisted into session.json, so an
+        // unbounded stream would balloon every save; and buffering must not
+        // become a budget-free channel.
+        const projected = (session.submitBuffer?.length ?? 0) + chunk.length;
+        if (projected > GUARDRAIL_LIMITS.maxSubmitBufferChars) {
+            session.submitBuffer = undefined;
+            CSSessionStore.save(session);
+            return jsonResult({
+                ok: false,
+                sessionId: session.sessionId,
+                state: session.state,
+                action: 'fulfil_envelope',
+                envelope: session.pendingEnvelope,
+                blockedReason:
+                    `Chunked payload exceeded ${GUARDRAIL_LIMITS.maxSubmitBufferChars} chars — buffer discarded. ` +
+                    'Produce a SMALLER payload that still satisfies the schema (summarize, do not enumerate).',
+            });
+        }
+        const budget = CSGuardrailEngine.checkBudget(session);
+        if (!budget.ok) {
+            session.submitBuffer = undefined;
+            CSSessionStore.save(session);
+            return jsonResult({
+                ok: false,
+                sessionId: session.sessionId,
+                state: session.state,
+                action: 'stop',
+                blockedReason: budget.reason,
+            });
+        }
 
         session.submitBuffer = (session.submitBuffer ?? '') + chunk;
 
@@ -421,6 +523,17 @@ const submitTool = defineTool()
         } catch (error) {
             session.submitRetries += 1;
             CSSessionStore.save(session);
+            // Same cap as schema failures — malformed JSON must not loop
+            // until the token budget drains.
+            if (session.submitRetries >= GUARDRAIL_LIMITS.maxSubmitRetries) {
+                return jsonResult({
+                    ok: false,
+                    sessionId: session.sessionId,
+                    state: session.state,
+                    action: 'stop',
+                    blockedReason: `Payload was invalid JSON ${session.submitRetries} times (max ${GUARDRAIL_LIMITS.maxSubmitRetries}) — session needs human review.`,
+                });
+            }
             return jsonResult({
                 ok: false,
                 sessionId: session.sessionId,
@@ -504,7 +617,10 @@ const toolpackTool = defineTool()
         const pack = String(params.pack ?? '').trim();
         try {
             if (action === 'activate') {
-                const result = packsRef.activate(pack);
+                // Attributed to the manual pseudo-owner so an explicit
+                // release can undo it — it can never pin a pack forever
+                // against session lifecycle, nor free a session's hold.
+                const result = packsRef.activate(pack, CSToolPacks.MANUAL_OWNER);
                 return jsonResult({
                     ok: true,
                     action: 'advance',
@@ -513,11 +629,17 @@ const toolpackTool = defineTool()
                         : `pack "${pack}" activated: ${result.activated.length} tools now available`,
                 } as unknown as Record<string, unknown>);
             }
-            packsRef.release(pack);
+            // Release drops only the manual hold. Packs held by live sessions
+            // stay registered — report who still holds them.
+            packsRef.release(pack, CSToolPacks.MANUAL_OWNER);
+            const holders = packsRef.holdersOf(pack);
             return jsonResult({
                 ok: true,
                 action: 'advance',
-                note: `pack "${pack}" released`,
+                note:
+                    holders.length > 0
+                        ? `pack "${pack}" still held by session(s): ${holders.join(', ')} — tools remain registered`
+                        : `pack "${pack}" released`,
             } as unknown as Record<string, unknown>);
         } catch (error) {
             return jsonResult({

@@ -41,6 +41,9 @@ export interface AdvanceInputs {
 export class CSPlaybookEngine {
     private readonly packs: CSToolPacks;
 
+    /** Sessions with an advance in flight — rejects re-entrant calls that would double-execute stages. */
+    private static readonly busySessions = new Set<string>();
+
     constructor(packs: CSToolPacks) {
         this.packs = packs;
     }
@@ -61,6 +64,41 @@ export class CSPlaybookEngine {
         }
 
         let pending: AdvanceInputs = { ...inputs };
+
+        // Terminal-state guard: a CANCELLED or COMPLETE session must never be
+        // silently resurrected by a bare advance (its packs are released and
+        // its work is finished — resuming would re-run stages with side
+        // effects like ADO writes and test runs).
+        if (session.state === 'CANCELLED' || session.state === 'COMPLETE') {
+            return {
+                ok: false,
+                sessionId: session.sessionId,
+                mode: session.mode,
+                state: session.state,
+                action: 'stop',
+                blockedReason: `Session is ${session.state} and cannot be advanced. Start a new session for further work.`,
+                statusPath: CSSessionStore.statusPath(session),
+                usage: this.usageView(session),
+            };
+        }
+
+        // Re-entrancy guard: one advance at a time per session. A duplicated
+        // or retried request interleaving the auto-chain loop would
+        // double-execute stages with side effects.
+        if (CSPlaybookEngine.busySessions.has(session.sessionId)) {
+            return {
+                ok: false,
+                sessionId: session.sessionId,
+                mode: session.mode,
+                state: session.state,
+                action: 'stop',
+                blockedReason: 'Session is already processing a request — wait for it to return before calling again.',
+                statusPath: CSSessionStore.statusPath(session),
+                usage: this.usageView(session),
+            };
+        }
+        CSPlaybookEngine.busySessions.add(session.sessionId);
+        try {
 
         // Guard: an outstanding envelope/handoff/question must be satisfied
         // by the matching input, not skipped by a bare advance.
@@ -192,6 +230,9 @@ export class CSPlaybookEngine {
                     if (outcome.handoff?.packs?.length) {
                         this.activatePacksForSession(session, outcome.handoff.packs);
                     }
+                    // Handoff directives cross the model boundary too — meter
+                    // them like envelopes (instruction + schema are often KBs).
+                    CSGuardrailEngine.recordTokens(session, JSON.stringify(outcome.handoff ?? {}).length);
                     CSSessionStore.transition(session, 'AWAITING_HANDOFF');
                     return {
                         ok: true,
@@ -220,6 +261,9 @@ export class CSPlaybookEngine {
                     if (asked.kind === 'declined') {
                         return this.blocked(session, 'User declined the requested input.');
                     }
+                    // 'cancelled' (Esc / dialog dismissed) and 'unsupported'
+                    // both fall through to the text-question fallback below —
+                    // an accidental dismissal must re-ask, never hard-block.
                     session.pendingStageId = stageId;
                     session.pendingQuestion = question;
                     CSSessionStore.transition(session, 'AWAITING_ANSWER');
@@ -246,6 +290,9 @@ export class CSPlaybookEngine {
                     return this.done(session, outcome.reportPath, outcome.summary);
                 }
             }
+        }
+        } finally {
+            CSPlaybookEngine.busySessions.delete(session.sessionId);
         }
     }
 
@@ -363,13 +410,17 @@ export class CSPlaybookEngine {
     // Helpers
     // ------------------------------------------------------------------
 
-    /** Activate packs mid-session and record them for later release. */
+    /** Activate packs mid-session (owner = this session) and record them. */
     public activatePacksForSession(session: SessionRecord, packNames: string[]): void {
         const activated = new Set(session.activatedPacks ?? []);
         for (const name of packNames) {
-            if (activated.has(name)) continue;
-            const result = this.packs.activate(name);
+            // Always (re-)take the session's hold — activate() is idempotent
+            // per owner, and after a restart the in-memory owner table is
+            // empty even though session.activatedPacks says otherwise.
+            const wasNew = !activated.has(name);
+            const result = this.packs.activate(name, session.sessionId);
             activated.add(name);
+            if (!wasNew) continue;
             CSSessionStore.appendTimeline(session, {
                 event: 'pack_activated',
                 pack: name,
@@ -382,8 +433,13 @@ export class CSPlaybookEngine {
     public releasePacks(session: SessionRecord, packNames: string[]): void {
         if (session.packsReleased) return;
         const all = new Set([...packNames, ...(session.activatedPacks ?? [])]);
-        this.packs.releaseAll(Array.from(all));
+        // Owner-scoped: only THIS session's hold is dropped; packs another
+        // session still owns stay registered.
+        this.packs.releaseAll(Array.from(all), session.sessionId);
         session.packsReleased = true;
+        // Clear the bookkeeping so a later legitimate re-activation (e.g.
+        // budget-extended continuation) re-registers instead of skipping.
+        session.activatedPacks = [];
         CSSessionStore.save(session);
     }
 

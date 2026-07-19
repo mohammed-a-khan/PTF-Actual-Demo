@@ -20,7 +20,10 @@ export type FieldAnswers = Record<string, string | number | boolean>;
 
 export type InteractOutcome =
     | { kind: 'answers'; answers: FieldAnswers }
+    /** Explicit "No" — the user rejected the request itself. */
     | { kind: 'declined' }
+    /** Esc / dialog dismissed — NOT a refusal; callers should re-ask via the text fallback. */
+    | { kind: 'cancelled' }
     | { kind: 'unsupported' };
 
 export class CSInteract {
@@ -80,7 +83,10 @@ export class CSInteract {
                 }
                 return { kind: 'answers', answers };
             }
-            return { kind: 'declined' };
+            // Spec distinguishes decline (explicit "No") from cancel (Esc /
+            // dismissed). An accidental dismissal must not hard-block the
+            // session — callers re-ask via the text fallback on 'cancelled'.
+            return result.action === 'decline' ? { kind: 'declined' } : { kind: 'cancelled' };
         } catch {
             // Host advertised elicitation but failed the request — fall back.
             return { kind: 'unsupported' };

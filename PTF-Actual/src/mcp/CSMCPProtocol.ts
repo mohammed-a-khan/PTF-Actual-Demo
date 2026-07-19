@@ -23,7 +23,7 @@ import {
 // Types
 // ============================================================================
 
-export type MessageHandler = (request: JsonRpcRequest) => Promise<unknown>;
+export type MessageHandler = (request: JsonRpcRequest, abortSignal?: AbortSignal) => Promise<unknown>;
 export type NotificationHandler = (notification: JsonRpcNotification) => void;
 
 export interface PendingRequest {
@@ -45,6 +45,10 @@ export class CSMCPProtocol {
     private isRunning: boolean = false;
     private inputBuffer: string = '';
     private logLevel: MCPLogLevel = 'info';
+    /** In-flight client→server requests, so notifications/cancelled can abort them. */
+    private inflightRequests: Map<string | number, { controller: AbortController; cancelled: boolean }> = new Map();
+    /** The real stdout writer, captured before the stray-write guard replaces it. */
+    private rawStdoutWrite: typeof process.stdout.write | null = null;
 
     // Log level priorities for filtering
     private static readonly LOG_PRIORITIES: Record<MCPLogLevel, number> = {
@@ -79,6 +83,17 @@ export class CSMCPProtocol {
 
         this.isRunning = true;
 
+        // Guard the JSON-RPC channel: stdout belongs EXCLUSIVELY to the
+        // protocol. In-process tool runs (the bdd runner, CSReporter's
+        // ANSI-colored console.log output, stray library prints) would
+        // otherwise inject non-JSON lines into the stream and make strict
+        // hosts error out mid-session — losing all the credits already spent
+        // on it. We capture the real writer for writeMessage and reroute
+        // every other stdout write to stderr.
+        this.rawStdoutWrite = process.stdout.write.bind(process.stdout);
+        process.stdout.write = ((chunk: unknown, ...rest: unknown[]) =>
+            (process.stderr.write as unknown as (...a: unknown[]) => boolean)(chunk, ...rest)) as typeof process.stdout.write;
+
         // Create readline interface for stdin
         this.readline = createInterface({
             input: process.stdin,
@@ -88,6 +103,21 @@ export class CSMCPProtocol {
 
         this.readline.on('line', this.handleLine);
         this.readline.on('close', this.handleClose);
+
+        // Cancellation: abort the matching in-flight request so long tool runs
+        // (bdd execution, exploration) can stop burning compute, and so we
+        // know to suppress the response the spec says a cancelled request
+        // must not receive.
+        this.onNotification(MCP_NOTIFICATIONS.CANCELLED, (notification) => {
+            const requestId = notification.params?.requestId as string | number | undefined;
+            if (requestId === undefined) return;
+            const inflight = this.inflightRequests.get(requestId);
+            if (inflight) {
+                inflight.cancelled = true;
+                inflight.controller.abort();
+                this.log('debug', 'Request cancelled by client', { requestId });
+            }
+        });
 
         // Handle process signals for graceful shutdown
         process.on('SIGINT', () => this.stop());
@@ -105,6 +135,12 @@ export class CSMCPProtocol {
         }
 
         this.isRunning = false;
+
+        // Restore the real stdout writer.
+        if (this.rawStdoutWrite) {
+            process.stdout.write = this.rawStdoutWrite;
+            this.rawStdoutWrite = null;
+        }
 
         // Clear all pending requests
         for (const [id, pending] of this.pendingRequests) {
@@ -250,11 +286,12 @@ export class CSMCPProtocol {
     /**
      * Send a progress notification
      */
-    public sendProgress(progressToken: string | number, progress: number, total?: number): void {
+    public sendProgress(progressToken: string | number, progress: number, total?: number, message?: string): void {
         this.sendNotification(MCP_NOTIFICATIONS.PROGRESS, {
             progressToken,
             progress,
-            total,
+            ...(total !== undefined ? { total } : {}),
+            ...(message !== undefined ? { message } : {}),
         });
     }
 
@@ -397,12 +434,30 @@ export class CSMCPProtocol {
             return;
         }
 
+        const controller = new AbortController();
+        this.inflightRequests.set(request.id, { controller, cancelled: false });
         try {
-            const result = await this.messageHandler(request);
-            this.sendResponse(request.id, result);
+            const result = await this.messageHandler(request, controller.signal);
+            // A cancelled request MUST NOT receive a response (the client is
+            // no longer waiting and would treat it as a protocol violation).
+            if (!this.inflightRequests.get(request.id)?.cancelled) {
+                this.sendResponse(request.id, result);
+            }
         } catch (error) {
+            if (this.inflightRequests.get(request.id)?.cancelled) return;
             const errorMessage = error instanceof Error ? error.message : String(error);
-            this.sendResponse(request.id, undefined, CSMCPProtocol.internalError(errorMessage));
+            // Preserve JSON-RPC error codes thrown by handlers (e.g. -32601
+            // method-not-found, -32602 invalid-params) instead of flattening
+            // everything to -32603 — hosts feature-detect optional methods by
+            // this distinction.
+            const code = (error as { code?: unknown })?.code;
+            const rpcError =
+                typeof code === 'number'
+                    ? CSMCPProtocol.createError(code, errorMessage)
+                    : CSMCPProtocol.internalError(errorMessage);
+            this.sendResponse(request.id, undefined, rpcError);
+        } finally {
+            this.inflightRequests.delete(request.id);
         }
     }
 
@@ -463,7 +518,9 @@ export class CSMCPProtocol {
 
         try {
             const json = JSON.stringify(message);
-            process.stdout.write(json + '\n');
+            // Use the captured raw writer — process.stdout.write is rerouted
+            // to stderr while the server runs (see start()'s channel guard).
+            (this.rawStdoutWrite ?? process.stdout.write.bind(process.stdout))(json + '\n');
         } catch (error) {
             // Log to stderr if we can't write to stdout
             console.error('Failed to write message:', error);

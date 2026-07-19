@@ -80,7 +80,45 @@ export class CSSessionStore {
         CSSessionStore.CACHE.set(sessionId, record);
         CSSessionStore.save(record);
         CSSessionStore.appendTimeline(record, { event: 'session_created', mode, inputs });
+        // Opportunistic hygiene: session folders otherwise accumulate forever.
+        CSSessionStore.pruneExpired(workspaceRoot);
         return record;
+    }
+
+    /**
+     * Delete COMPLETE/CANCELLED session folders older than the retention
+     * window (AGENTIC_SESSION_RETENTION_DAYS, default 14). Active, blocked and
+     * awaiting sessions are NEVER pruned regardless of age. Best-effort — a
+     * failed delete never breaks session creation.
+     */
+    public static pruneExpired(workspaceRoot: string): number {
+        const days = Number(process.env.AGENTIC_SESSION_RETENTION_DAYS ?? '14');
+        if (!Number.isFinite(days) || days <= 0) return 0;
+        const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+        const root = path.join(workspaceRoot, ROOT_DIR_NAME);
+        let pruned = 0;
+        try {
+            if (!fs.existsSync(root)) return 0;
+            for (const dir of fs.readdirSync(root)) {
+                const folder = path.join(root, dir);
+                const file = path.join(folder, 'session.json');
+                try {
+                    if (!fs.existsSync(file)) continue; // not a session dir (e.g. correction-memory.jsonl)
+                    const rec = JSON.parse(fs.readFileSync(file, 'utf-8')) as SessionRecord;
+                    const terminal = rec.state === 'COMPLETE' || rec.state === 'CANCELLED';
+                    if (!terminal) continue;
+                    if (new Date(rec.updatedAt).getTime() >= cutoff) continue;
+                    fs.rmSync(folder, { recursive: true, force: true });
+                    CSSessionStore.CACHE.delete(rec.sessionId);
+                    pruned++;
+                } catch {
+                    /* skip unreadable/undeletable entries */
+                }
+            }
+        } catch {
+            /* best-effort */
+        }
+        return pruned;
     }
 
     /** Load a session from cache or disk. Returns null when not found. */
@@ -98,8 +136,15 @@ export class CSSessionStore {
         if (!fs.existsSync(file)) return null;
         try {
             const record = JSON.parse(fs.readFileSync(file, 'utf-8')) as SessionRecord;
-            // Folder may have been produced on another machine — re-anchor.
+            // Folder may have been produced on another machine — re-anchor
+            // the folder AND every recorded artifact path under it.
+            const oldFolder = record.folder;
             record.folder = path.join(root, match);
+            if (oldFolder && oldFolder !== record.folder && Array.isArray(record.artifacts)) {
+                record.artifacts = record.artifacts.map((a) =>
+                    a.startsWith(oldFolder) ? path.join(record.folder, path.relative(oldFolder, a)) : a,
+                );
+            }
             // Fresh active period: the wall-clock budget measures active
             // work, not elapsed calendar time between resumes.
             record.activeSince = new Date().toISOString();

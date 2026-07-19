@@ -17,7 +17,7 @@ import type { MCPToolContext } from '../types/CSMCPTypes';
 // SDLC Modes
 // ============================================================================
 
-/** The eighteen SDLC capabilities the single agent exposes as a menu. */
+/** The SDLC capabilities the single agent exposes as a menu. */
 export type SDLCMode =
     | 'plan'
     | 'analyze'

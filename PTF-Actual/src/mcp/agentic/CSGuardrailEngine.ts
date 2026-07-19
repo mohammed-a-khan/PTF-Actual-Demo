@@ -42,6 +42,10 @@ export const GUARDRAIL_LIMITS = {
     maxHealCycles: 20,
     /** Warn threshold as a fraction of any budget axis. */
     warnAt: 0.8,
+    /** User-approved +50% budget extensions per session (then truly hard). */
+    maxBudgetExtensions: 3,
+    /** Max chars a chunked csaa_submit buffer may accumulate. */
+    maxSubmitBufferChars: 2_000_000,
 };
 
 export interface BudgetVerdict {
@@ -127,13 +131,15 @@ export class CSGuardrailEngine {
         const raw = String(sql ?? '');
         if (!raw.trim()) return { ok: true };
 
-        // Strip string literals and comments so keywords inside data don't
-        // false-positive, and hidden statements can't ride in comments.
-        const stripped = raw
-            .replace(/'(?:[^']|'')*'/g, "''")
-            .replace(/"(?:[^"]|"")*"/g, '""')
-            .replace(/--[^\n]*/g, ' ')
-            .replace(/\/\*[\s\S]*?\*\//g, ' ');
+        // Strip string literals and comments in a SINGLE left-to-right scan.
+        // Sequential regex passes are bypassable via strip-order confusion
+        // (an apostrophe inside a `--` comment opens a fake "string" that
+        // swallows real SQL the DB would execute). A lexical scan consumes
+        // each construct in the order the DB parser would. Two deliberate
+        // hardenings: MySQL executable comments (`/*! ... */`) are treated as
+        // CODE (their body reaches the keyword scan), and backslash escapes
+        // inside strings are consumed so `\'` can't prematurely close one.
+        const stripped = CSGuardrailEngine.stripSqlLiteralsAndComments(raw);
 
         const statements = stripped
             .split(';')
@@ -166,6 +172,76 @@ export class CSGuardrailEngine {
             };
         }
         return { ok: true };
+    }
+
+    /**
+     * Single-pass lexical stripper: replaces string literals with '' / "" and
+     * removes comments, consuming constructs strictly left-to-right so no
+     * pass can be confused by tokens inside an earlier construct.
+     */
+    private static stripSqlLiteralsAndComments(raw: string): string {
+        let out = '';
+        let i = 0;
+        const n = raw.length;
+        while (i < n) {
+            const c = raw[i];
+            const next = i + 1 < n ? raw[i + 1] : '';
+
+            // -- line comment → skip to end of line
+            if (c === '-' && next === '-') {
+                while (i < n && raw[i] !== '\n') i++;
+                out += ' ';
+                continue;
+            }
+
+            // /* block comment */ — but MySQL executable comments (/*! ... */)
+            // are EXECUTED by MySQL, so their body must be kept as code.
+            if (c === '/' && next === '*') {
+                const executable = raw[i + 2] === '!';
+                if (executable) {
+                    i += 3; // consume '/*!' and optional version digits
+                    while (i < n && /[0-9]/.test(raw[i])) i++;
+                    out += ' ';
+                    // body continues as CODE until '*/', which we also consume
+                    while (i < n) {
+                        if (raw[i] === '*' && raw[i + 1] === '/') { i += 2; break; }
+                        out += raw[i];
+                        i++;
+                    }
+                } else {
+                    i += 2;
+                    while (i < n) {
+                        if (raw[i] === '*' && raw[i + 1] === '/') { i += 2; break; }
+                        i++;
+                    }
+                    out += ' ';
+                }
+                continue;
+            }
+
+            // 'string' — '' doubling is honored (ANSI, works in every dialect).
+            // Backslash is treated as a LITERAL, not an escape: under ANSI /
+            // PostgreSQL standard_conforming_strings a backslash does not
+            // escape the closing quote, so `'\'` CLOSES the string and any
+            // following `; DELETE` is a separate statement the multi-statement
+            // check must see. Treating `\` as an escape (MySQL-only) would
+            // hide exactly that attack — so we err toward exposing it.
+            if (c === "'" || c === '"' || c === '`') {
+                const quote = c;
+                i++;
+                while (i < n) {
+                    if (raw[i] === quote && raw[i + 1] === quote) { i += 2; continue; } // '' doubling
+                    if (raw[i] === quote) { i++; break; }
+                    i++;
+                }
+                out += quote === '`' ? '``' : quote + quote;
+                continue;
+            }
+
+            out += c;
+            i++;
+        }
+        return out;
     }
 
     /**
@@ -232,9 +308,22 @@ export class CSGuardrailEngine {
         return { ok: true, warn: worst.pct >= GUARDRAIL_LIMITS.warnAt, pctUsed: worst.pct };
     }
 
-    /** User-approved extension: +50% on every axis, logged. */
-    public static extendBudget(session: SessionRecord): void {
+    /**
+     * User-approved extension: +50% on every axis, logged. Capped at
+     * maxBudgetExtensions — after that the ceiling is genuinely hard and the
+     * session must be finished in a new, deliberately-scoped session instead
+     * of extended forever (an uncapped extend loop is no budget at all).
+     */
+    public static extendBudget(session: SessionRecord): { ok: boolean; reason?: string } {
         const u = session.usage;
+        if (u.budgetExtensions >= GUARDRAIL_LIMITS.maxBudgetExtensions) {
+            return {
+                ok: false,
+                reason:
+                    `budget already extended ${u.budgetExtensions}× (max ${GUARDRAIL_LIMITS.maxBudgetExtensions}). ` +
+                    'Start a new session with a narrower scope instead.',
+            };
+        }
         u.budgetMaxTokens = Math.round(u.budgetMaxTokens * 1.5);
         u.budgetMaxWallClockMs = Math.round(u.budgetMaxWallClockMs * 1.5);
         u.budgetMaxCostUsd = Math.round(u.budgetMaxCostUsd * 1.5 * 100) / 100;
@@ -244,6 +333,7 @@ export class CSGuardrailEngine {
             extensions: u.budgetExtensions,
             newMaxTokens: u.budgetMaxTokens,
         });
+        return { ok: true };
     }
 
     // ------------------------------------------------------------------
@@ -317,8 +407,11 @@ export class CSGuardrailEngine {
         };
 
         const planUsesAdo = mode === 'plan' && String(inputs.source ?? '') === 'ado_plan';
-        const adoModes = new Set(['ado_plan', 'pr_impact']);
-        const adoOptional = planUsesAdo ? new Set(['plan']) : new Set(['release']);
+        // Modes that CANNOT proceed without ADO config. plan-from-ado_plan
+        // belongs here too: its plan.source stage emits an ADO fetch handoff
+        // that can only fail (or pressure fabrication) without credentials.
+        const adoModes = new Set(['ado_plan', 'ado_automate', 'pr_impact', ...(planUsesAdo ? ['plan'] : [])]);
+        const adoOptional = new Set(['release']);
         const gitModes = new Set(['pr_review', 'regression']);
         const runModes = new Set(['run', 'heal', 'regression', 'performance']);
         const liveUrlModes = new Set(['accessibility', 'security', 'load']);

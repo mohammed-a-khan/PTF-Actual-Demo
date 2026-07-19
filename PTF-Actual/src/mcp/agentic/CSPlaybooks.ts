@@ -34,6 +34,7 @@ import type { DelegationEnvelope } from '../agent-platform/CSDelegationEnvelope'
 
 import { StageContext, StageDefinition, StageOutcome } from './types';
 import { CSGuardrailEngine, GUARDRAIL_LIMITS } from './CSGuardrailEngine';
+import { CSCorrectionMemory } from './CSCorrectionMemory';
 
 // ============================================================================
 // Small deterministic helpers
@@ -315,11 +316,24 @@ stage({
     title: 'Trust gate & final report',
     run: (ctx: StageContext): StageOutcome => {
         const session = ctx.session;
+        const EXECUTING_STAGES = ['run.execute', 'author.pipeline', 'heal.loop', 'primpact.run', 'defect.resolve'];
         const executed = session.stageLog.some(
-            (s) => s.stageId === 'run.execute' || s.stageId === 'author.pipeline' || s.stageId === 'heal.loop',
+            (s) => EXECUTING_STAGES.includes(s.stageId) && s.status === 'complete',
+        );
+        // Grounded = the session actually captured/fetched real source
+        // material (live exploration, a fetched requirement/PR/defect) —
+        // derived from artifacts, not asserted.
+        const GROUNDING_ARTIFACTS = [
+            'captured-pages.json', 'planning-source.json', 'pr-changes.json',
+            'defect.json', 'ado-context.json', 'ado-suite-cases.json',
+            'derived-workflows.json', 'discovery.json', 'audit-findings.json',
+            'diff-audit.json', 'failure-clusters.json', 'audit-full.json',
+        ];
+        const sourceGrounded = session.artifacts.some((a) =>
+            GROUNDING_ARTIFACTS.some((g) => a.endsWith(g)),
         );
         const trust = CSGuardrailEngine.computeTrust(session, {
-            sourceGrounded: true,
+            sourceGrounded,
             executed,
             judgeVerdict: executed ? 'PASS_REAL' : 'PASS_WEAK',
             hasMeaningfulAssertions: true,
@@ -442,12 +456,25 @@ stage({
         }
 
         // Document path → read it deterministically (no LLM, no tokens).
-        if (source === 'document' && value && fs.existsSync(value)) {
+        // A missing/unreadable document BLOCKS — silently degrading to
+        // "description" would plan against a filename instead of requirements.
+        if (source === 'document') {
+            if (!value || !fs.existsSync(value)) {
+                return {
+                    status: 'blocked',
+                    summary: 'requirement document not found',
+                    blockedReason: `Requirement document not found at "${value}". Check the path and start again (or use source "description").`,
+                };
+            }
             let text = '';
             try {
                 text = fs.readFileSync(value, 'utf-8').slice(0, 40_000);
-            } catch {
-                /* ignore */
+            } catch (e) {
+                return {
+                    status: 'blocked',
+                    summary: 'requirement document unreadable',
+                    blockedReason: `Could not read "${value}": ${e instanceof Error ? e.message : String(e)}`,
+                };
             }
             const artifact = ctx.writeArtifact(
                 'planning-source.json',
@@ -827,6 +854,17 @@ stage({
     kind: 'handoff',
     title: 'csaa_* authoring pipeline',
     run: (ctx: StageContext): StageOutcome => {
+        // Modes that skip author.intake (ado_automate, source) reach here with
+        // no linked run — create it lazily so csaa_discover never receives an
+        // empty runId (which it hard-rejects).
+        if (!ctx.session.linkedRunId) {
+            const lazyId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+            CSRunContext.getOrCreate(lazyId, {
+                workspaceRoot: ctx.workspaceRoot,
+                inputSummary: `${ctx.session.mode}: ${str(ctx.session.inputs.planId) || str(ctx.session.inputs.sourcePath) || 'session ' + ctx.session.sessionId}`,
+            });
+            ctx.session.linkedRunId = lazyId;
+        }
         const runId = ctx.session.linkedRunId ?? '';
         if (ctx.handoffReport === undefined) {
             const inputs = ctx.session.inputs;
@@ -836,14 +874,19 @@ stage({
                 (a) =>
                     a.endsWith('workspace-posture.json') ||
                     a.endsWith('captured-pages.json') ||
-                    a.endsWith('data-resolution.json'),
+                    a.endsWith('data-resolution.json') ||
+                    a.endsWith('ado-suite-cases.json') ||
+                    a.endsWith('derived-workflows.json'),
             );
             const groundingNote = grounding.length
                 ? ` GROUNDING ARTIFACTS (read and honour them when fulfilling analyze/translate ` +
                   `envelopes): ${grounding.join(', ')} — captured-pages.json locators are the ` +
                   'source of truth for page objects; data-resolution.json decides each ' +
                   'scenario\'s data strategy (db → cite the SELECT; ui_create → emit the setup ' +
-                  'steps); workspace-posture.json tells you what to reuse instead of recreate.'
+                  'steps); workspace-posture.json tells you what to reuse instead of recreate; ' +
+                  'ado-suite-cases.json (when present) lists the EXACT test cases to automate — ' +
+                  'no more, no fewer; derived-workflows.json (when present) is the authoritative ' +
+                  'workflow list derived from the application source.'
                 : '';
             return {
                 status: 'handoff',
@@ -1074,9 +1117,12 @@ stage({
         if (ctx.handoffReport === undefined) {
             const inputs = ctx.session.inputs;
             const project = str(inputs.project);
-            const selected = str(inputs.selectedFeatures);
+            // selectedFeatures is a comma-joined list from impact/candidate
+            // stages — bdd_run_feature takes ONE path per call, so suggest the
+            // first and instruct an explicit per-file loop over the rest.
+            const selectedList = str(inputs.selectedFeatures).split(',').map((s) => s.trim()).filter(Boolean);
             const featureTarget =
-                selected || path.join(ctx.workspaceRoot, 'test', project, 'features');
+                selectedList[0] || path.join(ctx.workspaceRoot, 'test', project, 'features');
             const guard = CSGuardrailEngine.checkAction('bdd_run_feature', {
                 environment: str(inputs.environment),
             });
@@ -1095,9 +1141,12 @@ stage({
                     instruction:
                         `Set environment PROJECT=${project}` +
                         (str(inputs.environment) ? ` ENVIRONMENT=${str(inputs.environment)}` : '') +
+                        (inputs.headless !== undefined ? ` HEADLESS=${inputs.headless === true}` : '') +
                         `, then run the target feature(s) with bdd_run_feature` +
                         (str(inputs.tags) ? ` using tags "${str(inputs.tags)}"` : '') +
-                        '. For a directory target, run each .feature (or use the tags filter). ' +
+                        (selectedList.length > 1
+                            ? `. Run EACH of these ${selectedList.length} feature files with ONE bdd_run_feature call per file:\n  - ${selectedList.join('\n  - ')}\n`
+                            : '. For a directory target, run each .feature (or use the tags filter). ') +
                         'Do not fix failures in this mode — collect results and report back ' +
                         'via csaa_advance with the reportSchema totals.',
                     nextSuggestedTool: 'bdd_run_feature',
@@ -1168,6 +1217,24 @@ const HEAL_REPORT_SCHEMA: JsonSchema = {
         healed: { type: 'number', minimum: 0 },
         remaining: { type: 'number', minimum: 0 },
         changedFiles: { type: 'array', items: { type: 'string' } },
+        /**
+         * Per-failure learning records — feed the platform's correction
+         * memory so the NEXT session that hits the same error signature gets
+         * the known fix as a hint instead of re-diagnosing from scratch.
+         */
+        resolutions: {
+            type: 'array',
+            items: {
+                type: 'object',
+                required: ['errorText', 'category', 'resolution'],
+                properties: {
+                    errorText: { type: 'string', minLength: 5 },
+                    category: { type: 'string' },
+                    resolution: { type: 'string', minLength: 10 },
+                    files: { type: 'array', items: { type: 'string' } },
+                },
+            },
+        },
         notes: { type: 'string' },
     },
 };
@@ -1219,7 +1286,20 @@ stage({
                         'weaken it, and record it for a defect.\n' +
                         'After each fix, re-run to confirm green. NEVER weaken or delete an assertion ' +
                         `just to pass. HARD LIMIT: at most ${Math.min(remaining, 3)} cycles per scenario. ` +
-                        'Then report back via csaa_advance with per-failure category + what you changed.',
+                        'Then report back via csaa_advance with per-failure category + what you changed — ' +
+                        'include a `resolutions` entry per fixed failure (errorText, category, resolution, files) ' +
+                        'so the platform remembers the fix for next time.' +
+                        CSCorrectionMemory.hintBlock(
+                            CSCorrectionMemory.lookup(
+                                ctx.workspaceRoot,
+                                latestResultDirs(ctx.workspaceRoot, 1)
+                                    .flatMap((d) => loadScenarios(d))
+                                    .filter((s) => s.status === 'failed')
+                                    .map((s) => s.error ?? s.steps.find((st) => st.error)?.error ?? '')
+                                    .filter(Boolean),
+                                str(inputs.project),
+                            ),
+                        ),
                     nextSuggestedTool: 'bdd_run_feature',
                     nextSuggestedArgs: {
                         path:
@@ -1232,10 +1312,28 @@ stage({
             };
         }
         const r = ctx.handoffReport;
-        ctx.session.healCycles += Number(r.cyclesUsed) || 0;
+        // Clamp: an agent reporting 0 must still consume budget; a huge value
+        // must not poison the session counter past the cap.
+        const remainingCycles = GUARDRAIL_LIMITS.maxHealCycles - ctx.session.healCycles;
+        ctx.session.healCycles += Math.min(Math.max(Number(r.cyclesUsed) || 1, 1), Math.max(remainingCycles, 1));
+        // Learning loop: every reported fix becomes correction memory — the
+        // next session hitting the same signature gets it as a hint.
+        const resolutions = (r.resolutions as Array<Record<string, unknown>>) ?? [];
+        for (const res of resolutions) {
+            CSCorrectionMemory.record(ctx.workspaceRoot, {
+                errorText: str(res.errorText),
+                category: str(res.category) || 'unknown',
+                resolution: str(res.resolution),
+                files: Array.isArray(res.files) ? (res.files as string[]) : [],
+                project: str(ctx.session.inputs.project),
+            });
+        }
         return {
             status: 'complete',
-            summary: `heal: ${Number(r.healed) || 0} healed, ${Number(r.remaining) || 0} remaining, ${Number(r.cyclesUsed) || 0} cycles used`,
+            summary:
+                `heal: ${Number(r.healed) || 0} healed, ${Number(r.remaining) || 0} remaining, ` +
+                `${Number(r.cyclesUsed) || 0} cycles used` +
+                (resolutions.length ? `, ${resolutions.length} fix(es) memorized` : ''),
         };
     },
 });
@@ -1337,6 +1435,19 @@ stage({
         }
         const triage = ctx.submission as Record<string, unknown>;
         const clusters = (triage.clusters as Array<Record<string, unknown>>) ?? [];
+        // Feed each classified cluster into correction memory — signatures are
+        // already normalized, so future heal/triage sessions get the fix hint.
+        for (const c of clusters) {
+            if (str(c.signature) && str(c.suggestedFix)) {
+                CSCorrectionMemory.record(ctx.workspaceRoot, {
+                    errorText: str(c.signature),
+                    category: str(c.category) || 'unknown',
+                    resolution: str(c.suggestedFix),
+                    files: [],
+                    project: str(ctx.session.inputs.project),
+                });
+            }
+        }
         const md = [
             `# Triage board — ${str(ctx.session.inputs.project)}`,
             '',
@@ -1870,6 +1981,9 @@ stage({
                             : '') +
                         'NEVER type or record literal credentials/secrets in the report — use the ' +
                         '{config:...} placeholders. Bound it: max 15 pages, max 25 elements/page. ' +
+                        (str(inputs.exploreScope)
+                            ? `IN-SCOPE WORKFLOWS (walk exactly these, nothing else): ${str(inputs.exploreScope)}. `
+                            : '') +
                         'Then call csaa_advance with the report per reportSchema.',
                     nextSuggestedTool: 'browser_launch',
                     nextSuggestedArgs: { headless: true },
@@ -2190,7 +2304,7 @@ stage({
 
 const ADO_CONTEXT_SCHEMA: JsonSchema = {
     type: 'object',
-    required: ['story', 'plans'],
+    required: ['story', 'plans', 'suites'],
     properties: {
         story: {
             type: 'object',
@@ -2780,7 +2894,6 @@ stage({
                     LOAD_DESIGN_SCHEMA,
                     {
                         targetUrl: str(inputs.targetUrl),
-                        capturedPages: ctx.session.artifacts.find((a) => a.endsWith('captured-pages.json')),
                         skills: skillHints('performance load test thresholds'),
                     },
                 ),
@@ -3530,6 +3643,29 @@ stage({
     run: (ctx: StageContext): StageOutcome => {
         if (ctx.handoffReport === undefined) {
             const inputs = ctx.session.inputs;
+            // Either/or contract: the catalog can't express "one of PR/commit
+            // required", so enforce it here — ask instead of emitting a
+            // handoff around an empty id (which would pressure fabrication).
+            if (!str(inputs.pullRequestId) && !str(inputs.commitId)) {
+                if (ctx.answers !== undefined) {
+                    if (str(ctx.answers.pullRequestId)) inputs.pullRequestId = str(ctx.answers.pullRequestId);
+                    if (str(ctx.answers.commitId)) inputs.commitId = str(ctx.answers.commitId);
+                }
+                if (!str(inputs.pullRequestId) && !str(inputs.commitId)) {
+                    return {
+                        status: 'question',
+                        summary: 'need a PR or commit to analyse',
+                        question: {
+                            questionId: 'primpact.target',
+                            message: 'Which change should I analyse for regression impact? Provide a pull request id OR a commit SHA.',
+                            fields: [
+                                { id: 'pullRequestId', title: 'Pull request id', description: 'The ADO pull request to analyse.', type: 'string', required: false, pattern: '^[0-9]+$' },
+                                { id: 'commitId', title: 'Commit SHA', description: 'A single commit to analyse instead of a PR.', type: 'string', required: false },
+                            ],
+                        },
+                    };
+                }
+            }
             const repo = str(inputs.repositoryId);
             const prId = str(inputs.pullRequestId);
             const commitId = str(inputs.commitId);
@@ -3769,6 +3905,7 @@ stage({
         if (ctx.handoffReport === undefined) {
             const inputs = ctx.session.inputs;
             const project = str(inputs.project);
+            const selectedList = selected.split(',').map((s) => s.trim()).filter(Boolean);
             const guard = CSGuardrailEngine.checkAction('bdd_run_feature', { environment: str(inputs.environment) });
             if (!guard.ok) {
                 return { status: 'blocked', summary: 'constitutional block', blockedReason: guard.reason };
@@ -3782,14 +3919,14 @@ stage({
                     instruction:
                         `Set environment PROJECT=${project}` +
                         (str(inputs.environment) ? ` ENVIRONMENT=${str(inputs.environment)}` : '') +
-                        `, then execute ONLY the covered regression set with bdd_run_feature` +
+                        `, then execute ONLY the covered regression set` +
                         (str(inputs.tags) ? ` using tags "${str(inputs.tags)}"` : '') +
-                        '. The exact feature paths are in regression-candidates.json (the run_existing ' +
-                        'set). Do not fix failures here — collect results and report totals via ' +
+                        `. Run EACH of these ${selectedList.length} feature file(s) with ONE bdd_run_feature call per file:\n  - ${selectedList.join('\n  - ')}\n` +
+                        'Do not fix failures here — collect results and report totals via ' +
                         'csaa_advance.',
                     nextSuggestedTool: 'bdd_run_feature',
                     nextSuggestedArgs: {
-                        path: selected,
+                        path: selectedList[0] ?? selected,
                         ...(str(inputs.tags) ? { tags: str(inputs.tags) } : {}),
                     },
                     doneWhen: 'the covered regression features executed once',

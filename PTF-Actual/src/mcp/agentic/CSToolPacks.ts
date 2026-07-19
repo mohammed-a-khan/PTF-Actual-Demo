@@ -146,8 +146,17 @@ export class CSToolPacks {
     private readonly notifyChanged: () => void;
     /** pack name → tool names currently registered for it */
     private readonly active: Map<string, string[]> = new Map();
-    /** pack name → reference count (sessions using it) */
-    private readonly refs: Map<string, number> = new Map();
+    /**
+     * pack name → the OWNERS holding it (session ids, or '__manual__' for
+     * explicit csaa_toolpack activations). Owner-attributed instead of a
+     * bare counter so (a) a resumed session re-taking its packs is idempotent
+     * and (b) one session finishing can never yank tools out from under
+     * another session that still holds the pack.
+     */
+    private readonly owners: Map<string, Set<string>> = new Map();
+
+    /** Owner id used for explicit csaa_toolpack activations. */
+    public static readonly MANUAL_OWNER = '__manual__';
 
     constructor(registry: CSMCPToolRegistry, notifyChanged: () => void) {
         this.registry = registry;
@@ -168,10 +177,12 @@ export class CSToolPacks {
     }
 
     /**
-     * Activate a pack (idempotent, ref-counted). Returns the tool names now
-     * available. Tools already registered by another pack are skipped.
+     * Activate a pack for an owner (idempotent per owner). Returns the tool
+     * names now available. Tools already registered by another pack are
+     * skipped. Calling again with the same owner is a no-op membership-wise —
+     * safe for session resume/rehydration paths.
      */
-    public activate(name: string): { activated: string[]; alreadyActive: boolean } {
+    public activate(name: string, owner: string = CSToolPacks.MANUAL_OWNER): { activated: string[]; alreadyActive: boolean } {
         const spec = PACKS.find((p) => p.name === name);
         if (!spec) {
             throw new Error(
@@ -179,7 +190,9 @@ export class CSToolPacks {
             );
         }
 
-        this.refs.set(name, (this.refs.get(name) ?? 0) + 1);
+        const members = this.owners.get(name) ?? new Set<string>();
+        members.add(owner);
+        this.owners.set(name, members);
 
         if (this.active.has(name)) {
             return { activated: this.active.get(name)!, alreadyActive: true };
@@ -198,41 +211,47 @@ export class CSToolPacks {
         return { activated: registered, alreadyActive: false };
     }
 
-    /** Activate several packs; returns total tools newly exposed. */
-    public activateAll(names: string[]): number {
+    /** Activate several packs for an owner; returns total tools newly exposed. */
+    public activateAll(names: string[], owner: string = CSToolPacks.MANUAL_OWNER): number {
         let count = 0;
         for (const n of names) {
-            count += this.activate(n).activated.length;
+            count += this.activate(n, owner).activated.length;
         }
         return count;
     }
 
     /**
-     * Release one reference to a pack; unregisters its tools when the last
-     * session using it finishes.
+     * Release an owner's hold on a pack; unregisters its tools only when the
+     * LAST owner lets go. Releasing an owner that never held the pack is a
+     * safe no-op (it cannot decrement someone else's hold).
      */
-    public release(name: string): boolean {
-        const current = this.refs.get(name) ?? 0;
-        if (current <= 1) {
-            this.refs.delete(name);
-            const tools = this.active.get(name);
-            if (tools) {
-                for (const t of tools) this.registry.unregisterTool(t);
-                this.active.delete(name);
-                this.notifyChanged();
-            }
-            return true;
+    public release(name: string, owner: string = CSToolPacks.MANUAL_OWNER): boolean {
+        const members = this.owners.get(name);
+        if (!members || !members.has(owner)) return false;
+        members.delete(owner);
+        if (members.size > 0) return false;
+
+        this.owners.delete(name);
+        const tools = this.active.get(name);
+        if (tools) {
+            for (const t of tools) this.registry.unregisterTool(t);
+            this.active.delete(name);
+            this.notifyChanged();
         }
-        this.refs.set(name, current - 1);
-        return false;
+        return true;
     }
 
-    public releaseAll(names: string[]): void {
-        for (const n of names) this.release(n);
+    public releaseAll(names: string[], owner: string = CSToolPacks.MANUAL_OWNER): void {
+        for (const n of names) this.release(n, owner);
     }
 
     public isActive(name: string): boolean {
         return this.active.has(name);
+    }
+
+    /** The owners (session ids / '__manual__') currently holding a pack. */
+    public holdersOf(name: string): string[] {
+        return Array.from(this.owners.get(name) ?? []);
     }
 
     /** Wrap a tool definition so its handler runs the pack guard first. */

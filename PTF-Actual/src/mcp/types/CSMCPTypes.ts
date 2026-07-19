@@ -64,7 +64,13 @@ export interface MCPCapabilities {
     tools?: boolean | MCPToolsCapability;
     resources?: boolean | MCPResourcesCapability;
     prompts?: boolean | MCPPromptsCapability;
-    logging?: boolean;
+    /** Spec shape is an empty object (`logging: {}`); boolean kept for back-compat. */
+    logging?: boolean | Record<string, never>;
+    /**
+     * NOTE: sampling/elicitation are CLIENT capabilities. A server must not
+     * advertise them in its own initialize result — these fields remain only
+     * so stored client capability objects can be typed with this interface.
+     */
     sampling?: boolean;
     elicitation?: boolean;
     roots?: boolean;
@@ -402,6 +408,19 @@ export interface MCPToolContext {
     elicitation?: MCPElicitationClient;
     notify: (notification: MCPNotification) => void;
     log: (level: MCPLogLevel, message: string, data?: unknown) => void;
+    /**
+     * Present only when the client attached a `_meta.progressToken` to this
+     * tools/call — emits `notifications/progress` bound to that token so long
+     * tool runs (bdd execution, exploration, healing) keep the host from
+     * timing out and re-billing a retry.
+     */
+    reportProgress?: (progress: number, total?: number, message?: string) => void;
+    /**
+     * Fires when the client sends `notifications/cancelled` for this request.
+     * Long-running tools SHOULD observe it and stop work — the response is
+     * suppressed either way, so continuing only burns local compute.
+     */
+    abortSignal?: AbortSignal;
 }
 
 export interface MCPServerContext {

@@ -33,6 +33,7 @@ import {
     MCPServerContext,
     MCPSamplingClient,
     MCPElicitationClient,
+    JSON_RPC_ERRORS,
 } from './types/CSMCPTypes';
 import { CSMCPProtocol } from './CSMCPProtocol';
 import { CSMCPToolRegistry } from './CSMCPToolRegistry';
@@ -57,9 +58,11 @@ const DEFAULT_CONFIG: Required<CSMCPServerConfig> = {
         tools: { listChanged: true },
         resources: { subscribe: true, listChanged: true },
         prompts: { listChanged: true },
-        logging: true,
-        sampling: true,
-        elicitation: true,
+        // Spec shape: an empty object, not a boolean.
+        logging: {},
+        // NOTE: sampling and elicitation are CLIENT capabilities — the server
+        // USES them when the connected host declares them at initialize, but
+        // must not advertise them as its own (fixed per MCP spec audit).
     },
     logLevel: 'info',
 };
@@ -281,7 +284,7 @@ export class CSMCPServer {
     // Message Handler
     // ========================================================================
 
-    private async handleMessage(request: JsonRpcRequest): Promise<unknown> {
+    private async handleMessage(request: JsonRpcRequest, abortSignal?: AbortSignal): Promise<unknown> {
         const method = request.method;
         const params = request.params || {};
 
@@ -296,7 +299,7 @@ export class CSMCPServer {
             case MCP_METHODS.TOOLS_LIST:
                 return this.handleToolsList(params);
             case MCP_METHODS.TOOLS_CALL:
-                return this.handleToolsCall(params);
+                return this.handleToolsCall(params, abortSignal);
 
             // Resources
             case MCP_METHODS.RESOURCES_LIST:
@@ -320,8 +323,13 @@ export class CSMCPServer {
             case MCP_METHODS.LOGGING_SET_LEVEL:
                 return this.handleLoggingSetLevel(params);
 
-            default:
-                throw new Error(`Unknown method: ${method}`);
+            default: {
+                // -32601 method-not-found (not -32603 internal-error) so hosts
+                // can cheaply feature-detect optional methods.
+                const err = new Error(`Method not found: ${method}`);
+                (err as Error & { code: number }).code = JSON_RPC_ERRORS.METHOD_NOT_FOUND;
+                throw err;
+            }
         }
     }
 
@@ -359,35 +367,37 @@ export class CSMCPServer {
         return {};
     }
 
-    private async handleToolsList(params: Record<string, unknown>): Promise<{
+    private async handleToolsList(_params: Record<string, unknown>): Promise<{
         tools: MCPTool[];
         nextCursor?: string;
     }> {
-        const tools = this.toolRegistry.getAllTools();
-
-        // Handle pagination if cursor is provided
-        const cursor = params.cursor as string | undefined;
-        const pageSize = 100;
-
-        if (cursor) {
-            const startIndex = parseInt(cursor, 10) || 0;
-            const endIndex = startIndex + pageSize;
-            const pagedTools = tools.slice(startIndex, endIndex);
-            const nextCursor = endIndex < tools.length ? String(endIndex) : undefined;
-
-            return { tools: pagedTools, nextCursor };
-        }
-
-        return { tools };
+        // Server-side pagination is deliberately NOT engaged: the default
+        // agentic profile exposes 5 meta-tools (packs add a few dozen at
+        // most), and returning the full list avoids breaking hosts with
+        // incomplete cursor support. (The previous cursor branch here was
+        // dead code — the server never issued a nextCursor, so no client
+        // could ever send a cursor.)
+        return { tools: this.toolRegistry.getAllTools() };
     }
 
-    private async handleToolsCall(params: Record<string, unknown>): Promise<MCPToolResult> {
+    private async handleToolsCall(params: Record<string, unknown>, abortSignal?: AbortSignal): Promise<MCPToolResult> {
         const toolCall = params as unknown as MCPToolCall;
 
-        // Create tool context
-        const context = this.createToolContext();
+        // Unknown tool is a protocol-level error (-32602), not a tool-result
+        // error — matters after a pack release, when a host with a stale tool
+        // list calls a just-unregistered tool.
+        if (!this.toolRegistry.hasTool(toolCall.name)) {
+            const err = new Error(`Unknown tool: ${toolCall.name}`);
+            (err as Error & { code: number }).code = JSON_RPC_ERRORS.INVALID_PARAMS;
+            throw err;
+        }
 
-        // Execute the tool
+        // Progress support: when the client attached a progressToken, hand the
+        // tool a reporter bound to it (spec: notifications/progress).
+        const progressToken = (params._meta as { progressToken?: string | number } | undefined)?.progressToken;
+
+        const context = this.createToolContext(progressToken, abortSignal);
+
         return this.toolRegistry.executeTool(toolCall.name, toolCall.arguments, context);
     }
 
@@ -491,7 +501,7 @@ export class CSMCPServer {
     // Helper Methods
     // ========================================================================
 
-    private createToolContext(): MCPToolContext {
+    private createToolContext(progressToken?: string | number, abortSignal?: AbortSignal): MCPToolContext {
         // Sampling and elicitation are CLIENT capabilities (server → client
         // requests). Only hand tools those clients when the connected host
         // declared support during initialize — otherwise a tool would fire a
@@ -514,6 +524,13 @@ export class CSMCPServer {
             elicitation: elicitationClient,
             notify: (notification: MCPNotification) => this.protocol.notify(notification),
             log: (level: MCPLogLevel, message: string, data?: unknown) => this.log(level, message, data),
+            ...(progressToken !== undefined
+                ? {
+                      reportProgress: (progress: number, total?: number, message?: string) =>
+                          this.protocol.sendProgress(progressToken, progress, total, message),
+                  }
+                : {}),
+            ...(abortSignal ? { abortSignal } : {}),
         };
     }
 
