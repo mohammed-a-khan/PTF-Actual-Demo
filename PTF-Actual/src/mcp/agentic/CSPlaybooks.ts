@@ -837,15 +837,21 @@ stage({
 
 const AUTHOR_REPORT_SCHEMA: JsonSchema = {
     type: 'object',
-    required: ['finalState', 'filesWritten'],
+    required: ['finalState', 'filesWritten', 'compileClean', 'auditClean'],
     properties: {
         finalState: { type: 'string', enum: ['READY', 'PASS_PARTIAL', 'FAILED', 'BLOCKED_NEED_HUMAN'] },
         filesWritten: { type: 'number', minimum: 0 },
+        // Hard gates — the generated files MUST compile (tsc/compile_check =
+        // zero errors) and pass audit_file before the pipeline is accepted.
+        compileClean: { type: 'boolean' },
+        auditClean: { type: 'boolean' },
+        featureFiles: { type: 'array', items: { type: 'string' } },
         scenariosTotal: { type: 'number' },
         scenariosPassed: { type: 'number' },
         trustScore: { type: 'number' },
         finalReportPath: { type: 'string' },
         blockedReason: { type: 'string' },
+        remainingErrors: { type: 'array', items: { type: 'string' } },
     },
 };
 
@@ -901,16 +907,28 @@ stage({
                         'Start with the suggested tool, then ALWAYS follow each result\'s ' +
                         'nextSuggestedTool/nextSuggestedArgs without asking the user. ' +
                         'Fulfil every delegation envelope exactly per its responseSchema ' +
-                        'via the envelope\'s recordWith tool. Stop only on BLOCKED_NEED_HUMAN ' +
-                        'or after csaa_verify (and csaa_publish if the user asked for ADO publish). ' +
-                        'Then call csaa_advance with the report described in reportSchema.' +
+                        'via the envelope\'s recordWith tool. ' +
+                        'REUSE, DO NOT DUPLICATE: scenario-plan.json marks each scenario\'s ' +
+                        'targetFeatureFile / reuseExisting — when set, EXTEND that existing .feature ' +
+                        'and reuse its existing page objects and step definitions; create a NEW ' +
+                        'feature file ONLY for genuinely new areas. Do not create a parallel feature ' +
+                        'that duplicates one already in the repo. ' +
+                        'MANDATORY QUALITY GATES before you finish: run csaa_compile_check (or ' +
+                        'compile_check) and FIX every error until it is clean; run csaa_audit / ' +
+                        'audit_file on every generated file and FIX until zero error-severity ' +
+                        'violations. Do NOT report finalState READY unless compileClean=true AND ' +
+                        'auditClean=true. If you cannot make it clean, report the remaining errors ' +
+                        'in remainingErrors and finalState FAILED (do not hide them). ' +
+                        'Then call csaa_advance with the report (include featureFiles, compileClean, ' +
+                        'auditClean).' +
                         groundingNote,
                     nextSuggestedTool: 'csaa_discover',
                     nextSuggestedArgs: isPath
                         ? { runId, rootPath: source }
                         : { runId, rootPath: ctx.workspaceRoot },
                     doneWhen:
-                        'csaa_verify returned READY/PASS_PARTIAL/FAILED, or any primitive returned BLOCKED_NEED_HUMAN',
+                        'files generated AND compile_check is clean AND audit is clean (or the ' +
+                        'unfixable errors are reported); or a primitive returned BLOCKED_NEED_HUMAN',
                     reportSchema: AUTHOR_REPORT_SCHEMA,
                 },
             };
@@ -924,9 +942,221 @@ stage({
                 blockedReason: str(report.blockedReason) || 'pipeline reported BLOCKED_NEED_HUMAN',
             };
         }
+        // Compile/audit gate: generated code that does not compile or fails the
+        // rule audit must be FIXED before the mode moves on — send it back
+        // (bounded) instead of accepting broken files (the exact "it created
+        // files with errors and stopped" problem).
+        const fixRetries = Number(ctx.session.inputs.pipelineFixRetries) || 0;
+        const clean = report.compileClean === true && report.auditClean === true;
+        if (!clean && Number(report.filesWritten) > 0 && fixRetries < 2) {
+            ctx.session.inputs.pipelineFixRetries = fixRetries + 1;
+            const errs = (report.remainingErrors as string[]) ?? [];
+            return {
+                status: 'handoff',
+                summary: `generated files not clean (compile=${report.compileClean}, audit=${report.auditClean}) — fixing`,
+                handoff: {
+                    handoffId: 'author.pipeline',
+                    packs: ['authoring', 'quality'],
+                    instruction:
+                        `The generated files are not clean yet — compileClean=${report.compileClean}, ` +
+                        `auditClean=${report.auditClean}. FIX them now: run compile_check, resolve EVERY ` +
+                        `TypeScript/compile error, then audit_file on each file and resolve every ` +
+                        `error-severity violation, editing the files with csaa_write. ` +
+                        (errs.length ? `Known remaining errors: ${errs.slice(0, 10).join(' | ')}. ` : '') +
+                        'Re-run until both are clean, then csaa_advance with compileClean=true, auditClean=true.',
+                    nextSuggestedTool: 'csaa_compile_check',
+                    nextSuggestedArgs: { runId },
+                    doneWhen: 'compile_check clean AND audit clean',
+                    reportSchema: AUTHOR_REPORT_SCHEMA,
+                },
+            };
+        }
+        ctx.session.inputs.pipelineCompileClean = report.compileClean === true;
+        ctx.session.inputs.generatedFeatureFiles = ((report.featureFiles as string[]) ?? []).join(',');
+        const artifact = ctx.writeArtifact('pipeline-report.json', JSON.stringify(report, null, 2));
         return {
             status: 'complete',
-            summary: `pipeline ${finalState}: ${Number(report.filesWritten) || 0} files, ${Number(report.scenariosPassed) || 0}/${Number(report.scenariosTotal) || 0} scenarios passed`,
+            summary: `pipeline ${finalState}: ${Number(report.filesWritten) || 0} files, compile=${report.compileClean ? 'clean' : 'DIRTY'}, audit=${report.auditClean ? 'clean' : 'DIRTY'}`,
+            artifacts: [artifact],
+        };
+    },
+});
+
+// ---------------------------------------------------------------------------
+// Author verify + heal — EXECUTE the generated tests, and for every failure
+// diagnose + heal (locator/timing/workflow/data) against the live app, looping
+// until green or the heal budget is spent. Also audits the generated page
+// objects + steps against what the app actually does. This is what turns
+// "generated files" into "passing, validated tests".
+// ---------------------------------------------------------------------------
+
+const AUTHOR_VERIFY_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['total', 'passed', 'failed'],
+    properties: {
+        total: { type: 'number', minimum: 0 },
+        passed: { type: 'number', minimum: 0 },
+        failed: { type: 'number', minimum: 0 },
+        healed: { type: 'number', minimum: 0 },
+        cyclesUsed: { type: 'number', minimum: 0 },
+        pageObjectsAudited: { type: 'boolean' },
+        stepsAudited: { type: 'boolean' },
+        realAppBugs: { type: 'array', items: { type: 'string' } },
+        notes: { type: 'string' },
+    },
+};
+
+stage({
+    id: 'author.verify',
+    kind: 'handoff',
+    title: 'Execute + heal generated tests to green',
+    run: (ctx: StageContext): StageOutcome => {
+        const inputs = ctx.session.inputs;
+        if (ctx.handoffReport === undefined) {
+            const project = str(inputs.project);
+            const remaining = GUARDRAIL_LIMITS.maxHealCycles - ctx.session.healCycles;
+            if (remaining <= 0) {
+                return { status: 'complete', summary: 'heal budget exhausted before verify — see report' };
+            }
+            const featureTarget =
+                (str(inputs.generatedFeatureFiles).split(',').map((s) => s.trim()).filter(Boolean)[0]) ||
+                path.join(ctx.workspaceRoot, 'test', project, 'features');
+            const guard = CSGuardrailEngine.checkAction('bdd_run_feature', { environment: str(inputs.environment) });
+            if (!guard.ok) {
+                return { status: 'blocked', summary: 'constitutional block', blockedReason: guard.reason };
+            }
+            return {
+                status: 'handoff',
+                summary: 'verify + heal delegated',
+                handoff: {
+                    handoffId: 'author.verify',
+                    packs: ['execution', 'exploration'],
+                    instruction:
+                        `Now EXECUTE the tests you just generated and make them PASS — do not stop at ` +
+                        `"generated". Set PROJECT=${project}` +
+                        (str(inputs.environment) ? ` ENVIRONMENT=${str(inputs.environment)}` : '') +
+                        '. Run them with bdd_run_feature. For EACH failing scenario, DIAGNOSE the real ' +
+                        'cause and HEAL the right layer (locator drift → fix the page-object locator against ' +
+                        'the live DOM with browser_generate_locator; timing → waits; workflow changed → ' +
+                        're-explore and fix steps+feature+pages; data → re-resolve DB-first then UI). While ' +
+                        'you are in the app, AUDIT that the generated page objects and step definitions match ' +
+                        'what the app actually does — correct any mismatch. Re-run after each fix. LOOP until ' +
+                        `ALL scenarios pass or you hit the heal budget (${Math.min(remaining, GUARDRAIL_LIMITS.maxHealCycles)} cycles). ` +
+                        'NEVER weaken or delete an assertion to force a pass — a genuine application defect ' +
+                        'stays failing and goes in realAppBugs. Report totals + pageObjectsAudited + ' +
+                        'stepsAudited via csaa_advance.' +
+                        CSCorrectionMemory.hintBlock(
+                            CSCorrectionMemory.lookup(
+                                ctx.workspaceRoot,
+                                latestResultDirs(ctx.workspaceRoot, 1)
+                                    .flatMap((d) => loadScenarios(d))
+                                    .filter((s) => s.status === 'failed')
+                                    .map((s) => s.error ?? '')
+                                    .filter(Boolean),
+                                project,
+                            ),
+                        ),
+                    nextSuggestedTool: 'bdd_run_feature',
+                    nextSuggestedArgs: { path: featureTarget },
+                    doneWhen: 'all generated scenarios pass, or the heal budget is exhausted with the failures classified',
+                    reportSchema: AUTHOR_VERIFY_SCHEMA,
+                },
+            };
+        }
+        const r = ctx.handoffReport;
+        ctx.session.healCycles += Math.min(Math.max(Number(r.cyclesUsed) || 0, 0), GUARDRAIL_LIMITS.maxHealCycles);
+        const failed = Number(r.failed) || 0;
+        const passed = Number(r.passed) || 0;
+        const total = Number(r.total) || 0;
+        ctx.session.inputs.verifyPassed = passed;
+        ctx.session.inputs.verifyFailed = failed;
+        const artifact = ctx.writeArtifact('verify-report.json', JSON.stringify(r, null, 2));
+        const bugs = (r.realAppBugs as string[]) ?? [];
+        return {
+            status: 'complete',
+            summary:
+                `verify: ${passed}/${total} passed, ${failed} failed` +
+                (Number(r.healed) ? `, ${Number(r.healed)} healed` : '') +
+                (bugs.length ? `, ${bugs.length} suspected app bug(s)` : ''),
+            artifacts: [artifact],
+        };
+    },
+});
+
+// ---------------------------------------------------------------------------
+// Coverage audit — does the generated suite actually cover the requirement?
+// Compares the requirement document + plan against the generated features.
+// ---------------------------------------------------------------------------
+
+const COVERAGE_AUDIT_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['coveragePercent', 'verdict'],
+    properties: {
+        coveragePercent: { type: 'number', minimum: 0, maximum: 100 },
+        coveredRequirements: { type: 'array', items: { type: 'string' } },
+        missingRequirements: { type: 'array', items: { type: 'string' } },
+        verdict: { type: 'string', enum: ['complete', 'partial', 'insufficient'] },
+        recommendation: { type: 'string' },
+    },
+};
+
+stage({
+    id: 'author.coverage_audit',
+    kind: 'cognitive',
+    title: 'Audit coverage against the requirement',
+    run: (ctx: StageContext): StageOutcome => {
+        if (ctx.submission === undefined) {
+            const grounding = ctx.session.artifacts.filter(
+                (a) =>
+                    a.endsWith('requirement-source.json') ||
+                    a.endsWith('scenario-plan.json') ||
+                    a.endsWith('pipeline-report.json') ||
+                    a.endsWith('verify-report.json'),
+            );
+            // Fresh inventory so the audit sees the ACTUAL generated features.
+            const invPath = ctx.writeArtifact(
+                'coverage-inventory.json',
+                JSON.stringify(CSRepoInventory.inventory(str(ctx.session.inputs.project), { workspaceRoot: ctx.workspaceRoot }), null, 2),
+            );
+            return {
+                status: 'envelope',
+                summary: 'awaiting coverage audit',
+                envelope: makeEnvelope(
+                    ctx,
+                    'audit-coverage',
+                    'Audit whether the GENERATED suite actually covers the REQUIREMENT. Read the ' +
+                        'requirement at requirement-source.json, the plan at scenario-plan.json, and the ' +
+                        'current test inventory (the generated features/scenarios) at the inventory grounding ' +
+                        'path. For every requirement/acceptance item, decide whether a generated scenario ' +
+                        'covers it (coveredRequirements) or not (missingRequirements). Compute coveragePercent ' +
+                        'and a verdict (complete ≥ ~95%, partial, insufficient). Be honest — do not claim ' +
+                        'coverage that is not there. Return JSON per responseSchema.',
+                    COVERAGE_AUDIT_SCHEMA,
+                    { groundingPaths: [...grounding, invPath], skills: skillHints('coverage audit requirement traceability') },
+                ),
+            };
+        }
+        const a = ctx.submission as Record<string, unknown>;
+        const missing = (a.missingRequirements as string[]) ?? [];
+        const md = [
+            `# Coverage audit — ${str(ctx.session.inputs.project)}`,
+            '',
+            `**Coverage:** ${Number(a.coveragePercent)}%  ·  **Verdict:** ${str(a.verdict)}`,
+            '',
+            '## Covered',
+            ...(((a.coveredRequirements as string[]) ?? []).map((c) => `- ${c}`)),
+            '',
+            '## Missing (not yet covered)',
+            ...(missing.length ? missing.map((c) => `- ${c}`) : ['- (none — full coverage)']),
+            '',
+            str(a.recommendation ?? ''),
+        ];
+        const jsonPath = ctx.writeArtifact('coverage-audit.json', JSON.stringify(a, null, 2));
+        const mdPath = ctx.writeArtifact('COVERAGE-AUDIT.md', md.join('\n') + '\n');
+        return {
+            status: 'complete',
+            summary: `coverage ${Number(a.coveragePercent)}% (${str(a.verdict)}), ${missing.length} requirement(s) still uncovered`,
+            artifacts: [jsonPath, mdPath],
         };
     },
 });
@@ -1953,6 +2183,24 @@ const AUTHOR_PLAN_SCHEMA: JsonSchema = {
     properties: {
         existingCoverage: { type: 'array', items: { type: 'string' } },
         coverageGaps: { type: 'array', items: { type: 'string' } },
+        // The user roles/personas the requirement involves and which to test
+        // with (read-only, super user, approver…). Drives data + login choice.
+        userRoles: {
+            type: 'array',
+            items: {
+                type: 'object',
+                required: ['role'],
+                properties: {
+                    role: { type: 'string' },
+                    permissions: { type: 'string' },
+                    useForTest: { type: 'boolean' },
+                },
+            },
+        },
+        // Open questions the requirement leaves ambiguous (which user to use,
+        // which data set, environment specifics). These are ASKED before
+        // generation via author.clarify — no guessing.
+        clarifications: { type: 'array', items: { type: 'string' } },
         scenarios: {
             type: 'array',
             minItems: 1,
@@ -1968,6 +2216,11 @@ const AUTHOR_PLAN_SCHEMA: JsonSchema = {
                     priority: { type: 'string', enum: ['P1', 'P2', 'P3'] },
                     type: { type: 'string', enum: ['positive', 'negative', 'edge', 'e2e'] },
                     reuseExisting: { type: 'boolean' },
+                    // When this scenario belongs in an EXISTING feature file,
+                    // name it here so the pipeline EXTENDS it instead of
+                    // creating a parallel duplicate feature.
+                    targetFeatureFile: { type: 'string' },
+                    role: { type: 'string' },
                     notes: { type: 'string' },
                 },
             },
@@ -2024,15 +2277,24 @@ stage({
                     'plan-scenarios',
                     'You are the test lead planning BEFORE any automation — exactly what a human tester ' +
                         'does first. Read the requirement at requirement-source.json (the FDD / document / ' +
-                        'description) AND the existing test inventory at the inventory grounding path. Do a ' +
-                        'GAP ANALYSIS: list what the existing tests ALREADY cover (existingCoverage) and what ' +
-                        'the requirement needs that is NOT yet covered (coverageGaps). Then produce the ' +
-                        'prioritized scenario plan to implement — one entry per scenario, each with a concrete ' +
-                        '`workflow`: the ordered user journey a tester will walk in the browser to verify it ' +
-                        '(e.g. "login → open PIM → Add Employee → fill required fields → Save → assert in list"). ' +
-                        'Set reuseExisting=true when an existing test already covers it and only needs extension. ' +
-                        'Ground every scenario in the requirement — do NOT invent scope it does not imply, and do ' +
-                        'NOT duplicate existing coverage. Return JSON per responseSchema.',
+                        'description) THOROUGHLY (all sections, not just headings) AND the existing test ' +
+                        'inventory at the inventory grounding path (it lists existing .feature files, their ' +
+                        'scenarios, step files and page objects). Then:\n' +
+                        '1. GAP ANALYSIS — existingCoverage (what existing tests already cover) vs coverageGaps ' +
+                        '(what the requirement needs that is NOT yet covered).\n' +
+                        '2. REUSE, DO NOT DUPLICATE — for EACH scenario, if an existing .feature already covers ' +
+                        'that area, set reuseExisting=true and set targetFeatureFile to that EXISTING file so the ' +
+                        'pipeline EXTENDS it (adds scenarios / reuses its page objects + steps) instead of ' +
+                        'creating a parallel duplicate feature. Only omit targetFeatureFile for genuinely new areas.\n' +
+                        '3. USER ROLES — from the requirement, list the user roles/personas involved (e.g. ' +
+                        'read-only user, super user, approver) in userRoles, marking which to use for the tests ' +
+                        '(useForTest). Assign each scenario its role.\n' +
+                        '4. CLARIFICATIONS — put any genuinely ambiguous decision the requirement does not settle ' +
+                        '(which user account to test with, which data set, environment specifics) into ' +
+                        'clarifications; these will be ASKED, not guessed.\n' +
+                        'Each scenario needs a concrete `workflow` (the ordered journey a tester walks to verify ' +
+                        'it). Ground everything in the requirement — do NOT invent scope it does not imply. ' +
+                        'Return JSON per responseSchema.',
                     AUTHOR_PLAN_SCHEMA,
                     {
                         groundingPaths: [reqArtifact, invPath],
@@ -2050,6 +2312,9 @@ stage({
         ctx.session.inputs.exploreScope = toWalk.join(' | ');
         ctx.session.inputs.plannedScenarioCount = scenarios.length;
         ctx.session.inputs.exploreRetries = 0;
+        // Stash the plan's clarifications for the author.clarify stage to ask.
+        const clar = (plan.clarifications as string[]) ?? [];
+        ctx.session.inputs.pendingClarifications = clar.filter(Boolean).join(' || ');
         const md = [
             `# Scenario plan — ${str(ctx.session.inputs.project)}`,
             '',
@@ -2074,6 +2339,48 @@ stage({
             summary: `planned ${scenarios.length} scenario(s), ${gaps.length} gap(s) to implement`,
             artifacts: [jsonPath, mdPath],
         };
+    },
+});
+
+// ---------------------------------------------------------------------------
+// Clarify — ask the ambiguous decisions the plan surfaced (which user/role to
+// test with, which data set) BEFORE generating. Never guess these.
+// ---------------------------------------------------------------------------
+
+stage({
+    id: 'author.clarify',
+    kind: 'elicit',
+    title: 'Clarify ambiguous requirement decisions',
+    run: (ctx: StageContext): StageOutcome => {
+        const pending = str(ctx.session.inputs.pendingClarifications);
+        const questions = pending.split('||').map((q) => q.trim()).filter(Boolean);
+        if (questions.length === 0) {
+            return { status: 'complete', summary: 'no clarifications needed' };
+        }
+        if (ctx.answers === undefined) {
+            return {
+                status: 'question',
+                summary: `awaiting ${questions.length} clarification(s)`,
+                question: {
+                    questionId: 'author.clarify',
+                    message:
+                        'The requirement leaves a few things open. Please clarify so I test the RIGHT thing ' +
+                        '(I will not guess):',
+                    fields: questions.map((q, i) => ({
+                        id: `clar_${i}`,
+                        title: q.slice(0, 60),
+                        description: q,
+                        type: 'string',
+                        required: false,
+                    })) as never,
+                },
+            };
+        }
+        // Record the answers as grounding for the pipeline.
+        const resolved = questions.map((q, i) => ({ question: q, answer: str(ctx.answers?.[`clar_${i}`]) }));
+        const artifact = ctx.writeArtifact('clarifications.json', JSON.stringify({ resolved }, null, 2));
+        ctx.session.inputs.pendingClarifications = '';
+        return { status: 'complete', summary: `${resolved.filter((r) => r.answer).length}/${questions.length} clarified`, artifacts: [artifact] };
     },
 });
 
