@@ -251,19 +251,12 @@ export class CSPlaybookEngine {
 
                 case 'question': {
                     const question = outcome.question!;
-                    // Try native elicitation first — zero agent round-trips.
-                    const asked = await CSInteract.form(mcp, question.message, question.fields);
-                    if (asked.kind === 'answers') {
-                        pending = { answers: asked.answers };
-                        CSSessionStore.save(session);
-                        continue; // re-run the same stage with answers
-                    }
-                    if (asked.kind === 'declined') {
-                        return this.blocked(session, 'User declined the requested input.');
-                    }
-                    // 'cancelled' (Esc / dialog dismissed) and 'unsupported'
-                    // both fall through to the text-question fallback below —
-                    // an accidental dismissal must re-ask, never hard-block.
+                    // Return the question for the MODEL to relay (reliable
+                    // request/response), rather than firing a server-initiated
+                    // elicitation dialog mid-tool-call. Nested elicitation is
+                    // unreliable on the Copilot/GPT route (it produced cascading
+                    // duplicate input boxes). The user answers, the model calls
+                    // csaa_advance { answers }, and the stage re-runs.
                     session.pendingStageId = stageId;
                     session.pendingQuestion = question;
                     CSSessionStore.transition(session, 'AWAITING_ANSWER');

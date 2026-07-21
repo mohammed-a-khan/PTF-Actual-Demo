@@ -122,20 +122,11 @@ async function startSession(
         };
     }
 
-    // Collect missing required fields — natively when possible.
+    // Collect missing required fields via the reliable ask_user protocol —
+    // return ONE question for the model to relay, then the user answers and
+    // the model re-calls with { mode, inputs }. No server-initiated dialog
+    // (nested elicitation caused the cascading duplicate input boxes).
     if (validated.missing.length > 0) {
-        const asked = await CSInteract.form(
-            context,
-            `${modeDef.title} — please provide:`,
-            validated.missing,
-        );
-        if (asked.kind === 'answers') {
-            const merged = { ...rawInputs, ...asked.answers };
-            return startSession(modeDef, merged, context);
-        }
-        // declined / cancelled / unsupported → ALWAYS re-ask as a text question
-        // and wait. A dismissed input dialog must never abort a mode the user
-        // asked to run — the agent relays these fields and waits for values.
         return {
             ok: true,
             mode: modeDef.mode,
@@ -146,9 +137,9 @@ async function startSession(
                 fields: validated.missing,
             },
             note:
-                'Relay these fields to the user and WAIT for their values — do not proceed or ' +
-                'assume defaults. Then re-call cs_ai_auto_assist with ' +
-                `{ mode: "${modeDef.mode}", inputs: { ...provided values... } }.`,
+                'Relay these fields to the user in ONE message and WAIT for their values — do not ' +
+                'proceed, assume defaults, or ask again while waiting. Then re-call cs_ai_auto_assist ' +
+                `once with { mode: "${modeDef.mode}", inputs: { ...all provided values... } }.`,
         };
     }
 
@@ -291,34 +282,23 @@ const frontDoorTool = defineTool()
         }
 
         if (!mode) {
-            // Native dropdown first; text menu fallback.
-            const picked = await CSInteract.pick(
-                context,
-                'CS AI Auto-Assist — what do you want to do?',
-                CSSDLCCatalog.list().map((m) => ({
-                    value: m.mode,
-                    title: m.title,
-                    description: m.summary,
-                })),
-            );
-            if (picked.kind === 'picked') {
-                mode = picked.value;
-            } else {
-                // declined / cancelled (dialog dismissed) / unsupported all
-                // fall back to the TEXT menu and wait. A dismissed picker must
-                // never dead-end as "nothing started" — the user is mid-decision.
-                const menu = CSSDLCCatalog.modeMenu();
-                return jsonResult({
-                    ok: true,
-                    action: 'show_menu',
-                    menu,
-                    note:
-                        'Show this menu to the user EXACTLY as rendered by the menuText below, ' +
-                        'then re-call cs_ai_auto_assist with { mode: "<their choice>" }. ' +
-                        'Do NOT proceed until the user has chosen.\n\n' +
-                        CSInteract.menuText(menu),
-                });
-            }
+            // Return the menu for the MODEL to relay (single message), rather
+            // than firing a server-initiated dialog. Nested elicitation during
+            // a tool call is unreliable across hosts (Copilot/GPT route) — it
+            // makes duplicate input boxes cascade. The request/response
+            // protocol (tool returns menu → model relays → user picks → model
+            // re-calls with { mode }) is reliable everywhere.
+            const menu = CSSDLCCatalog.modeMenu();
+            return jsonResult({
+                ok: true,
+                action: 'show_menu',
+                menu,
+                note:
+                    'Show this menu to the user EXACTLY as rendered by the menuText below, ' +
+                    'then re-call cs_ai_auto_assist with { mode: "<their choice>" }. ' +
+                    'Do NOT proceed until the user has chosen.\n\n' +
+                    CSInteract.menuText(menu),
+            });
         }
 
         const modeDef = CSSDLCCatalog.get(mode);
@@ -332,18 +312,9 @@ const frontDoorTool = defineTool()
         }
 
         const rawInputs = (params.inputs as Record<string, unknown>) ?? {};
-
-        // With elicitation, collect the full input form up-front in ONE dialog.
-        if (Object.keys(rawInputs).length === 0 && modeDef.inputs.length > 0 && CSInteract.supported(context)) {
-            const asked = await CSInteract.form(context, `${modeDef.title} — inputs:`, modeDef.inputs);
-            if (asked.kind === 'answers') {
-                return jsonResult(await startSession(modeDef, asked.answers, context));
-            }
-            // declined / cancelled / unsupported → fall through to startSession,
-            // which re-asks for the required fields as a TEXT question and waits.
-            // A dismissed form must never dead-end.
-        }
-
+        // Input collection is handled by startSession via the reliable ask_user
+        // protocol — NO server-initiated form here (that was the cause of the
+        // cascading duplicate input boxes on the Copilot/GPT route).
         return jsonResult(await startSession(modeDef, rawInputs, context));
     })
     .build();
