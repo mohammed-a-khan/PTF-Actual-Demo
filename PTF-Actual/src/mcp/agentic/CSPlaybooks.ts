@@ -875,6 +875,7 @@ stage({
                     a.endsWith('workspace-posture.json') ||
                     a.endsWith('captured-pages.json') ||
                     a.endsWith('data-resolution.json') ||
+                    a.endsWith('scenario-plan.json') ||
                     a.endsWith('ado-suite-cases.json') ||
                     a.endsWith('derived-workflows.json'),
             );
@@ -886,7 +887,9 @@ stage({
                   'steps); workspace-posture.json tells you what to reuse instead of recreate; ' +
                   'ado-suite-cases.json (when present) lists the EXACT test cases to automate — ' +
                   'no more, no fewer; derived-workflows.json (when present) is the authoritative ' +
-                  'workflow list derived from the application source.'
+                  'workflow list derived from the application source; scenario-plan.json (when ' +
+                  'present) is the approved plan — generate exactly its scenarios, reusing existing ' +
+                  'tests where reuseExisting=true, and cover every coverageGap.'
                 : '';
             return {
                 status: 'handoff',
@@ -1259,7 +1262,7 @@ stage({
                 summary: 'heal loop delegated',
                 handoff: {
                     handoffId: 'heal.loop',
-                    packs: ['browser'],
+                    packs: ['exploration'],
                     instruction:
                         `Heal failing tests for project ${str(inputs.project)}` +
                         (str(inputs.target) ? ` (target: ${str(inputs.target)})` : ' (latest failed run)') +
@@ -1937,6 +1940,143 @@ const EXPLORE_REPORT_SCHEMA: JsonSchema = {
     },
 };
 
+// ---------------------------------------------------------------------------
+// Plan-before-explore — read the requirement (FDD/doc/description) AND the
+// existing tests, do gap analysis, and produce the prioritized scenario plan
+// that scopes the exploration and generation. Without this, exploration has
+// nothing concrete to walk and stops after one page.
+// ---------------------------------------------------------------------------
+
+const AUTHOR_PLAN_SCHEMA: JsonSchema = {
+    type: 'object',
+    required: ['scenarios', 'coverageGaps'],
+    properties: {
+        existingCoverage: { type: 'array', items: { type: 'string' } },
+        coverageGaps: { type: 'array', items: { type: 'string' } },
+        scenarios: {
+            type: 'array',
+            minItems: 1,
+            items: {
+                type: 'object',
+                required: ['id', 'title', 'workflow', 'priority'],
+                properties: {
+                    id: { type: 'string' },
+                    title: { type: 'string', minLength: 5 },
+                    // The ordered user journey a tester walks to verify it —
+                    // this is what the explore stage actually performs.
+                    workflow: { type: 'string', minLength: 10 },
+                    priority: { type: 'string', enum: ['P1', 'P2', 'P3'] },
+                    type: { type: 'string', enum: ['positive', 'negative', 'edge', 'e2e'] },
+                    reuseExisting: { type: 'boolean' },
+                    notes: { type: 'string' },
+                },
+            },
+        },
+    },
+};
+
+stage({
+    id: 'author.plan',
+    kind: 'cognitive',
+    title: 'Requirement + gap analysis → scenario plan',
+    run: (ctx: StageContext): StageOutcome => {
+        if (ctx.submission === undefined) {
+            const inputs = ctx.session.inputs;
+            const source = str(inputs.source) || str(inputs.legacyPath);
+            // Deterministically pre-read a requirement document when the source
+            // is a file path (the FDD) — zero tokens, and it grounds the plan
+            // in the real requirement instead of the model guessing.
+            let requirementText = '';
+            try {
+                if (source && fs.existsSync(source) && fs.statSync(source).isFile()) {
+                    requirementText = fs.readFileSync(source, 'utf-8').slice(0, 40_000);
+                }
+            } catch {
+                /* ignore — fall back to source string as the requirement */
+            }
+            const reqArtifact = ctx.writeArtifact(
+                'requirement-source.json',
+                JSON.stringify(
+                    {
+                        source,
+                        isDocument: requirementText.length > 0,
+                        content: requirementText || `(no document read — requirement is: ${source})`,
+                    },
+                    null,
+                    2,
+                ),
+            );
+            const invPath =
+                ctx.session.artifacts.find((a) => a.endsWith('inventory.json') || a.endsWith('workspace-posture.json')) ??
+                ctx.writeArtifact(
+                    'plan-inventory.json',
+                    JSON.stringify(
+                        CSRepoInventory.inventory(str(inputs.project), { workspaceRoot: ctx.workspaceRoot }),
+                        null,
+                        2,
+                    ),
+                );
+            return {
+                status: 'envelope',
+                summary: 'awaiting scenario plan',
+                envelope: makeEnvelope(
+                    ctx,
+                    'plan-scenarios',
+                    'You are the test lead planning BEFORE any automation — exactly what a human tester ' +
+                        'does first. Read the requirement at requirement-source.json (the FDD / document / ' +
+                        'description) AND the existing test inventory at the inventory grounding path. Do a ' +
+                        'GAP ANALYSIS: list what the existing tests ALREADY cover (existingCoverage) and what ' +
+                        'the requirement needs that is NOT yet covered (coverageGaps). Then produce the ' +
+                        'prioritized scenario plan to implement — one entry per scenario, each with a concrete ' +
+                        '`workflow`: the ordered user journey a tester will walk in the browser to verify it ' +
+                        '(e.g. "login → open PIM → Add Employee → fill required fields → Save → assert in list"). ' +
+                        'Set reuseExisting=true when an existing test already covers it and only needs extension. ' +
+                        'Ground every scenario in the requirement — do NOT invent scope it does not imply, and do ' +
+                        'NOT duplicate existing coverage. Return JSON per responseSchema.',
+                    AUTHOR_PLAN_SCHEMA,
+                    {
+                        groundingPaths: [reqArtifact, invPath],
+                        project: str(inputs.project),
+                        skills: skillHints('test plan scenario coverage gap analysis'),
+                    },
+                ),
+            };
+        }
+        const plan = ctx.submission as Record<string, unknown>;
+        const scenarios = (plan.scenarios as Array<Record<string, unknown>>) ?? [];
+        const gaps = (plan.coverageGaps as string[]) ?? [];
+        // Explore scope = the workflows the tester must walk, priority order.
+        const toWalk = scenarios.map((s) => `${str(s.title)} :: ${str(s.workflow)}`);
+        ctx.session.inputs.exploreScope = toWalk.join(' | ');
+        ctx.session.inputs.plannedScenarioCount = scenarios.length;
+        ctx.session.inputs.exploreRetries = 0;
+        const md = [
+            `# Scenario plan — ${str(ctx.session.inputs.project)}`,
+            '',
+            '## Existing coverage',
+            ...(((plan.existingCoverage as string[]) ?? ['(none found)']).map((c) => `- ${c}`)),
+            '',
+            '## Coverage gaps to implement',
+            ...(gaps.length ? gaps.map((c) => `- ${c}`) : ['- (none — extending existing coverage)']),
+            '',
+            '## Planned scenarios',
+            '| Priority | Type | Scenario | Reuse | Workflow to walk |',
+            '|---|---|---|---|---|',
+            ...scenarios.map(
+                (s) =>
+                    `| ${s.priority} | ${s.type ?? '-'} | ${str(s.title).replace(/\|/g, '\\|')} | ${s.reuseExisting ? 'yes' : 'no'} | ${str(s.workflow).replace(/\|/g, '\\|')} |`,
+            ),
+        ];
+        const jsonPath = ctx.writeArtifact('scenario-plan.json', JSON.stringify(plan, null, 2));
+        const mdPath = ctx.writeArtifact('SCENARIO-PLAN.md', md.join('\n') + '\n');
+        return {
+            status: 'complete',
+            summary: `planned ${scenarios.length} scenario(s), ${gaps.length} gap(s) to implement`,
+            artifacts: [jsonPath, mdPath],
+        };
+    },
+});
+
 stage({
     id: 'author.explore',
     kind: 'handoff',
@@ -1962,7 +2102,7 @@ stage({
                 summary: 'live exploration delegated',
                 handoff: {
                     handoffId: 'author.explore',
-                    packs: ['browser'],
+                    packs: ['exploration'],
                     instruction:
                         `Explore the application at ${resolvedUrl} exactly like a human tester doing a ` +
                         'manual test pass BEFORE writing any automation. browser_launch (headless), ' +
@@ -1982,29 +2122,60 @@ stage({
                         'NEVER type or record literal credentials/secrets in the report — use the ' +
                         '{config:...} placeholders. Bound it: max 15 pages, max 25 elements/page. ' +
                         (str(inputs.exploreScope)
-                            ? `IN-SCOPE WORKFLOWS (walk exactly these, nothing else): ${str(inputs.exploreScope)}. `
+                            ? `IN-SCOPE WORKFLOWS from the plan — walk EVERY ONE of these end-to-end, ` +
+                              `not just the first (read scenario-plan.json for full detail): ${str(inputs.exploreScope)}. ` +
+                              'One workflow entry in your report per planned scenario. '
                             : '') +
+                        'Do NOT report done after a single page — you must walk every planned workflow. ' +
                         'Then call csaa_advance with the report per reportSchema.',
                     nextSuggestedTool: 'browser_launch',
                     nextSuggestedArgs: { headless: true },
-                    doneWhen: 'every in-scope workflow walked end-to-end with its step sequence + every visited page captured',
+                    doneWhen: 'EVERY planned in-scope workflow walked end-to-end with its step sequence + every visited page captured',
                     reportSchema: EXPLORE_REPORT_SCHEMA,
                 },
             };
         }
         const report = ctx.handoffReport;
         const pages = (report.pages as Array<Record<string, unknown>>) ?? [];
+        const workflows = (report.workflows as Array<Record<string, unknown>>) ?? [];
         const elementCount = pages.reduce(
             (sum, p) => sum + ((p.elements as unknown[]) ?? []).length,
             0,
         );
+        // Coverage gate: if a plan set N scenarios but the walk covered far
+        // fewer (or only one page), send it BACK to finish — this is what stops
+        // "navigated to one page, declared done". Bounded to avoid a loop.
+        const planned = Number(inputs.plannedScenarioCount) || 0;
+        const retries = Number(inputs.exploreRetries) || 0;
+        const needed = Math.max(1, Math.ceil(planned * 0.6));
+        if (planned > 0 && retries < 2 && (workflows.length < needed || pages.length <= 1)) {
+            inputs.exploreRetries = retries + 1;
+            return {
+                status: 'handoff',
+                summary: `exploration too shallow (${workflows.length}/${planned} workflows, ${pages.length} pages) — sending back`,
+                handoff: {
+                    handoffId: 'author.explore',
+                    packs: ['exploration'],
+                    instruction:
+                        `Your exploration only covered ${workflows.length} of ${planned} planned workflows ` +
+                        `(${pages.length} page(s)). That is not enough. Go BACK to the app at ${resolvedUrl} and ` +
+                        'walk the REMAINING planned workflows END TO END (see scenario-plan.json for the full ' +
+                        'list and each workflow\'s journey), capturing each page\'s elements + locators and the ' +
+                        'ordered observed steps. Return the COMPLETE report (all planned workflows) via csaa_advance.',
+                    nextSuggestedTool: 'browser_navigate',
+                    nextSuggestedArgs: { url: resolvedUrl },
+                    doneWhen: 'all planned workflows are covered in the report',
+                    reportSchema: EXPLORE_REPORT_SCHEMA,
+                },
+            };
+        }
         const artifact = ctx.writeArtifact(
             'captured-pages.json',
             JSON.stringify({ source, ...report }, null, 2),
         );
         return {
             status: 'complete',
-            summary: `explored ${pages.length} pages, captured ${elementCount} elements`,
+            summary: `explored ${pages.length} pages, ${workflows.length} workflow(s), captured ${elementCount} elements`,
             artifacts: [artifact],
         };
     },

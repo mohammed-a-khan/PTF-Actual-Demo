@@ -157,7 +157,7 @@ export const MODE_DEFINITIONS: ModeDefinition[] = [
             },
         ],
         toolPacks: ['authoring', 'quality'],
-        stages: ['posture', 'author.intake', 'app.context', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
+        stages: ['posture', 'author.intake', 'author.plan', 'app.context', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
     },
     {
         mode: 'migrate',
@@ -184,7 +184,7 @@ export const MODE_DEFINITIONS: ModeDefinition[] = [
             },
         ],
         toolPacks: ['authoring', 'quality'],
-        stages: ['posture', 'author.intake', 'app.context', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
+        stages: ['posture', 'author.intake', 'author.plan', 'app.context', 'author.explore', 'author.data', 'author.pipeline', 'finalize'],
     },
     {
         mode: 'review',

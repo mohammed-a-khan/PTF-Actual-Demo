@@ -133,25 +133,21 @@ async function startSession(
             const merged = { ...rawInputs, ...asked.answers };
             return startSession(modeDef, merged, context);
         }
-        if (asked.kind === 'declined') {
-            return {
-                ok: false,
-                mode: modeDef.mode,
-                action: 'stop',
-                blockedReason: 'User declined to provide the required inputs.',
-            };
-        }
+        // declined / cancelled / unsupported → ALWAYS re-ask as a text question
+        // and wait. A dismissed input dialog must never abort a mode the user
+        // asked to run — the agent relays these fields and waits for values.
         return {
             ok: true,
             mode: modeDef.mode,
             action: 'ask_user',
             question: {
                 questionId: 'collect_inputs',
-                message: `To run "${modeDef.title}" I need:`,
+                message: `To run "${modeDef.title}" I need the following — please provide them (I will wait):`,
                 fields: validated.missing,
             },
             note:
-                'Ask the user for these values, then re-call cs_ai_auto_assist with ' +
+                'Relay these fields to the user and WAIT for their values — do not proceed or ' +
+                'assume defaults. Then re-call cs_ai_auto_assist with ' +
                 `{ mode: "${modeDef.mode}", inputs: { ...provided values... } }.`,
         };
     }
@@ -307,13 +303,10 @@ const frontDoorTool = defineTool()
             );
             if (picked.kind === 'picked') {
                 mode = picked.value;
-            } else if (picked.kind === 'declined') {
-                return jsonResult({
-                    ok: true,
-                    action: 'done',
-                    note: 'User dismissed the menu. Nothing started.',
-                });
             } else {
+                // declined / cancelled (dialog dismissed) / unsupported all
+                // fall back to the TEXT menu and wait. A dismissed picker must
+                // never dead-end as "nothing started" — the user is mid-decision.
                 const menu = CSSDLCCatalog.modeMenu();
                 return jsonResult({
                     ok: true,
@@ -321,7 +314,8 @@ const frontDoorTool = defineTool()
                     menu,
                     note:
                         'Show this menu to the user EXACTLY as rendered by the menuText below, ' +
-                        'then re-call cs_ai_auto_assist with { mode: "<their choice>" }.\n\n' +
+                        'then re-call cs_ai_auto_assist with { mode: "<their choice>" }. ' +
+                        'Do NOT proceed until the user has chosen.\n\n' +
                         CSInteract.menuText(menu),
                 });
             }
@@ -345,14 +339,9 @@ const frontDoorTool = defineTool()
             if (asked.kind === 'answers') {
                 return jsonResult(await startSession(modeDef, asked.answers, context));
             }
-            if (asked.kind === 'declined') {
-                return jsonResult({
-                    ok: true,
-                    mode: modeDef.mode,
-                    action: 'done',
-                    note: 'User dismissed the input form. Nothing started.',
-                });
-            }
+            // declined / cancelled / unsupported → fall through to startSession,
+            // which re-asks for the required fields as a TEXT question and waits.
+            // A dismissed form must never dead-end.
         }
 
         return jsonResult(await startSession(modeDef, rawInputs, context));

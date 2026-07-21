@@ -36,12 +36,34 @@ interface PackSpec {
     load: () => MCPToolDefinition[];
     /** Tool names NEVER registered by this pack (hard capability removal). */
     exclude?: string[];
+    /**
+     * When set, ONLY these tool names are registered from load() — a lean
+     * pack. Keeps a stage's tool surface small so (a) the host's tool-count
+     * limit isn't hit (which can silently evict the control-flow meta-tools
+     * like csaa_advance) and (b) the user pays for fewer loaded schemas.
+     */
+    only?: string[];
     /** Optional interceptor wrapped around every handler in the pack. */
     guard?: (
         toolName: string,
         params: Record<string, unknown>,
     ) => { ok: boolean; reason?: string };
 }
+
+/**
+ * The lean exploration toolset — what a human-tester walkthrough actually
+ * needs (navigate, observe, interact, capture locators), curated down from
+ * the full 53-tool browser pack so the meta-tools survive the host tool cap.
+ */
+const EXPLORATION_BROWSER_TOOLS = [
+    'browser_launch', 'browser_close', 'browser_navigate', 'browser_back', 'browser_reload',
+    'browser_snapshot', 'browser_take_screenshot',
+    'browser_click', 'browser_type', 'browser_select_option', 'browser_hover', 'browser_press_key', 'browser_fill_form',
+    'browser_get_text', 'browser_get_attribute', 'browser_get_value',
+    'browser_wait_for_element', 'browser_wait_for_navigation', 'browser_wait_for_load_state',
+    'browser_handle_dialog', 'browser_generate_locator',
+    'browser_verify_text_visible', 'browser_verify_element_visible',
+];
 
 /**
  * Database tools with write/DDL capability. The agentic platform's hard
@@ -75,6 +97,12 @@ const PACKS: PackSpec[] = [
             ...require('../tools/testing/CSMCPTestingTools').testingTools,
             ...require('../tools/heal-loop/CSMCPHealLoopTools').healLoopTools,
         ],
+    },
+    {
+        name: 'exploration',
+        summary: 'Lean browser walkthrough set (navigate, observe, interact, capture locators) — the ~23 tools an exploration/heal pass needs, without the full browser surface.',
+        load: () => require('../tools/browser/CSMCPBrowserTools').browserTools,
+        only: EXPLORATION_BROWSER_TOOLS,
     },
     {
         name: 'browser',
@@ -203,6 +231,7 @@ export class CSToolPacks {
         for (const def of definitions) {
             if (this.registry.hasTool(def.tool.name)) continue;
             if (spec.exclude?.includes(def.tool.name)) continue;
+            if (spec.only && !spec.only.includes(def.tool.name)) continue;
             this.registry.registerTool(spec.guard ? CSToolPacks.withGuard(def, spec.guard) : def);
             registered.push(def.tool.name);
         }

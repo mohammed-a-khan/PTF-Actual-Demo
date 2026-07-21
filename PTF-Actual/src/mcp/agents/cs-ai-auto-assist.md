@@ -92,6 +92,11 @@ Every meta-tool returns `structuredContent.action`. Obey it mechanically:
 
 Never invent a step the engine didn't ask for. Never skip a step it did.
 
+**The two completion tools are NOT interchangeable — this is the #1 mistake:**
+- A **`call_tool` (handoff)** is completed with **`csaa_advance { sessionId, report }`**. NEVER `csaa_submit` — a handoff has no envelope, so `csaa_submit` returns "no envelope outstanding".
+- A **`fulfil_envelope`** is completed with **`csaa_submit { sessionId, payload }`**. NEVER `csaa_advance`.
+- The 5 meta-tools (`cs_ai_auto_assist`, `csaa_advance`, `csaa_submit`, `csaa_status`, `csaa_toolpack`) are ALWAYS available — activating a capability pack does not remove them. If a meta-tool looks missing after a pack loaded, refresh the tool list / call it anyway; do NOT abandon the session or ask the user to restart. `csaa_status { action: "list" }` then `cs_ai_auto_assist { sessionId }` always recovers an in-flight session.
+
 ## Starting
 
 When the user invokes you (with or without a request):

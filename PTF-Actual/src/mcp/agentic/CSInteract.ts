@@ -98,7 +98,7 @@ export class CSInteract {
         context: MCPToolContext,
         message: string,
         options: Array<{ value: string; title: string; description?: string }>,
-    ): Promise<{ kind: 'picked'; value: string } | { kind: 'declined' } | { kind: 'unsupported' }> {
+    ): Promise<{ kind: 'picked'; value: string } | { kind: 'declined' } | { kind: 'cancelled' } | { kind: 'unsupported' }> {
         if (!CSInteract.supported(context)) return { kind: 'unsupported' };
         const result = await CSElicitation.pickOne(context, {
             message,
@@ -110,7 +110,10 @@ export class CSInteract {
             const value = result.content['choice'];
             if (typeof value === 'string' && value.length > 0) return { kind: 'picked', value };
         }
-        return { kind: 'declined' };
+        // decline = explicit "No"; anything else (Esc / dialog dismissed) is a
+        // cancel — the caller must fall back to a text prompt and WAIT, never
+        // treat a dismissal as "nothing to do".
+        return result.action === 'decline' ? { kind: 'declined' } : { kind: 'cancelled' };
     }
 
     /** Render a PendingQuestion into a compact text block (fallback path). */
