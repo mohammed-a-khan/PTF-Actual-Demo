@@ -181,20 +181,23 @@ const BUILTIN_TOOL_ALIASES = new Set([
     'todo',
 ]);
 
-function qualifyToolName(tool: string, serverName: string): string {
+function qualifyToolName(tool: string, serverName: string, wholeServerWildcard = false): string {
     // Already a wildcard or explicitly server-qualified — pass through.
     if (tool.includes('/')) return tool;
     if (BUILTIN_TOOL_ALIASES.has(tool)) return tool;
     // Naming the MCP server itself grants ALL its tools — required for the
     // agentic profile, where capability-pack tools appear dynamically via
-    // tools/list_changed and can't be enumerated statically.
-    if (tool === serverName) return tool;
+    // tools/list_changed and can't be enumerated statically. VS Code renamed
+    // the whole-toolset reference: the bare server name is rejected with
+    // "Tool or toolset '<server>' has been renamed, use '<server>/*' instead",
+    // so the VS Code / JetBrains generator emits the `/*` wildcard form.
+    if (tool === serverName) return wholeServerWildcard ? `${serverName}/*` : tool;
     return `${serverName}/${tool}`;
 }
 
 function generateVSCodeChatmode(agent: AgentDefinition, serverName: string): string {
     const toolsList = agent.tools
-        .map(t => `- ${qualifyToolName(t, serverName)}`)
+        .map(t => `- ${qualifyToolName(t, serverName, true)}`)
         .join('\n');
 
     return `---
