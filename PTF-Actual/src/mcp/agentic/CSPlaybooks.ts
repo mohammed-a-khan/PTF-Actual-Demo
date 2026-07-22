@@ -70,6 +70,75 @@ function walkFiles(root: string, exts: string[], limit: number = 400): string[] 
     return out.sort();
 }
 
+/** Extract readable text from a .docx (it is a zip; text lives in document.xml). */
+async function extractDocxText(filePath: string): Promise<string> {
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const JSZip = require('jszip');
+        const zip = await JSZip.loadAsync(fs.readFileSync(filePath));
+        const entry = zip.file('word/document.xml');
+        if (!entry) return '';
+        const xml: string = await entry.async('string');
+        return xml
+            .replace(/<\/w:p>/g, '\n')
+            .replace(/<w:tab\b[^>]*\/>/g, '\t')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+            .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+            .replace(/[ \t]+\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    } catch {
+        return '';
+    }
+}
+
+const REQ_TEXT_EXTS = ['.txt', '.md', '.markdown', '.csv', '.json', '.html', '.htm', '.xml', '.feature'];
+
+/**
+ * Read a requirement source that may be a single file, a .docx, OR a FOLDER of
+ * documents. Returns the concatenated text (bounded) plus a per-file manifest.
+ * This is what lets "point at the folder with all the AFDD documents" work.
+ */
+async function readRequirementSource(
+    source: string,
+): Promise<{ files: Array<{ name: string; chars: number }>; content: string; isDocument: boolean }> {
+    const collected: Array<{ name: string; text: string }> = [];
+    const readOne = async (fp: string): Promise<void> => {
+        const ext = path.extname(fp).toLowerCase();
+        let text = '';
+        if (ext === '.docx') text = await extractDocxText(fp);
+        else if (REQ_TEXT_EXTS.includes(ext)) {
+            try {
+                text = fs.readFileSync(fp, 'utf-8');
+            } catch {
+                /* ignore */
+            }
+        } else if (ext === '.pdf' || ext === '.doc') {
+            text = `(binary ${ext} — server cannot extract text; the agent should open it with the read tool and summarise it into the plan)`;
+        }
+        if (text.trim()) collected.push({ name: path.basename(fp), text: text.slice(0, 60_000) });
+    };
+    try {
+        if (source && fs.existsSync(source)) {
+            const stat = fs.statSync(source);
+            if (stat.isDirectory()) {
+                const docs = walkFiles(source, [...REQ_TEXT_EXTS, '.docx', '.pdf', '.doc'], 60);
+                for (const d of docs) await readOne(d);
+            } else if (stat.isFile()) {
+                await readOne(source);
+            }
+        }
+    } catch {
+        /* best-effort */
+    }
+    const content = collected
+        .map((d) => `\n===== DOCUMENT: ${d.name} =====\n${d.text}`)
+        .join('\n')
+        .slice(0, 120_000);
+    return { files: collected.map((d) => ({ name: d.name, chars: d.text.length })), content, isDocument: collected.length > 0 };
+}
+
 /** Map a file path to the audit engine's file-type domain. */
 function auditFileType(file: string): FileType {
     const p = file.replace(/\\/g, '/');
@@ -1035,12 +1104,17 @@ stage({
                         `Now EXECUTE the tests you just generated and make them PASS — do not stop at ` +
                         `"generated". Set PROJECT=${project}` +
                         (str(inputs.environment) ? ` ENVIRONMENT=${str(inputs.environment)}` : '') +
-                        '. Run them with bdd_run_feature. For EACH failing scenario, DIAGNOSE the real ' +
-                        'cause and HEAL the right layer (locator drift → fix the page-object locator against ' +
-                        'the live DOM with browser_generate_locator; timing → waits; workflow changed → ' +
-                        're-explore and fix steps+feature+pages; data → re-resolve DB-first then UI). While ' +
-                        'you are in the app, AUDIT that the generated page objects and step definitions match ' +
-                        'what the app actually does — correct any mismatch. Re-run after each fix. LOOP until ' +
+                        '. Run them with bdd_run_feature. ' +
+                        'CRITICAL — DO NOT GUESS ANY FIX. For EACH failing scenario you MUST open the REAL ' +
+                        'browser and reproduce it: browser_launch → browser_navigate to the app → actually ' +
+                        'PERFORM the failing step (click/type/submit) → browser_snapshot the live DOM at the ' +
+                        'point of failure → then fix from what you OBSERVE, not from assumptions. Concretely: ' +
+                        'locator drift → browser_generate_locator against the live element and update the ' +
+                        'page object; timing → add explicit waits; workflow changed → re-walk the flow in the ' +
+                        'browser and update steps+feature+pages to the OBSERVED flow; data → re-resolve ' +
+                        'DB-first then UI. While in the app, AUDIT that each generated page object locator and ' +
+                        'step actually resolves/behaves as written — correct any mismatch against the live DOM. ' +
+                        'Re-run after each fix. LOOP until ' +
                         `ALL scenarios pass or you hit the heal budget (${Math.min(remaining, GUARDRAIL_LIMITS.maxHealCycles)} cycles). ` +
                         'NEVER weaken or delete an assertion to force a pass — a genuine application defect ' +
                         'stays failing and goes in realAppBugs. Report totals + pageObjectsAudited + ' +
@@ -2232,28 +2306,23 @@ stage({
     id: 'author.plan',
     kind: 'cognitive',
     title: 'Requirement + gap analysis → scenario plan',
-    run: (ctx: StageContext): StageOutcome => {
+    run: async (ctx: StageContext): Promise<StageOutcome> => {
         if (ctx.submission === undefined) {
             const inputs = ctx.session.inputs;
             const source = str(inputs.source) || str(inputs.legacyPath);
-            // Deterministically pre-read a requirement document when the source
-            // is a file path (the FDD) — zero tokens, and it grounds the plan
-            // in the real requirement instead of the model guessing.
-            let requirementText = '';
-            try {
-                if (source && fs.existsSync(source) && fs.statSync(source).isFile()) {
-                    requirementText = fs.readFileSync(source, 'utf-8').slice(0, 40_000);
-                }
-            } catch {
-                /* ignore — fall back to source string as the requirement */
-            }
+            // Extract requirement text PROPERLY. A .docx is a zip (reading it
+            // as utf-8 yields binary garbage — the old bug that starved the
+            // analysis). This also accepts a FOLDER and reads EVERY supported
+            // document in it (multi-document requirements).
+            const req = await readRequirementSource(source);
             const reqArtifact = ctx.writeArtifact(
                 'requirement-source.json',
                 JSON.stringify(
                     {
                         source,
-                        isDocument: requirementText.length > 0,
-                        content: requirementText || `(no document read — requirement is: ${source})`,
+                        isDocument: req.isDocument,
+                        documents: req.files,
+                        content: req.content || `(no readable document found — requirement is: ${source})`,
                     },
                     null,
                     2,
@@ -2276,8 +2345,10 @@ stage({
                     ctx,
                     'plan-scenarios',
                     'You are the test lead planning BEFORE any automation — exactly what a human tester ' +
-                        'does first. Read the requirement at requirement-source.json (the FDD / document / ' +
-                        'description) THOROUGHLY (all sections, not just headings) AND the existing test ' +
+                        'does first. Read the requirement at requirement-source.json THOROUGHLY — it may ' +
+                        'contain MULTIPLE documents (see its `documents` manifest; the content section ' +
+                        'concatenates them with "===== DOCUMENT: <name> =====" separators). Cover EVERY ' +
+                        'document and all sections, not just headings. Also read the existing test ' +
                         'inventory at the inventory grounding path (it lists existing .feature files, their ' +
                         'scenarios, step files and page objects). Then:\n' +
                         '1. GAP ANALYSIS — existingCoverage (what existing tests already cover) vs coverageGaps ' +
@@ -2542,15 +2613,17 @@ stage({
                     handoffId: 'author.data',
                     packs: ['data'],
                     instruction:
-                        'Resolve test data for every scenario you are about to author, in this ' +
-                        'strict order: (1) db_connect using the project config, db_list_tables + ' +
-                        'db_describe_table to discover the relevant schema, then SELECT queries ' +
-                        '(db_query) to find EXISTING rows that satisfy each scenario\'s data need — ' +
-                        'record the query that found them. (2) If no suitable rows exist, plan ' +
-                        'ui_create: the exact UI steps that create the data through the ' +
-                        'application (these become Background/setup steps). (3) static only for ' +
-                        'pure-input values. THE DATABASE IS READ-ONLY: INSERT/UPDATE/DELETE and ' +
-                        'all write tools are blocked server-side — do not attempt them. ' +
+                        'Resolve test data for every scenario you are about to author. FIRST, discover the ' +
+                        'schema so you KNOW the tables/columns (this is the prerequisite — do not guess table ' +
+                        'or column names): db_connect using the project config, then db_list_tables to see ' +
+                        'the tables, and db_describe_table on each RELEVANT table to learn its columns, types ' +
+                        'and keys. Record what you discovered in schemaDiscovered. THEN for each scenario, in ' +
+                        'strict order: (1) write a SELECT (db_query) against the discovered tables/columns to ' +
+                        'find an EXISTING row that satisfies the scenario\'s data need — record the exact query ' +
+                        'and the tables it used. (2) If no suitable row exists, plan ui_create: the exact UI ' +
+                        'steps that create the data through the application (these become Background/setup ' +
+                        'steps). (3) static only for pure-input values. THE DATABASE IS READ-ONLY: ' +
+                        'INSERT/UPDATE/DELETE and all write tools are blocked server-side — do not attempt them. ' +
                         'Never put real PII in the report. Then csaa_advance with the report.',
                     nextSuggestedTool: 'db_connect',
                     nextSuggestedArgs: {},

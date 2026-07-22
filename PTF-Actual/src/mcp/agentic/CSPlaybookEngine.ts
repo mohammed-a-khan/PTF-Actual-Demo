@@ -251,12 +251,16 @@ export class CSPlaybookEngine {
 
                 case 'question': {
                     const question = outcome.question!;
-                    // Return the question for the MODEL to relay (reliable
-                    // request/response), rather than firing a server-initiated
-                    // elicitation dialog mid-tool-call. Nested elicitation is
-                    // unreliable on the Copilot/GPT route (it produced cascading
-                    // duplicate input boxes). The user answers, the model calls
-                    // csaa_advance { answers }, and the stage re-runs.
+                    // Fancy native dialog first (single-dialog lock prevents any
+                    // overlap/cascade); if answered inline, continue the chain
+                    // with zero extra round-trips. On busy / dismissed /
+                    // unsupported, fall through to the text ask_user protocol.
+                    const asked = await CSInteract.form(mcp, question.message, question.fields);
+                    if (asked.kind === 'answers') {
+                        pending = { answers: asked.answers };
+                        CSSessionStore.save(session);
+                        continue;
+                    }
                     session.pendingStageId = stageId;
                     session.pendingQuestion = question;
                     CSSessionStore.transition(session, 'AWAITING_ANSWER');

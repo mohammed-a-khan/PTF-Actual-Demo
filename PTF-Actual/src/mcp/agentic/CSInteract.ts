@@ -24,9 +24,20 @@ export type InteractOutcome =
     | { kind: 'declined' }
     /** Esc / dialog dismissed — NOT a refusal; callers should re-ask via the text fallback. */
     | { kind: 'cancelled' }
+    /** Another dialog is already open — the caller must fall back to text, never open a 2nd box. */
+    | { kind: 'busy' }
     | { kind: 'unsupported' };
 
 export class CSInteract {
+    /**
+     * Global single-dialog lock. VS Code fully supports elicitation DURING a
+     * tool call, but a model that re-invokes the tool while a dialog is open
+     * would open a SECOND overlapping box (the cascade the user saw). This lock
+     * guarantees at most one native dialog is ever open at a time: a concurrent
+     * request returns 'busy' and the caller relays a text prompt instead.
+     */
+    private static dialogOpen = false;
+
     public static supported(context: MCPToolContext): boolean {
         return CSElicitation.isSupported(context);
     }
@@ -43,6 +54,20 @@ export class CSInteract {
     ): Promise<InteractOutcome> {
         if (!CSInteract.supported(context)) return { kind: 'unsupported' };
         if (fields.length === 0) return { kind: 'answers', answers: {} };
+        if (CSInteract.dialogOpen) return { kind: 'busy' };
+        CSInteract.dialogOpen = true;
+        try {
+            return await CSInteract.formInner(context, message, fields);
+        } finally {
+            CSInteract.dialogOpen = false;
+        }
+    }
+
+    private static async formInner(
+        context: MCPToolContext,
+        message: string,
+        fields: ModeInputField[],
+    ): Promise<InteractOutcome> {
 
         const properties: Record<string, MCPSchemaProperty> = {};
         const required: string[] = [];
@@ -98,22 +123,27 @@ export class CSInteract {
         context: MCPToolContext,
         message: string,
         options: Array<{ value: string; title: string; description?: string }>,
-    ): Promise<{ kind: 'picked'; value: string } | { kind: 'declined' } | { kind: 'cancelled' } | { kind: 'unsupported' }> {
+    ): Promise<{ kind: 'picked'; value: string } | { kind: 'declined' } | { kind: 'cancelled' } | { kind: 'busy' } | { kind: 'unsupported' }> {
         if (!CSInteract.supported(context)) return { kind: 'unsupported' };
-        const result = await CSElicitation.pickOne(context, {
-            message,
-            fieldName: 'choice',
-            options,
-        });
-        if (!result.supported) return { kind: 'unsupported' };
-        if (result.action === 'accept') {
-            const value = result.content['choice'];
-            if (typeof value === 'string' && value.length > 0) return { kind: 'picked', value };
+        if (CSInteract.dialogOpen) return { kind: 'busy' };
+        CSInteract.dialogOpen = true;
+        try {
+            const result = await CSElicitation.pickOne(context, {
+                message,
+                fieldName: 'choice',
+                options,
+            });
+            if (!result.supported) return { kind: 'unsupported' };
+            if (result.action === 'accept') {
+                const value = result.content['choice'];
+                if (typeof value === 'string' && value.length > 0) return { kind: 'picked', value };
+            }
+            // decline = explicit "No"; anything else (Esc / dialog dismissed) is a
+            // cancel — the caller falls back to a text prompt, never dead-ends.
+            return result.action === 'decline' ? { kind: 'declined' } : { kind: 'cancelled' };
+        } finally {
+            CSInteract.dialogOpen = false;
         }
-        // decline = explicit "No"; anything else (Esc / dialog dismissed) is a
-        // cancel — the caller must fall back to a text prompt and WAIT, never
-        // treat a dismissal as "nothing to do".
-        return result.action === 'decline' ? { kind: 'declined' } : { kind: 'cancelled' };
     }
 
     /** Render a PendingQuestion into a compact text block (fallback path). */

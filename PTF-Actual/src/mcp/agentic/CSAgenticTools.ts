@@ -122,11 +122,18 @@ async function startSession(
         };
     }
 
-    // Collect missing required fields via the reliable ask_user protocol —
-    // return ONE question for the model to relay, then the user answers and
-    // the model re-calls with { mode, inputs }. No server-initiated dialog
-    // (nested elicitation caused the cascading duplicate input boxes).
+    // Collect the not-yet-provided inputs. Prefer ONE consolidated native
+    // dialog (the fancy form) via the single-dialog lock; on busy / dismissed /
+    // unsupported fall back to a single text question. Either way it is exactly
+    // ONE prompt — never the cascading duplicate boxes.
     if (validated.missing.length > 0) {
+        const toAsk = modeDef.inputs.filter((f) => rawInputs[f.id] === undefined || rawInputs[f.id] === '');
+        const dialogFields = toAsk.length > 0 ? toAsk : validated.missing;
+        const asked = await CSInteract.form(context, `${modeDef.title} — inputs:`, dialogFields);
+        if (asked.kind === 'answers') {
+            return startSession(modeDef, { ...rawInputs, ...asked.answers }, context);
+        }
+        // busy / cancelled / declined / unsupported → single text question, wait.
         return {
             ok: true,
             mode: modeDef.mode,
@@ -282,23 +289,30 @@ const frontDoorTool = defineTool()
         }
 
         if (!mode) {
-            // Return the menu for the MODEL to relay (single message), rather
-            // than firing a server-initiated dialog. Nested elicitation during
-            // a tool call is unreliable across hosts (Copilot/GPT route) — it
-            // makes duplicate input boxes cascade. The request/response
-            // protocol (tool returns menu → model relays → user picks → model
-            // re-calls with { mode }) is reliable everywhere.
-            const menu = CSSDLCCatalog.modeMenu();
-            return jsonResult({
-                ok: true,
-                action: 'show_menu',
-                menu,
-                note:
-                    'Show this menu to the user EXACTLY as rendered by the menuText below, ' +
-                    'then re-call cs_ai_auto_assist with { mode: "<their choice>" }. ' +
-                    'Do NOT proceed until the user has chosen.\n\n' +
-                    CSInteract.menuText(menu),
-            });
+            // Fancy native dropdown when the host supports elicitation — but
+            // ONE dialog at a time (CSInteract's lock), and a text-menu
+            // fallback for busy / dismissed / unsupported so it never
+            // dead-ends or cascades.
+            const picked = await CSInteract.pick(
+                context,
+                'CS AI Auto-Assist — what do you want to do?',
+                CSSDLCCatalog.list().map((m) => ({ value: m.mode, title: m.title, description: m.summary })),
+            );
+            if (picked.kind === 'picked') {
+                mode = picked.value;
+            } else {
+                const menu = CSSDLCCatalog.modeMenu();
+                return jsonResult({
+                    ok: true,
+                    action: 'show_menu',
+                    menu,
+                    note:
+                        'Show this menu to the user EXACTLY as rendered by the menuText below, ' +
+                        'then re-call cs_ai_auto_assist with { mode: "<their choice>" }. ' +
+                        'Do NOT proceed until the user has chosen.\n\n' +
+                        CSInteract.menuText(menu),
+                });
+            }
         }
 
         const modeDef = CSSDLCCatalog.get(mode);
