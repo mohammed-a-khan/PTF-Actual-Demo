@@ -48,6 +48,15 @@ export interface CSMCPServerConfig {
     workingDirectory?: string;
     capabilities?: Partial<MCPCapabilities>;
     logLevel?: MCPLogLevel;
+    /**
+     * Agentic profile only: which capability packs to eager-load into the
+     * startup tool list (so snapshot-at-start hosts like VS Code Copilot see
+     * them). `undefined` uses the interactive-core default; `[]` keeps the
+     * pure lazy behaviour; a custom list tunes the startup surface for a
+     * host's tool budget (e.g. add 'ado' for ADO-heavy work). May also be set
+     * via the CSAA_EAGER_PACKS env var (comma-separated).
+     */
+    eagerPacks?: string[];
 }
 
 const DEFAULT_CONFIG: Required<CSMCPServerConfig> = {
@@ -65,6 +74,9 @@ const DEFAULT_CONFIG: Required<CSMCPServerConfig> = {
         // must not advertise them as its own (fixed per MCP spec audit).
     },
     logLevel: 'info',
+    // Empty sentinel — createAgenticMCPServer resolves the real default when
+    // the caller does not specify (Required<> forbids `undefined` here).
+    eagerPacks: [],
 };
 
 // ============================================================================

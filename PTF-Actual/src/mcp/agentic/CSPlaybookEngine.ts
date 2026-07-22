@@ -251,16 +251,11 @@ export class CSPlaybookEngine {
 
                 case 'question': {
                     const question = outcome.question!;
-                    // Fancy native dialog first (single-dialog lock prevents any
-                    // overlap/cascade); if answered inline, continue the chain
-                    // with zero extra round-trips. On busy / dismissed /
-                    // unsupported, fall through to the text ask_user protocol.
-                    const asked = await CSInteract.form(mcp, question.message, question.fields);
-                    if (asked.kind === 'answers') {
-                        pending = { answers: asked.answers };
-                        CSSessionStore.save(session);
-                        continue;
-                    }
+                    // PURE TEXT protocol — no native dialog. On the Copilot/GPT
+                    // route the elicitation form does not reliably return the
+                    // typed values (the "input not received" cascade), so we
+                    // always relay the question as text, show the exact format
+                    // to type, and WAIT for one reply.
                     session.pendingStageId = stageId;
                     session.pendingQuestion = question;
                     CSSessionStore.transition(session, 'AWAITING_ANSWER');
@@ -271,7 +266,11 @@ export class CSPlaybookEngine {
                         state: session.state,
                         action: 'ask_user',
                         question,
-                        note: CSInteract.questionText(question),
+                        note:
+                            'Relay this to the user EXACTLY as rendered below and WAIT for their ' +
+                            'reply — do not proceed or assume answers. Then resume with csaa_advance ' +
+                            'passing their values.\n\n' +
+                            CSInteract.questionText(question),
                         statusPath: CSSessionStore.statusPath(session),
                         usage: this.usageView(session),
                     };

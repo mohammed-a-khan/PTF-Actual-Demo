@@ -105,18 +105,41 @@ export type ToolCategory =
 /**
  * Create the v3 agentic MCP server — the DEFAULT profile.
  *
- * Registers only the five cs_ai_auto_assist meta-tools plus prompts and
- * resources. The 240+ concrete tools stay out of the host's context until
- * a session's mode (or an explicit csaa_toolpack call) activates their
- * capability pack, at which point the server emits
- * `notifications/tools/list_changed`.
+ * Registers the five cs_ai_auto_assist meta-tools plus the interactive-core
+ * capability packs (browser walkthrough, the csaa_* authoring pipeline,
+ * execution/heal, quality gates, read-only DB) EAGERLY, so their tools are in
+ * the host's very first `tools/list`. This is required for snapshot-at-start
+ * hosts (VS Code Copilot in "auto" mode) that capture the tool list when a
+ * turn begins and ignore tools added later via `notifications/tools/list_changed`
+ * — without it a browser/author handoff blocks with "the browser tools are not
+ * available in this session".
+ *
+ * The heavy/specialised packs (ado, api, insights, security, generation, full
+ * browser) stay lazy — they are large and mode-specific, and eager-loading
+ * them would blow the host's ~128-tool cap. Tune the startup surface with
+ * `config.eagerPacks` or the CSAA_EAGER_PACKS env var when a host/mode mix
+ * needs a different profile.
  */
 export function createAgenticMCPServer(config?: CSMCPServerConfig): CSMCPServer {
     const server = new CSMCPServer(config);
     const registry = server.getToolRegistry();
 
-    const { registerAgenticTools } = require('./agentic') as typeof import('./agentic');
-    registerAgenticTools(registry, () => server.notifyToolsChanged());
+    const { registerAgenticTools, DEFAULT_EAGER_PACKS } =
+        require('./agentic') as typeof import('./agentic');
+
+    // Precedence: explicit config → CSAA_EAGER_PACKS env → interactive-core default.
+    const envPacks = (process.env.CSAA_EAGER_PACKS ?? '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    const eagerPacks =
+        config?.eagerPacks !== undefined
+            ? config.eagerPacks
+            : envPacks.length > 0
+              ? envPacks
+              : DEFAULT_EAGER_PACKS;
+
+    registerAgenticTools(registry, () => server.notifyToolsChanged(), eagerPacks);
 
     registerResources(server);
     registerPrompts(server);

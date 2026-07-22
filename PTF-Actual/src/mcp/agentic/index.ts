@@ -16,4 +16,9 @@ export { CSGuardrailEngine, GUARDRAIL_LIMITS } from './CSGuardrailEngine';
 export { CSInteract } from './CSInteract';
 export { CSPlaybooks } from './CSPlaybooks';
 export { CSPlaybookEngine } from './CSPlaybookEngine';
-export { agenticMetaTools, registerAgenticTools } from './CSAgenticTools';
+export {
+    agenticMetaTools,
+    registerAgenticTools,
+    DEFAULT_EAGER_PACKS,
+    STARTUP_OWNER,
+} from './CSAgenticTools';

@@ -25,7 +25,7 @@ import { CSGuardrailEngine, GUARDRAIL_LIMITS } from './CSGuardrailEngine';
 import { CSInteract } from './CSInteract';
 import { CSPlaybookEngine } from './CSPlaybookEngine';
 import { CSToolPacks } from './CSToolPacks';
-import { AgenticToolResult, ModeDefinition, SessionRecord } from './types';
+import { AgenticToolResult, ModeDefinition, PendingQuestion, SessionRecord } from './types';
 
 // ============================================================================
 // Wiring
@@ -122,31 +122,28 @@ async function startSession(
         };
     }
 
-    // Collect the not-yet-provided inputs. Prefer ONE consolidated native
-    // dialog (the fancy form) via the single-dialog lock; on busy / dismissed /
-    // unsupported fall back to a single text question. Either way it is exactly
-    // ONE prompt — never the cascading duplicate boxes.
+    // Collect the not-yet-provided inputs as ONE plain-text question — no
+    // native dialog. On the Copilot/GPT route the elicitation form does not
+    // reliably return the typed values (the "input not received" cascade the
+    // user hit), so we always relay the required fields as text, show the
+    // exact format to type, and WAIT for one reply.
     if (validated.missing.length > 0) {
-        const toAsk = modeDef.inputs.filter((f) => rawInputs[f.id] === undefined || rawInputs[f.id] === '');
-        const dialogFields = toAsk.length > 0 ? toAsk : validated.missing;
-        const asked = await CSInteract.form(context, `${modeDef.title} — inputs:`, dialogFields);
-        if (asked.kind === 'answers') {
-            return startSession(modeDef, { ...rawInputs, ...asked.answers }, context);
-        }
-        // busy / cancelled / declined / unsupported → single text question, wait.
+        const question: PendingQuestion = {
+            questionId: 'collect_inputs',
+            message: `To run "${modeDef.title}" I need the following — please type them and I will continue:`,
+            fields: validated.missing,
+        };
         return {
             ok: true,
             mode: modeDef.mode,
             action: 'ask_user',
-            question: {
-                questionId: 'collect_inputs',
-                message: `To run "${modeDef.title}" I need the following — please provide them (I will wait):`,
-                fields: validated.missing,
-            },
+            question,
             note:
-                'Relay these fields to the user in ONE message and WAIT for their values — do not ' +
-                'proceed, assume defaults, or ask again while waiting. Then re-call cs_ai_auto_assist ' +
-                `once with { mode: "${modeDef.mode}", inputs: { ...all provided values... } }.`,
+                'Relay these fields to the user in ONE message, rendered EXACTLY as the ' +
+                'inputFormat block below so they know what to type, then WAIT for their reply — ' +
+                'do not proceed, assume defaults, or ask again while waiting. When they answer, ' +
+                `re-call cs_ai_auto_assist ONCE with { mode: "${modeDef.mode}", inputs: { ...all values... } }.\n\n` +
+                CSInteract.questionText(question),
         };
     }
 
@@ -289,30 +286,21 @@ const frontDoorTool = defineTool()
         }
 
         if (!mode) {
-            // Fancy native dropdown when the host supports elicitation — but
-            // ONE dialog at a time (CSInteract's lock), and a text-menu
-            // fallback for busy / dismissed / unsupported so it never
-            // dead-ends or cascades.
-            const picked = await CSInteract.pick(
-                context,
-                'CS AI Auto-Assist — what do you want to do?',
-                CSSDLCCatalog.list().map((m) => ({ value: m.mode, title: m.title, description: m.summary })),
-            );
-            if (picked.kind === 'picked') {
-                mode = picked.value;
-            } else {
-                const menu = CSSDLCCatalog.modeMenu();
-                return jsonResult({
-                    ok: true,
-                    action: 'show_menu',
-                    menu,
-                    note:
-                        'Show this menu to the user EXACTLY as rendered by the menuText below, ' +
-                        'then re-call cs_ai_auto_assist with { mode: "<their choice>" }. ' +
-                        'Do NOT proceed until the user has chosen.\n\n' +
-                        CSInteract.menuText(menu),
-                });
-            }
+            // TEXT protocol only — no native dialog. On the Copilot/GPT route
+            // the elicitation dialog does not reliably return values, so we
+            // present the menu as text; the user types their choice and the
+            // model re-calls with { mode }.
+            const menu = CSSDLCCatalog.modeMenu();
+            return jsonResult({
+                ok: true,
+                action: 'show_menu',
+                menu,
+                note:
+                    'Show this menu to the user EXACTLY as rendered by the menuText below, ' +
+                    'then re-call cs_ai_auto_assist with { mode: "<their choice>" }. ' +
+                    'Do NOT proceed until the user has typed a choice.\n\n' +
+                    CSInteract.menuText(menu),
+            });
         }
 
         const modeDef = CSSDLCCatalog.get(mode);
@@ -638,15 +626,52 @@ export const agenticMetaTools: MCPToolDefinition[] = [
 ];
 
 /**
+ * Owner id for packs eager-loaded at startup. Never released — these tools
+ * must stay in the host's tool list for the whole connection.
+ */
+export const STARTUP_OWNER = '__startup__';
+
+/**
+ * The interactive core that MUST be present in the host's tool list from the
+ * very first `tools/list` — NOT lazily added mid-session.
+ *
+ * Why eager: VS Code Copilot (and other snapshot-at-start hosts) capture the
+ * tool list when the agent turn begins and DO NOT pick up tools added later
+ * via `notifications/tools/list_changed`. A handoff that needs the real
+ * browser (author/explore/heal/run/review) would otherwise be "blocked — the
+ * browser tools are not available" even though the pack was activated. These
+ * packs are the ones interactive modes drive directly (browser walkthrough,
+ * the csaa_* authoring pipeline, execution/heal, quality gates, read-only DB
+ * for test data), curated to stay well under the host's ~128-tool cap.
+ *
+ * Heavy/specialised packs (ado, api, insights, security, generation, full
+ * browser) stay lazy — they are large, mode-specific, and would blow the cap.
+ */
+export const DEFAULT_EAGER_PACKS = ['exploration', 'authoring', 'execution', 'quality', 'data'];
+
+/**
  * Wire the agentic platform into a registry. `notifyToolsChanged` must emit
  * `notifications/tools/list_changed` (the server provides this) so hosts
  * refresh after pack activation.
+ *
+ * `eagerPacks` are activated immediately (owner = STARTUP_OWNER, never
+ * released) so their tools are in the host's very first tool snapshot. Pass
+ * `[]` to keep the pure lazy behaviour, or a custom list (e.g. add 'ado') to
+ * tune the startup surface for a given host's tool budget.
  */
 export function registerAgenticTools(
     registry: CSMCPToolRegistry,
     notifyToolsChanged: () => void,
+    eagerPacks: string[] = DEFAULT_EAGER_PACKS,
 ): void {
     packs = new CSToolPacks(registry, notifyToolsChanged);
     engine = new CSPlaybookEngine(packs);
     registry.registerTools(agenticMetaTools);
+    for (const name of eagerPacks) {
+        try {
+            packs.activate(name, STARTUP_OWNER);
+        } catch {
+            // Unknown pack name in a custom list — skip it rather than crash startup.
+        }
+    }
 }
