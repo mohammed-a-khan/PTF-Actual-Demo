@@ -10,7 +10,7 @@
  * failure-cluster severity) keep their own colour systems for now;
  * they'll fold into this module in a later phase.
  *
- * Defaults align with the perf-app's `computershare-theme.css`
+ * Defaults align with the perf-app's `brand-theme.css`
  * primary family (`#4d004d`) so reports look like they belong to
  * the same product surface. No company name is encoded here —
  * just the values — so the framework stays generic and consumers

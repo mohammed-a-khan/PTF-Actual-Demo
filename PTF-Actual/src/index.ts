@@ -127,6 +127,18 @@ Common Options:
   --retries <n>         Retry failed tests
   --timeout <ms>        Test timeout in milliseconds
   --debug               Enable debug mode
+
+Rerun Options:
+  --rerun-failed              Re-execute only the failed scenarios from the most recent report.
+                              Aliases: --last-failed, --execute-failures-only.
+                              Composes (INTERSECTS) with --features / --tags / --test / --grep.
+  --rerun-failed-count <n>    Union failures across the last N reports (default 1).
+                              Useful to catch flakes.
+  --rerun-failed-from <path>  Point to a specific report dir or report-data.json.
+  --report-base <path>        Override the reports directory (default: reports/).
+  --strict-context            Refuse to rerun if the last report's project/env
+                              does not match the current --project/--env.
+  --dry-run                   With --rerun-failed: print what would run, do not execute.
   --lazy-steps          Enable lazy step loading (30-60x faster startup)
 
 Multi-Project Suite Mode:
@@ -358,6 +370,61 @@ async function execute(mode: string) {
             if (shouldLog('DEBUG')) console.log('[DEBUG] args.feature:', args.feature);
             if (shouldLog('DEBUG')) console.log('[DEBUG] args.f:', args.f);
 
+            // --- --rerun-failed / --last-failed / --execute-failures-only ---
+            const rerunFlag =
+                args['rerun-failed'] !== undefined ? args['rerun-failed'] :
+                args['rerunFailed'] !== undefined ? args['rerunFailed'] :
+                args['last-failed'] !== undefined ? args['last-failed'] :
+                args['lastFailed'] !== undefined ? args['lastFailed'] :
+                args['execute-failures-only'] !== undefined ? args['execute-failures-only'] :
+                args['executeFailuresOnly'] !== undefined ? args['executeFailuresOnly'] :
+                undefined;
+            if (rerunFlag !== undefined && rerunFlag !== false && rerunFlag !== 'false') {
+                const { selectFailures, formatOutcome } = await import('./cli/CSFailureSelector');
+                const rerunCount = Number(args['rerun-failed-count'] || args['rerunFailedCount'] || args['last-failed-count'] || 1) || 1;
+                const reportFrom = args['rerun-failed-from'] || args['rerunFailedFrom'] || args['last-failed-from'] || undefined;
+                const reportsBase = args['report-base'] || args['reportBase'] || undefined;
+                const strictContext = !!(args['strict-context'] || args['strictContext']);
+                const dryRun = !!(args['dry-run'] || args['dryRun']);
+                const toArr = (v: unknown) => v == null || v === '' ? undefined : String(v).split(',').map((s) => s.trim()).filter(Boolean);
+                const filters = {
+                    features: toArr(args.features || args.feature || args.f),
+                    tags: toArr(args.tags || args.t),
+                    testNames: toArr(args.test),
+                    grep: args.grep ? String(args.grep) : undefined,
+                };
+                const outcome = selectFailures({
+                    workspaceRoot: process.cwd(),
+                    count: rerunCount,
+                    reportFrom,
+                    reportsBase,
+                    filters,
+                    context: {
+                        currentProject: args.project ? String(args.project) : undefined,
+                        currentEnvironment: args.env ? String(args.env) : (args.environment ? String(args.environment) : undefined),
+                        strictContext,
+                    },
+                });
+                console.log(formatOutcome(outcome));
+                if (outcome.kind === 'no-report' || outcome.kind === 'parse-error' || outcome.kind === 'context-mismatch') {
+                    process.exit(2);
+                }
+                if (outcome.kind === 'no-failures' || outcome.kind === 'no-matches') {
+                    process.exit(0);
+                }
+                if (dryRun) {
+                    console.log('[rerun-failed] --dry-run set — not executing.');
+                    process.exit(0);
+                }
+                // Overwrite args so the downstream option-mapping picks the effective filter.
+                args.features = outcome.filterArgs.features.join(',');
+                args.test = outcome.filterArgs.testNames.join(',');
+                // Clear --tags / --grep so we do not double-filter (selector already intersected).
+                if (args.tags) delete args.tags;
+                if (args.t) delete args.t;
+                if (args.grep) delete args.grep;
+            }
+
             // Pass CLI options to the runner
             const options: any = {};
             
@@ -385,11 +452,23 @@ async function execute(mode: string) {
                 config.set('TAGS', tags);
             }
             
-            // Handle scenario
+            // Handle scenario (single-name substring filter — legacy)
             if (args.scenario || args.s) {
                 const scenario = args.scenario || args.s;
                 options.scenario = scenario;
                 config.set('SCENARIO', scenario);
+            }
+
+            // Handle scenario allow-list (multi-name exact filter). Populated
+            // by --rerun-failed, and also usable directly via --scenarios= or
+            // --test= (comma-separated list of scenario names).
+            const scenarioList = args.scenarios || args.scenarioNames || args.test;
+            if (scenarioList) {
+                const names = String(scenarioList).split(',').map((s) => s.trim()).filter(Boolean);
+                if (names.length > 0) {
+                    options.scenarioNames = names;
+                    if (shouldLog('DEBUG')) console.log('[DEBUG] Setting options.scenarioNames (' + names.length + ' scenarios):', names);
+                }
             }
             
             // Handle headless mode

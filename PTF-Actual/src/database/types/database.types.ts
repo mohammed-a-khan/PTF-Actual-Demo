@@ -112,6 +112,13 @@ export interface ResultMetadata {
 
 export interface ResultSet {
     rows: any[];
+    /**
+     * All result sets returned by the statement, in order, when the driver produced more
+     * than one (a stored procedure emitting several SELECTs). `rows` always mirrors the
+     * driver's primary set, so existing single-set consumers are unaffected; this field is
+     * populated only when a multi-set result was actually observed.
+     */
+    recordsets?: any[][];
     fields: Array<{
         name: string;
         dataType: string;

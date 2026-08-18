@@ -977,12 +977,35 @@ export class CSBDDRunner {
             if (hasExcludeTag) return false;
         }
 
-        // Scenario name filter
+        // Scenario name filter (single-string, substring, case-insensitive).
         if (options.scenario) {
             const scenarioFilter = options.scenario.toLowerCase();
             if (!scenario.name.toLowerCase().includes(scenarioFilter)) {
                 return false;
             }
+        }
+
+        // Scenario-names allow-list (used by --rerun-failed to select an
+        // explicit set of scenarios). Matches with a few tolerant fallbacks so
+        // Scenario Outline "iteration" suffixes and case differences don't
+        // hide real matches:
+        //   1) exact case-insensitive
+        //   2) allow-name is a substring of scenario.name (covers Outline
+        //      names like "<base>_Iteration-1")
+        //   3) scenario.name is a substring of the allow-name (covers reports
+        //      that stored the interpolated name and now we're pre-interp)
+        const scenarioNames: string[] | undefined = (options as { scenarioNames?: string[] }).scenarioNames;
+        if (Array.isArray(scenarioNames) && scenarioNames.length > 0) {
+            const scName = scenario.name.toLowerCase().trim();
+            const hit = scenarioNames.some((raw) => {
+                const n = String(raw).toLowerCase().trim();
+                if (!n) return false;
+                if (n === scName) return true;
+                if (scName.includes(n)) return true;
+                if (n.includes(scName)) return true;
+                return false;
+            });
+            if (!hit) return false;
         }
 
         // Impact-only mode — when active, only run scenarios the analyzer

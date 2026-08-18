@@ -50,7 +50,14 @@ export class ResultSetParser {
       if (rawResult.affectedRows !== undefined) {
         result.affectedRows = rawResult.affectedRows;
       }
-      
+      // Multi-result-set passthrough. The parser otherwise keeps only its known fields, which
+      // would silently discard every result set but the primary one for a procedure that
+      // emits several. Pagination/transform apply to `rows` only — they describe the primary
+      // set, so the raw sets are handed through untouched.
+      if (Array.isArray(rawResult['recordsets'])) {
+        result.recordsets = rawResult['recordsets'] as any[][];
+      }
+
       return result;
     } catch (error) {
       CSReporter.error('Failed to parse result set: ' + (error as Error).message);

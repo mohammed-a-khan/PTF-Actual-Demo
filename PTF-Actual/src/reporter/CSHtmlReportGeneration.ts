@@ -154,6 +154,38 @@ interface ExecutionHistory {
     passRate: number;
 }
 
+/**
+ * Read the compiled chart library that gets inlined into the HTML report.
+ *
+ * `__dirname` is `dist/reporter/` for a compiled run but `src/reporter/` under ts-node —
+ * and `src/reporter/` holds only the TypeScript source, so the plain
+ * `path.join(__dirname, 'CSCustomChartsEmbedded.js')` read threw ENOENT and took the entire
+ * report down with it on every ts-node invocation (`npx ts-node src/index.ts --project=...`).
+ *
+ * Try `__dirname` first (correct for a compiled run), then the `dist` sibling of a `src`
+ * layout, then a cwd-relative `dist`. If none resolve, return an empty script rather than
+ * failing report generation: a report without charts beats no report at all.
+ */
+function readEmbeddedChartLibrary(): string {
+    const candidates = [
+        path.join(__dirname, 'CSCustomChartsEmbedded.js'),
+        path.join(__dirname.replace(/([\\/])src([\\/])/, '$1dist$2'), 'CSCustomChartsEmbedded.js'),
+        path.join(process.cwd(), 'dist', 'reporter', 'CSCustomChartsEmbedded.js'),
+    ];
+    for (const candidate of candidates) {
+        try {
+            if (fs.existsSync(candidate)) return fs.readFileSync(candidate, 'utf8');
+        } catch {
+            // try the next candidate
+        }
+    }
+    CSReporter.warn(
+        'Chart library CSCustomChartsEmbedded.js not found (run `npm run build`) — ' +
+        'report will render without charts.',
+    );
+    return '';
+}
+
 export class CSHtmlReportGenerator {
     // Brand colours are now driven by the report-theme singleton
     // (`src/reporter/theme/`). Defaults align with the perf-app
@@ -814,7 +846,7 @@ export class CSHtmlReportGenerator {
     <!-- External Libraries -->
     <!-- Custom Chart Library (embedded) -->
     <script>
-${fs.readFileSync(path.join(__dirname, 'CSCustomChartsEmbedded.js'), 'utf8')}
+${readEmbeddedChartLibrary()}
     </script>
     <!-- v1.40.0: dayjs CDN scripts removed. The library was loaded for
          two plugin-registration calls that nobody actually invoked.

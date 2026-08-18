@@ -174,6 +174,13 @@ export class CSTestResultsManager {
             har: path.join(baseDir, 'har'),
             consoleLogs: path.join(baseDir, 'console-logs'),
             reports: path.join(baseDir, 'reports'),
+            // Report-validation evidence (diff reports + canonical extraction dumps).
+            // A SIBLING of `reports`, not a child: `reports` holds the run's HTML test
+            // report, and nesting under it produced `.../reports/report-validation/`.
+            // Not pre-created in createDirectoryStructure() — unlike the artifact dirs
+            // above, report validation is used by a minority of suites, and its writers
+            // mkdir on demand. Declaring the path here keeps it in one place.
+            reportValidation: path.join(baseDir, 'report-validation'),
             downloads: path.join(baseDir, 'downloads'),
             uploads: path.join(baseDir, 'uploads'),
             screencasts: path.join(baseDir, 'screencasts'),

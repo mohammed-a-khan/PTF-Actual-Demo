@@ -520,8 +520,13 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
       let rowCount = 0;
       let rows = result.recordset || [];
 
-      // Check for multiple recordsets (use the last one)
+      // Preserve EVERY result set a multi-SELECT procedure emitted, in driver order. `rows`
+      // still carries the last one (unchanged behaviour for every existing caller); callers
+      // that need all of them — report validation maps one result set per report section —
+      // read `recordsets`.
+      let recordsets: any[][] | undefined;
       if (result.recordsets && Array.isArray(result.recordsets) && result.recordsets.length > 0) {
+        recordsets = result.recordsets.map((rs: any) => (Array.isArray(rs) ? rs : []));
         rows = result.recordsets[result.recordsets.length - 1] || [];
       }
 
@@ -537,6 +542,7 @@ export class CSSQLServerAdapter extends CSDatabaseAdapter {
 
       return {
         rows: rows,
+        ...(recordsets ? { recordsets } : {}),
         rowCount: rowCount,
         affectedRows: rowCount,
         output: result.output || {},
