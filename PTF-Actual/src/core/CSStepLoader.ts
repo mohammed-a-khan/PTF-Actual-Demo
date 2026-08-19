@@ -15,7 +15,7 @@ import { CSReporter } from '../reporter/CSReporter';
 import { CSConfigurationManager } from './CSConfigurationManager';
 import type { ParsedFeature } from '../bdd/CSBDDTypes'
 
-export type StepGroup = 'common' | 'api' | 'database' | 'soap' | 'browser' | 'ai' | 'auth';
+export type StepGroup = 'common' | 'api' | 'database' | 'soap' | 'browser' | 'ai' | 'auth' | 'report-validation';
 
 export class CSStepLoader {
     private static instance: CSStepLoader;
@@ -141,6 +141,29 @@ export class CSStepLoader {
                 }
             } catch (error: any) {
                 CSReporter.debug(`[StepLoader] Auth steps not available: ${error.message}`);
+            }
+        }
+
+        // Report-validation steps are ALWAYS loaded unconditionally, like ai and auth.
+        //
+        // They cannot be reached any other way. A consumer project's STEP_DEFINITIONS_PATH
+        // resolves against ITS OWN tree, so the framework's own step files only ever load
+        // through this loader — and the group list below is derived from module detection,
+        // which knows about browser/api/database/soap and nothing else. Report validation
+        // drives no browser, no API and (for PDF-vs-PDF parity) no database, so it detected
+        // as "browser" and its steps were never required: "step definition not found" with
+        // no path setting able to fix it.
+        //
+        // Cost of loading it eagerly is one require of one file whose only side effect is
+        // decorator registration; pdfjs is imported dynamically at first use, not here.
+        if (!this.loadedGroups.has('report-validation')) {
+            try {
+                const rvLoaded = await this.loadStepGroup('report-validation');
+                if (rvLoaded.length > 0) {
+                    CSReporter.debug(`[StepLoader] Report-validation steps loaded: ${rvLoaded.length} file(s)`);
+                }
+            } catch (error: any) {
+                CSReporter.debug(`[StepLoader] Report-validation steps not available: ${error.message}`);
             }
         }
 

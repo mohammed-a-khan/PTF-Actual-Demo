@@ -10,3 +10,6 @@ export * from '../steps/soap';
 
 //common step definitions
 export * from '../steps/common/CSCommonSteps'
+
+//Report validation step definitions (Crystal/SSRS parity, PDF ingestion)
+export * from '../steps/report-validation';

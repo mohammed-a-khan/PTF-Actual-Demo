@@ -56,7 +56,7 @@ import { segmentPages } from './layout/CSPageSegmenter';
 import { detectSectionHeaders, type SectionHeaderCandidate } from './layout/CSSectionDetector';
 import { resolveTableHeaders } from './layout/CSTableHeaderResolver';
 import { tagTotalRows } from './layout/CSTotalRowTagger';
-import { extractToc } from './layout/CSTocExtractor';
+import { extractToc, findTocPageNumbers } from './layout/CSTocExtractor';
 
 /**
  * Full Layer-2 analysis. Given the raw pages from Layer 1, returns an `AnalyzedReport`
@@ -73,14 +73,36 @@ export function analyzeReport(pages: PageContent[], opts: LayoutAnalyzerOptions 
     const toc = extractToc(pages);
 
     // 2. Page-level chrome removal.
-    const segmented = segmentPages(pages);
+    // Section titles must survive header/footer stripping. A title repeats at identical
+    // coordinates on every page its section spans, which on a short extract is a majority of
+    // the document — enough to be mistaken for running chrome and deleted before
+    // `detectSectionHeaders` ever runs, losing the entire section. The spec's own section
+    // matchers are the authority on what a title is, so they are handed to the segmenter as
+    // protected text.
+    const segmented = segmentPages(pages, {
+        repeatThreshold: opts.headerFooterRepeatThreshold,
+        protectedPatterns: opts.sectionHeaderRegexes,
+    });
 
-    // 3. Per-page analysis.
+    // 3. Per-page analysis. Section promotion is suppressed on the table-of-contents page:
+    // its lines read exactly like section titles, so detecting sections there mints a
+    // duplicate of every real section, resolving to the same canonical id and shadowing the
+    // genuine one for any lookup that takes the first match.
+    const tocPages = new Set(findTocPageNumbers(pages));
     const analyzedPages: AnalyzedPage[] = [];
     for (let p = 0; p < segmented.length; p++) {
         const seg = segmented[p];
         const pageContent = pages[p];
-        analyzedPages.push(analyzeOnePage(pageContent, seg.bodyItems, seg.headerItems, seg.footerItems, opts));
+        analyzedPages.push(
+            analyzeOnePage(
+                pageContent,
+                seg.bodyItems,
+                seg.headerItems,
+                seg.footerItems,
+                opts,
+                tocPages.has(pageContent.pageNumber),
+            ),
+        );
     }
 
     // 4. Cross-page section merging.
@@ -104,6 +126,7 @@ function analyzeOnePage(
     headerItems: TextItem[],
     footerItems: TextItem[],
     opts: LayoutAnalyzerOptions,
+    isTocPage = false,
 ): AnalyzedPage {
     const pageNumber = original.pageNumber;
     const header = headerItems.map((i) => i.str).filter((s) => s.trim().length > 0);
@@ -148,7 +171,9 @@ function analyzeOnePage(
         pageWidth: original.width,
         maxTitleGapRatio: opts.maxTitleGapRatio,
     });
-    const fullSectionHeaders = sectionCandidates.filter((c) => c.isFullSectionHeader);
+    // On the TOC page every entry looks like a title, because every entry NAMES one. Treat
+    // the page as a single anonymous region so those names stay rows, not sections.
+    const fullSectionHeaders = isTocPage ? [] : sectionCandidates.filter((c) => c.isFullSectionHeader);
 
     // If no section header was found, treat the whole page as one anonymous section so
     // downstream code has SOMETHING to hand to the mapper. Layer-3 will decide whether
@@ -303,11 +328,17 @@ function analyzeSectionRegion(
 
     // Late-header recovery. Runs AFTER stitching so a header wrapped over two lines
     // ("S & P Recovery" / "Rate") is already one cell by the time we read it.
+    let preambleText: string[] = [];
     if (opts.recoverLateHeaderRow !== false) {
         const recovered = recoverHeaderRowFromData(columns, rows, dataLines);
         if (recovered) {
-            rows = recovered;
+            rows = recovered.rows;
             realignHeadersOntoDataBands(columns, rows);
+            // Everything above the recovered header is the section's CALCULATION block. It
+            // holds the figures the section is really about — the collateral balance, the
+            // total, the ratio against the threshold — and dropping it silently would leave
+            // the grid verified and the headline numbers unchecked.
+            preambleText = preambleAbove(lines, recovered.headerY, recovered.headerLines);
         }
     }
 
@@ -320,6 +351,7 @@ function analyzeSectionRegion(
         tableRows: rows,
         columns,
         freeText: [],
+        preambleText,
         charts,
         // spansToNextPage: decided during cross-page merging.
         spansToNextPage: false,
@@ -417,13 +449,13 @@ function realignHeadersOntoDataBands(columns: ColumnBand[], rows: TableRow[]): v
  * for a plain grid. Financial reports routinely print a calculation preamble first —
  *
  *     Deferring Securities Detail            CALCULATION   RATIO
- *     Collateral Principal Amount   86,592,595.84   (A)
- *     All Deferring Securities       5,355,026.07   (B)   (B)/(A)   6.184%
+ *     Collateral Principal Amount   75,000,000.00   (A)
+ *     All Deferring Securities       4,200,000.00   (B)   (B)/(A)   5.600%
  *     Facility Name / Issue Name  Identifier  Security Type  Current Par Amount  …   <- the real header
- *     SIRVA Worldwide Inc …       LX243193    Loan           340,062.20          …
+ *     Northwind Trading Ltd …       REF243193    Loan           330,000.20          …
  *
  * — so the top lines are summary VALUES. The column bands then take their headers from
- * that preamble (`Collateral Principal Amount`, `86,592,595.84`, `(A)`), no spec field maps
+ * that preamble (`Collateral Principal Amount`, `75,000,000.00`, `(A)`), no spec field maps
  * onto them, and the whole section yields zero records: a silent extraction loss on a
  * section the spec claims to check.
  *
@@ -440,11 +472,20 @@ function realignHeadersOntoDataBands(columns: ColumnBand[], rows: TableRow[]): v
  * @returns the surviving data rows when a header was recovered, or `null` to leave the
  *          section exactly as it was.
  */
+interface RecoveredHeader {
+    /** Data rows that survive below the recovered header. */
+    rows: TableRow[];
+    /** Baseline of the recovered header row. */
+    headerY: number;
+    /** Every source line the header occupied, wrapped continuations included. */
+    headerLines: LogicalLine[];
+}
+
 function recoverHeaderRowFromData(
     columns: ColumnBand[],
     rows: TableRow[],
     sourceLines: LogicalLine[],
-): TableRow[] | null {
+): RecoveredHeader | null {
     if (columns.length === 0 || rows.length < 2) return null;
 
     const headed = columns.filter((c) => c.header !== null && c.header.trim().length > 0).length;
@@ -475,12 +516,14 @@ function recoverHeaderRowFromData(
         // next door headerless and its values unmapped. A header row has exactly one label
         // per column, so it is a MATCHING problem: assign left-to-right, never moving
         // backwards, which also re-joins a label wrapped over two lines.
-        const headerTexts = headerTextsFromItems(headerItemsFor(row, sourceLines), columns);
+        const headerLines = headerLinesFor(row, sourceLines);
+        const headerItems = headerLines.flatMap((l) => l.items);
+        const headerTexts = headerTextsFromItems(headerItems, columns);
         for (let ci = 0; ci < columns.length; ci++) {
             columns[ci].header = headerTexts[ci];
             columns[ci].headerPath = [];
         }
-        return rows.slice(i + 1);
+        return { rows: rows.slice(i + 1), headerY: row.y, headerLines };
     }
     return null;
 }
@@ -490,13 +533,34 @@ function recoverHeaderRowFromData(
  * row's own y plus any wrapped continuation clustered right above or below it, which is
  * how `S & P Recovery` / `Rate` is printed.
  */
-function headerItemsFor(row: TableRow, sourceLines: LogicalLine[]): TextItem[] {
+function headerLinesFor(row: TableRow, sourceLines: LogicalLine[]): LogicalLine[] {
     const window = maxFontSizeOn(sourceLines) * HEADER_WRAP_LINES;
-    const items: TextItem[] = [];
-    for (const line of sourceLines) {
-        if (Math.abs(line.y - row.y) <= window) items.push(...line.items);
-    }
-    return items;
+    return sourceLines.filter((line) => Math.abs(line.y - row.y) <= window);
+}
+
+/**
+ * The section's calculation preamble: every line above the header row that isn't part of
+ * the header itself, rendered top-down as plain text with runs joined left to right.
+ *
+ * Plain text rather than cells on purpose. The preamble is a label-and-value block, not a
+ * grid — the two engines lay it out differently (one engine's first preamble line is even
+ * consumed as column headers before recovery runs), so band positions carry no meaning
+ * here. Text is the one representation both sides agree on.
+ */
+function preambleAbove(lines: LogicalLine[], headerY: number, headerLines: LogicalLine[]): string[] {
+    const consumed = new Set(headerLines);
+    return lines
+        .filter((line) => !consumed.has(line) && line.y > headerY)
+        .sort((a, b) => b.y - a.y)
+        .map((line) =>
+            [...line.items]
+                .sort((a, b) => a.x - b.x)
+                .map((i) => i.str)
+                .join(' ')
+                .replace(/\s+/g, ' ')
+                .trim(),
+        )
+        .filter((text) => text.length > 0);
 }
 
 /** Vertical reach, in line-heights, over which a wrapped header label is still the same header. */

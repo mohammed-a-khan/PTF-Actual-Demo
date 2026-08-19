@@ -83,6 +83,45 @@ export function extractToc(pages: PageContent[], maxScanPages = 3, opts: TocExtr
 }
 
 /**
+ * Which pages ARE the table of contents.
+ *
+ * A TOC page lists sections; it does not contain them. Its lines read exactly like section
+ * titles — that is the point of a TOC — so section detection on such a page invents a
+ * section per entry, each one resolving to the same canonical id as the real section far
+ * later in the document. The duplicate then shadows the real one for any lookup that takes
+ * the first match, and the TOC's own rows get mapped as if they were data.
+ *
+ * Same detection as `extractToc`, exposed separately so the analyzer can suppress section
+ * promotion on these pages without re-deriving the rule.
+ */
+export function findTocPageNumbers(
+    pages: PageContent[],
+    maxScanPages = 3,
+    opts: TocExtractorOptions = {},
+): number[] {
+    if (pages.length === 0) return [];
+    const headerPattern = opts.tocHeaderPattern ?? /table\s*of\s*contents/i;
+    const yTol = opts.yPairingTolerance ?? 3;
+    const maxPageNumber = opts.maxTocPageNumber ?? 9999;
+
+    const found: number[] = [];
+    for (let p = 0; p < Math.min(maxScanPages, pages.length); p++) {
+        const page = pages[p];
+        const lines = clusterLines(page.textItems);
+        const hasHeader = lines.some((l) =>
+            headerPattern.test(l.items.map((i) => i.str).join(' ').replace(/\s+/g, ' ')),
+        );
+        if (!hasHeader) continue;
+        const entries = lines.filter((line) => extractTocEntryFromLine(line, yTol, maxPageNumber) !== null);
+        if (entries.length > 0) {
+            found.push(page.pageNumber);
+            break;
+        }
+    }
+    return found;
+}
+
+/**
  * Interpret one line as a TOC entry. Returns null when the line doesn't fit the pattern
  * (title-text plus integer page number). "Integer" is strict — decimal or currency-
  * shaped tokens are rejected so a numeric cell in a coincidentally-TOC-looking page

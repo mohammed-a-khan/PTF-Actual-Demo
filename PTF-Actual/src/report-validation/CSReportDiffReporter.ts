@@ -208,6 +208,8 @@ export interface SectionComparisonScope {
     fields: string[];
     /** Value comparisons the reconciler ran in this section. */
     comparisons: number;
+    /** Calculation-block figures compared in this section (outside the row grid). */
+    summaryFields: number;
 }
 
 /** Positive evidence of what a reconciliation actually looked at. See `renderScopePanel`. */
@@ -219,6 +221,8 @@ export interface ComparisonScope {
     comparisons: number;
     /** Distinct canonical fields compared anywhere in the report. */
     fields: string[];
+    /** Calculation-block figures compared across all sections. */
+    summaryFields: number;
     /** True when nothing was compared — a zero-difference result would prove nothing. */
     vacuous: boolean;
 }
@@ -253,7 +257,7 @@ export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: 
     const sectionOf = (id: string): SectionComparisonScope => {
         let entry = perSection.get(id);
         if (!entry) {
-            entry = { sectionId: id, title: titleOf.get(id) ?? id, matched: 0, rowsA: 0, rowsB: 0, fields: [], comparisons: 0 };
+            entry = { sectionId: id, title: titleOf.get(id) ?? id, matched: 0, rowsA: 0, rowsB: 0, fields: [], comparisons: 0, summaryFields: 0 };
             perSection.set(id, entry);
         }
         return entry;
@@ -281,6 +285,20 @@ export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: 
     }
     for (const [id, fields] of fieldsBySection) sectionOf(id).fields = [...fields];
 
+    // Calculation-block figures are compared per SECTION, not per row, so they are counted
+    // separately — folding them into `comparisons` would misreport them as row work.
+    for (const required of spec.requiredSections ?? []) {
+        const declared = required.summaryFields ?? [];
+        if (declared.length === 0) continue;
+        const aSection = a.sections.find((sec) => sec.id === required.id && sec.present && !sec.outOfScope);
+        const bSection = b.sections.find((sec) => sec.id === required.id && sec.present && !sec.outOfScope);
+        if (!aSection || !bSection) continue;
+        const compared = declared.filter(
+            (f) => aSection.summary?.[f.id] !== undefined || bSection.summary?.[f.id] !== undefined,
+        ).length;
+        if (compared > 0) sectionOf(required.id).summaryFields = compared;
+    }
+
     const sections = [...perSection.values()]
         .filter((s) => s.matched > 0 || s.rowsA > 0 || s.rowsB > 0)
         .sort((x, y) => y.comparisons - x.comparisons || x.sectionId.localeCompare(y.sectionId));
@@ -290,6 +308,7 @@ export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: 
 
     const matched = sections.reduce((n, s) => n + s.matched, 0);
     const comparisons = sections.reduce((n, s) => n + s.comparisons, 0);
+    const summaryFields = sections.reduce((n, s) => n + s.summaryFields, 0);
     return {
         sections,
         matched,
@@ -297,7 +316,8 @@ export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: 
         rowsB: b.records.length,
         comparisons,
         fields: [...allFields],
-        vacuous: comparisons === 0,
+        summaryFields,
+        vacuous: comparisons === 0 && summaryFields === 0,
     };
 }
 
@@ -321,6 +341,7 @@ function renderScopePanel(spec: ReportSpec, a?: CanonicalReport, b?: CanonicalRe
         { label: 'Sections compared', value: String(scope.sections.filter((s) => s.matched > 0).length), hint: scope.sections.filter((s) => s.matched > 0).map((s) => s.title).join(', ') || '—' },
         { label: 'Fields compared', value: String(scope.fields.length), hint: (spec.ignoreFields ?? []).length ? `${(spec.ignoreFields ?? []).length} ignored by spec` : 'none ignored' },
         { label: 'Value comparisons', value: String(scope.comparisons), hint: 'per matched row, per populated field' },
+        { label: 'Calc figures', value: String(scope.summaryFields), hint: 'totals and ratios above the grids' },
     ];
 
     const cells = tiles
@@ -339,7 +360,7 @@ function renderScopePanel(spec: ReportSpec, a?: CanonicalReport, b?: CanonicalRe
 
     const breakdown = scope.sections.length === 0 ? '' : `<div class="rv-table-wrap">
     <table class="rv-scope-table">
-      <thead><tr><th>Section</th><th>Rows A</th><th>Rows B</th><th>Matched</th><th>Fields</th><th>Comparisons</th></tr></thead>
+      <thead><tr><th>Section</th><th>Rows A</th><th>Rows B</th><th>Matched</th><th>Fields</th><th>Comparisons</th><th>Calc figures</th></tr></thead>
       <tbody>
         ${scope.sections
             .map(
@@ -350,6 +371,7 @@ function renderScopePanel(spec: ReportSpec, a?: CanonicalReport, b?: CanonicalRe
                     `<td class="rv-num">${sec.matched}</td>` +
                     `<td class="rv-num">${sec.fields.length}</td>` +
                     `<td class="rv-num">${sec.comparisons}</td>` +
+                    `<td class="rv-num">${sec.summaryFields}</td>` +
                     `</tr>`,
             )
             .join('\n        ')}
@@ -367,7 +389,7 @@ function renderScopePanel(spec: ReportSpec, a?: CanonicalReport, b?: CanonicalRe
 </section>`;
 }
 
-const FAILING_CLASSIFICATIONS = ['DATA_MISMATCH', 'MISSING', 'EXTRA', 'CHECKSUM_DRIFT'] as const;
+const FAILING_CLASSIFICATIONS = ['DATA_MISMATCH', 'MISSING', 'EXTRA', 'FOOTING_MISMATCH', 'CHECKSUM_DRIFT'] as const;
 const NOTE_CLASSIFICATIONS = ['FORMAT_ONLY', 'WITHIN_TOLERANCE', 'KNOWN_DIFFERENCE', 'SECTION_RESTRUCTURE'] as const;
 
 function renderCountTiles(counts: ReconciliationCounts): string {
@@ -381,6 +403,7 @@ function renderCountTiles(counts: ReconciliationCounts): string {
         { label: 'Known difference', value: counts.knownDifference, kind: 'known' },
         { label: 'Section restructure', value: counts.sectionRestructure, kind: 'restructure' },
         { label: 'Checksum drift', value: counts.checksumDrift, kind: 'checksum' },
+        { label: 'Footing mismatch', value: counts.footingMismatch, kind: 'footing' },
     ];
     return `<div class="rv-tiles">${tiles
         .map(
@@ -751,6 +774,8 @@ body[data-status="status-fail"] .rv-verdict-rail { background: var(--fail); }
 .rv-tile-extra.rv-tile-nonzero .rv-tile-value { color: var(--tag-extra); }
 .rv-tile-checksum.rv-tile-nonzero { border-color: var(--tag-mismatch); }
 .rv-tile-checksum.rv-tile-nonzero .rv-tile-value { color: var(--tag-mismatch); }
+.rv-tile-footing.rv-tile-nonzero { border-color: var(--tag-mismatch); }
+.rv-tile-footing.rv-tile-nonzero .rv-tile-value { color: var(--tag-mismatch); }
 .rv-tile-total.rv-tile-nonzero { border-color: var(--line-2); }
 
 /* ---------- scope panel ---------- */
@@ -822,6 +847,7 @@ body[data-status="status-fail"] .rv-verdict-rail { background: var(--fail); }
 .rv-tag-known-difference { background: var(--tag-known); }
 .rv-tag-section-restructure { background: var(--tag-restr); }
 .rv-tag-checksum-drift { background: var(--tag-mismatch); }
+.rv-tag-footing-mismatch { background: var(--tag-mismatch); }
 .rv-tag-coverage-gap { background: var(--tag-missing); }
 @media (prefers-color-scheme: dark) { .rv-tag { color: #10131a; } }
 

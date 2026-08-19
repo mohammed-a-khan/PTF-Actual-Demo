@@ -28,6 +28,7 @@ export type {
 export type {
     ReportSpec,
     SpecFieldNames,
+    SummaryFieldSpec,
     ToleranceSpec,
     RequiredSectionSpec,
     KnownDifferenceSpec,
@@ -45,7 +46,7 @@ export {
     canonicalizeString,
 } from './CSReportNormalizer';
 
-export { CSReportReconciler } from './CSReportReconciler';
+export { CSReportReconciler, compareValues } from './CSReportReconciler';
 
 // ---- Phase B: PDF extraction + layout analysis ----------------------------
 export type {
@@ -128,6 +129,7 @@ export {
 } from './layout/CSChartRegionDetector';
 export {
     extractToc,
+    findTocPageNumbers,
     type TocExtractorOptions,
 } from './layout/CSTocExtractor';
 
@@ -160,6 +162,7 @@ export {
 // ---- Phase F: checksum validator + canonical cache + OCR adapter ----------
 export { validateChecksums } from './CSReportChecksumValidator';
 export { validateCoverage } from './CSReportCoverageValidator';
+export { validateFooting } from './CSReportFootingValidator';
 export {
     CSCanonicalCache,
     specFingerprint,

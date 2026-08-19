@@ -156,6 +156,8 @@ export class CSReportSectionMapper {
             );
             for (const [k, v] of Object.entries(canonicalChecksums)) checksums[k] = v;
 
+            const summary = extractSectionSummary(analyzedSection.preambleText ?? [], requiredMeta, spec);
+
             sections.push({
                 id: canonicalSectionId,
                 title: requiredMeta?.title ?? analyzedSection.title,
@@ -163,6 +165,7 @@ export class CSReportSectionMapper {
                 order: sectionOrder,
                 rowCount: canonicalRecords.length,
                 detectedRowCount: analyzedSection.tableRows.length,
+                ...(summary ? { summary } : {}),
             });
             records.push(...canonicalRecords);
         }
@@ -360,6 +363,59 @@ function mapColumnIndexesToCanonical(
         if (!band.header) return null;
         return canonicalFieldFor(band.header, source, spec.fieldMap);
     });
+}
+
+/**
+ * Read a section's declared calculation figures out of its preamble lines.
+ *
+ * The preamble is label-and-value text, not a grid, so extraction is label-driven: find the
+ * line carrying the label, then take the Nth VALUE on it. "Value" means the token normalizes
+ * to a number or a date — which is what excludes the formula markers these blocks are full
+ * of (`(A)`, `(B)`, `(B)/(A)`) without having to enumerate them, and what lets
+ * `All Deferring Securities 4,200,000.00 (B) (B)/(A) 5.600%` yield the amount at index 1 and
+ * the ratio at index 2.
+ *
+ * A declared figure that isn't found is left ABSENT rather than written as null. The
+ * reconciler treats absence as a coverage gap — a figure the spec claims to check and
+ * didn't — where a null would silently compare equal against the other side's null.
+ *
+ * @returns the figures found, or `undefined` when the section declares none.
+ */
+function extractSectionSummary(
+    preambleText: string[],
+    requiredMeta: RequiredSectionSpec | undefined,
+    spec: ReportSpec,
+): Record<string, CanonicalValue> | undefined {
+    const fields = requiredMeta?.summaryFields;
+    if (!fields || fields.length === 0) return undefined;
+
+    const out: Record<string, CanonicalValue> = {};
+    for (const field of fields) {
+        const wanted = Math.max(1, field.valueIndex ?? 1);
+        const label = collapseSpaces(field.label).toLowerCase();
+
+        for (const rawLine of preambleText) {
+            const line = collapseSpaces(rawLine);
+            const at = line.toLowerCase().indexOf(label);
+            if (at < 0) continue;
+
+            const values: CanonicalValue[] = [];
+            for (const token of line.slice(at + label.length).split(' ')) {
+                if (token.length === 0) continue;
+                const value = normalizeValue(token, { dateFormats: spec.dateFormats });
+                if (value.kind === 'number' || value.kind === 'date') values.push(value);
+            }
+            if (values.length >= wanted) {
+                out[field.id] = values[wanted - 1];
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+function collapseSpaces(text: string): string {
+    return text.replace(/\s+/g, ' ').trim();
 }
 
 /**

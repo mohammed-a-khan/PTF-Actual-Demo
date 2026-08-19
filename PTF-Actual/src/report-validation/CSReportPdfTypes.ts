@@ -161,6 +161,13 @@ export interface AnalyzedSection {
     columns: ColumnBand[];
     /** Free text paragraphs found within the section but outside any table. */
     freeText: string[];
+    /**
+     * Lines of the CALCULATION block printed above the section's grid, top-down, when one
+     * was found. These carry the section's headline figures — balances, totals, the ratio
+     * against its threshold — which sit outside every column band and would otherwise never
+     * be compared. Empty for an ordinary grid. See `RequiredSectionSpec.summaryFields`.
+     */
+    preambleText?: string[];
     /** Chart regions detected within this section — kept for debug/evidence; NOT used for data compare. */
     charts: ChartRegion[];
     /**

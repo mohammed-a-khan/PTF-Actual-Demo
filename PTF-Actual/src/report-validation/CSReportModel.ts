@@ -59,6 +59,13 @@ export interface CanonicalSection {
     outOfScope?: boolean;
     /** Rows the source rendered under this section, whether or not they were compared. */
     detectedRowCount?: number;
+    /**
+     * Figures read from the section's calculation block, keyed by
+     * `RequiredSectionSpec.summaryFields[].id`. Absent when the spec declares none. A
+     * declared figure that could not be read is absent here rather than null, so the
+     * reconciler can tell "did not extract" from "extracted as empty".
+     */
+    summary?: Record<string, CanonicalValue>;
 }
 
 /** One comparable row in the canonical model. */
@@ -160,6 +167,17 @@ export type FindingKind =
      */
     | 'CHECKSUM_DRIFT'
     /**
+     * A section's printed total disagrees with the sum of the rows extracted from that same
+     * section, beyond `spec.footingTolerance`. Fails.
+     *
+     * This is the one integrity check a single report can run on ITSELF, and the only thing
+     * that catches a silently truncated extraction: drop the last page and the printed total
+     * stays exactly where it was while the sum of rows falls away. Cross-side checksum
+     * agreement cannot see it — both sides can be truncated the same way, and identical
+     * wrong numbers still agree.
+     */
+    | 'FOOTING_MISMATCH'
+    /**
      * The spec asked for something that was never actually compared — a required section
      * that produced no records, a mapped field whose column was never found, or a
      * reconciliation with no records at all.
@@ -205,14 +223,15 @@ export interface ReconciliationCounts {
     sectionRestructure: number;
     checksumDrift: number;
     coverageGap: number;
+    footingMismatch: number;
 }
 
 /** The full result of `CSReportReconciler.reconcile(...)`. */
 export interface ReconciliationResult {
     /**
      * True iff there are ZERO findings in the failing classifications: `DATA_MISMATCH`,
-     * `MISSING`, `EXTRA`, and `COVERAGE_GAP` (the last suppressible via
-     * `spec.allowCoverageGaps`, the first three never).
+     * `MISSING`, `EXTRA`, `FOOTING_MISMATCH`, and `COVERAGE_GAP` (the last suppressible via
+     * `spec.allowCoverageGaps`, the others never).
      */
     passed: boolean;
     counts: ReconciliationCounts;

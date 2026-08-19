@@ -4,3 +4,4 @@
 // programmatic entry point when they want to reference the step class directly.
 
 export * from './CSReportValidationSteps';
+export * from './CSReportAssertionSteps';

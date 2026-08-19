@@ -27,7 +27,7 @@ try {
     }
 
     if (sub === '--help' || sub === '-h') {
-        process.stdout.write(`cs-playwright-mcp — Computershare Playwright QA MCP server.
+        process.stdout.write(`cs-playwright-mcp — Playwright QA MCP server.
 
 Usage:
   cs-playwright-mcp                          Start the stdio MCP server (default).

@@ -22,6 +22,27 @@
  * qualify. Position-repeat + text-shape-repeat (numbers changing, all
  * else stable) both count.
  *
+ * PROTECTED TITLES
+ * ----------------
+ * A SECTION TITLE also repeats, at identical coordinates, on every page
+ * its section spans — and on a short extract that is a majority of the
+ * document. A 6-page SSRS report whose detail grid runs from page 3 to
+ * page 6 prints its title on 4 of 6 pages: past the 0.6 threshold, inside
+ * the top strip, and therefore deleted as chrome before the section
+ * detector ever sees it. The section then reads as absent and the whole
+ * grid is lost silently — the worst failure this pipeline can have,
+ * because "section missing" and "section empty" look identical downstream.
+ *
+ * `protectedPatterns` is the answer: text the CALLER knows to be a section
+ * title is never chrome, however often it repeats. The report spec already
+ * declares exactly that (`requiredSections[].matchers`, falling back to the
+ * literal title), and `analyzeReport` threads it through, so a spec that
+ * names its sections is immune by construction.
+ *
+ * Patterns are tested against each item AND against the whole line the item
+ * sits on, so a title the PDF splits into several text runs is still
+ * recognised as one title.
+ *
  * @module report-validation/layout/CSPageSegmenter
  */
 
@@ -38,6 +59,12 @@ export interface PageSegmenterOptions {
     yTolerance?: number;
     /** X-tolerance for grouping items across pages (in PDF points). Default 5. */
     xTolerance?: number;
+    /**
+     * Text that must never be classified as chrome, however often it repeats — section
+     * titles. Tested against each item's own text and against the joined text of the line
+     * it belongs to. Default: none (every repeat is eligible to be chrome).
+     */
+    protectedPatterns?: RegExp[];
 }
 
 /** Per-page segmentation output. Header + footer items are removed from `bodyItems`. */
@@ -66,6 +93,7 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
     const bottomStripRatio = opts.bottomStripRatio ?? 0.1;
     const yTol = opts.yTolerance ?? 3;
     const xTol = opts.xTolerance ?? 5;
+    const protectedPatterns = opts.protectedPatterns ?? [];
 
     // For each page, split items into "top strip" (candidate header), "bottom strip"
     // (candidate footer), "body". The strip regions are height-relative — reports use
@@ -105,7 +133,11 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
             new Map();
         for (let p = 0; p < strips.length; p++) {
             const items = strips[p][region];
+            const protectedItems = protectedItemsOn(items, protectedPatterns, yTol);
             for (const item of items) {
+                // A protected item never enters the signature index, so it can never reach
+                // the repeat threshold and can never be removed from the body.
+                if (protectedItems.has(item)) continue;
                 const sig = itemSignature(item, xTol, yTol);
                 let entry = signatures.get(sig);
                 if (!entry) {
@@ -140,6 +172,51 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
         footerItems: chromeFooter[p],
         bodyItems: page.textItems.filter((it) => !chromeItemSets[p].has(it)),
     }));
+}
+
+/**
+ * Which of `items` are protected from chrome classification.
+ *
+ * Matching is tried twice per item: against its own text, and against the joined text of
+ * every item sharing its baseline. The second pass is what catches a title the PDF emits as
+ * several runs — pdfjs routinely splits a centred heading around its padding, and an
+ * anchored spec matcher like `^Market Value Detail(\s+\d+[A-Z]?)?$` matches the assembled
+ * line but none of the fragments. When a line matches, every item on it is protected: the
+ * fragments are the title.
+ */
+function protectedItemsOn(items: TextItem[], patterns: RegExp[], yTol: number): Set<TextItem> {
+    const out = new Set<TextItem>();
+    if (patterns.length === 0 || items.length === 0) return out;
+
+    const matches = (text: string): boolean => {
+        const t = text.trim();
+        return t.length > 0 && patterns.some((re) => re.test(t));
+    };
+
+    // Group by baseline so a split title can be reassembled.
+    const byLine = new Map<number, TextItem[]>();
+    for (const item of items) {
+        const bucket = Math.round(item.y / yTol);
+        const line = byLine.get(bucket);
+        if (line) line.push(item);
+        else byLine.set(bucket, [item]);
+    }
+
+    for (const line of byLine.values()) {
+        const joined = [...line]
+            .sort((a, b) => a.x - b.x)
+            .map((i) => i.str)
+            .join(' ')
+            .replace(/\s+/g, ' ');
+        if (matches(joined)) {
+            for (const item of line) out.add(item);
+            continue;
+        }
+        for (const item of line) {
+            if (matches(item.str)) out.add(item);
+        }
+    }
+    return out;
 }
 
 /**

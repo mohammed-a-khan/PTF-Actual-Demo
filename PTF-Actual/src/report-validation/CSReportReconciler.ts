@@ -45,6 +45,7 @@
 import type {
     CanonicalRecord,
     CanonicalReport,
+    CanonicalSection,
     CanonicalValue,
     Finding,
     FindingKind,
@@ -54,6 +55,7 @@ import type {
 import { canonicalizeString } from './CSReportNormalizer';
 import { validateChecksums } from './CSReportChecksumValidator';
 import { validateCoverage } from './CSReportCoverageValidator';
+import { validateFooting } from './CSReportFootingValidator';
 import type { KnownDifferenceSpec, ReportSpec, ToleranceSpec } from './CSReportSpec';
 
 /** Non-printable Unit Separator — safe to concat into a composite key because it can't appear in real data. */
@@ -166,6 +168,18 @@ export class CSReportReconciler {
             }
         }
 
+        // Calculation-block figures. These live outside every column band, so the record walk
+        // above cannot reach them — and they are usually the numbers the section exists to
+        // report. Compared here so a section whose grid agrees but whose ratio doesn't
+        // cannot pass.
+        for (const f of compareSectionSummaries(a, b, spec)) findings.push(f);
+
+        // Footing: each side's printed totals against the rows extracted beneath them. Run
+        // per side, not across sides — two identically truncated extractions agree with each
+        // other perfectly, so only a report checked against itself can catch that.
+        for (const f of validateFooting(a, spec)) findings.push(f);
+        for (const f of validateFooting(b, spec)) findings.push(f);
+
         // Extraction-integrity check. Findings ALWAYS append (visibility matters even when
         // `enforceChecksums` is off); pass/fail below decides whether they gate the outcome.
         const checksumFindings = validateChecksums(a, b, spec);
@@ -190,6 +204,7 @@ export class CSReportReconciler {
             counts.dataMismatch === 0 &&
             counts.missing === 0 &&
             counts.extra === 0 &&
+            counts.footingMismatch === 0 &&
             (spec.enforceChecksums ? counts.checksumDrift === 0 : true) &&
             (spec.allowCoverageGaps ? true : counts.coverageGap === 0);
         return { passed, counts, findings };
@@ -198,6 +213,77 @@ export class CSReportReconciler {
 
 // ---------------------------------------------------------------------------
 // Internals — kept in this file (not exported) so the API surface stays small.
+
+/**
+ * Compare the declared calculation figures of every required section.
+ *
+ * Three outcomes per declared figure:
+ *   - present on both  → compared with `spec.tolerances[<id>]`, exactly like a row field
+ *   - present on one   → DATA_MISMATCH; one engine printed a figure the other didn't
+ *   - present on neither, while the section itself WAS found on both sides → COVERAGE_GAP
+ *
+ * That last case is the important one. A spec can declare a figure whose label the report
+ * later renames; extraction then finds nothing, both sides hold nothing, and a naive
+ * comparison calls that agreement. It is a silent loss of the very number the section is
+ * about, so it is reported as a gap — which fails by default.
+ *
+ * Sections absent from a side are left alone: the section validator already reports a
+ * missing section, and repeating it once per figure would bury that finding.
+ */
+function compareSectionSummaries(a: CanonicalReport, b: CanonicalReport, spec: ReportSpec): Finding[] {
+    const findings: Finding[] = [];
+    const sectionOn = (report: CanonicalReport, id: string): CanonicalSection | undefined =>
+        report.sections.find((s) => s.id === id && s.present && !s.outOfScope);
+
+    for (const required of spec.requiredSections ?? []) {
+        const fields = required.summaryFields ?? [];
+        if (fields.length === 0) continue;
+
+        const aSection = sectionOn(a, required.id);
+        const bSection = sectionOn(b, required.id);
+        if (!aSection || !bSection) continue;
+
+        for (const field of fields) {
+            const av = aSection.summary?.[field.id];
+            const bv = bSection.summary?.[field.id];
+
+            if (av === undefined && bv === undefined) {
+                findings.push({
+                    id: hashId(required.id, `summary:${field.id}`, 'coverage'),
+                    classification: 'COVERAGE_GAP',
+                    section: required.id,
+                    key: { coverage: `summaryField:${required.id}:${field.id}` },
+                    field: field.id,
+                    reason:
+                        `spec declares summary figure "${field.id}" (label "${field.label}") in section ` +
+                        `"${required.title}", but neither report yielded a value for it — the figure was ` +
+                        `never compared. Check the label against the calculation block as printed.`,
+                });
+                continue;
+            }
+
+            const result = compareValues(
+                av ?? { kind: 'null', raw: '' },
+                bv ?? { kind: 'null', raw: '' },
+                spec.tolerances[field.id],
+            );
+            if (result.classification === 'MATCH') continue;
+
+            findings.push({
+                id: hashId(required.id, `summary:${field.id}`, field.id),
+                classification: result.classification,
+                section: required.id,
+                key: { summary: field.label },
+                field: field.id,
+                aValue: av,
+                bValue: bv,
+                delta: result.delta,
+                reason: result.reason,
+            });
+        }
+    }
+    return findings;
+}
 // ---------------------------------------------------------------------------
 
 /** Group records into `Map<section, Map<keyString, record>>`. */
@@ -228,7 +314,7 @@ function compositeKey(key: Record<string, string>): string {
  * Single-field compare. Returns a classification + optional delta/reason. `'MATCH'` means
  * "no finding to record"; anything else is a finding.
  */
-function compareValues(
+export function compareValues(
     a: CanonicalValue,
     b: CanonicalValue,
     tol: ToleranceSpec | undefined,
@@ -402,6 +488,7 @@ function tallyCounts(findings: Finding[]): ReconciliationCounts {
         sectionRestructure: 0,
         checksumDrift: 0,
         coverageGap: 0,
+        footingMismatch: 0,
     };
     for (const f of findings) {
         switch (f.classification) {
@@ -414,6 +501,7 @@ function tallyCounts(findings: Finding[]): ReconciliationCounts {
             case 'SECTION_RESTRUCTURE': counts.sectionRestructure++; break;
             case 'CHECKSUM_DRIFT': counts.checksumDrift++; break;
             case 'COVERAGE_GAP': counts.coverageGap++; break;
+            case 'FOOTING_MISMATCH': counts.footingMismatch++; break;
         }
     }
     return counts;

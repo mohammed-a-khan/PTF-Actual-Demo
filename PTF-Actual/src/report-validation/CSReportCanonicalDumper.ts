@@ -116,6 +116,16 @@ export class CSReportCanonicalDumper {
      * Flat CSV, one row per canonical record. Columns are
      * `row, section, key:<k>…, <field>…` — key columns first so the business key the
      * reconciler matched on is visible before the data it carried.
+     *
+     * After the data rows come the SUMMARY rows, marked in the `row` column and separated by
+     * a blank line: each section's printed total, the sum of the rows above it, the delta
+     * between them, and any calculation-block figures. The JSON dump has always carried
+     * these; the CSV is the artefact people actually open, and a reader checking a total by
+     * hand should not have to go and find a second file to see what the report claimed.
+     *
+     * They are rows rather than extra columns because they are per SECTION, not per record —
+     * as columns they would repeat the same value down 104 lines and read as if each row
+     * carried it.
      */
     static renderCsv(canonical: CanonicalReport): string {
         const keys = keyOrder(canonical);
@@ -133,6 +143,10 @@ export class CSReportCanonicalDumper {
                 ...fields.map((f) => rawOf((r.fields ?? {})[f])),
             ];
             lines.push(row.map(csvCell).join(','));
+        }
+
+        for (const line of summaryRows(canonical, header.length)) {
+            lines.push(line.map(csvCell).join(','));
         }
 
         // Trailing newline — POSIX text convention, and Excel is happier with it.
@@ -228,6 +242,70 @@ function keyOrder(canonical: CanonicalReport): string[] {
 function rawOf(v: CanonicalValue | undefined): string {
     if (v === undefined) return '';
     return v.raw ?? '';
+}
+
+/**
+ * The labelled trailing rows: printed totals, the sum of extracted rows, their delta, and
+ * each section's calculation figures.
+ *
+ * Shape is `['', '<section>', '<label>', '<field>', '<value>']` padded to the data width, so
+ * the block lines up under the data columns in a spreadsheet and an empty `row` column marks
+ * every line of it as not-a-record. Returns just a blank separator row when the report
+ * carries no totals and no calculation figures — most sections have neither, and emitting
+ * headers for an empty block is noise.
+ */
+function summaryRows(canonical: CanonicalReport, width: number): string[][] {
+    const checksums = canonical.meta?.checksums ?? {};
+    const withSummary = (canonical.sections ?? []).filter(
+        (s) => s.summary && Object.keys(s.summary).length > 0,
+    );
+    if (Object.keys(checksums).length === 0 && withSummary.length === 0) return [];
+
+    const pad = (cells: string[]): string[] => {
+        const out = cells.slice(0, Math.max(width, cells.length));
+        while (out.length < width) out.push('');
+        return out;
+    };
+
+    const rows: string[][] = [pad([]), pad(['', 'SECTION', 'MEASURE', 'FIELD', 'VALUE'])];
+
+    for (const key of Object.keys(checksums).sort()) {
+        const dot = key.indexOf('.');
+        const sectionId = dot > 0 ? key.slice(0, dot) : '*';
+        const field = dot > 0 ? key.slice(dot + 1) : key;
+        const printed = checksums[key];
+
+        let sum = 0;
+        let contributing = 0;
+        for (const record of canonical.records) {
+            if (dot > 0 && record.sectionId !== sectionId) continue;
+            const value = record.fields?.[field];
+            if (value && value.kind === 'number') {
+                sum += value.value;
+                contributing++;
+            }
+        }
+
+        rows.push(pad(['', sectionId, 'printed total', field, String(printed)]));
+        if (contributing > 0) {
+            // Sum and delta let a reader reproduce the footing check by eye. Rounded to six
+            // places: enough to expose a genuine sub-cent difference, tight enough that
+            // float accumulation noise doesn't render as a fake discrepancy.
+            rows.push(pad(['', sectionId, `sum of ${contributing} extracted row(s)`, field, String(round6(sum))]));
+            rows.push(pad(['', sectionId, 'delta (sum - printed)', field, String(round6(sum - printed))]));
+        }
+    }
+
+    for (const section of withSummary) {
+        for (const [id, value] of Object.entries(section.summary ?? {})) {
+            rows.push(pad(['', section.id, 'calculation figure', id, rawOf(value)]));
+        }
+    }
+    return rows;
+}
+
+function round6(value: number): number {
+    return Math.round(value * 1e6) / 1e6;
 }
 
 /** Cells that a spreadsheet would evaluate as a formula. Leading `-` is intentionally absent. */

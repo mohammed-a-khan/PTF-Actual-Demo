@@ -46,6 +46,34 @@ export interface SpecFieldNames {
     db?: string | string[];
 }
 
+/**
+ * One figure in a section's CALCULATION block — the label-and-value lines printed above
+ * the detail grid.
+ *
+ * These carry what the section is actually about (the collateral balance, the total being
+ * tested, the ratio against its threshold) and they sit outside every column band, so the
+ * row-level walk cannot see them. Declaring them here is what puts them under comparison;
+ * anything not declared is not checked.
+ */
+export interface SummaryFieldSpec {
+    /** Canonical id for the figure. Tolerances are looked up under this name in `spec.tolerances`. */
+    id: string;
+    /**
+     * The label printed to the left of the value, e.g. `All Deferring Securities`. Matched
+     * case-insensitively with runs of whitespace collapsed, so the two engines' spacing
+     * differences don't matter.
+     */
+    label: string;
+    /**
+     * Which value on the label's line to take, 1-based. Default 1.
+     *
+     * A calculation line often carries more than one: `All Deferring Securities 4,200,000.00
+     * (B) (B)/(A) 5.600%` prints the amount and the ratio it feeds. Formula markers like
+     * `(A)` and `(B)/(A)` are not values and are never counted.
+     */
+    valueIndex?: number;
+}
+
 /** A section that MUST be present in the report (used by `CSReportSectionValidator`). */
 export interface RequiredSectionSpec {
     /** Canonical id — what the section is called in `CanonicalReport.sections[].id`. */
@@ -63,6 +91,11 @@ export interface RequiredSectionSpec {
      * case-insensitive substring match on `title`.
      */
     matchers?: string[];
+    /**
+     * Figures in the section's calculation block to compare. Omit when the section is a
+     * plain grid. See `SummaryFieldSpec`.
+     */
+    summaryFields?: SummaryFieldSpec[];
 }
 
 /** One entry in the intentional-difference allowlist. Findings that match it downgrade to `KNOWN_DIFFERENCE`. */
@@ -188,6 +221,32 @@ export interface ReportSpec {
      * still recorded so humans see them, but they don't gate pass/fail unless this is on.
      */
     enforceChecksums?: boolean;
+    /**
+     * Tolerance for the FOOTING check — a section's printed total against the sum of the
+     * rows extracted from that section.
+     *
+     * Needs its own tolerance, separate from `checksumTolerance` and from per-field epsilon,
+     * because the drift here is not measurement error: reports routinely foot from unrounded
+     * values while printing each row rounded to 2dp, so the gap grows with ROW COUNT — up to
+     * half a cent per row. A flat absolute tolerance either fails every long section or is so
+     * loose it stops catching a dropped page.
+     *
+     * Hence the object form: `absolute + perRow × rowCount`. A number is shorthand for
+     * `{ absolute: n, perRow: 0 }`. Default `{ absolute: 0.01, perRow: 0 }` — strict, so a
+     * spec opts INTO the rounding allowance deliberately.
+     *
+     * Example: `{ absolute: 0.01, perRow: 0.005 }` allows 53c across 104 rows, while a
+     * dropped 32-row page (millions) still fails loudly.
+     */
+    footingTolerance?: number | { absolute?: number; perRow?: number };
+    /**
+     * Canonical fields (or full `<sectionId>.<field>` keys) exempt from the footing check.
+     *
+     * Reports do not only print SUMS in the totals band. A weighted average price, a count, a
+     * max maturity — all render in the same place and land in `meta.checksums` the same way.
+     * Asserting those as sums fails a perfectly correct report, so they are listed here.
+     */
+    footingIgnoreFields?: string[];
     /**
      * Absolute tolerance for the per-key checksum comparison. Default 0.01 (one cent, since
      * checksums are typically monetary totals or row counts). Compare passes when
@@ -371,6 +430,30 @@ export function validateReportSpecShape(obj: unknown): string[] {
                 }
                 if (names.some((n) => typeof n !== 'string' || n.length === 0)) {
                     errors.push(`fieldMap.${canonical}.${source}: array entries must be non-empty strings`);
+                }
+            }
+        }
+    }
+
+    if (Array.isArray(s.requiredSections)) {
+        for (const raw of s.requiredSections as Array<Record<string, unknown>>) {
+            const summaryFields = raw?.summaryFields;
+            if (summaryFields === undefined) continue;
+            const where = `requiredSections["${String(raw?.id ?? '?')}"].summaryFields`;
+            if (!Array.isArray(summaryFields)) {
+                errors.push(`${where}: must be an array of {id, label, valueIndex?}`);
+                continue;
+            }
+            for (const field of summaryFields as Array<Record<string, unknown>>) {
+                if (typeof field?.id !== 'string' || field.id.length === 0) {
+                    errors.push(`${where}: every entry needs a non-empty "id"`);
+                }
+                if (typeof field?.label !== 'string' || field.label.length === 0) {
+                    errors.push(`${where}: every entry needs a non-empty "label"`);
+                }
+                if (field?.valueIndex !== undefined &&
+                    (typeof field.valueIndex !== 'number' || !Number.isInteger(field.valueIndex) || field.valueIndex < 1)) {
+                    errors.push(`${where}: "valueIndex" must be an integer >= 1`);
                 }
             }
         }

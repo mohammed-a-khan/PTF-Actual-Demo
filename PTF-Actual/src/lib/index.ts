@@ -230,3 +230,44 @@ export * from '../steps/api';
 export * from '../steps/common/CSCommonSteps';
 export * from '../steps/database';
 export * from '../steps/soap';
+
+// Report validation (Crystal vs SSRS migration parity, PDF/Excel/DB ingestion).
+// The full surface — layout internals, layer-by-layer exports, every type — lives on the
+// dedicated subpath: `@mdakhan.mak/cs-playwright-test-framework/report-validation`.
+// Re-exported here are the entry points a consumer actually calls.
+export {
+    CSReportValidationService,
+    CSReportSpecLoader,
+    CSReportReconciler,
+    CSReportSectionMapper,
+    CSReportSectionValidator,
+    CSReportDiffReporter,
+    CSReportCanonicalDumper,
+    computeComparisonScope,
+    // Validators and the comparison primitive, so a consumer can assert on a canonical
+    // without going through the reconciler — which is what the assertion steps do.
+    validateFooting,
+    validateChecksums,
+    validateCoverage,
+    compareValues,
+    normalizeValue,
+} from '../report-validation/index';
+export type {
+    ReportSpec,
+    RequiredSectionSpec,
+    SummaryFieldSpec,
+    SpecFieldNames,
+    ToleranceSpec,
+    KnownDifferenceSpec,
+    CanonicalReport,
+    CanonicalSection,
+    CanonicalRecord,
+    CanonicalValue,
+    ReportSource,
+    Finding,
+    FindingKind,
+    ReconciliationResult,
+    ReconciliationCounts,
+    ComparisonScope,
+    SectionComparisonScope,
+} from '../report-validation/index';

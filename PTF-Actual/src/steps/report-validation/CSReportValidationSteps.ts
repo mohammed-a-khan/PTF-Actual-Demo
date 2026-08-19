@@ -329,7 +329,8 @@ export class CSReportValidationSteps {
             `mismatch=${c.dataMismatch}, missing=${c.missing}, extra=${c.extra}, ` +
             `formatOnly=${c.formatOnly}, withinTolerance=${c.withinTolerance}, ` +
             `known=${c.knownDifference}, restructure=${c.sectionRestructure}, ` +
-            `checksumDrift=${c.checksumDrift}, coverageGap=${c.coverageGap}`;
+            `checksumDrift=${c.checksumDrift}, footingMismatch=${c.footingMismatch}, ` +
+            `coverageGap=${c.coverageGap}`;
         const line = scope
             ? `${label}: ${scope} — ${c.total} difference(s) [${breakdown}]`
             : `${label}: ${c.total} difference(s) [${breakdown}]`;
