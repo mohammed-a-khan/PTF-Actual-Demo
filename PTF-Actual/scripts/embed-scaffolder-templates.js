@@ -2,26 +2,21 @@
 /**
  * embed-scaffolder-templates.js
  *
- * Reads every scaffolder-template file at framework build time and emits
- *   src/mcp/v3/scaffolder/embedded-templates.ts
- * with the contents inlined as string constants. init-agents.ts then reads
- * from the embedded map — no filesystem walk into node_modules at runtime,
- * and package.json 'files' can DROP .github/**, .vscode/**, AGENTS.md.
+ * Bakes every consumer-facing scaffolder template into
+ *   src/mcp/v6/scaffolder/embedded-templates.ts
+ * as inlined string constants. init-agents reads from this map instead of
+ * walking node_modules at runtime — so `files:` in package.json can drop
+ * every source-template directory and consumers still get a full scaffold.
  *
- * Mirrors the earlier embed-skills.js / embed-agents.js pattern (per the
- * comment in scripts/post-build.js).
+ * SOURCE (self-contained under src/mcp/v6/scaffolder/templates/):
+ *   templates/github/copilot-instructions.md      → .github/copilot-instructions.md
+ *   templates/github/instructions/*.md            → .github/instructions/*.md
+ *   templates/github/prompts/*.md                 → .github/prompts/*.md
+ *   templates/vscode/settings.json                → .vscode/settings.json
+ *   templates/AGENTS.md                           → AGENTS.md
  *
- * Sources (relative to repo root):
- *   .github/copilot-instructions.md
- *   .github/instructions/*.instructions.md
- *   .github/agents/*.agent.md            (top-level agents only)
- *   .github/agents/subagents/*.agent.md  (subagents — flattened preserving dir)
- *   .github/prompts/*.prompt.md
- *   .vscode/settings.json
- *   AGENTS.md
- *
- * NOT embedded (framework-internal, never scaffolded):
- *   .vscode/mcp.json  — consumer version is synthesized in init-agents.ts
+ * NOT embedded (synthesized in init-agents.ts):
+ *   .vscode/mcp.json — points at `npx cs-playwright-mcp` with a lean env.
  */
 
 'use strict';
@@ -30,52 +25,47 @@ const fs = require('fs');
 const path = require('path');
 
 const repoRoot = path.resolve(__dirname, '..');
+const templatesRoot = path.join(repoRoot, 'src', 'mcp', 'v6', 'scaffolder', 'templates');
 const outPath = path.join(repoRoot, 'src', 'mcp', 'v6', 'scaffolder', 'embedded-templates.ts');
 
 /**
- * Sources to embed. `src` is relative to repoRoot; `key` is the path the
- * scaffolder writes to in the consumer target dir.
- * Files list first, then directory globs.
+ * Single-file mappings: { src: <path under templates/>, key: <consumer target> }.
  */
 const FILES = [
-    { src: '.github/copilot-instructions.md', key: '.github/copilot-instructions.md' },
-    { src: 'AGENTS.md',                       key: 'AGENTS.md' },
-    { src: '.vscode/settings.json',           key: '.vscode/settings.json' },
+    { src: 'github/copilot-instructions.md', key: '.github/copilot-instructions.md' },
+    { src: 'AGENTS.md',                      key: 'AGENTS.md' },
+    { src: 'vscode/settings.json',           key: '.vscode/settings.json' },
 ];
 
+/**
+ * Directory mappings: every non-dotfile at src/ gets written to key/name.
+ */
 const DIRS = [
-    { src: '.github/instructions',       key: '.github/instructions',       recursive: false },
-    // .github/agents intentionally removed — Copilot Chat 0.48.1 crashes with
-    // `.invoke` errors when its virtual-tools summarizer drops any tool listed
-    // in an agent's `tools:` frontmatter (fires on .bind()). Direct-tool
-    // invocation via natural language works cleanly. Slash commands under
-    // .github/prompts/ are user-triggered and don't hit this failure surface.
-    { src: '.github/prompts',            key: '.github/prompts',            recursive: false },
+    { src: 'github/instructions', key: '.github/instructions' },
+    { src: 'github/prompts',      key: '.github/prompts' },
 ];
 
 const contents = {};
 
 for (const entry of FILES) {
-    const abs = path.join(repoRoot, entry.src);
+    const abs = path.join(templatesRoot, entry.src);
     if (!fs.existsSync(abs)) {
-        console.warn(`[embed] MISSING (skipped): ${entry.src}`);
+        console.warn(`[embed] MISSING (skipped): src/mcp/v6/scaffolder/templates/${entry.src}`);
         continue;
     }
     contents[entry.key] = fs.readFileSync(abs, 'utf-8');
 }
 
 for (const dir of DIRS) {
-    const abs = path.join(repoRoot, dir.src);
+    const abs = path.join(templatesRoot, dir.src);
     if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
-        console.warn(`[embed] MISSING DIR (skipped): ${dir.src}`);
+        console.warn(`[embed] MISSING DIR (skipped): src/mcp/v6/scaffolder/templates/${dir.src}`);
         continue;
     }
     for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
         if (entry.name.startsWith('.')) continue;
         if (entry.isDirectory()) continue;
-        const abs2 = path.join(abs, entry.name);
-        const key = `${dir.key}/${entry.name}`;
-        contents[key] = fs.readFileSync(abs2, 'utf-8');
+        contents[`${dir.key}/${entry.name}`] = fs.readFileSync(path.join(abs, entry.name), 'utf-8');
     }
 }
 
@@ -85,17 +75,12 @@ const header = `/**
  * Generated by: scripts/embed-scaffolder-templates.js
  * Regenerated on every \`npm run build\`.
  *
- * Contents: every scaffolder-shippable file inlined as a string, keyed by the
- * path the scaffolder writes to in the consumer target directory. init-agents
- * reads from this map instead of walking node_modules for source files. This
- * lets package.json 'files' drop .github/**, .vscode/**, AGENTS.md entirely
- * so npm install doesn't bloat the consumer's node_modules with hundreds of
- * source-template files.
+ * Source of truth: src/mcp/v6/scaffolder/templates/
+ * Every consumer-shippable file inlined as a string, keyed by the destination
+ * path in the consumer target directory.
  */
 `;
 
-// Emit as a Record<string, string> so init-agents can iterate keys freely.
-// Values escaped via JSON.stringify (handles backticks, newlines, unicode).
 const entries = Object.keys(contents).sort().map(k => {
     const value = JSON.stringify(contents[k]);
     return `    ${JSON.stringify(k)}: ${value},`;

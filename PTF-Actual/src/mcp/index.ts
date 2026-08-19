@@ -12,12 +12,11 @@
  *   - src/mcp/_salvage/publish-feature/composition.ts
  *                                    (pure functions extracted from CSAdoMode)
  *   - src/mcp/_salvage/skills/       (~50 framework skill markdown files;
- *                                     to be curated into .github/skills/ during
- *                                     Phase 3-5 with the target v3 layout)
+ *                                     curated into .github/skills/ during
+ *                                     earlier phases)
  *
- * Nothing outside src/mcp/ imports from this module today. When Phase 1 lands
- * the v3 MCP server, its entry point will move to src/mcp/v3/index.ts and this
- * file will re-export from there.
+ * Nothing outside src/mcp/ imports from this module today. The v6 MCP server
+ * lives under src/mcp/v6/ and is launched by dist/mcp/v6/server/bin.js.
  */
 
 export {};
