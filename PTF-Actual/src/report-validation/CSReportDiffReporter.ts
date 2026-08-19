@@ -300,7 +300,10 @@ export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: 
     }
 
     const sections = [...perSection.values()]
-        .filter((s) => s.matched > 0 || s.rowsA > 0 || s.rowsB > 0)
+        // `summaryFields > 0` belongs in this filter: a section can legitimately carry only a
+        // calculation block — figures, no grid. Dropping it here zeroed the calc-figure total
+        // and made a real comparison report itself as vacuous.
+        .filter((s) => s.matched > 0 || s.rowsA > 0 || s.rowsB > 0 || s.summaryFields > 0)
         .sort((x, y) => y.comparisons - x.comparisons || x.sectionId.localeCompare(y.sectionId));
 
     const allFields = new Set<string>();
@@ -389,7 +392,11 @@ function renderScopePanel(spec: ReportSpec, a?: CanonicalReport, b?: CanonicalRe
 </section>`;
 }
 
-const FAILING_CLASSIFICATIONS = ['DATA_MISMATCH', 'MISSING', 'EXTRA', 'FOOTING_MISMATCH', 'CHECKSUM_DRIFT'] as const;
+// COVERAGE_GAP belongs here, not in the notes: it FAILS the run by default. Leaving it out
+// of both lists counted it in the tiles and then rendered it nowhere — so a run that failed
+// purely because extraction lost a column showed a red banner, a non-zero counter, and not
+// one word about which column. That is the exact moment a reader most needs the detail.
+const FAILING_CLASSIFICATIONS = ['DATA_MISMATCH', 'MISSING', 'EXTRA', 'FOOTING_MISMATCH', 'CHECKSUM_DRIFT', 'COVERAGE_GAP'] as const;
 const NOTE_CLASSIFICATIONS = ['FORMAT_ONLY', 'WITHIN_TOLERANCE', 'KNOWN_DIFFERENCE', 'SECTION_RESTRUCTURE'] as const;
 
 function renderCountTiles(counts: ReconciliationCounts): string {
@@ -427,6 +434,10 @@ function renderFilterChips(counts: ReconciliationCounts): string {
         { classification: 'KNOWN_DIFFERENCE', label: 'Known', count: counts.knownDifference },
         { classification: 'SECTION_RESTRUCTURE', label: 'Restructure', count: counts.sectionRestructure },
         { classification: 'CHECKSUM_DRIFT', label: 'Checksum', count: counts.checksumDrift },
+        // Both of these FAIL a run. Omitting them left the reader able to filter to every
+        // classification that cannot fail, and none of the two that can.
+        { classification: 'FOOTING_MISMATCH', label: 'Footing', count: counts.footingMismatch },
+        { classification: 'COVERAGE_GAP', label: 'Coverage', count: counts.coverageGap },
     ];
     return `<div class="rv-chips" role="tablist">${chips
         .map(

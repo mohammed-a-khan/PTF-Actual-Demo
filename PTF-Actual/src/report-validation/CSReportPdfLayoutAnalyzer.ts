@@ -56,7 +56,7 @@ import { segmentPages } from './layout/CSPageSegmenter';
 import { detectSectionHeaders, type SectionHeaderCandidate } from './layout/CSSectionDetector';
 import { resolveTableHeaders } from './layout/CSTableHeaderResolver';
 import { tagTotalRows } from './layout/CSTotalRowTagger';
-import { extractToc, findTocPageNumbers } from './layout/CSTocExtractor';
+import { extractToc, findTocEntryLines } from './layout/CSTocExtractor';
 
 /**
  * Full Layer-2 analysis. Given the raw pages from Layer 1, returns an `AnalyzedReport`
@@ -84,11 +84,14 @@ export function analyzeReport(pages: PageContent[], opts: LayoutAnalyzerOptions 
         protectedPatterns: opts.sectionHeaderRegexes,
     });
 
-    // 3. Per-page analysis. Section promotion is suppressed on the table-of-contents page:
-    // its lines read exactly like section titles, so detecting sections there mints a
-    // duplicate of every real section, resolving to the same canonical id and shadowing the
-    // genuine one for any lookup that takes the first match.
-    const tocPages = new Set(findTocPageNumbers(pages));
+    // 3. Per-page analysis. Section promotion is suppressed on the CONTENTS LINES of a
+    // table-of-contents page: those lines read exactly like section titles, so detecting
+    // sections there mints a duplicate of every real section, resolving to the same canonical
+    // id and shadowing the genuine one for any lookup that takes the first match.
+    //
+    // Per line rather than per page, because a report may print its contents at the top of
+    // page 1 and start a real section below it; blanket suppression would lose that section.
+    const tocLines = findTocEntryLines(pages);
     const analyzedPages: AnalyzedPage[] = [];
     for (let p = 0; p < segmented.length; p++) {
         const seg = segmented[p];
@@ -100,7 +103,7 @@ export function analyzeReport(pages: PageContent[], opts: LayoutAnalyzerOptions 
                 seg.headerItems,
                 seg.footerItems,
                 opts,
-                tocPages.has(pageContent.pageNumber),
+                tocLines.get(pageContent.pageNumber),
             ),
         );
     }
@@ -126,7 +129,7 @@ function analyzeOnePage(
     headerItems: TextItem[],
     footerItems: TextItem[],
     opts: LayoutAnalyzerOptions,
-    isTocPage = false,
+    tocEntryYBuckets?: Set<number>,
 ): AnalyzedPage {
     const pageNumber = original.pageNumber;
     const header = headerItems.map((i) => i.str).filter((s) => s.trim().length > 0);
@@ -171,9 +174,11 @@ function analyzeOnePage(
         pageWidth: original.width,
         maxTitleGapRatio: opts.maxTitleGapRatio,
     });
-    // On the TOC page every entry looks like a title, because every entry NAMES one. Treat
-    // the page as a single anonymous region so those names stay rows, not sections.
-    const fullSectionHeaders = isTocPage ? [] : sectionCandidates.filter((c) => c.isFullSectionHeader);
+    // A contents entry looks like a title because it NAMES one. Drop just those lines from
+    // consideration; anything else on the page is still eligible to be a real section.
+    const fullSectionHeaders = sectionCandidates.filter(
+        (c) => c.isFullSectionHeader && !isTocEntryLine(c, tocEntryYBuckets),
+    );
 
     // If no section header was found, treat the whole page as one anonymous section so
     // downstream code has SOMETHING to hand to the mapper. Layer-3 will decide whether
@@ -442,6 +447,17 @@ function realignHeadersOntoDataBands(columns: ColumnBand[], rows: TableRow[]): v
     }
 }
 
+/** Y-tolerance used when bucketing TOC entry lines; must match `CSTocExtractor`'s default. */
+const TOC_Y_TOLERANCE = 3;
+
+function isTocEntryLine(
+    candidate: SectionHeaderCandidate,
+    tocEntryYBuckets: Set<number> | undefined,
+): boolean {
+    if (!tocEntryYBuckets || tocEntryYBuckets.size === 0) return false;
+    return tocEntryYBuckets.has(Math.round(candidate.line.y / TOC_Y_TOLERANCE));
+}
+
 /**
  * Second-chance header detection for sections that open with a SUMMARY BLOCK.
  *
@@ -465,9 +481,20 @@ function realignHeadersOntoDataBands(columns: ColumnBand[], rows: TableRow[]): v
  * everything above it is dropped — the preamble rows have no business key and would be
  * discarded downstream anyway.
  *
- * Gated on the bands being mostly UNHEADED (< half carry a header). A section whose headers
- * resolved normally is never second-guessed, so this cannot disturb a grid that already
- * works.
+ * GATING — measured against the bands that carry DATA, never against the total band count.
+ *
+ * Column detection emits a spacer band between real columns wherever the PDF pads cells, and
+ * how many it emits varies with the file: the same report from the same generator produced
+ * 14, 15, 16 and 17 bands on four consecutive pages here. A "< half of all bands are headed"
+ * gate therefore fires or not depending on padding, which is nothing to do with whether the
+ * headers are good — one page of a healthy grid slipped under it and had its headers rebuilt
+ * from a data row, losing a key column and with it every record in the section.
+ *
+ * What actually distinguishes the two cases is ALIGNMENT: in a healthy grid every band that
+ * carries data also carries a header. When the headers came from a preamble they sit over
+ * bands the grid leaves empty. So the gate is "fewer than half the DATA-carrying bands have a
+ * header" — a ratio of two things the grid itself defines, with the padding excluded from
+ * both sides.
  *
  * @returns the surviving data rows when a header was recovered, or `null` to leave the
  *          section exactly as it was.
@@ -488,8 +515,20 @@ function recoverHeaderRowFromData(
 ): RecoveredHeader | null {
     if (columns.length === 0 || rows.length < 2) return null;
 
-    const headed = columns.filter((c) => c.header !== null && c.header.trim().length > 0).length;
-    if (headed * 2 >= columns.length) return null;
+    const carriesData = columns.map((_, ci) =>
+        rows.some((row) => {
+            if (row.isTotalRow || row.isGroupHeader) return false;
+            const cell = row.cells[ci];
+            return cell !== null && cell !== undefined && cell.trim().length > 0;
+        }),
+    );
+    const dataBands = carriesData.filter(Boolean).length;
+    if (dataBands === 0) return null;
+
+    const headedDataBands = columns.filter(
+        (c, ci) => carriesData[ci] && c.header !== null && c.header.trim().length > 0,
+    ).length;
+    if (headedDataBands * 2 >= dataBands) return null;
 
     // A header row this far down is a preamble, not a header. Bounded so a long section of
     // genuinely unheaded text rows can't have an arbitrary row promoted out of its middle.

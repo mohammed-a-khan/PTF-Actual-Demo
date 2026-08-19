@@ -43,6 +43,11 @@
  * the spec declares is allowed and matches on the prefix; if that turns out to be ambiguous
  * the step fails and lists the candidates rather than silently taking the first.
  *
+ * LIMITATION: a key VALUE containing `|` cannot be written in the `keyed "…"` form — it would
+ * be read as two key parts. The step says so explicitly ("has 2 part(s) but the spec declares
+ * 1 key column") rather than mis-matching. Use the row-table form, whose cells are separate,
+ * for keys that can contain the separator.
+ *
  * @module steps/report-validation/CSReportAssertionSteps
  */
 

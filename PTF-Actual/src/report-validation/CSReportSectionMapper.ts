@@ -233,10 +233,32 @@ export class CSReportSectionMapper {
         const canonicalRecords: CanonicalRecord[] = [];
         const coverage = newCoverageAccumulator();
         let sectionOrder = 0;
+        // Same scoping rule as `fromPdf`: when the spec declares sections, rows belonging to
+        // sections it does NOT declare are recorded but not compared. Applying it on one
+        // ingest path and not the other would make a PDF-vs-DB comparison disagree with a
+        // PDF-vs-PDF one over the same spec — the DB side contributing rows the PDF side had
+        // already dropped, every one of them surfacing as EXTRA.
+        const scoped = spec.requiredSections.length > 0;
+        const declaredIds = new Set(spec.requiredSections.map((r) => r.id));
+
         for (const [rawSectionId, groupRows] of groups) {
             sectionOrder++;
             const canonicalSectionId = resolveCanonicalSectionId(rawSectionId, spec);
             const requiredMeta = findRequiredSection(canonicalSectionId, spec);
+
+            if (scoped && !declaredIds.has(canonicalSectionId)) {
+                sections.push({
+                    id: canonicalSectionId,
+                    title: rawSectionId,
+                    present: true,
+                    order: sectionOrder,
+                    rowCount: 0,
+                    outOfScope: true,
+                    detectedRowCount: groupRows.length,
+                });
+                continue;
+            }
+
             const rowCanonicals = groupRows
                 .map((row) => dataRowToCanonicalRecord(row, spec, opts, canonicalSectionId, coverage))
                 .filter((r): r is CanonicalRecord => r !== null);
@@ -248,6 +270,7 @@ export class CSReportSectionMapper {
                 present: true,
                 order: sectionOrder,
                 rowCount: rowCanonicals.length,
+                detectedRowCount: groupRows.length,
             });
             canonicalRecords.push(...rowCanonicals);
         }
@@ -394,7 +417,18 @@ function extractSectionSummary(
         const wanted = Math.max(1, field.valueIndex ?? 1);
         const label = collapseSpaces(field.label).toLowerCase();
 
-        for (const rawLine of preambleText) {
+        // Two passes: lines that BEGIN with the label, then lines that merely contain it.
+        // Calculation blocks print the label first and the figures after it, so a line that
+        // starts with the label is the one meant; a mid-line match is usually a different
+        // caption that happens to embed the same words ("Total Ratio Excluded" vs "Ratio").
+        // Without the ordering, whichever printed higher on the page won.
+        const startsWith = preambleText.filter((l) => collapseSpaces(l).toLowerCase().startsWith(label));
+        const contains = preambleText.filter((l) => {
+            const t = collapseSpaces(l).toLowerCase();
+            return !t.startsWith(label) && t.includes(label);
+        });
+
+        for (const rawLine of [...startsWith, ...contains]) {
             const line = collapseSpaces(rawLine);
             const at = line.toLowerCase().indexOf(label);
             if (at < 0) continue;

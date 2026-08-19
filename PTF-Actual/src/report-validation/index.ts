@@ -130,6 +130,7 @@ export {
 export {
     extractToc,
     findTocPageNumbers,
+    findTocEntryLines,
     type TocExtractorOptions,
 } from './layout/CSTocExtractor';
 

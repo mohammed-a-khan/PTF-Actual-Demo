@@ -91,20 +91,27 @@ export function extractToc(pages: PageContent[], maxScanPages = 3, opts: TocExtr
  * later in the document. The duplicate then shadows the real one for any lookup that takes
  * the first match, and the TOC's own rows get mapped as if they were data.
  *
- * Same detection as `extractToc`, exposed separately so the analyzer can suppress section
- * promotion on these pages without re-deriving the rule.
+ * Reported per LINE, not per page: a report may print its contents at the top of page 1 and
+ * begin a real section further down the same page. Suppressing every candidate on the page
+ * would lose that section. Only the lines that actually parsed as a TOC entry — title text
+ * followed by an integer page number — are suppressed.
+ *
+ * Same detection as `extractToc`, exposed separately so the analyzer can apply it without
+ * re-deriving the rule.
+ *
+ * @returns page number → the y-buckets (rounded by `yPairingTolerance`) of its entry lines.
  */
-export function findTocPageNumbers(
+export function findTocEntryLines(
     pages: PageContent[],
     maxScanPages = 3,
     opts: TocExtractorOptions = {},
-): number[] {
-    if (pages.length === 0) return [];
+): Map<number, Set<number>> {
+    const found = new Map<number, Set<number>>();
+    if (pages.length === 0) return found;
     const headerPattern = opts.tocHeaderPattern ?? /table\s*of\s*contents/i;
     const yTol = opts.yPairingTolerance ?? 3;
     const maxPageNumber = opts.maxTocPageNumber ?? 9999;
 
-    const found: number[] = [];
     for (let p = 0; p < Math.min(maxScanPages, pages.length); p++) {
         const page = pages[p];
         const lines = clusterLines(page.textItems);
@@ -112,13 +119,28 @@ export function findTocPageNumbers(
             headerPattern.test(l.items.map((i) => i.str).join(' ').replace(/\s+/g, ' ')),
         );
         if (!hasHeader) continue;
-        const entries = lines.filter((line) => extractTocEntryFromLine(line, yTol, maxPageNumber) !== null);
-        if (entries.length > 0) {
-            found.push(page.pageNumber);
+
+        const ys = new Set<number>();
+        for (const line of lines) {
+            if (extractTocEntryFromLine(line, yTol, maxPageNumber) !== null) {
+                ys.add(Math.round(line.y / yTol));
+            }
+        }
+        if (ys.size > 0) {
+            found.set(page.pageNumber, ys);
             break;
         }
     }
     return found;
+}
+
+/** Page numbers that carry a TOC listing. Thin wrapper over `findTocEntryLines`. */
+export function findTocPageNumbers(
+    pages: PageContent[],
+    maxScanPages = 3,
+    opts: TocExtractorOptions = {},
+): number[] {
+    return [...findTocEntryLines(pages, maxScanPages, opts).keys()];
 }
 
 /**
