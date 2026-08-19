@@ -30,7 +30,7 @@ const fs = require('fs');
 const path = require('path');
 
 const repoRoot = path.resolve(__dirname, '..');
-const outPath = path.join(repoRoot, 'src', 'mcp', 'v3', 'scaffolder', 'embedded-templates.ts');
+const outPath = path.join(repoRoot, 'src', 'mcp', 'v6', 'scaffolder', 'embedded-templates.ts');
 
 /**
  * Sources to embed. `src` is relative to repoRoot; `key` is the path the
