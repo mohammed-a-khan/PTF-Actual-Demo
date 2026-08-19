@@ -42,7 +42,7 @@ import {
 } from '../../report-validation/CSReportValidationService';
 import type { CanonicalReport, ReconciliationResult, ReportSource } from '../../report-validation/CSReportModel';
 import type { ReportSpec } from '../../report-validation/CSReportSpec';
-import type { DiffReportInput } from '../../report-validation/CSReportDiffReporter';
+import { computeComparisonScope, type DiffReportInput } from '../../report-validation/CSReportDiffReporter';
 
 const CTX_SPEC = 'reportvalidation.spec';
 const CTX_ENTITY = 'reportvalidation.entity';
@@ -296,19 +296,24 @@ export class CSReportValidationSteps {
      * value comparisons that ran. Without it the log line is a wall of zeros, and a genuine
      * clean run reads exactly like a run that extracted nothing and compared nothing.
      */
+    /**
+     * One line of positive evidence for the console: how many rows paired up, in which
+     * sections, and how many values that actually put under comparison.
+     *
+     * Shares `computeComparisonScope` with the HTML diff report on purpose — two
+     * implementations of "what did we compare" is two chances to disagree with the
+     * reconciler, and this number is the one thing standing between a clean run and a
+     * vacuous one that looks identical.
+     */
     private describeScope(spec: ReportSpec, a?: CanonicalReport, b?: CanonicalReport): string {
         if (!a || !b) return '';
-        const keyColumns = spec.keyColumns ?? [];
-        const ignored = new Set(spec.ignoreFields ?? []);
-        const keyed = new Set(keyColumns);
-        const fields = Object.keys(spec.fieldMap ?? {}).filter((f) => !ignored.has(f) && !keyed.has(f));
-        const keyOf = (r: CanonicalReport['records'][number]): string =>
-            [r.sectionId, ...keyColumns.map((k) => r.key?.[k] ?? '')].join('\u001f');
-        const keysB = new Set(b.records.map(keyOf));
-        let matched = 0;
-        for (const r of a.records) if (keysB.has(keyOf(r))) matched++;
-        return `${matched} row(s) matched on key (${a.records.length} in A, ${b.records.length} in B), ` +
-            `${fields.length} field(s) each = ${matched * fields.length} value comparison(s)`;
+        const scope = computeComparisonScope(spec, a, b);
+        const perSection = scope.sections
+            .filter((sec) => sec.matched > 0)
+            .map((sec) => `${sec.title} ${sec.matched}\u00d7${sec.fields.length}`)
+            .join(', ');
+        return `${scope.comparisons} value comparison(s) over ${scope.matched} matched row(s) ` +
+            `(${scope.rowsA} in A, ${scope.rowsB} in B)` + (perSection ? ` — ${perSection}` : '');
     }
 
     private reportReconciliation(

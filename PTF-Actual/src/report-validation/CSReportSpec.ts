@@ -36,6 +36,16 @@ export type ToleranceSpec =
           fuzzy?: number;
       };
 
+/**
+ * Per-source column names for one canonical field. A string is the single name that source
+ * prints; an array lists accepted spellings, any of which resolves to the canonical field.
+ */
+export interface SpecFieldNames {
+    crystal?: string | string[];
+    ssrs?: string | string[];
+    db?: string | string[];
+}
+
 /** A section that MUST be present in the report (used by `CSReportSectionValidator`). */
 export interface RequiredSectionSpec {
     /** Canonical id — what the section is called in `CanonicalReport.sections[].id`. */
@@ -139,8 +149,15 @@ export interface ReportSpec {
      * Canonical field name → per-source column-name mapping. Each entry says "this canonical
      * field is called X in Crystal, Y in SSRS, Z in the DB". Missing per-source entries mean
      * the field doesn't appear in that source (which is fine — that side just skips it).
+     *
+     * A per-source entry may be a LIST of names instead of one, and any of them resolves to
+     * the canonical field. Use it when one business concept is printed under different
+     * headings in different sections of the same report — `Issue Name / Facility Name` in
+     * the market-value grid, `Facility Name / Issue Name` in the deferring grid. The
+     * alternative, a separate canonical field per spelling, splits one concept in two and
+     * makes every cross-section total and tolerance rule say it twice.
      */
-    fieldMap: Record<string, { crystal?: string; ssrs?: string; db?: string }>;
+    fieldMap: Record<string, SpecFieldNames>;
     /** Per-canonical-field tolerance rules. Fields not listed here compare strictly (after normalization). */
     tolerances: Record<string, ToleranceSpec>;
     /**
@@ -331,6 +348,29 @@ export function validateReportSpecShape(obj: unknown): string[] {
             for (const k of s.keyColumns as string[]) {
                 if (!(k in (s.fieldMap as Record<string, unknown>))) {
                     errors.push(`fieldMap: missing entry for keyColumn "${k}"`);
+                }
+            }
+        }
+        // Per-source names: a string, or a non-empty list of strings. An empty list would
+        // read as "declared" everywhere downstream while matching no column at all.
+        for (const [canonical, entry] of Object.entries(s.fieldMap as Record<string, unknown>)) {
+            if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+                errors.push(`fieldMap.${canonical}: must be an object of {crystal?, ssrs?, db?}`);
+                continue;
+            }
+            for (const source of ['crystal', 'ssrs', 'db'] as const) {
+                const names = (entry as Record<string, unknown>)[source];
+                if (names === undefined) continue;
+                if (typeof names === 'string') {
+                    if (names.length === 0) errors.push(`fieldMap.${canonical}.${source}: must not be empty`);
+                    continue;
+                }
+                if (!Array.isArray(names) || names.length === 0) {
+                    errors.push(`fieldMap.${canonical}.${source}: must be a string or a non-empty array of strings`);
+                    continue;
+                }
+                if (names.some((n) => typeof n !== 'string' || n.length === 0)) {
+                    errors.push(`fieldMap.${canonical}.${source}: array entries must be non-empty strings`);
                 }
             }
         }

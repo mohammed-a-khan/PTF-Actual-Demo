@@ -50,6 +50,15 @@ export interface CanonicalSection {
     order: number;
     /** How many rows were extracted under this section header. */
     rowCount: number;
+    /**
+     * True when the section was found in the source but the spec does not declare it, so
+     * none of its rows entered the comparison. Recorded rather than dropped: a reader of the
+     * canonical dump can see what else the report contained, and `rowCount` stays honest at
+     * 0 because zero rows were contributed.
+     */
+    outOfScope?: boolean;
+    /** Rows the source rendered under this section, whether or not they were compared. */
+    detectedRowCount?: number;
 }
 
 /** One comparable row in the canonical model. */

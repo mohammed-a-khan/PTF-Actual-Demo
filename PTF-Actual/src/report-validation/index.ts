@@ -27,6 +27,7 @@ export type {
 
 export type {
     ReportSpec,
+    SpecFieldNames,
     ToleranceSpec,
     RequiredSectionSpec,
     KnownDifferenceSpec,
@@ -133,7 +134,10 @@ export {
 // ---- Phase E: HTML diff reporter ------------------------------------------
 export {
     CSReportDiffReporter,
+    computeComparisonScope,
     resolveReportValidationOutputDir,
+    type ComparisonScope,
+    type SectionComparisonScope,
     type DiffReportInput,
     type DiffReportWriteResult,
 } from './CSReportDiffReporter';

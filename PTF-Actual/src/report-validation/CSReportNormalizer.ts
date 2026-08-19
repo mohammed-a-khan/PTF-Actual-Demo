@@ -99,12 +99,14 @@ export function normalizeColumnName(name: string): string {
 export function canonicalFieldFor(
     sourceName: string,
     source: 'crystal' | 'ssrs' | 'db',
-    fieldMap: Record<string, { crystal?: string; ssrs?: string; db?: string }>,
+    fieldMap: Record<string, { crystal?: string | string[]; ssrs?: string | string[]; db?: string | string[] }>,
 ): string | null {
     const target = normalizeColumnName(sourceName);
     for (const [canonical, entry] of Object.entries(fieldMap)) {
         const raw = entry[source];
-        if (raw && normalizeColumnName(raw) === target) return canonical;
+        if (raw === undefined) continue;
+        const names = Array.isArray(raw) ? raw : [raw];
+        if (names.some((n) => normalizeColumnName(n) === target)) return canonical;
     }
     return null;
 }

@@ -193,6 +193,114 @@ function scopeKeyOf(record: { sectionId: string; key: Record<string, string> }, 
     return [record.sectionId, ...keyColumns.map((k) => record.key?.[k] ?? '')].join(SCOPE_KEY_SEP);
 }
 
+/** One section's share of the comparison — what `computeComparisonScope` reports per section. */
+export interface SectionComparisonScope {
+    /** Canonical section id as it appears on the records. */
+    sectionId: string;
+    /** Spec title when the section is declared, otherwise the id. */
+    title: string;
+    /** Rows present on both sides under the same business key. */
+    matched: number;
+    /** Rows this section contributed on side A / side B. */
+    rowsA: number;
+    rowsB: number;
+    /** Canonical fields that were actually compared on at least one matched row here. */
+    fields: string[];
+    /** Value comparisons the reconciler ran in this section. */
+    comparisons: number;
+}
+
+/** Positive evidence of what a reconciliation actually looked at. See `renderScopePanel`. */
+export interface ComparisonScope {
+    sections: SectionComparisonScope[];
+    matched: number;
+    rowsA: number;
+    rowsB: number;
+    comparisons: number;
+    /** Distinct canonical fields compared anywhere in the report. */
+    fields: string[];
+    /** True when nothing was compared — a zero-difference result would prove nothing. */
+    vacuous: boolean;
+}
+
+/**
+ * Reproduce the reconciler's walk WITHOUT comparing values, to count the work it did.
+ *
+ * Deliberately mirrors `CSReportReconciler` rather than approximating it: rows pair on the
+ * composite (section + key columns) key, a field counts only when the spec declares it for
+ * BOTH sources, and — as in the reconciler — a field where neither side carries a value is
+ * skipped rather than counted. That last rule is what makes the number honest on a
+ * multi-section report, where each section fills a different subset of the field map:
+ * `rows × fieldMap.length` would claim comparisons that never happened.
+ */
+export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: CanonicalReport): ComparisonScope {
+    const keyColumns = spec.keyColumns ?? [];
+    const ignored = new Set(spec.ignoreFields ?? []);
+    const keyed = new Set(keyColumns);
+    const candidateFields = Object.keys(spec.fieldMap ?? {}).filter(
+        (f) =>
+            !ignored.has(f) &&
+            !keyed.has(f) &&
+            Boolean(spec.fieldMap[f]?.[a.source]) &&
+            Boolean(spec.fieldMap[f]?.[b.source]),
+    );
+
+    const bByKey = new Map<string, CanonicalReport['records'][number]>();
+    for (const r of b.records) bByKey.set(scopeKeyOf(r, keyColumns), r);
+
+    const titleOf = new Map((spec.requiredSections ?? []).map((rs) => [rs.id, rs.title]));
+    const perSection = new Map<string, SectionComparisonScope>();
+    const sectionOf = (id: string): SectionComparisonScope => {
+        let entry = perSection.get(id);
+        if (!entry) {
+            entry = { sectionId: id, title: titleOf.get(id) ?? id, matched: 0, rowsA: 0, rowsB: 0, fields: [], comparisons: 0 };
+            perSection.set(id, entry);
+        }
+        return entry;
+    };
+
+    for (const r of a.records) sectionOf(r.sectionId).rowsA++;
+    for (const r of b.records) sectionOf(r.sectionId).rowsB++;
+
+    const fieldsBySection = new Map<string, Set<string>>();
+    for (const aRec of a.records) {
+        const bRec = bByKey.get(scopeKeyOf(aRec, keyColumns));
+        if (!bRec) continue;
+        const entry = sectionOf(aRec.sectionId);
+        entry.matched++;
+        let fields = fieldsBySection.get(aRec.sectionId);
+        if (!fields) {
+            fields = new Set<string>();
+            fieldsBySection.set(aRec.sectionId, fields);
+        }
+        for (const field of candidateFields) {
+            if (aRec.fields[field] === undefined && bRec.fields[field] === undefined) continue;
+            entry.comparisons++;
+            fields.add(field);
+        }
+    }
+    for (const [id, fields] of fieldsBySection) sectionOf(id).fields = [...fields];
+
+    const sections = [...perSection.values()]
+        .filter((s) => s.matched > 0 || s.rowsA > 0 || s.rowsB > 0)
+        .sort((x, y) => y.comparisons - x.comparisons || x.sectionId.localeCompare(y.sectionId));
+
+    const allFields = new Set<string>();
+    for (const sec of sections) for (const f of sec.fields) allFields.add(f);
+
+    const matched = sections.reduce((n, s) => n + s.matched, 0);
+    const comparisons = sections.reduce((n, s) => n + s.comparisons, 0);
+    return {
+        sections,
+        matched,
+        rowsA: a.records.length,
+        rowsB: b.records.length,
+        comparisons,
+        fields: [...allFields],
+        vacuous: comparisons === 0,
+    };
+}
+
 /**
  * "What was actually compared" — the panel that makes a clean run legible.
  *
@@ -200,31 +308,19 @@ function scopeKeyOf(record: { sectionId: string; key: Record<string, string> }, 
  * as ten zeros: visually identical to a run that extracted nothing and compared nothing.
  * The coverage gate already makes that state fail rather than pass, but the report still has
  * to SHOW the work. This panel reports positive evidence — rows matched on the business key,
- * fields compared on each of them, and the resulting number of value comparisons — so a
- * reader can tell "104 rows agreed" apart from "no rows were read".
+ * fields compared on them, and the resulting number of value comparisons — broken down per
+ * section, so "both migrated sections were checked" is something a reader can verify rather
+ * than take on trust.
  */
 function renderScopePanel(spec: ReportSpec, a?: CanonicalReport, b?: CanonicalReport): string {
     if (!a || !b) return '';
-
-    const keyColumns = spec.keyColumns ?? [];
-    const ignored = new Set(spec.ignoreFields ?? []);
-    const keyed = new Set(keyColumns);
-    const comparedFields = Object.keys(spec.fieldMap ?? {}).filter((f) => !ignored.has(f) && !keyed.has(f));
-
-    const keysA = new Set(a.records.map((r) => scopeKeyOf(r, keyColumns)));
-    const keysB = new Set(b.records.map((r) => scopeKeyOf(r, keyColumns)));
-    let matched = 0;
-    keysA.forEach((k) => { if (keysB.has(k)) matched++; });
-
-    const comparisons = matched * comparedFields.length;
-    const sectionsCompared = new Set<string>();
-    for (const r of a.records) if (keysB.has(scopeKeyOf(r, keyColumns))) sectionsCompared.add(r.sectionId);
+    const scope = computeComparisonScope(spec, a, b);
 
     const tiles = [
-        { label: 'Rows matched on key', value: String(matched), hint: `${a.records.length} in A · ${b.records.length} in B` },
-        { label: 'Fields per row', value: String(comparedFields.length), hint: ignored.size ? `${ignored.size} ignored by spec` : 'none ignored' },
-        { label: 'Value comparisons', value: String(comparisons), hint: 'rows × fields' },
-        { label: 'Sections compared', value: String(sectionsCompared.size), hint: [...sectionsCompared].join(', ') || '—' },
+        { label: 'Rows matched on key', value: String(scope.matched), hint: `${scope.rowsA} in A · ${scope.rowsB} in B` },
+        { label: 'Sections compared', value: String(scope.sections.filter((s) => s.matched > 0).length), hint: scope.sections.filter((s) => s.matched > 0).map((s) => s.title).join(', ') || '—' },
+        { label: 'Fields compared', value: String(scope.fields.length), hint: (spec.ignoreFields ?? []).length ? `${(spec.ignoreFields ?? []).length} ignored by spec` : 'none ignored' },
+        { label: 'Value comparisons', value: String(scope.comparisons), hint: 'per matched row, per populated field' },
     ];
 
     const cells = tiles
@@ -237,16 +333,36 @@ function renderScopePanel(spec: ReportSpec, a?: CanonicalReport, b?: CanonicalRe
         )
         .join('\n    ');
 
-    const vacuous = matched === 0 || comparedFields.length === 0;
-    const note = vacuous
+    const note = scope.vacuous
         ? `<p class="rv-scope-warn">Nothing was compared — a zero-difference result here proves nothing. Check the spec's key columns and section matchers against the source.</p>`
-        : `<p class="rv-scope-note">${escapeHtml(String(comparisons))} value comparisons ran across ${escapeHtml(String(matched))} matched rows. The counters below are what disagreed.</p>`;
+        : `<p class="rv-scope-note">${escapeHtml(String(scope.comparisons))} value comparisons ran across ${escapeHtml(String(scope.matched))} matched rows. The counters below are what disagreed.</p>`;
+
+    const breakdown = scope.sections.length === 0 ? '' : `<div class="rv-table-wrap">
+    <table class="rv-scope-table">
+      <thead><tr><th>Section</th><th>Rows A</th><th>Rows B</th><th>Matched</th><th>Fields</th><th>Comparisons</th></tr></thead>
+      <tbody>
+        ${scope.sections
+            .map(
+                (sec) => `<tr${sec.matched === 0 ? ' class="rv-scope-empty"' : ''}>` +
+                    `<td>${escapeHtml(sec.title)}</td>` +
+                    `<td class="rv-num">${sec.rowsA}</td>` +
+                    `<td class="rv-num">${sec.rowsB}</td>` +
+                    `<td class="rv-num">${sec.matched}</td>` +
+                    `<td class="rv-num">${sec.fields.length}</td>` +
+                    `<td class="rv-num">${sec.comparisons}</td>` +
+                    `</tr>`,
+            )
+            .join('\n        ')}
+      </tbody>
+    </table>
+  </div>`;
 
     return `<section class="rv-sections rv-scope">
   <h2>What was compared</h2>
   <div class="rv-tiles">
     ${cells}
   </div>
+  ${breakdown}
   ${note}
 </section>`;
 }
@@ -646,6 +762,21 @@ body[data-status="status-fail"] .rv-verdict-rail { background: var(--fail); }
   margin: 14px 0 0; color: var(--fail); font-size: 13px; font-weight: 600;
   background: var(--fail-bg); border: 1px solid var(--fail); border-radius: 7px; padding: 10px 13px;
 }
+.rv-scope .rv-table-wrap { margin-top: 16px; }
+.rv-scope-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rv-scope-table th, .rv-scope-table td {
+  padding: 8px 12px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap;
+}
+.rv-scope-table th {
+  position: sticky; top: 0; background: var(--panel); z-index: 1;
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 650;
+}
+.rv-scope-table td.rv-num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.rv-scope-table tbody tr:last-child td { border-bottom: 0; }
+/* A section with rows on one side and none matched is the shape of a mapping bug — the
+   comparison silently covered nothing there. Flag it rather than letting it read as a row
+   of zeros among healthy ones. */
+.rv-scope-empty td { color: var(--fail); background: var(--fail-bg); }
 
 /* ---------- filter chips ---------- */
 .rv-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }

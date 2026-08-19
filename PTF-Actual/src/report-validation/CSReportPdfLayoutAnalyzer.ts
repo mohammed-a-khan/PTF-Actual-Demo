@@ -143,6 +143,10 @@ function analyzeOnePage(
     const sectionCandidates = detectSectionHeaders(lines, {
         sectionHeaderFontRatio: opts.sectionHeaderFontRatio,
         sectionHeaderRegexes: opts.sectionHeaderRegexes,
+        // Page geometry enables the detector's wide-gap veto, which keeps a row of
+        // column labels from being read as a section title and splitting the section.
+        pageWidth: original.width,
+        maxTitleGapRatio: opts.maxTitleGapRatio,
     });
     const fullSectionHeaders = sectionCandidates.filter((c) => c.isFullSectionHeader);
 
@@ -297,6 +301,16 @@ function analyzeSectionRegion(
         rows = stitchMultiLineCells(rows);
     }
 
+    // Late-header recovery. Runs AFTER stitching so a header wrapped over two lines
+    // ("S & P Recovery" / "Rate") is already one cell by the time we read it.
+    if (opts.recoverLateHeaderRow !== false) {
+        const recovered = recoverHeaderRowFromData(columns, rows, dataLines);
+        if (recovered) {
+            rows = recovered;
+            realignHeadersOntoDataBands(columns, rows);
+        }
+    }
+
     // Reindex after stitching so rowIndex reflects the final visible order.
     rows.forEach((r, i) => (r.rowIndex = i + 1));
 
@@ -394,6 +408,179 @@ function realignHeadersOntoDataBands(columns: ColumnBand[], rows: TableRow[]): v
             break;
         }
     }
+}
+
+/**
+ * Second-chance header detection for sections that open with a SUMMARY BLOCK.
+ *
+ * `splitHeaderAndData` only inspects the top one or two lines of a section, which is right
+ * for a plain grid. Financial reports routinely print a calculation preamble first —
+ *
+ *     Deferring Securities Detail            CALCULATION   RATIO
+ *     Collateral Principal Amount   86,592,595.84   (A)
+ *     All Deferring Securities       5,355,026.07   (B)   (B)/(A)   6.184%
+ *     Facility Name / Issue Name  Identifier  Security Type  Current Par Amount  …   <- the real header
+ *     SIRVA Worldwide Inc …       LX243193    Loan           340,062.20          …
+ *
+ * — so the top lines are summary VALUES. The column bands then take their headers from
+ * that preamble (`Collateral Principal Amount`, `86,592,595.84`, `(A)`), no spec field maps
+ * onto them, and the whole section yields zero records: a silent extraction loss on a
+ * section the spec claims to check.
+ *
+ * The recovery reads the type profile instead of the position: the header row is the first
+ * row whose filled cells are ALL non-numeric, sitting immediately above a row that carries
+ * real values. Its cells become the band headers (replacing the preamble's), and it plus
+ * everything above it is dropped — the preamble rows have no business key and would be
+ * discarded downstream anyway.
+ *
+ * Gated on the bands being mostly UNHEADED (< half carry a header). A section whose headers
+ * resolved normally is never second-guessed, so this cannot disturb a grid that already
+ * works.
+ *
+ * @returns the surviving data rows when a header was recovered, or `null` to leave the
+ *          section exactly as it was.
+ */
+function recoverHeaderRowFromData(
+    columns: ColumnBand[],
+    rows: TableRow[],
+    sourceLines: LogicalLine[],
+): TableRow[] | null {
+    if (columns.length === 0 || rows.length < 2) return null;
+
+    const headed = columns.filter((c) => c.header !== null && c.header.trim().length > 0).length;
+    if (headed * 2 >= columns.length) return null;
+
+    // A header row this far down is a preamble, not a header. Bounded so a long section of
+    // genuinely unheaded text rows can't have an arbitrary row promoted out of its middle.
+    const searchLimit = Math.min(LATE_HEADER_SEARCH_ROWS, rows.length - 1);
+
+    for (let i = 0; i < searchLimit; i++) {
+        const row = rows[i];
+        if (row.isGroupHeader || row.isTotalRow) continue;
+
+        const filled = row.cells.filter((c): c is string => c !== null && c.trim().length > 0);
+        // Two labels don't make a header row — that's a caption or a stray pair.
+        if (filled.length < MIN_HEADER_CELLS) continue;
+        if (filled.some(looksLikeValue)) continue;
+
+        // …and the row under it must actually carry data, or we've found a paragraph.
+        const below = rows[i + 1];
+        const valuesBelow = below.cells.filter((c) => c !== null && looksLikeValue(c)).length;
+        if (valuesBelow < MIN_VALUE_CELLS_BELOW) continue;
+
+        // Re-read the header text from the ITEMS rather than from `row.cells`. The generic
+        // cell bucketing places each item in the band it overlaps most, independently — and
+        // header labels are wider than the values beneath them, so two adjacent labels can
+        // both land in one band ("Security Type Current Par Amount"), leaving the column
+        // next door headerless and its values unmapped. A header row has exactly one label
+        // per column, so it is a MATCHING problem: assign left-to-right, never moving
+        // backwards, which also re-joins a label wrapped over two lines.
+        const headerTexts = headerTextsFromItems(headerItemsFor(row, sourceLines), columns);
+        for (let ci = 0; ci < columns.length; ci++) {
+            columns[ci].header = headerTexts[ci];
+            columns[ci].headerPath = [];
+        }
+        return rows.slice(i + 1);
+    }
+    return null;
+}
+
+/**
+ * The pre-stitch lines that make up a (possibly stitched) header row — the line at the
+ * row's own y plus any wrapped continuation clustered right above or below it, which is
+ * how `S & P Recovery` / `Rate` is printed.
+ */
+function headerItemsFor(row: TableRow, sourceLines: LogicalLine[]): TextItem[] {
+    const window = maxFontSizeOn(sourceLines) * HEADER_WRAP_LINES;
+    const items: TextItem[] = [];
+    for (const line of sourceLines) {
+        if (Math.abs(line.y - row.y) <= window) items.push(...line.items);
+    }
+    return items;
+}
+
+/** Vertical reach, in line-heights, over which a wrapped header label is still the same header. */
+const HEADER_WRAP_LINES = 1.2;
+
+function maxFontSizeOn(lines: LogicalLine[]): number {
+    let max = 0;
+    for (const line of lines) {
+        for (const item of line.items) {
+            if (item.fontSize > max) max = item.fontSize;
+        }
+    }
+    return max;
+}
+
+/**
+ * Assign header items to column bands as an ordered MATCHING: walking the items left to
+ * right, each one takes the best-overlapping band at or after the last band used. Two
+ * consequences, both wanted:
+ *
+ *   - No band can swallow two labels while the next band goes headerless, since a label on
+ *     the SAME line as the previous one must look strictly forward from where that one
+ *     landed. Independent per-item assignment gets this wrong whenever a label is wider
+ *     than its values: `Current Par Amount` overlaps the band to its left more than its
+ *     own, so it lands on top of `Security Type` and the amount column loses its name.
+ *   - A label wrapped onto a SECOND line rejoins its own band, because a different line is
+ *     allowed to reuse the band just used (`S & P Recovery` + `Rate`).
+ *
+ * Bands with no label get `null`, and `realignHeadersOntoDataBands` afterwards nudges a
+ * header sitting over an empty band onto the neighbouring band that carries the values —
+ * the usual right-aligned-numeric offset.
+ */
+function headerTextsFromItems(items: TextItem[], bands: ColumnBand[]): (string | null)[] {
+    const out: (string | null)[] = bands.map(() => null);
+    const inked = items.filter((i) => i.str.trim().length > 0).sort((a, b) => a.x - b.x);
+    let last = 0;
+    let lastY: number | null = null;
+    for (const item of inked) {
+        const sameLine = lastY !== null && Math.abs(item.y - lastY) <= SAME_LINE_EPSILON;
+        const from = lastY === null ? 0 : sameLine ? last + 1 : last;
+        const right = item.x + Math.max(item.width, 0);
+        let best = -1;
+        let bestOverlap = -Infinity;
+        let bestDelta = Infinity;
+        for (let bi = from; bi < bands.length; bi++) {
+            const overlap = Math.min(right, bands[bi].end) - Math.max(item.x, bands[bi].start);
+            const delta = Math.abs(item.x - bands[bi].start);
+            if (overlap > bestOverlap || (overlap === bestOverlap && delta < bestDelta)) {
+                best = bi;
+                bestOverlap = overlap;
+                bestDelta = delta;
+            }
+        }
+        if (best < 0) continue;
+        const text = item.str.trim();
+        out[best] = out[best] === null ? text : `${out[best]} ${text}`;
+        last = best;
+        lastY = item.y;
+    }
+    return out;
+}
+
+/** Baseline distance (points) within which two header items count as the same printed line. */
+const SAME_LINE_EPSILON = 1;
+
+/** How far into a section the late-header pass will look before giving up. */
+const LATE_HEADER_SEARCH_ROWS = 6;
+/** Minimum filled cells for a row to be considered a header rather than a caption. */
+const MIN_HEADER_CELLS = 3;
+/** Minimum value-shaped cells the row BELOW a candidate header must carry. */
+const MIN_VALUE_CELLS_BELOW = 2;
+
+/**
+ * True when a cell reads as DATA rather than a label: a number (with optional currency,
+ * thousands separators, accounting parens, trailing percent) or a date. Deliberately narrow
+ * — anything it isn't sure about counts as a label, which only makes the late-header pass
+ * decline to fire.
+ */
+function looksLikeValue(cell: string): boolean {
+    const t = cell.trim();
+    if (t.length === 0) return false;
+    if (/^\(?-?[$\u00a3\u20ac]?[\d,]+(?:\.\d+)?\)?%?-?$/.test(t)) return true;
+    if (/^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$/.test(t)) return true;
+    return false;
 }
 
 /**

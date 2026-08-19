@@ -106,11 +106,35 @@ export class CSReportSectionMapper {
         const checksums: Record<string, number> = {};
         const coverage = newCoverageAccumulator();
 
+        // The spec's `requiredSections` IS the declaration of scope. A legacy report carries
+        // dozens of sections; the replacement renders the migrated few. Mapping the rest
+        // turns every unmigrated section into a wall of MISSING rows that says nothing the
+        // section list doesn't already say, and buries the differences that matter. Sections
+        // outside the declaration are recorded (below) but contribute no records.
+        //
+        // Guarded on the list being non-empty so specs that declare no sections — flat
+        // single-table sources — keep mapping everything, as before.
+        const scoped = spec.requiredSections.length > 0;
+        const declared = new Set(spec.requiredSections.map((r) => r.id));
+
         let sectionOrder = 0;
         for (const analyzedSection of analyzed.mergedSections) {
             sectionOrder++;
             const canonicalSectionId = resolveCanonicalSectionId(analyzedSection.title, spec);
             const requiredMeta = findRequiredSection(canonicalSectionId, spec);
+
+            if (scoped && !declared.has(canonicalSectionId)) {
+                sections.push({
+                    id: canonicalSectionId,
+                    title: analyzedSection.title,
+                    present: true,
+                    order: sectionOrder,
+                    rowCount: 0,
+                    outOfScope: true,
+                    detectedRowCount: analyzedSection.tableRows.length,
+                });
+                continue;
+            }
 
             // Column-index → canonical field name, based on the resolved bands' headers.
             // Skip columns whose header doesn't map to any canonical field via `spec.fieldMap`
@@ -138,6 +162,7 @@ export class CSReportSectionMapper {
                 present: true,
                 order: sectionOrder,
                 rowCount: canonicalRecords.length,
+                detectedRowCount: analyzedSection.tableRows.length,
             });
             records.push(...canonicalRecords);
         }

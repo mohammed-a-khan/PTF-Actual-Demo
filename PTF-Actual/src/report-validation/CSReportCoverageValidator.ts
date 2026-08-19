@@ -98,8 +98,11 @@ export function validateCoverage(a: CanonicalReport, b: CanonicalReport, spec: R
         for (const field of coverage.unmappedFields) {
             if (exempt.has(field)) continue;
             const declared = spec.fieldMap[field]?.[canonical.source];
+            const declaredText = declared === undefined
+                ? '(unknown)'
+                : Array.isArray(declared) ? declared.join('" / "') : declared;
             findings.push(gap('*', `unmappedField:${label}:${field}`, field,
-                `spec maps "${field}" to column "${declared ?? '(unknown)'}" on ${label}, but no such column was found — ` +
+                `spec maps "${field}" to column "${declaredText}" on ${label}, but no such column was found — ` +
                 `the field was never compared. Fix the column name, or list it in spec.optionalFields if it is genuinely optional.`));
         }
     }

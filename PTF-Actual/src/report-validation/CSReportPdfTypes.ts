@@ -224,6 +224,17 @@ export interface LayoutAnalyzerOptions {
     lineToleranceRatio?: number;
     /** Fraction of pages a text item must appear on (at similar y) to be classified as header/footer. Default 0.6. */
     headerFooterRepeatThreshold?: number;
+    /**
+     * Wide-gap veto threshold for section-title detection, as a fraction of page width.
+     * See `CSSectionDetector`. Default 0.06.
+     */
+    maxTitleGapRatio?: number;
+    /**
+     * When true (default), a section whose column bands came back mostly unheaded gets a
+     * second pass that looks for the real header row further down the section. See
+     * `recoverHeaderRowFromData` in `CSReportPdfLayoutAnalyzer`.
+     */
+    recoverLateHeaderRow?: boolean;
     /** Section-header font-size threshold (× median). Default 1.2 — 20% larger than surrounding text. */
     sectionHeaderFontRatio?: number;
     /** Kernel-density bandwidth for column detection (in PDF points). Default 3. */

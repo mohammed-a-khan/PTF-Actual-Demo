@@ -16,6 +16,16 @@
  *   3. REGEX — spec-supplied patterns matching known section names.
  *
  * A line needs at least 2 of 3 signals to qualify as a section header.
+ *
+ * One VETO overrides the vote: a line whose text runs are separated by a
+ * blank gap wider than `maxTitleGapRatio` of the page is a column-label
+ * row, not a title. Financial reports print grid labels in the same large
+ * all-caps face they use for section titles (`CALCULATION` … `RATIO`
+ * spanning the right half of the page), which otherwise scores 2 votes and
+ * splits the section in half — orphaning the detail grid under a bogus
+ * title no spec matcher can name. A real title is one contiguous phrase.
+ * The veto yields to an explicit spec matcher: when the `regex` signal
+ * fires the spec has NAMED this title, and the spec outranks geometry.
  * A single signal downgrades to "group sub-header" candidate — inside a
  * table region, that's a legitimate sub-header row; outside, it's noise.
  *
@@ -39,6 +49,17 @@ export interface SectionDetectorOptions {
     extraSectionWords?: string[];
     /** Vote count required to qualify as a full section header. Default 2 of 3. */
     votesRequired?: number;
+    /**
+     * Page width in PDF user-space. Enables the wide-gap veto (below). Omit to disable it —
+     * callers that don't know the page geometry keep the pre-veto behaviour.
+     */
+    pageWidth?: number;
+    /**
+     * Wide-gap veto threshold, as a fraction of `pageWidth`. A candidate line whose runs are
+     * separated by a blank gap wider than this is a COLUMN-LABEL row, not a section title.
+     * Default 0.06 (6% of the page).
+     */
+    maxTitleGapRatio?: number;
 }
 
 export interface SectionHeaderCandidate {
@@ -80,6 +101,7 @@ export function detectSectionHeaders(
     const votesRequired = opts.votesRequired ?? 2;
     const regexes = opts.sectionHeaderRegexes ?? [];
     const words = new Set([...DEFAULT_SECTION_WORDS, ...(opts.extraSectionWords ?? [])]);
+    const maxGap = opts.pageWidth ? opts.pageWidth * (opts.maxTitleGapRatio ?? 0.06) : Infinity;
 
     // Compute page-wide median font size (per-line max-item font) as the FONT baseline.
     // Using per-line MAX (not per-item) so a mixed-font body-text line doesn't drag the
@@ -115,14 +137,40 @@ export function detectSectionHeaders(
         if (regexes.some((r) => r.test(title))) signals.push('regex');
 
         if (signals.length === 0) continue;
+
+        // VETO: wide internal gap ⇒ column labels, not a title. Skipped when the spec
+        // explicitly matched this title (regex signal) — the spec outranks geometry.
+        const vetoed = !signals.includes('regex') && widestInternalGap(line) > maxGap;
+
         candidates.push({
             line,
             signals,
-            isFullSectionHeader: signals.length >= votesRequired,
+            isFullSectionHeader: !vetoed && signals.length >= votesRequired,
             title,
         });
     }
     return candidates;
+}
+
+/**
+ * Widest blank run between consecutive non-blank text runs on a line, in PDF user-space
+ * points. Whitespace-only items (pdfjs emits them as padding runs) are skipped rather than
+ * measured, because their reported width is the gap we're after — measuring edge-to-edge
+ * between the runs that carry ink is the same number without depending on that quirk.
+ *
+ * Returns 0 for a line with fewer than two inked runs.
+ */
+function widestInternalGap(line: LogicalLine): number {
+    const inked = line.items
+        .filter((i) => i.str.trim().length > 0)
+        .sort((a, b) => a.x - b.x);
+    let widest = 0;
+    for (let i = 1; i < inked.length; i++) {
+        const prev = inked[i - 1];
+        const gap = inked[i].x - (prev.x + prev.width);
+        if (gap > widest) widest = gap;
+    }
+    return widest;
 }
 
 /**
