@@ -100,6 +100,7 @@ async function defaultPdfJsLoader(): Promise<PdfJsLoader> {
             s: string,
         ) => Promise<{ getDocument: PdfJsLoader['getDocument'] }>;
         const mod = await dynamicImport('pdfjs-dist/legacy/build/pdf.mjs');
+        assertSupportedPdfJs();
         cachedPdfJs = { getDocument: mod.getDocument };
         return cachedPdfJs;
     } catch (err) {
@@ -108,6 +109,59 @@ async function defaultPdfJsLoader(): Promise<PdfJsLoader> {
                 `Run: npm install pdfjs-dist. Underlying error: ${(err as Error).message}`,
         );
     }
+}
+
+/** pdfjs major version this extractor's geometry handling is written and tested against. */
+const SUPPORTED_PDFJS_MAJOR = 4;
+
+/**
+ * Refuse to run on an untested pdfjs major.
+ *
+ * Column bands are clustered from the `x`, `y` and `width` pdfjs reports per text item, so a
+ * release that changes those numbers moves every band boundary. The visible result is not an
+ * error — it is adjacent headers collapsing into one band, a key column losing its name, and
+ * every row in the section being discarded for want of a business key. Silent, and
+ * indistinguishable from a report that genuinely has no data.
+ *
+ * A consumer whose own project depends on a newer pdfjs hoists it above this package, so the
+ * wrong version arrives without anyone choosing it. Failing loudly here costs one clear
+ * message; the alternative costs a day of looking for the defect in the wrong place.
+ *
+ * `REPORT_PDFJS_ALLOW_UNTESTED=true` downgrades this to a warning for anyone deliberately
+ * trying a newer release.
+ */
+function assertSupportedPdfJs(): void {
+    let version: string | undefined;
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        version = require('pdfjs-dist/package.json').version;
+    } catch {
+        return; // Version unreadable — not worth blocking on.
+    }
+    if (!version) return;
+    const major = Number(version.split('.')[0]);
+    if (!Number.isFinite(major) || major === SUPPORTED_PDFJS_MAJOR) return;
+
+    const message =
+        `CSReportPdfExtractor: pdfjs-dist ${version} is installed, but PDF layout analysis is ` +
+        `written and tested against ${SUPPORTED_PDFJS_MAJOR}.x. Text-item geometry differs ` +
+        `between majors, which shifts every detected column boundary — headers merge, key ` +
+        `columns lose their names, and rows are then dropped for want of a business key. ` +
+        `Install the tested version alongside your project: ` +
+        `npm install pdfjs-dist@${SUPPORTED_PDFJS_MAJOR}.10.38 --save-exact. ` +
+        `Set REPORT_PDFJS_ALLOW_UNTESTED=true to proceed anyway.`;
+
+    const allow = String(process.env['REPORT_PDFJS_ALLOW_UNTESTED'] ?? '').toLowerCase();
+    if (allow === 'true' || allow === '1' || allow === 'yes') {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            require('../reporter/CSReporter').CSReporter.warn(message);
+        } catch {
+            console.warn(message);
+        }
+        return;
+    }
+    throw new Error(message);
 }
 
 /** Optional overrides for `extractPagesFromPdf`. */

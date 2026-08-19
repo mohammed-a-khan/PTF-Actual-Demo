@@ -157,6 +157,7 @@ export class CSReportSectionMapper {
             for (const [k, v] of Object.entries(canonicalChecksums)) checksums[k] = v;
 
             const summary = extractSectionSummary(analyzedSection.preambleText ?? [], requiredMeta, spec);
+            const detectedColumns = describeColumns(analyzedSection, colIdxToCanonical);
 
             sections.push({
                 id: canonicalSectionId,
@@ -165,6 +166,7 @@ export class CSReportSectionMapper {
                 order: sectionOrder,
                 rowCount: canonicalRecords.length,
                 detectedRowCount: analyzedSection.tableRows.length,
+                detectedColumns,
                 ...(summary ? { summary } : {}),
             });
             records.push(...canonicalRecords);
@@ -389,14 +391,33 @@ function mapColumnIndexesToCanonical(
 }
 
 /**
+ * What each column band came out as: header text, the canonical field it resolved to, and a
+ * sample value. Bands that are pure spacing — no header, no data — are omitted as noise.
+ */
+function describeColumns(
+    section: AnalyzedSection,
+    colIdxToCanonical: (string | null)[],
+): Array<{ header: string | null; mapsTo: string | null; sample?: string }> {
+    const dataRows = section.tableRows.filter((r) => !r.isTotalRow && !r.isGroupHeader);
+    const out: Array<{ header: string | null; mapsTo: string | null; sample?: string }> = [];
+    section.columns.forEach((band, ci) => {
+        const header = band.header && band.header.trim() ? band.header.trim() : null;
+        const sampleRow = dataRows.find((r) => r.cells[ci] && String(r.cells[ci]).trim());
+        const sample = sampleRow ? String(sampleRow.cells[ci]).trim().slice(0, 40) : undefined;
+        if (!header && sample === undefined) return;
+        out.push({ header, mapsTo: colIdxToCanonical[ci] ?? null, ...(sample !== undefined ? { sample } : {}) });
+    });
+    return out;
+}
+
+/**
  * Read a section's declared calculation figures out of its preamble lines.
  *
  * The preamble is label-and-value text, not a grid, so extraction is label-driven: find the
  * line carrying the label, then take the Nth VALUE on it. "Value" means the token normalizes
  * to a number or a date — which is what excludes the formula markers these blocks are full
  * of (`(A)`, `(B)`, `(B)/(A)`) without having to enumerate them, and what lets
- * `All Deferring Securities 4,200,000.00 (B) (B)/(A) 5.600%` yield the amount at index 1 and
- * the ratio at index 2.
+ * one line yield its amount at index 1 and the ratio it feeds at index 2.
  *
  * A declared figure that isn't found is left ABSENT rather than written as null. The
  * reconciler treats absence as a coverage gap — a figure the spec claims to check and

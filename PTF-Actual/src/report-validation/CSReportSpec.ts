@@ -47,29 +47,24 @@ export interface SpecFieldNames {
 }
 
 /**
- * One figure in a section's CALCULATION block — the label-and-value lines printed above
- * the detail grid.
- *
- * These carry what the section is actually about (the collateral balance, the total being
- * tested, the ratio against its threshold) and they sit outside every column band, so the
- * row-level walk cannot see them. Declaring them here is what puts them under comparison;
- * anything not declared is not checked.
+ * One figure in a section's summary block — the label-and-value lines printed above the
+ * detail grid. They sit outside every column band, so the row-level walk cannot reach them.
+ * Declaring them here is what puts them under comparison; anything not declared is not
+ * checked.
  */
 export interface SummaryFieldSpec {
     /** Canonical id for the figure. Tolerances are looked up under this name in `spec.tolerances`. */
     id: string;
     /**
-     * The label printed to the left of the value, e.g. `All Deferring Securities`. Matched
-     * case-insensitively with runs of whitespace collapsed, so the two engines' spacing
-     * differences don't matter.
+     * The label printed to the left of the value. Matched case-insensitively with runs of
+     * whitespace collapsed, so spacing differences between engines don't matter.
      */
     label: string;
     /**
      * Which value on the label's line to take, 1-based. Default 1.
      *
-     * A calculation line often carries more than one: `All Deferring Securities 4,200,000.00
-     * (B) (B)/(A) 5.600%` prints the amount and the ratio it feeds. Formula markers like
-     * `(A)` and `(B)/(A)` are not values and are never counted.
+     * A summary line often carries more than one — an amount and the ratio it feeds.
+     * Formula markers such as `(A)` or `(B)/(A)` are not values and are never counted.
      */
     valueIndex?: number;
 }
@@ -129,7 +124,7 @@ export type SpecDatabaseQuery =
  * procedure that emits SEVERAL result sets.
  */
 export interface SpecProcedure {
-    /** Procedure name, schema-qualified (e.g. `dbo.usp_PositionDetail`). */
+    /** Procedure name, schema-qualified (e.g. `dbo.usp_ExampleReport`). */
     name: string;
     /**
      * Ordered parameter names, bound POSITIONALLY in this order. Each name is resolved
@@ -185,10 +180,9 @@ export interface ReportSpec {
      *
      * A per-source entry may be a LIST of names instead of one, and any of them resolves to
      * the canonical field. Use it when one business concept is printed under different
-     * headings in different sections of the same report — `Issue Name / Facility Name` in
-     * the market-value grid, `Facility Name / Issue Name` in the deferring grid. The
-     * alternative, a separate canonical field per spelling, splits one concept in two and
-     * makes every cross-section total and tolerance rule say it twice.
+     * headings in different sections of the same report. The alternative, a separate
+     * canonical field per spelling, splits one concept in two and makes every cross-section
+     * total and tolerance rule say it twice.
      */
     fieldMap: Record<string, SpecFieldNames>;
     /** Per-canonical-field tolerance rules. Fields not listed here compare strictly (after normalization). */

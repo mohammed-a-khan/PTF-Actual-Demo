@@ -7,14 +7,14 @@
 //
 // Gherkin surface:
 //
-//   Given the report spec "position-detail"
-//   Given the report spec "position-detail" for entity "FUND-1"
-//   Given the report entity "FUND-1"
+//   Given the report spec "example-report"
+//   Given the report spec "example-report" for entity "ENTITY-1"
+//   Given the report entity "ENTITY-1"
 //   Given the report parameter "asOfDate" is "2026-08-18"
 //   Given the report section column "SECTION_NAME"
 //
-//   When I acquire the SSRS report for entity "FUND-1" exporting as "Excel"
-//   When I acquire the Crystal report for entity "FUND-1"
+//   When I acquire the SSRS report for entity "ENTITY-1" exporting as "Excel"
+//   When I acquire the Crystal report for entity "ENTITY-1"
 //   When I ingest the SSRS report from "path/to/file.xlsx"
 //   When I ingest the Crystal report from "path/to/file.pdf"
 //   When I ingest the SSRS report from the latest download

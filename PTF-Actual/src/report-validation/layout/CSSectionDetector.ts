@@ -2,9 +2,8 @@
  * CS Report Validation — Layer 2.4: Section header detection.
  *
  * Identifies which lines on a page are SECTION HEADERS (top-of-section
- * titles like "Deal Summary", "Coverage Test Summary") vs GROUP SUB-
- * HEADERS inside a table (like "Interest Coverage Tests", "OverCollat-
- * eralization Tests" as bold sub-headings within Coverage Test Summary).
+ * i.e. top-of-section titles) vs GROUP SUB-HEADERS inside a table
+ * (bold sub-headings that group the rows beneath them).
  *
  * Uses THREE independent signals + majority voting so no single heuristic
  * can misfire alone:
@@ -20,8 +19,8 @@
  * One VETO overrides the vote: a line whose text runs are separated by a
  * blank gap wider than `maxTitleGapRatio` of the page is a column-label
  * row, not a title. Financial reports print grid labels in the same large
- * all-caps face they use for section titles (`CALCULATION` … `RATIO`
- * spanning the right half of the page), which otherwise scores 2 votes and
+ * all-caps face they use for section titles, spread across the width of
+ * the page, which otherwise scores 2 votes and
  * splits the section in half — orphaning the detail grid under a bogus
  * title no spec matcher can name. A real title is one contiguous phrase.
  * The veto yields to an explicit spec matcher: when the `regex` signal

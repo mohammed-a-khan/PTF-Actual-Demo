@@ -127,7 +127,7 @@ export interface TableRow {
      * "column X uses text color as Pass/Fail signal". Same array length as `cells`.
      */
     cellMeta: (CellMeta | null)[];
-    /** True when this row was classified as a group sub-header (`Interest Coverage Tests` etc.), not a data row. */
+    /** True when this row was classified as a group sub-header (a bold sub-heading inside a table), not a data row. */
     isGroupHeader: boolean;
     /** True when this row was classified as a totals / subtotals row (extractor-side checksum, not comparable data). */
     isTotalRow: boolean;
@@ -146,8 +146,8 @@ export interface CellMeta {
 }
 
 /**
- * A section detected on the page — either the top-of-report title (`Deal Summary`,
- * `Coverage Tests`) or a mid-table group sub-header. Sections that span
+ * A section detected on the page — either a top-of-section title or a mid-table group
+ * sub-header. Sections that span
  * multiple pages have `spansToNextPage` set so the cross-page merger can join them.
  */
 export interface AnalyzedSection {
@@ -162,9 +162,8 @@ export interface AnalyzedSection {
     /** Free text paragraphs found within the section but outside any table. */
     freeText: string[];
     /**
-     * Lines of the CALCULATION block printed above the section's grid, top-down, when one
-     * was found. These carry the section's headline figures — balances, totals, the ratio
-     * against its threshold — which sit outside every column band and would otherwise never
+     * Lines of the summary block printed above the section's grid, top-down, when one was
+     * found. These carry figures that sit outside every column band and would otherwise never
      * be compared. Empty for an ordinary grid. See `RequiredSectionSpec.summaryFields`.
      */
     preambleText?: string[];

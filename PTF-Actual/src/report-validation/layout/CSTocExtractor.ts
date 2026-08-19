@@ -4,8 +4,8 @@
  * The first page of most Crystal / SSRS report exports is a Table of
  * Contents. We extract it as GROUND TRUTH — the authoritative section
  * list against which the layout analyzer's own section detection is
- * cross-checked downstream. When the TOC says "Deal Summary → 2" and
- * layout analysis finds "Deal Summary" on page 4 (or doesn't find it
+ * cross-checked downstream. When the TOC points a title at one page and
+ * layout analysis finds that title on another (or doesn't find it
  * at all), that's a real, high-signal discrepancy the reconciler
  * surfaces.
  *
@@ -163,7 +163,7 @@ function extractTocEntryFromLine(line: LogicalLine, yTol: number, maxPageNumber:
     // e.g. a line that's just two numbers.
     const titleItems = sorted.slice(0, -1);
     const titleText = titleItems.map((it) => it.str).join(' ').replace(/\s+/g, ' ').trim();
-    // Strip trailing dot-leaders ("Deal Summary ....." → "Deal Summary").
+    // Strip trailing dot-leaders ("Title ....." → "Title").
     const cleanTitle = titleText.replace(/[\s.·:]+$/g, '').trim();
     if (cleanTitle.length === 0) return null;
     if (!/[A-Za-z]/.test(cleanTitle)) return null;

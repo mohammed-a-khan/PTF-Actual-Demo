@@ -14,9 +14,9 @@
  *   "400,000.30"                        a literal
  *   "<marketValue>"                     a Scenario Outline column
  *   "{{expectedMv}}"                    test data / a stored context variable
- *   "{context:dbResult.MARKET_VALUE}"   a stored DB result set — first row, column-name
- *                                       matching is normalized, so MARKET_VALUE / marketValue
- *                                       / "Market Value" all resolve
+ *   "{context:dbResult.SOME_COLUMN}"    a stored DB result set — first row; column-name
+ *                                       matching is normalized, so SOME_COLUMN, someColumn
+ *                                       and "Some Column" all resolve
  *   "{config:EXPECTED_MV}"              configuration
  *   "{env:EXPECTED_MV}"                 environment
  *   "$expectedMv"                       alternative variable syntax
@@ -328,7 +328,7 @@ function findRecord(
 /**
  * Compare one key part against a record's stored key.
  *
- * Keys are stored already-normalized (`52000000.53`, not `"52,000,000.53"`), while a feature
+ * Keys are stored already-normalized (unformatted, not as printed), while a feature
  * file naturally writes the number as the report printed it. Normalizing the supplied part
  * the same way lets either spelling address the same row.
  */

@@ -180,7 +180,7 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
  * Matching is tried twice per item: against its own text, and against the joined text of
  * every item sharing its baseline. The second pass is what catches a title the PDF emits as
  * several runs — pdfjs routinely splits a centred heading around its padding, and an
- * anchored spec matcher like `^Market Value Detail(\s+\d+[A-Z]?)?$` matches the assembled
+ * an anchored spec matcher matches the assembled
  * line but none of the fragments. When a line matches, every item on it is protected: the
  * fragments are the title.
  */

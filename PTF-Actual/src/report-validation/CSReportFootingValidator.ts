@@ -2,7 +2,7 @@
  * CS Report Validation — Footing check (printed total vs sum of extracted rows).
  *
  * The one integrity check a report can run against ITSELF, and the only one that catches a
- * silently truncated extraction. Drop the last page of a PDF and the printed `TOTALS:` row
+ * silently truncated extraction. Drop the last page of a PDF and the printed totals row
  * is usually still there — it is rendered once, at the end of the section, and whether it
  * survives has nothing to do with whether the rows above it did. The sum of what was
  * extracted falls away; the printed figure does not. Cross-side checksum agreement is blind

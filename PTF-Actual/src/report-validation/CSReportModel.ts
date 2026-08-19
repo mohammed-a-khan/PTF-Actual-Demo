@@ -60,6 +60,16 @@ export interface CanonicalSection {
     /** Rows the source rendered under this section, whether or not they were compared. */
     detectedRowCount?: number;
     /**
+     * Every column band this section produced: the header text extracted, the canonical field
+     * it resolved to, and one sample value. Present for PDF sources.
+     *
+     * Recorded because a field that fails to map is otherwise invisible — the rows simply
+     * vanish, and if the field is a key column every row in the section vanishes with it. The
+     * canonical dump is the artefact people send when that happens, so it has to carry the
+     * header text the parser actually saw, not just the consequence.
+     */
+    detectedColumns?: Array<{ header: string | null; mapsTo: string | null; sample?: string }>;
+    /**
      * Figures read from the section's calculation block, keyed by
      * `RequiredSectionSpec.summaryFields[].id`. Absent when the spec declares none. A
      * declared figure that could not be read is absent here rather than null, so the

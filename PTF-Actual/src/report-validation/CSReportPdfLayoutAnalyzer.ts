@@ -10,7 +10,7 @@
  *
  * PIPELINE
  * --------
- *   1. TOC extraction  — pull `Deal Summary → 2` style entries as ground truth
+ *   1. TOC extraction  — pull title/page entries as ground truth
  *   2. Page segmentation — strip repeating header/footer chrome
  *   3. Per-page loop:
  *      a. Chart region detection → drop chart-label items
@@ -332,17 +332,16 @@ function analyzeSectionRegion(
     }
 
     // Late-header recovery. Runs AFTER stitching so a header wrapped over two lines
-    // ("S & P Recovery" / "Rate") is already one cell by the time we read it.
+    // wrapped over two lines is already one cell by the time we read it.
     let preambleText: string[] = [];
     if (opts.recoverLateHeaderRow !== false) {
         const recovered = recoverHeaderRowFromData(columns, rows, dataLines);
         if (recovered) {
             rows = recovered.rows;
             realignHeadersOntoDataBands(columns, rows);
-            // Everything above the recovered header is the section's CALCULATION block. It
-            // holds the figures the section is really about — the collateral balance, the
-            // total, the ratio against the threshold — and dropping it silently would leave
-            // the grid verified and the headline numbers unchecked.
+            // Everything above the recovered header is the section's summary block: the
+            // figures the section reports, which sit outside every column band. Dropping it
+            // would leave the grid verified and those figures unchecked.
             preambleText = preambleAbove(lines, recovered.headerY, recovered.headerLines);
         }
     }
@@ -409,7 +408,7 @@ function splitHeaderAndData(
  * Move a header off an empty band onto the adjacent band that holds its values.
  *
  * The KDE column detector works on x-positions, so a right-aligned money column whose
- * header label sits further left than its digits yields two bands: `[Purchase Price][ ]`
+ * header label sits further left than its digits yields two bands: `[label][ ]`
  * where the label is in the first and `99.2500` in the second. `spec.fieldMap` resolves
  * fields BY HEADER, so the field would map to a permanently-empty band and every record
  * would come out blank.
@@ -459,44 +458,27 @@ function isTocEntryLine(
 }
 
 /**
- * Second-chance header detection for sections that open with a SUMMARY BLOCK.
+ * Second-chance header detection for a section that opens with a summary block.
  *
- * `splitHeaderAndData` only inspects the top one or two lines of a section, which is right
- * for a plain grid. Financial reports routinely print a calculation preamble first —
+ * `splitHeaderAndData` only inspects the top one or two lines, which is right for a plain
+ * grid and wrong when those lines carry summary VALUES: the bands then take their headers
+ * from them, no spec field maps onto them, and the section yields zero records — a silent
+ * loss on a section the spec claims to check.
  *
- *     Deferring Securities Detail            CALCULATION   RATIO
- *     Collateral Principal Amount   75,000,000.00   (A)
- *     All Deferring Securities       4,200,000.00   (B)   (B)/(A)   5.600%
- *     Facility Name / Issue Name  Identifier  Security Type  Current Par Amount  …   <- the real header
- *     Northwind Trading Ltd …       REF243193    Loan           330,000.20          …
+ * The recovery reads the type profile rather than the position: the header row is the first
+ * row whose filled cells are all non-numeric, sitting immediately above a row that carries
+ * values. Its cells become the band headers, and it plus everything above it is dropped.
  *
- * — so the top lines are summary VALUES. The column bands then take their headers from
- * that preamble (`Collateral Principal Amount`, `75,000,000.00`, `(A)`), no spec field maps
- * onto them, and the whole section yields zero records: a silent extraction loss on a
- * section the spec claims to check.
+ * GATING — measured against the bands that carry DATA, never the total band count. Column
+ * detection emits a spacer band wherever the PDF pads cells, and how many varies from page to
+ * page of one report, so a gate on total bands fires according to padding rather than on
+ * whether the headers are good: a healthy grid can slip under it and have its headers rebuilt
+ * from a data row, losing a key column and with it every record in the section. In a healthy
+ * grid every band carrying data also carries a header, whereas headers taken from a summary
+ * block sit over bands the grid leaves empty — so the gate is "fewer than half the
+ * DATA-carrying bands have a header", with padding excluded from both sides.
  *
- * The recovery reads the type profile instead of the position: the header row is the first
- * row whose filled cells are ALL non-numeric, sitting immediately above a row that carries
- * real values. Its cells become the band headers (replacing the preamble's), and it plus
- * everything above it is dropped — the preamble rows have no business key and would be
- * discarded downstream anyway.
- *
- * GATING — measured against the bands that carry DATA, never against the total band count.
- *
- * Column detection emits a spacer band between real columns wherever the PDF pads cells, and
- * how many it emits varies with the file: the same report from the same generator produced
- * 14, 15, 16 and 17 bands on four consecutive pages here. A "< half of all bands are headed"
- * gate therefore fires or not depending on padding, which is nothing to do with whether the
- * headers are good — one page of a healthy grid slipped under it and had its headers rebuilt
- * from a data row, losing a key column and with it every record in the section.
- *
- * What actually distinguishes the two cases is ALIGNMENT: in a healthy grid every band that
- * carries data also carries a header. When the headers came from a preamble they sit over
- * bands the grid leaves empty. So the gate is "fewer than half the DATA-carrying bands have a
- * header" — a ratio of two things the grid itself defines, with the padding excluded from
- * both sides.
- *
- * @returns the surviving data rows when a header was recovered, or `null` to leave the
+ * @returns the surviving data rows plus the header's position, or `null` to leave the
  *          section exactly as it was.
  */
 interface RecoveredHeader {
@@ -551,10 +533,10 @@ function recoverHeaderRowFromData(
         // Re-read the header text from the ITEMS rather than from `row.cells`. The generic
         // cell bucketing places each item in the band it overlaps most, independently — and
         // header labels are wider than the values beneath them, so two adjacent labels can
-        // both land in one band ("Security Type Current Par Amount"), leaving the column
-        // next door headerless and its values unmapped. A header row has exactly one label
-        // per column, so it is a MATCHING problem: assign left-to-right, never moving
-        // backwards, which also re-joins a label wrapped over two lines.
+        // both land in one band, leaving the column next door headerless and its values
+        // unmapped. A header row has exactly one label per column, so it is a MATCHING
+        // problem: assign left-to-right, never moving backwards, which also re-joins a
+        // label wrapped over two lines.
         const headerLines = headerLinesFor(row, sourceLines);
         const headerItems = headerLines.flatMap((l) => l.items);
         const headerTexts = headerTextsFromItems(headerItems, columns);
@@ -570,7 +552,7 @@ function recoverHeaderRowFromData(
 /**
  * The pre-stitch lines that make up a (possibly stitched) header row — the line at the
  * row's own y plus any wrapped continuation clustered right above or below it, which is
- * how `S & P Recovery` / `Rate` is printed.
+ * how a wrapped header label is printed.
  */
 function headerLinesFor(row: TableRow, sourceLines: LogicalLine[]): LogicalLine[] {
     const window = maxFontSizeOn(sourceLines) * HEADER_WRAP_LINES;
@@ -620,13 +602,12 @@ function maxFontSizeOn(lines: LogicalLine[]): number {
  * right, each one takes the best-overlapping band at or after the last band used. Two
  * consequences, both wanted:
  *
- *   - No band can swallow two labels while the next band goes headerless, since a label on
- *     the SAME line as the previous one must look strictly forward from where that one
- *     landed. Independent per-item assignment gets this wrong whenever a label is wider
- *     than its values: `Current Par Amount` overlaps the band to its left more than its
- *     own, so it lands on top of `Security Type` and the amount column loses its name.
+ *   - No band can swallow two labels while the next goes headerless: a label on the SAME
+ *     line as the previous one must look strictly forward of where that one landed.
+ *     Independent per-item assignment gets this wrong whenever a label is wider than its
+ *     values, so it lands on the band to its left and that column loses its name.
  *   - A label wrapped onto a SECOND line rejoins its own band, because a different line is
- *     allowed to reuse the band just used (`S & P Recovery` + `Rate`).
+ *     allowed to reuse the band just used.
  *
  * Bands with no label get `null`, and `realignHeadersOntoDataBands` afterwards nudges a
  * header sitting over an empty band onto the neighbouring band that carries the values —
