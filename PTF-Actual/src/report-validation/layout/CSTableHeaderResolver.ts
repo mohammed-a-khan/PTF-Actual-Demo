@@ -75,6 +75,7 @@ export function resolveTableHeaders(
         const leafText = leafTexts[i] ?? '';
         bands[i].header = leafText || null;
         bands[i].headerPath = leafText ? [leafText] : [];
+        if (!leafText) bands[i].headerLeft = undefined;
         // Right-aligned detection: leaf-item's right edge close to band's right edge but
         // the item's start is not close to the band's start.
         const leafItems = leafRow.items.filter((it) => itemInBand(it, bands, i));
@@ -181,30 +182,110 @@ export function resolveTableHeaders(
  */
 function assignLeafLabelsExclusively(items: TextItem[], bands: ColumnBand[]): Array<string | null> {
     const out: Array<string | null> = bands.map(() => null);
-    const inked = items.filter((i) => i.str.trim().length > 0).sort((a, b) => a.x - b.x);
-    let next = 0;
-    for (const item of inked) {
-        if (next >= bands.length) break;
-        const right = item.x + Math.max(item.width, 0);
-        let best = -1;
-        let bestOverlap = -Infinity;
-        let bestDelta = Infinity;
-        for (let bi = next; bi < bands.length; bi++) {
-            const overlap = Math.min(right, bands[bi].end) - Math.max(item.x, bands[bi].start);
-            const delta = Math.abs(item.x - bands[bi].start);
-            if (overlap > bestOverlap || (overlap === bestOverlap && delta < bestDelta)) {
-                best = bi;
-                bestOverlap = overlap;
-                bestDelta = delta;
+    if (bands.length === 0) return out;
+
+    const labels = groupRunsIntoLabels(items);
+    if (labels.length === 0) return out;
+
+    const n = labels.length;
+    const m = bands.length;
+    const overlap = (li: number, bi: number): number => {
+        const l = labels[li];
+        const b = bands[bi];
+        const value = Math.min(l.right, b.end) - Math.max(l.left, b.start);
+        return value > 0 ? value : 0;
+    };
+
+    // best[i][j] — highest total overlap placing labels 0..i, with label i on band j and every
+    // earlier label on a band at or before j. `prefix[i][j]` is the running max over bands, so
+    // each cell is O(1) and the whole table is O(labels × bands).
+    // One heading per band while there are enough bands to go round. A table gives each column
+    // exactly one name, so letting two headings share a band is what produces
+    // `"Purchase Price Current Par Amount"` beside a nameless column. Sharing is permitted only
+    // when headings outnumber bands, where something has to give.
+    const exclusive = n <= m;
+    const NEG = -Infinity;
+    const best: number[][] = Array.from({ length: n }, () => new Array<number>(m).fill(NEG));
+    const prefix: number[][] = Array.from({ length: n }, () => new Array<number>(m).fill(NEG));
+    for (let j = 0; j < m; j++) {
+        best[0][j] = overlap(0, j);
+        prefix[0][j] = j === 0 ? best[0][j] : Math.max(prefix[0][j - 1], best[0][j]);
+    }
+    for (let i = 1; i < n; i++) {
+        for (let j = 0; j < m; j++) {
+            // Strict: this label must sit strictly right of the previous one, so read the
+            // running best from band j-1. Sharing: read it from band j.
+            const carried = exclusive ? (j === 0 ? NEG : prefix[i - 1][j - 1]) : prefix[i - 1][j];
+            best[i][j] = carried === NEG ? NEG : carried + overlap(i, j);
+            prefix[i][j] = j === 0 ? best[i][j] : Math.max(prefix[i][j - 1], best[i][j]);
+        }
+    }
+
+    // Walk back for the actual placement, latest-best band first so labels stay left-to-right.
+    const placement = new Array<number>(n).fill(-1);
+    let limit = m - 1;
+    for (let i = n - 1; i >= 0; i--) {
+        let chosen = -1;
+        let chosenScore = NEG;
+        for (let j = 0; j <= limit; j++) {
+            if (best[i][j] !== NEG && best[i][j] >= chosenScore) {
+                chosenScore = best[i][j];
+                chosen = j;
             }
         }
-        if (best < 0) continue;
-        const text = item.str.trim();
-        out[best] = out[best] === null ? text : `${out[best]} ${text}`.replace(/\s+/g, ' ').trim();
-        next = best + 1;
+        if (chosen < 0) chosen = Math.max(0, Math.min(limit, i));
+        placement[i] = chosen;
+        limit = exclusive ? chosen - 1 : chosen;
+    }
+
+    for (let i = 0; i < n; i++) {
+        const band = placement[i];
+        const text = labels[i].text;
+        out[band] = out[band] === null ? text : `${out[band]} ${text}`.replace(/\s+/g, ' ').trim();
+        // Remember where the heading's text actually begins. Downstream needs it to tell a
+        // left-aligned heading that overflowed into the next band from a right-aligned one
+        // that legitimately starts left of its own digits.
+        const existing = bands[band].headerLeft;
+        bands[band].headerLeft = existing === undefined ? labels[i].left : Math.min(existing, labels[i].left);
     }
     return out;
 }
+
+/**
+ * Join the heading row's text runs into whole labels before any band is chosen.
+ *
+ * A producer may emit a heading as one run or as one run per WORD. Matching word runs to bands
+ * individually scatters a single heading across several columns — `Issue` in one, `Name` in the
+ * next — so runs separated by no more than a word space are combined first. What is matched is
+ * then a column name, which is what a band actually has one of.
+ */
+function groupRunsIntoLabels(items: TextItem[]): Array<{ text: string; left: number; right: number }> {
+    const inked = items
+        .filter((i) => i.str.trim().length > 0)
+        .sort((a, b) => a.x - b.x);
+    const out: Array<{ text: string; left: number; right: number }> = [];
+    for (const item of inked) {
+        const left = item.x;
+        const right = item.x + Math.max(item.width, 0);
+        const last = out[out.length - 1];
+        const gap = left - (last ? last.right : 0);
+        // Only a small POSITIVE gap is word spacing. A negative gap means the previous run's
+        // reported width over-runs the next one — common, since a run's width can include a
+        // trailing space — and merging on it would fuse two distinct headings into one.
+        if (last && gap >= MIN_WORD_GAP && gap <= MAX_WORD_GAP) {
+            last.text = `${last.text} ${item.str.trim()}`.replace(/\s+/g, ' ').trim();
+            last.right = Math.max(last.right, right);
+            continue;
+        }
+        out.push({ text: item.str.trim(), left, right });
+    }
+    return out;
+}
+
+/** Clear space, in points, up to which two runs are words of one heading rather than two headings. */
+const MAX_WORD_GAP = 6;
+/** Slack for a run whose reported width over-runs the next run by a hair. Beyond this they are separate headings. */
+const MIN_WORD_GAP = -2;
 
 /**
  * True when `item` belongs to band `index` of `bands`. Delegates to the same max-overlap

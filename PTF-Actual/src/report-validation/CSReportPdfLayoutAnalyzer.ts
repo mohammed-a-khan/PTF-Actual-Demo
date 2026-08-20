@@ -457,6 +457,33 @@ function realignHeadersOntoDataBands(columns: ColumnBand[], rows: TableRow[]): v
         }),
     );
 
+    // A LEFT-ALIGNED heading begins at its column's left edge. When a long value splits the
+    // column in two, the heading is wider than the first fragment and overlaps the second one
+    // more, so band assignment puts it there — on the band holding the value's TAIL — while the
+    // band holding the value itself is left unheaded. The field then resolves to the tail
+    // (`TL` instead of the whole name).
+    //
+    // The heading's own left edge settles it: it starts inside the FIRST band, so that is its
+    // column. Right-aligned numeric headings are untouched, because theirs starts at their own
+    // band's edge, not inside an earlier one.
+    for (let ci = 1; ci < columns.length; ci++) {
+        const heading = columns[ci].header;
+        if (!heading || heading.trim().length === 0) continue;
+        const left = columns[ci].headerLeft;
+        if (typeof left !== 'number') continue;
+        for (let target = ci - 1; target >= 0; target--) {
+            if (left >= columns[target].end) break;
+            if (columns[target].header || !hasData[target]) continue;
+            columns[target].header = heading;
+            columns[target].headerPath = columns[ci].headerPath;
+            columns[target].rightAligned = columns[ci].rightAligned;
+            columns[target].headerLeft = left;
+            columns[ci].header = null;
+            columns[ci].headerPath = [];
+            break;
+        }
+    }
+
     for (let ci = 0; ci < columns.length; ci++) {
         if (!columns[ci].header) continue;
         if (hasData[ci]) continue;

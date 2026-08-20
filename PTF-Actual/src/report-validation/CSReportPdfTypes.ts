@@ -109,6 +109,8 @@ export interface ColumnBand {
      * one heading, which re-joins with a space rather than camel-casing into a path.
      */
     spannerDepth?: number;
+    /** X where this column's heading text begins, when one was resolved. Distinguishes a left-aligned heading that overflowed from a right-aligned one that starts left of its digits. */
+    headerLeft?: number;
     /** Header text for this column, or `null` when the column is auto-detected without a header row. */
     header: string | null;
     /** Multi-level header ancestry (top → bottom), e.g. `['Original Rating', 'Agency A']`. Empty when column is single-level. */
