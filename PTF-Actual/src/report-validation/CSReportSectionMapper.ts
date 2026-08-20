@@ -118,7 +118,7 @@ export class CSReportSectionMapper {
         const declared = new Set(spec.requiredSections.map((r) => r.id));
 
         let sectionOrder = 0;
-        for (const analyzedSection of analyzed.mergedSections) {
+        for (let analyzedSection of analyzed.mergedSections) {
             sectionOrder++;
             const canonicalSectionId = resolveCanonicalSectionId(analyzedSection.title, spec);
             const requiredMeta = findRequiredSection(canonicalSectionId, spec);
@@ -139,7 +139,16 @@ export class CSReportSectionMapper {
             // Column-index → canonical field name, based on the resolved bands' headers.
             // Skip columns whose header doesn't map to any canonical field via `spec.fieldMap`
             // (extraneous columns on this side of the report — a common source of noise).
-            const colIdxToCanonical = mapColumnIndexesToCanonical(analyzedSection, spec, opts.source);
+            let colIdxToCanonical = mapColumnIndexesToCanonical(analyzedSection, spec, opts.source);
+
+            // A section whose grid sits below a preamble hands Layer 2 the preamble's first
+            // line as the header row, leaving the real headings stranded in the data. Find
+            // them by name and re-cut the section there.
+            const recut = recoverHeaderRowBySpec(analyzedSection, spec, opts.source, colIdxToCanonical);
+            if (recut) {
+                colIdxToCanonical = recut.mapped;
+                analyzedSection = { ...analyzedSection, tableRows: analyzedSection.tableRows.slice(recut.dataStartIndex) };
+            }
 
             const canonicalRecords = pdfRowsToCanonicalRecords(
                 analyzedSection.tableRows,
@@ -396,6 +405,101 @@ function mapColumnIndexesToCanonical(
     rehomeMappingsOntoDataBands(section, mapped);
     return mapped;
 }
+
+/**
+ * Find a grid's real header row when it is sitting in the DATA, and re-cut the section there.
+ *
+ * Many report sections open with a preamble — a label-and-value summary block — and only then
+ * print the grid with its column headings. Layer 2 picks a header row by geometry, so it takes
+ * the preamble's first line and every real heading ends up as a data row. The bands then carry
+ * headings like `"Collateral Principal Amount"` and `"(A)"` lifted out of the summary, nothing
+ * maps, and if a key column is among the casualties the whole section yields no records.
+ *
+ * Geometry cannot distinguish a summary label from a column heading — both are text above
+ * numbers. The SPEC can: a header row is the row whose cells ARE the declared column names.
+ * So the row is found by name, its cells become the mapping, and everything from it upward is
+ * dropped as preamble.
+ *
+ * Runs only when the current mapping covers less than half the columns the spec declares for
+ * this source, so a correctly-headed section is never re-cut. A heading split across two lines
+ * is handled by merging the matched row with the one below when that also reads as headings.
+ */
+function recoverHeaderRowBySpec(
+    section: AnalyzedSection,
+    spec: ReportSpec,
+    source: ReportSource,
+    current: (string | null)[],
+): { mapped: (string | null)[]; dataStartIndex: number } | null {
+    const lookup = sourceColumnLookup(spec, source);
+    if (lookup.size === 0) return null;
+
+    const declaredCount = new Set(lookup.values()).size;
+    const currentHits = new Set(current.filter((c): c is string => c !== null)).size;
+    if (currentHits * 2 >= declaredCount) return null;
+
+    const rows = section.tableRows;
+    const limit = Math.min(HEADER_SEARCH_ROWS, rows.length - 1);
+    let best: { mapped: (string | null)[]; hits: number; index: number } | null = null;
+
+    for (let i = 0; i < limit; i++) {
+        const row = rows[i];
+        if (row.isTotalRow || row.isGroupHeader) continue;
+
+        // A heading may wrap onto the next line ("S & P Recovery" / "Rate"), which the row
+        // bucketing keeps as two rows. Try the row alone, then the row joined with the one
+        // below, and keep whichever names more columns.
+        for (const cells of [row.cells, mergeCells(row.cells, rows[i + 1]?.cells)]) {
+            if (!cells) continue;
+            const mapped = cells.map((cell) => headingToCanonical(cell, lookup));
+            const hits = new Set(mapped.filter((c): c is string => c !== null)).size;
+            if (hits < MIN_RECOVERED_HEADINGS || hits <= currentHits) continue;
+            if (!best || hits > best.hits) {
+                const merged = cells !== row.cells;
+                best = { mapped, hits, index: merged ? i + 1 : i };
+            }
+        }
+    }
+    if (!best) return null;
+
+    // Write the recovered headings back onto the bands so the diff report and the canonical
+    // dump show what the grid was actually read as.
+    for (let ci = 0; ci < section.columns.length; ci++) {
+        const cell = rows[best.index].cells[ci];
+        if (best.mapped[ci] !== null && cell && cell.trim().length > 0) {
+            section.columns[ci].header = cell.trim();
+            section.columns[ci].headerPath = [cell.trim()];
+        }
+    }
+    return { mapped: best.mapped, dataStartIndex: best.index + 1 };
+}
+
+/** Resolve one heading cell to a canonical field, allowing two names run together. */
+function headingToCanonical(cell: string | null, lookup: Map<string, string>): string | null {
+    if (!cell || cell.trim().length === 0) return null;
+    const normalized = normalizeColumnName(cell);
+    const direct = lookup.get(normalized);
+    if (direct) return direct;
+    const parts = splitIntoDeclaredColumns(normalized, lookup);
+    return parts && parts.length > 0 ? parts[0] : null;
+}
+
+/** Combine two rows cell-by-cell, preferring the upper cell and appending the lower one. */
+function mergeCells(upper: (string | null)[], lower?: (string | null)[]): (string | null)[] | null {
+    if (!lower) return null;
+    const width = Math.max(upper.length, lower.length);
+    const out: (string | null)[] = [];
+    for (let i = 0; i < width; i++) {
+        const a = (upper[i] ?? '').trim();
+        const b = (lower[i] ?? '').trim();
+        out.push(a && b ? `${a} ${b}` : a || b || null);
+    }
+    return out;
+}
+
+/** How far into a section to look for a header row hiding in the data. */
+const HEADER_SEARCH_ROWS = 15;
+/** Distinct column names a candidate row must name before it is believed to be the header. */
+const MIN_RECOVERED_HEADINGS = 3;
 
 /**
  * Split a band whose heading is two column names run together.
