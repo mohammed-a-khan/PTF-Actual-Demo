@@ -17,6 +17,7 @@
  */
 
 import type { ColumnBand, LogicalLine, TextItem } from '../CSReportPdfTypes';
+import { detectColumnsByAlignment } from './CSTextAlignmentNetwork';
 
 export interface ColumnDetectorOptions {
     /** Gaussian kernel bandwidth in PDF points. Smaller = more columns detected; larger = merges nearby columns. Default 3. */
@@ -36,6 +37,12 @@ export interface ColumnDetectorOptions {
     detectRightAlignedColumns?: boolean;
     /** Minimum items required across all lines for column detection to run. Default 6 — fewer is treated as free-text and returns []. */
     minItems?: number;
+    /** Set false to skip the alignment network and use density estimation alone. Default true. */
+    useAlignmentNetwork?: boolean;
+    /** Points within which two coordinates count as the same alignment. Default 2. */
+    alignmentTolerance?: number;
+    /** Distinct rows an alignment must span to be believed a column. Default 3. */
+    minRowsPerColumn?: number;
 }
 
 /**
@@ -49,6 +56,22 @@ export function detectColumns(lines: LogicalLine[], opts: ColumnDetectorOptions 
     const minItems = opts.minItems ?? 6;
     const allItems = lines.flatMap((l) => l.items);
     if (allItems.length < minItems) return [];
+
+    // PRIMARY: the alignment network. It asks whether runs line up with each other along both
+    // axes, which is what makes a grid a grid. Density over left edges — the fallback below —
+    // cannot answer that: it misses right-aligned money columns (no shared left edge), invents a
+    // band for a heading wider than its column, fragments a column around one long value, and
+    // reads a left-aligned paragraph as a column. Every one of those has cost us a section.
+    //
+    // An empty result means "this region does not read as a grid", not "there is nothing here",
+    // so the density estimator still gets its turn on short or irregular regions.
+    if (opts.useAlignmentNetwork !== false) {
+        const networked = detectColumnsByAlignment(lines, {
+            alignmentTolerance: opts.alignmentTolerance,
+            minRowsPerColumn: opts.minRowsPerColumn,
+        });
+        if (networked.length >= 2) return networked;
+    }
 
     const bandwidth = opts.kdeBandwidth ?? 3;
     const resolution = opts.sampleResolution ?? 400;

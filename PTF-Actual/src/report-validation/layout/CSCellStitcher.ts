@@ -199,9 +199,17 @@ function mergeContinuationInto(target: TableRow, source: TableRow): void {
  * group-header detection) set them based on cell content.
  */
 export function linesToTableRows(lines: LogicalLine[], bands: ColumnBand[]): TableRow[] {
+    // Bucket every line FIRST, so overflow absorption can see how often each band is used.
+    // A band that holds values on most rows is a column and must never be absorbed into its
+    // neighbour; a band that holds something on one row exists only because that row overran.
+    const allBuckets = lines.map((line) => assignItemsToColumns(line, bands));
+    const occupancy = bands.map((_, ci) =>
+        allBuckets.reduce((n, buckets) => n + (buckets[ci] && buckets[ci]!.length > 0 ? 1 : 0), 0),
+    );
+
     return lines.map((line, idx) => {
-        const buckets = assignItemsToColumns(line, bands);
-        absorbOverflowIntoPreviousCell(buckets, bands);
+        const buckets = allBuckets[idx];
+        absorbOverflowIntoPreviousCell(buckets, bands, occupancy, lines.length);
         const cells: (string | null)[] = buckets.map((items) => {
             if (items === null) return null;
             return items
@@ -250,12 +258,17 @@ export function linesToTableRows(lines: LogicalLine[], bands: ColumnBand[]): Tab
 function absorbOverflowIntoPreviousCell(
     buckets: (TextItem[] | null)[],
     bands: ColumnBand[],
+    occupancy: number[],
+    rowCount: number,
 ): void {
     for (let ci = 1; ci < buckets.length; ci++) {
         const items = buckets[ci];
         if (!items || items.length === 0) continue;
         const heading = bands[ci]?.header;
         if (heading && heading.trim().length > 0) continue;
+        // Used on most rows? Then it is a column of its own, whatever it is called, and its
+        // values belong to it. Only a band that is almost always empty is spill-over.
+        if (rowCount > 0 && occupancy[ci] / rowCount > MAX_OVERFLOW_OCCUPANCY) continue;
         const prev = buckets[ci - 1];
         if (!prev || prev.length === 0) continue;
 
@@ -272,6 +285,8 @@ function absorbOverflowIntoPreviousCell(
 
 /** Clear space, in points, within which a run is the tail of the cell before it rather than a value of its own. */
 const MAX_OVERFLOW_GAP = 8;
+/** Share of rows a band may be used on and still be treated as spill-over rather than a column. */
+const MAX_OVERFLOW_OCCUPANCY = 0.25;
 
 /**
  * Cross-page continuation: given two adjacent pages' `[title, bands, rows]` triples for
