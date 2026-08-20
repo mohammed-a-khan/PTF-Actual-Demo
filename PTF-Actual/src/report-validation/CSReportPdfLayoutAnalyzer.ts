@@ -404,6 +404,7 @@ function splitHeaderAndData(
     return { headerRows, dataLines };
 }
 
+
 /**
  * Move a header off an empty band onto the adjacent band that holds its values.
  *

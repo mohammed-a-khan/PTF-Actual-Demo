@@ -64,9 +64,10 @@ export function resolveTableHeaders(
 
     // Leaf row = bottom-most header line. Its items map directly onto the bands.
     const leafRow = linesTopDown[linesTopDown.length - 1];
+    const leafTexts = assignLeafLabelsExclusively(leafRow.items, bands);
     for (let i = 0; i < bands.length; i++) {
         const band = bands[i];
-        const leafText = joinItemsInBand(leafRow.items, bands, i);
+        const leafText = leafTexts[i] ?? '';
         bands[i].header = leafText || null;
         bands[i].headerPath = leafText ? [leafText] : [];
         // Right-aligned detection: leaf-item's right edge close to band's right edge but
@@ -126,15 +127,49 @@ export function resolveTableHeaders(
  * Join the items falling inside `band` on `line` into a single text run. Items are
  * left-to-right; joined with a single space; trimmed.
  */
-function joinItemsInBand(items: TextItem[], bands: ColumnBand[], index: number): string {
-    const inBand = items.filter((it) => itemInBand(it, bands, index));
-    if (inBand.length === 0) return '';
-    return inBand
-        .sort((a, b) => a.x - b.x)
-        .map((it) => it.str)
-        .join(' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+
+/**
+ * Assign the leaf header row's labels to bands as an ordered, EXCLUSIVE matching.
+ *
+ * Collecting per band — "which items land in band i", joined — lets one band swallow two
+ * labels while its neighbour gets none. That happens whenever a label is wider than the
+ * values beneath it, which is normal for right-aligned numeric columns: the heading starts
+ * well left of its digits and overlaps the band to its left more than its own. The merged
+ * text then matches no spec column, the nameless band's values are dropped, and if that band
+ * held a key column every row in the section goes with it.
+ *
+ * A header row has exactly one label per column, so it is a matching problem, not a lookup:
+ * walking left to right, each label takes the best-overlapping band strictly after the one
+ * the previous label took. Labels cannot cross and cannot share a band.
+ *
+ * Bands with no label get `null`; `realignHeadersOntoDataBands` afterwards nudges a header
+ * sitting over an empty band onto the neighbour that carries the values.
+ */
+function assignLeafLabelsExclusively(items: TextItem[], bands: ColumnBand[]): Array<string | null> {
+    const out: Array<string | null> = bands.map(() => null);
+    const inked = items.filter((i) => i.str.trim().length > 0).sort((a, b) => a.x - b.x);
+    let next = 0;
+    for (const item of inked) {
+        if (next >= bands.length) break;
+        const right = item.x + Math.max(item.width, 0);
+        let best = -1;
+        let bestOverlap = -Infinity;
+        let bestDelta = Infinity;
+        for (let bi = next; bi < bands.length; bi++) {
+            const overlap = Math.min(right, bands[bi].end) - Math.max(item.x, bands[bi].start);
+            const delta = Math.abs(item.x - bands[bi].start);
+            if (overlap > bestOverlap || (overlap === bestOverlap && delta < bestDelta)) {
+                best = bi;
+                bestOverlap = overlap;
+                bestDelta = delta;
+            }
+        }
+        if (best < 0) continue;
+        const text = item.str.trim();
+        out[best] = out[best] === null ? text : `${out[best]} ${text}`.replace(/\s+/g, ' ').trim();
+        next = best + 1;
+    }
+    return out;
 }
 
 /**

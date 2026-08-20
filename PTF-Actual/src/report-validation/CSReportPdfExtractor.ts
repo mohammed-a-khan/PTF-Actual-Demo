@@ -100,7 +100,7 @@ async function defaultPdfJsLoader(): Promise<PdfJsLoader> {
             s: string,
         ) => Promise<{ getDocument: PdfJsLoader['getDocument'] }>;
         const mod = await dynamicImport('pdfjs-dist/legacy/build/pdf.mjs');
-        assertSupportedPdfJs();
+        assertSupportedPdfJs((mod as { version?: string }).version);
         cachedPdfJs = { getDocument: mod.getDocument };
         return cachedPdfJs;
     } catch (err) {
@@ -130,23 +130,31 @@ const SUPPORTED_PDFJS_MAJOR = 4;
  * `REPORT_PDFJS_ALLOW_UNTESTED=true` downgrades this to a warning for anyone deliberately
  * trying a newer release.
  */
-function assertSupportedPdfJs(): void {
-    let version: string | undefined;
-    try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        version = require('pdfjs-dist/package.json').version;
-    } catch {
-        return; // Version unreadable — not worth blocking on.
+function assertSupportedPdfJs(loadedVersion?: string): void {
+    // The version MUST come from the module that was actually imported. Reading it from
+    // `require('pdfjs-dist/package.json')` uses CommonJS resolution while the loader above
+    // uses ESM resolution, and in a project holding two copies — one hoisted, one nested —
+    // those resolve to DIFFERENT installs. The check would then pass on the copy that isn't
+    // parsing anything, which is worse than no check at all.
+    let version = loadedVersion;
+    if (!version) {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            version = require('pdfjs-dist/package.json').version;
+        } catch {
+            return; // Version unreadable — not worth blocking on.
+        }
     }
     if (!version) return;
     const major = Number(version.split('.')[0]);
     if (!Number.isFinite(major) || major === SUPPORTED_PDFJS_MAJOR) return;
 
     const message =
-        `CSReportPdfExtractor: pdfjs-dist ${version} is installed, but PDF layout analysis is ` +
+        `CSReportPdfExtractor: the loaded pdfjs-dist is ${version}, but PDF layout analysis is ` +
         `written and tested against ${SUPPORTED_PDFJS_MAJOR}.x. Text-item geometry differs ` +
-        `between majors, which shifts every detected column boundary — headers merge, key ` +
-        `columns lose their names, and rows are then dropped for want of a business key. ` +
+        `between majors: a multi-word column heading that this version returns as ONE text ` +
+        `item can come back as several, so the band header becomes a fragment, matches no ` +
+        `spec column, and every row is dropped for want of a business key. ` +
         `Install the tested version alongside your project: ` +
         `npm install pdfjs-dist@${SUPPORTED_PDFJS_MAJOR}.10.38 --save-exact. ` +
         `Set REPORT_PDFJS_ALLOW_UNTESTED=true to proceed anyway.`;
