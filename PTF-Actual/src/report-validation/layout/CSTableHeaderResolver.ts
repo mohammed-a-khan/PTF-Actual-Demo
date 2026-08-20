@@ -63,105 +63,92 @@ export function resolveTableHeaders(
     const minSpanned = opts.minSpannedColumns ?? 2;
     const maxGap = opts.parentRowMaxGap ?? 30;
 
-    // Sort header rows top-to-bottom (highest y first) so we process them in visual
-    // reading order.
+    // Top-to-bottom, the order the heading reads in.
     const linesTopDown = [...headerLines].sort((a, b) => b.y - a.y);
 
-    // Leaf row = bottom-most header line. Its items map directly onto the bands.
-    const leafRow = linesTopDown[linesTopDown.length - 1];
-    const leafTexts = assignLeafLabelsExclusively(leafRow.items, bands);
-    for (let i = 0; i < bands.length; i++) {
-        const band = bands[i];
-        const leafText = leafTexts[i] ?? '';
-        bands[i].header = leafText || null;
-        bands[i].headerPath = leafText ? [leafText] : [];
-        if (!leafText) bands[i].headerLeft = undefined;
-        // Right-aligned detection: leaf-item's right edge close to band's right edge but
-        // the item's start is not close to the band's start.
-        const leafItems = leafRow.items.filter((it) => itemInBand(it, bands, i));
-        if (leafItems.length > 0) {
-            const rightMost = leafItems.reduce((a, b) => (a.x + a.width > b.x + b.width ? a : b));
-            const bandCenter = (band.start + band.end) / 2;
-            bands[i].rightAligned = rightMost.x + rightMost.width * 0.5 > bandCenter;
-        }
+    // EVERY header line is matched to the bands exclusively — not just the bottom one.
+    //
+    // Treating the bottom line as the only real header row and the lines above it as spanners
+    // breaks on the common case: a heading too wide for its column wraps, so `Purchase` sits
+    // above `Price` and `Current Par` above `Amount`. Those upper words are not spanners, they
+    // are the rest of the heading. Worse, once bands are tight around their data, a wide upper
+    // word overlaps several bands and gets copied onto all of them — one heading smeared across
+    // three columns, and a band left holding six headings joined end to end.
+    //
+    // Matching line by line and stacking the results per band assembles a wrapped heading in
+    // reading order and gives each label exactly one column per line.
+    const placements = linesTopDown.map((line) => placeLabels(line.items, bands));
+
+    for (const band of bands) {
+        band.header = null;
+        band.headerPath = [];
+        band.headerLeft = undefined;
+        band.spannerDepth = 0;
     }
 
-    // Walk upward: each ancestor row's items become PATH PREFIXES for whichever bands the
-    // item's x-range covers.
-    for (let li = linesTopDown.length - 2; li >= 0; li--) {
-        const ancestor = linesTopDown[li];
-        const child = linesTopDown[li + 1];
-        // Only consider ancestor if it's within `maxGap` of its child row (i.e. really
-        // sitting above it, not a random earlier section title). Y decreases downward in
-        // reading order but PDF Y grows upward — child y < ancestor y.
-        if (ancestor.y - child.y > maxGap) continue;
+    for (let li = 0; li < linesTopDown.length; li++) {
+        const isLeaf = li === linesTopDown.length - 1;
+        // An upper line only belongs to this heading block if it sits close above the next one;
+        // further away it is a section title or a stray label, not part of the header.
+        if (!isLeaf && linesTopDown[li].y - linesTopDown[li + 1].y > maxGap) continue;
+        const below = isLeaf ? null : placements[li + 1];
 
-        for (const item of ancestor.items) {
-            const itemLeft = item.x;
-            const itemRight = item.x + item.width;
-            // Which bands does this item straddle?
-            // A band counts as covered only when the overlap is MEANINGFUL. Counting any
-            // overlap at all means a heading whose box clips one point into the next band —
-            // routine, since headings are wider than their digits — reads as a two-column
-            // spanner and gets camel-cased onto a neighbour it has nothing to do with
-            // (`Purchase` + `Identifier` → `purchaseIdentifier`). A real spanner sits
-            // squarely over its sub-columns, so requiring a fraction of the item's own width
-            // separates the two without needing to know the report.
-            const width = Math.max(itemRight - itemLeft, 1);
-            const minOverlap = Math.max(MIN_SPAN_OVERLAP_POINTS, width * MIN_SPAN_OVERLAP_RATIO);
-            const covered: number[] = [];
-            for (let bi = 0; bi < bands.length; bi++) {
-                const b = bands[bi];
-                const overlap = Math.min(itemRight, b.end) - Math.max(itemLeft, b.start);
-                if (overlap >= Math.min(minOverlap, b.end - b.start)) covered.push(bi);
-            }
-            const label = item.str.trim();
-            if (label.length === 0) continue;
-            if (covered.length < minSpanned) {
-                // Covers ONE band: not a spanner but a CONTINUATION — the upper half of a
-                // heading too wide for its column, wrapped over two lines (`Current Par` above
-                // `Amount`, `S & P Recovery` above `Rate`). Dropping it, as a spanner-only rule
-                // does, loses half of every wrapped heading and the column stops resolving.
-                // Prepending rebuilds the heading in reading order.
-                if (covered.length === 1) bands[covered[0]].headerPath.unshift(label);
+        for (const placement of placements[li]) {
+            // A genuine SPANNER sits over several sub-columns, which shows up as its x-range
+            // containing labels from more than one band on the line beneath it. A wrapped
+            // heading has exactly one label below it — its own continuation.
+            const spanned = below
+                ? [...new Set(
+                      below
+                          .filter((q) => q.left < placement.right && q.right > placement.left)
+                          .map((q) => q.band),
+                  )]
+                : [];
+            if (spanned.length >= minSpanned) {
+                for (const bi of spanned) {
+                    bands[bi].headerPath.push(placement.text);
+                    bands[bi].spannerDepth = (bands[bi].spannerDepth ?? 0) + 1;
+                }
                 continue;
             }
-            for (const bi of covered) {
-                bands[bi].headerPath.unshift(label);
-                bands[bi].spannerDepth = (bands[bi].spannerDepth ?? 0) + 1;
-            }
+            const band = bands[placement.band];
+            band.headerPath.push(placement.text);
+            band.headerLeft = band.headerLeft === undefined
+                ? placement.left
+                : Math.min(band.headerLeft, placement.left);
         }
     }
 
-    // Recompute `header` as a normalised flat concatenation of `headerPath` so downstream
-    // fieldMap lookup can match on it deterministically. Preserve the raw headerPath
-    // separately for diff-report display.
+    // Right-alignment is read off the bottom line, the one sitting directly over the values.
+    for (const placement of placements[placements.length - 1]) {
+        const band = bands[placement.band];
+        const centre = (band.start + band.end) / 2;
+        band.rightAligned = (placement.left + placement.right) / 2 > centre;
+    }
+
+    // Flatten. A wrapped heading is ONE column name spread over lines, so it re-joins with a
+    // space: `Current Par` + `Amount` is the column `Current Par Amount`, which is what the spec
+    // declares. Only a genuine spanner hierarchy is camel-cased into a path.
     const normalize = opts.normalizeNames !== false;
     for (const band of bands) {
-        // A band whose heading arrived ONLY as a continuation has a path but no header yet —
-        // the leaf row had nothing for it. Without this the heading is carried in headerPath
-        // and never surfaces, so the column resolves to nothing.
-        if (band.headerPath.length === 1 && (!band.header || band.header.trim().length === 0)) {
-            band.header = band.headerPath[0];
+        if (band.headerPath.length === 0) {
+            band.header = null;
             continue;
         }
-        if (band.headerPath.length <= 1) continue;
-        // A wrapped heading is ONE column name spread over lines, so it re-joins with a
-        // space: `Current Par` + `Amount` is the column `Current Par Amount`, which is what
-        // the spec declares. Only a genuine spanner hierarchy gets camel-cased, and that is
-        // recorded by `spannerDepth` while the path was being built.
-        const flat = band.spannerDepth && band.spannerDepth > 0
+        band.header = band.spannerDepth && band.spannerDepth > 0
             ? flattenPath(band.headerPath, normalize)
             : band.headerPath.join(' ').replace(/\s+/g, ' ').trim();
-        band.header = flat;
     }
     return bands;
 }
 
-/**
- * Join the items falling inside `band` on `line` into a single text run. Items are
- * left-to-right; joined with a single space; trimmed.
- */
+/** One heading label and the band it was matched to. */
+interface LabelPlacement {
+    band: number;
+    text: string;
+    left: number;
+    right: number;
+}
 
 /**
  * Assign the leaf header row's labels to bands as an ordered, EXCLUSIVE matching.
@@ -180,8 +167,8 @@ export function resolveTableHeaders(
  * Bands with no label get `null`; `realignHeadersOntoDataBands` afterwards nudges a header
  * sitting over an empty band onto the neighbour that carries the values.
  */
-function assignLeafLabelsExclusively(items: TextItem[], bands: ColumnBand[]): Array<string | null> {
-    const out: Array<string | null> = bands.map(() => null);
+function placeLabels(items: TextItem[], bands: ColumnBand[]): LabelPlacement[] {
+    const out: LabelPlacement[] = [];
     if (bands.length === 0) return out;
 
     const labels = groupRunsIntoLabels(items);
@@ -239,14 +226,7 @@ function assignLeafLabelsExclusively(items: TextItem[], bands: ColumnBand[]): Ar
     }
 
     for (let i = 0; i < n; i++) {
-        const band = placement[i];
-        const text = labels[i].text;
-        out[band] = out[band] === null ? text : `${out[band]} ${text}`.replace(/\s+/g, ' ').trim();
-        // Remember where the heading's text actually begins. Downstream needs it to tell a
-        // left-aligned heading that overflowed into the next band from a right-aligned one
-        // that legitimately starts left of its own digits.
-        const existing = bands[band].headerLeft;
-        bands[band].headerLeft = existing === undefined ? labels[i].left : Math.min(existing, labels[i].left);
+        out.push({ band: placement[i], text: labels[i].text, left: labels[i].left, right: labels[i].right });
     }
     return out;
 }
