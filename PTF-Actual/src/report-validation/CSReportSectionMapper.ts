@@ -384,10 +384,134 @@ function mapColumnIndexesToCanonical(
     spec: ReportSpec,
     source: ReportSource,
 ): (string | null)[] {
-    return section.columns.map((band) => {
+    const mapped = section.columns.map((band) => {
         if (!band.header) return null;
         return canonicalFieldFor(band.header, source, spec.fieldMap);
     });
+
+    // Layer 2 resolves headings from geometry alone. Two failure modes survive that pass
+    // often enough to matter, and BOTH are repairable here because this layer knows what the
+    // columns are actually called.
+    splitMergedHeadings(section, spec, source, mapped);
+    rehomeMappingsOntoDataBands(section, mapped);
+    return mapped;
+}
+
+/**
+ * Split a band whose heading is two column names run together.
+ *
+ * A heading rendered flush-left above right-aligned digits starts well to the LEFT of the
+ * values it names, so it can overlap the previous column's band more than its own and be
+ * absorbed there. The band then carries `"Purchase Price Current Par Amount"` — which matches
+ * no spec column — while the band actually holding the values carries no heading at all. Both
+ * fields silently drop out, and if either is a key column every row in the section becomes
+ * unidentifiable and is discarded.
+ *
+ * Geometry cannot tell that string apart from a genuine two-word heading. The SPEC can: the
+ * text is split only where every piece is itself a declared column name for this source. A
+ * heading that legitimately reads "Current Par Amount" is never broken up, because
+ * "Current Par" is not a column.
+ *
+ * Pieces are assigned left-to-right: the first stays, each remaining one goes to the next
+ * still-unmapped band. Runs only over bands that failed to map, so it is a no-op whenever
+ * Layer 2 got the heading right.
+ */
+function splitMergedHeadings(
+    section: AnalyzedSection,
+    spec: ReportSpec,
+    source: ReportSource,
+    mapped: (string | null)[],
+): void {
+    const lookup = sourceColumnLookup(spec, source);
+    if (lookup.size === 0) return;
+
+    for (let ci = 0; ci < section.columns.length; ci++) {
+        if (mapped[ci] !== null) continue;
+        const header = section.columns[ci].header;
+        if (!header) continue;
+        const parts = splitIntoDeclaredColumns(normalizeColumnName(header), lookup);
+        if (!parts || parts.length < 2) continue;
+
+        mapped[ci] = parts[0];
+        let cursor = ci + 1;
+        for (let p = 1; p < parts.length; p++) {
+            while (cursor < mapped.length && mapped[cursor] !== null) cursor++;
+            if (cursor >= mapped.length) break;
+            mapped[cursor] = parts[p];
+            cursor++;
+        }
+    }
+}
+
+/**
+ * Move a canonical mapping off a band that holds no data onto the adjacent band that does.
+ *
+ * The mirror of the merge above: a heading can also land one band to the LEFT of its values,
+ * leaving the heading on an empty band and the values on an unheaded one. The field then maps
+ * to a column that is blank on every row, so the side reports nulls where the other side has
+ * values, and every row shows a difference that is not real.
+ *
+ * Only moves onto a band that is unmapped AND has data, and only off a band that has none, so
+ * a legitimately empty optional column is never reassigned.
+ */
+function rehomeMappingsOntoDataBands(section: AnalyzedSection, mapped: (string | null)[]): void {
+    const dataRows = section.tableRows.filter((r) => !r.isTotalRow && !r.isGroupHeader);
+    if (dataRows.length === 0) return;
+    const hasData = section.columns.map((_, ci) =>
+        dataRows.some((r) => {
+            const cell = r.cells[ci];
+            return cell !== null && cell !== undefined && String(cell).trim().length > 0;
+        }),
+    );
+
+    for (let ci = 0; ci < mapped.length; ci++) {
+        if (mapped[ci] === null || hasData[ci]) continue;
+        for (const target of [ci - 1, ci + 1]) {
+            if (target < 0 || target >= mapped.length) continue;
+            if (mapped[target] !== null || !hasData[target]) continue;
+            mapped[target] = mapped[ci];
+            mapped[ci] = null;
+            break;
+        }
+    }
+}
+
+/** Normalized source column name → canonical field, for every field this source declares. */
+function sourceColumnLookup(spec: ReportSpec, source: ReportSource): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const [canonical, perSource] of Object.entries(spec.fieldMap)) {
+        const declared = perSource[source];
+        if (!declared) continue;
+        // A source may declare several spellings for one column; every alias is a valid
+        // piece of a run-together heading.
+        for (const alias of Array.isArray(declared) ? declared : [declared]) {
+            const key = normalizeColumnName(alias);
+            if (key.length > 0 && !out.has(key)) out.set(key, canonical);
+        }
+    }
+    return out;
+}
+
+/**
+ * Split `normalized` into a sequence of declared column names, or null when it is not an
+ * exact concatenation of them. Longest-first at each step, then backtracking, so a column
+ * whose name prefixes another cannot strand the rest of the string.
+ */
+function splitIntoDeclaredColumns(
+    normalized: string,
+    lookup: Map<string, string>,
+    depth = 0,
+): string[] | null {
+    if (normalized.length === 0) return [];
+    if (depth > 8) return null; // A heading is never a run of nine columns; stop pathological search.
+    const candidates = [...lookup.keys()]
+        .filter((k) => normalized.startsWith(k))
+        .sort((a, b) => b.length - a.length);
+    for (const candidate of candidates) {
+        const rest = splitIntoDeclaredColumns(normalized.slice(candidate.length), lookup, depth + 1);
+        if (rest) return [lookup.get(candidate) as string, ...rest];
+    }
+    return null;
 }
 
 /**
