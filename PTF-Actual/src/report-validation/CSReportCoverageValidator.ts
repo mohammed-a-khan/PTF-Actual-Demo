@@ -107,6 +107,11 @@ export function validateCoverage(a: CanonicalReport, b: CanonicalReport, spec: R
         }
     }
 
+    // ---- 4b: does each field hold values of the shape its column should hold? ---
+    for (const [label, canonical] of [[aLabel, a], [bLabel, b]] as const) {
+        findings.push(...validateRecordShapes(canonical, spec, label));
+    }
+
     // ---- 5: rows dropped for want of a business key ------------------------
     // Scoped to `requiredSections` on purpose. A multi-section report drops rows in every
     // section the spec doesn't cover — their columns are different, so they have no business
@@ -125,6 +130,86 @@ export function validateCoverage(a: CanonicalReport, b: CanonicalReport, spec: R
     findings.sort((x, y) => x.id.localeCompare(y.id));
     return findings;
 }
+
+/**
+ * Check that the values a field received look like the values that field should hold.
+ *
+ * Column mapping is positional: a heading is matched to a band, and every value in that band
+ * becomes that field. When the match is off by a column the result is not an error but a full
+ * set of records holding the NEIGHBOUR's values — a vendor name in a price field, an identifier
+ * in a name field. Every downstream check still passes its own rules, so the run reports
+ * differences that are artefacts of the mis-match rather than anything about the data.
+ *
+ * Two properties catch it without knowing anything about the report:
+ *
+ *   - A field the spec gives a NUMERIC tolerance must hold numbers. Text there means the field
+ *     is reading a different column.
+ *   - Business keys must identify rows. When composite keys collide, the reconciler's key map
+ *     silently keeps the last record for each key and the rest vanish — the failure looks like
+ *     missing data on one side rather than a broken key.
+ */
+function validateRecordShapes(canonical: CanonicalReport, spec: ReportSpec, label: string): Finding[] {
+    const out: Finding[] = [];
+    const records = canonical.records;
+    if (records.length < MIN_RECORDS_FOR_SHAPE_CHECK) return out;
+
+    // --- numeric fields must hold numbers ---
+    for (const [field, tolerance] of Object.entries(spec.tolerances ?? {})) {
+        if (!tolerance || tolerance.type !== 'number') continue;
+        if (spec.ignoreFields.includes(field)) continue;
+        let present = 0;
+        let numeric = 0;
+        for (const record of records) {
+            const value = record.fields[field];
+            if (!value || value.kind === 'null') continue;
+            present++;
+            if (value.kind === 'number') numeric++;
+        }
+        if (present < MIN_RECORDS_FOR_SHAPE_CHECK) continue;
+        if (numeric / present >= MIN_NUMERIC_SHARE) continue;
+        const sample = records.find((r) => {
+            const v = r.fields[field];
+            return v && v.kind !== 'null' && v.kind !== 'number';
+        });
+        const shown = sample ? JSON.stringify((sample.fields[field] as { raw: string }).raw) : '(none)';
+        out.push(gap('*', `shape:${label}:${field}`, field,
+            `"${field}" is declared numeric but only ${numeric} of ${present} values on ${label} parse as numbers ` +
+            `(e.g. ${shown}) — the field is almost certainly reading a different column than the one it names.`));
+    }
+
+    // --- business keys must actually identify rows ---
+    const perSection = new Map<string, { total: number; keys: Set<string> }>();
+    for (const record of records) {
+        let bucket = perSection.get(record.sectionId);
+        if (!bucket) {
+            bucket = { total: 0, keys: new Set<string>() };
+            perSection.set(record.sectionId, bucket);
+        }
+        bucket.total++;
+        bucket.keys.add(
+            Object.keys(record.key)
+                .sort()
+                .map((k) => `${k}=${record.key[k] ?? ''}`)
+                .join('\u001f'),
+        );
+    }
+    for (const [sectionId, bucket] of perSection) {
+        if (bucket.total < MIN_RECORDS_FOR_SHAPE_CHECK) continue;
+        const collisions = bucket.total - bucket.keys.size;
+        if (collisions === 0) continue;
+        out.push(gap(sectionId, `keyCollision:${label}`, undefined,
+            `${collisions} of ${bucket.total} rows in "${sectionId}" on ${label} share a business key with ` +
+            `another row (${bucket.keys.size} distinct keys for ${bucket.total} rows). Colliding rows overwrite ` +
+            `each other during matching, so they are compared as though they were never extracted. ` +
+            `Either keyColumns (${spec.keyColumns.join(', ')}) do not identify a row, or they are reading the wrong columns.`));
+    }
+    return out;
+}
+
+/** Below this many records a shape is not established and the checks stay quiet. */
+const MIN_RECORDS_FOR_SHAPE_CHECK = 5;
+/** Share of a numeric field's populated values that must actually parse as numbers. */
+const MIN_NUMERIC_SHARE = 0.6;
 
 /** Build one COVERAGE_GAP finding. `discriminator` keeps ids unique and stable across runs. */
 function gap(section: string, discriminator: string, field: string | undefined, reason: string): Finding {
