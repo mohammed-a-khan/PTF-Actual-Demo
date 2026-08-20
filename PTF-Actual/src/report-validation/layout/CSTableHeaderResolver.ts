@@ -25,6 +25,11 @@
 import type { ColumnBand, LogicalLine, TextItem } from '../CSReportPdfTypes';
 import { bandIndexForItem } from './CSColumnDetector';
 
+/** Points of overlap below which a heading is clipping into a neighbour, not spanning it. */
+const MIN_SPAN_OVERLAP_POINTS = 4;
+/** Fraction of a heading's own width that must sit inside a band for it to count as spanned. */
+const MIN_SPAN_OVERLAP_RATIO = 0.25;
+
 export interface TableHeaderResolverOptions {
     /**
      * Y-gap tolerance in points between the sub-column header row and its parent header
@@ -94,19 +99,35 @@ export function resolveTableHeaders(
             const itemLeft = item.x;
             const itemRight = item.x + item.width;
             // Which bands does this item straddle?
+            // A band counts as covered only when the overlap is MEANINGFUL. Counting any
+            // overlap at all means a heading whose box clips one point into the next band —
+            // routine, since headings are wider than their digits — reads as a two-column
+            // spanner and gets camel-cased onto a neighbour it has nothing to do with
+            // (`Purchase` + `Identifier` → `purchaseIdentifier`). A real spanner sits
+            // squarely over its sub-columns, so requiring a fraction of the item's own width
+            // separates the two without needing to know the report.
+            const width = Math.max(itemRight - itemLeft, 1);
+            const minOverlap = Math.max(MIN_SPAN_OVERLAP_POINTS, width * MIN_SPAN_OVERLAP_RATIO);
             const covered: number[] = [];
             for (let bi = 0; bi < bands.length; bi++) {
                 const b = bands[bi];
-                // Item covers band if it overlaps AT ALL — even a small overlap counts
-                // because Crystal often centers a spanner over its sub-columns with the
-                // ends bleeding into neighbouring bands.
-                if (itemRight > b.start && itemLeft < b.end) covered.push(bi);
+                const overlap = Math.min(itemRight, b.end) - Math.max(itemLeft, b.start);
+                if (overlap >= Math.min(minOverlap, b.end - b.start)) covered.push(bi);
             }
-            if (covered.length < minSpanned) continue;
             const label = item.str.trim();
             if (label.length === 0) continue;
+            if (covered.length < minSpanned) {
+                // Covers ONE band: not a spanner but a CONTINUATION — the upper half of a
+                // heading too wide for its column, wrapped over two lines (`Current Par` above
+                // `Amount`, `S & P Recovery` above `Rate`). Dropping it, as a spanner-only rule
+                // does, loses half of every wrapped heading and the column stops resolving.
+                // Prepending rebuilds the heading in reading order.
+                if (covered.length === 1) bands[covered[0]].headerPath.unshift(label);
+                continue;
+            }
             for (const bi of covered) {
                 bands[bi].headerPath.unshift(label);
+                bands[bi].spannerDepth = (bands[bi].spannerDepth ?? 0) + 1;
             }
         }
     }
@@ -116,8 +137,21 @@ export function resolveTableHeaders(
     // separately for diff-report display.
     const normalize = opts.normalizeNames !== false;
     for (const band of bands) {
+        // A band whose heading arrived ONLY as a continuation has a path but no header yet —
+        // the leaf row had nothing for it. Without this the heading is carried in headerPath
+        // and never surfaces, so the column resolves to nothing.
+        if (band.headerPath.length === 1 && (!band.header || band.header.trim().length === 0)) {
+            band.header = band.headerPath[0];
+            continue;
+        }
         if (band.headerPath.length <= 1) continue;
-        const flat = flattenPath(band.headerPath, normalize);
+        // A wrapped heading is ONE column name spread over lines, so it re-joins with a
+        // space: `Current Par` + `Amount` is the column `Current Par Amount`, which is what
+        // the spec declares. Only a genuine spanner hierarchy gets camel-cased, and that is
+        // recorded by `spannerDepth` while the path was being built.
+        const flat = band.spannerDepth && band.spannerDepth > 0
+            ? flattenPath(band.headerPath, normalize)
+            : band.headerPath.join(' ').replace(/\s+/g, ' ').trim();
         band.header = flat;
     }
     return bands;

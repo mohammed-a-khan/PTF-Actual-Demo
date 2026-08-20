@@ -381,27 +381,54 @@ function splitHeaderAndData(
     // Top-to-bottom.
     const topDown = [...lines].sort((a, b) => b.y - a.y);
     const headerRows: LogicalLine[] = [];
-    // First line: header if EMPHASIZED (bold / all-caps / large font). A plain data row
-    // with items in every column would otherwise get miscategorised. We deliberately
-    // do NOT accept "spans most columns" as a header signal on its own — that's what
-    // regular data rows look like.
-    if (topDown.length > 0) {
-        const first = topDown[0];
-        if (first.isEmphasized || first.isHeader || usesDifferentFontFromBody(first, topDown.slice(1))) {
-            headerRows.push(first);
-        }
+
+    // Absorb every CONSECUTIVE header-like line from the top, not a fixed one or two.
+    //
+    // A heading block is routinely three lines deep, because a heading too wide for its
+    // column wraps: `Purchase` / `Current Par` / `Issue Name / Facility Name` on one line,
+    // `Price` / `Amount` on the next. Stopping at two leaves the last line in the DATA, where
+    // it looks like a headerless row of labels — and the late-header recovery downstream then
+    // fires on it and overwrites the headings that WERE read correctly. Capping the block was
+    // the direct cause of whole columns coming back null.
+    //
+    // A line qualifies while it carries no value-shaped cells (a heading never does) and
+    // still reads as a heading by font, emphasis, or contrast against the body below it.
+    // At least one line must remain as data, so a section of pure text can't be consumed
+    // entirely.
+    for (let i = 0; i < topDown.length - 1 && headerRows.length < MAX_HEADER_LINES; i++) {
+        const line = topDown[i];
+        const below = topDown.slice(i + 1);
+        const looksLikeHeading =
+            line.isEmphasized || line.isHeader || usesDifferentFontFromBody(line, below);
+        if (!looksLikeHeading) break;
+        if (lineCarriesValues(line)) break;
+        headerRows.push(line);
     }
-    // Second line: header only if emphasized. This picks up the sub-column row in a
-    // two-row header (`Original Rating` spanner / `Moody's | S&P` sub-columns) where the
-    // second row is usually bold too. Never absorbs a plain data row.
-    if (headerRows.length === 1 && topDown.length > 1) {
-        const second = topDown[1];
-        if (second.isEmphasized || second.isHeader || usesDifferentFontFromBody(second, topDown.slice(2))) {
-            headerRows.push(second);
-        }
-    }
+
     const dataLines = topDown.slice(headerRows.length);
     return { headerRows, dataLines };
+}
+
+/** How many stacked lines one RECOVERED heading block may span. */
+const MAX_HEADER_BLOCK_LINES = 3;
+
+/** How many stacked lines one heading block may occupy. Three is common; four is the ceiling. */
+const MAX_HEADER_LINES = 4;
+
+/**
+ * True when a line carries at least one number- or date-shaped run.
+ *
+ * This is the signal that separates a heading line from the first data row when the font
+ * signal is ambiguous — headings name things, data rows state amounts. Currency symbols,
+ * thousands separators and accounting parentheses all count as numeric.
+ */
+function lineCarriesValues(line: LogicalLine): boolean {
+    return line.items.some((item) => {
+        const text = item.str.trim();
+        if (text.length === 0) return false;
+        if (/^\(?[$£€¥]?[\d,]+(?:\.\d+)?\)?%?$/.test(text)) return true;
+        return /^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(text);
+    });
 }
 
 
@@ -526,9 +553,23 @@ function recoverHeaderRowFromData(
         if (filled.length < MIN_HEADER_CELLS) continue;
         if (filled.some(looksLikeValue)) continue;
 
-        // …and the row under it must actually carry data, or we've found a paragraph.
-        const below = rows[i + 1];
-        const valuesBelow = below.cells.filter((c) => c !== null && looksLikeValue(c)).length;
+        // …and real data must follow, or we've found a paragraph.
+        //
+        // Not necessarily the NEXT row: a heading block is often several lines deep, because a
+        // heading too wide for its column wraps (`Current Par` above `Amount`, `S & P Recovery`
+        // above `Rate`). Requiring values immediately below rejects the first line of every
+        // multi-line heading and the section is left with no headings at all. So scan past any
+        // further value-free lines, and treat the whole run as one heading block.
+        let blockEnd = i + 1;
+        while (
+            blockEnd < rows.length &&
+            blockEnd - i <= MAX_HEADER_BLOCK_LINES &&
+            !rows[blockEnd].cells.some((c) => c !== null && looksLikeValue(c))
+        ) {
+            blockEnd++;
+        }
+        if (blockEnd >= rows.length) continue;
+        const valuesBelow = rows[blockEnd].cells.filter((c) => c !== null && looksLikeValue(c)).length;
         if (valuesBelow < MIN_VALUE_CELLS_BELOW) continue;
 
         // Re-read the header text from the ITEMS rather than from `row.cells`. The generic
@@ -538,14 +579,41 @@ function recoverHeaderRowFromData(
         // unmapped. A header row has exactly one label per column, so it is a MATCHING
         // problem: assign left-to-right, never moving backwards, which also re-joins a
         // label wrapped over two lines.
-        const headerLines = headerLinesFor(row, sourceLines);
+        // Read the heading from EVERY line of the block, so a wrapped heading is reassembled
+        // rather than truncated to whichever line happened to match first.
+        const headerLines = rows
+            .slice(i, blockEnd)
+            .flatMap((r) => headerLinesFor(r, sourceLines));
         const headerItems = headerLines.flatMap((l) => l.items);
         const headerTexts = headerTextsFromItems(headerItems, columns);
+        // Does this row name MOST of the columns that carry data, or only a few?
+        //
+        // A complete header row sitting below a preamble is authoritative — the labels
+        // currently on the bands came from the summary block above and are wrong, so it
+        // replaces them. A row naming only a few columns is a FRAGMENT: the leftover line of
+        // a heading block that was cut one line short, holding `Price` / `Amount` / `Rate`
+        // while the headings it belongs to were already read correctly above. Letting a
+        // fragment clear every band is how a column that WAS resolving comes back null.
+        const named = headerTexts.filter(
+            (t, ci) => carriesData[ci] && t !== null && t.trim().length > 0,
+        ).length;
+        const authoritative = named * 2 >= dataBands;
+
         for (let ci = 0; ci < columns.length; ci++) {
-            columns[ci].header = headerTexts[ci];
-            columns[ci].headerPath = [];
+            const recovered = headerTexts[ci];
+            const hasRecovered = recovered !== null && recovered.trim().length > 0;
+            if (authoritative) {
+                columns[ci].header = hasRecovered ? recovered : null;
+                columns[ci].headerPath = hasRecovered ? [recovered as string] : [];
+                continue;
+            }
+            if (!hasRecovered) continue;
+            const existing = columns[ci].header;
+            if (existing && existing.trim().length > 0) continue;
+            columns[ci].header = recovered;
+            columns[ci].headerPath = [recovered as string];
         }
-        return { rows: rows.slice(i + 1), headerY: row.y, headerLines };
+        return { rows: rows.slice(blockEnd), headerY: row.y, headerLines };
     }
     return null;
 }

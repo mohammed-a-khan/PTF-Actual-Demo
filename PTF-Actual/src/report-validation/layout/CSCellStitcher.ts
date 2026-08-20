@@ -201,6 +201,7 @@ function mergeContinuationInto(target: TableRow, source: TableRow): void {
 export function linesToTableRows(lines: LogicalLine[], bands: ColumnBand[]): TableRow[] {
     return lines.map((line, idx) => {
         const buckets = assignItemsToColumns(line, bands);
+        absorbOverflowIntoPreviousCell(buckets, bands);
         const cells: (string | null)[] = buckets.map((items) => {
             if (items === null) return null;
             return items
@@ -229,6 +230,48 @@ export function linesToTableRows(lines: LogicalLine[], bands: ColumnBand[]): Tab
         };
     });
 }
+
+/**
+ * Absorb a cell's overflow back into the cell it ran out of.
+ *
+ * Column bands come from where the BULK of the values sit, so a value longer than its column
+ * runs past the band's right edge and the tail is bucketed into the next band —
+ * `MAVERICK GAMING LLC SECOND OUT` in the name column and `TL` in the band beyond it. The tail
+ * is then either dropped (the band maps to no field) or, worse, read as that column's value.
+ *
+ * The tail is recognisable: it sits in a band with no heading of its own, and it starts within
+ * a word space of where the previous cell's text ended. A genuine value in an adjacent column
+ * is separated by real white space and usually has a heading. Requiring BOTH conditions keeps
+ * a legitimately unheaded column from being swallowed by its neighbour.
+ *
+ * Mutates `buckets` in place: the tail's items move to the previous cell and its own bucket is
+ * cleared, so the row keeps one cell per column.
+ */
+function absorbOverflowIntoPreviousCell(
+    buckets: (TextItem[] | null)[],
+    bands: ColumnBand[],
+): void {
+    for (let ci = 1; ci < buckets.length; ci++) {
+        const items = buckets[ci];
+        if (!items || items.length === 0) continue;
+        const heading = bands[ci]?.header;
+        if (heading && heading.trim().length > 0) continue;
+        const prev = buckets[ci - 1];
+        if (!prev || prev.length === 0) continue;
+
+        let prevRight = -Infinity;
+        for (const item of prev) prevRight = Math.max(prevRight, item.x + item.width);
+        let left = Infinity;
+        for (const item of items) left = Math.min(left, item.x);
+        if (left - prevRight > MAX_OVERFLOW_GAP) continue;
+
+        prev.push(...items);
+        buckets[ci] = null;
+    }
+}
+
+/** Clear space, in points, within which a run is the tail of the cell before it rather than a value of its own. */
+const MAX_OVERFLOW_GAP = 8;
 
 /**
  * Cross-page continuation: given two adjacent pages' `[title, bands, rows]` triples for

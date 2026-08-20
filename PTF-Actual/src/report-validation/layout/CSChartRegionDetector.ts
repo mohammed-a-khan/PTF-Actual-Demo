@@ -41,7 +41,15 @@ export interface ChartRegionDetectorOptions {
     captionFontSize?: number;
     /** Minimum y-bands (rows) a cluster must have before the grid-alignment veto can fire. Default 4. */
     minTabularRows?: number;
-    /** Minimum aligned columns a cluster must show to be vetoed as a table. Default 3. */
+    /**
+     * Minimum aligned columns a cluster must show to be vetoed as a table. Default 2.
+     *
+     * Two is deliberate, not lax. Clustering splits a wide grid into fragments, and a fragment
+     * routinely spans just two columns — too few for a three-column rule, too many for the
+     * single-column rule — so a threshold of three leaves a gap that swallows part of the
+     * table. Two x-edges repeating down dozens of rows is already a grid; chart labels follow
+     * their data points and do not stack that way.
+     */
     minTabularColumns?: number;
     /** Fraction of rows an x-edge must appear in to count as an aligned column. Default 0.6. */
     tabularColumnCoverage?: number;
@@ -88,7 +96,7 @@ export function detectChartRegions(
         // both do) otherwise trip every density check above and get their entire data
         // table deleted before column detection ever runs. Charts scatter their labels;
         // tables repeat the same x-edges down every row.
-        if (looksTabular(cluster, opts)) continue;
+        if (looksTabular(cluster, opts) || looksLikeColumnRun(cluster, opts)) continue;
         // Find caption: a slightly-larger text item just above the region.
         const caption = findCaption(page.textItems, box, captionFont);
         // Confidence heuristic: higher density + presence of caption + font homogeneity.
@@ -134,6 +142,45 @@ function insideAnyRegion(item: TextItem, regions: ChartRegion[]): boolean {
 // ---- helpers -------------------------------------------------------------
 
 /**
+ * Single-column veto — the other half of "this is a table, not a chart".
+ *
+ * `looksTabular` asks whether a cluster shows several aligned columns. That only works when
+ * the whole grid arrives as ONE cluster, and it often does not: clustering merges items within
+ * `mergeDistance`, so a table whose columns are spaced further apart than that splits into one
+ * cluster PER COLUMN. Each fragment is then a single column of small text, can never exhibit
+ * three aligned columns, fails the grid test, and is deleted as a chart — taking the table
+ * with it, one column at a time.
+ *
+ * A lone column is still unmistakably not a chart: its items stack one per row, all flush to
+ * the same left or right edge, for many rows. Chart labels sit wherever their data point falls
+ * and never line up that way.
+ */
+function looksLikeColumnRun(cluster: TextItem[], opts: ChartRegionDetectorOptions): boolean {
+    const minRows = opts.minTabularRows ?? 4;
+    const coverage = opts.tabularColumnCoverage ?? 0.6;
+    const tolerance = opts.tabularEdgeTolerance ?? 3;
+
+    const rows = groupIntoRows(cluster);
+    if (rows.length < minRows) return false;
+
+    // A column contributes at most one cell per row.
+    const singles = rows.filter((r) => r.length === 1).length;
+    if (singles < rows.length * coverage) return false;
+
+    // …and those cells share an edge. Left for text columns, right for right-aligned numerics.
+    const leftEdges = new Map<number, Set<number>>();
+    const rightEdges = new Map<number, Set<number>>();
+    for (let r = 0; r < rows.length; r++) {
+        for (const item of rows[r]) {
+            addEdge(leftEdges, item.x, r, tolerance);
+            addEdge(rightEdges, item.x + item.width, r, tolerance);
+        }
+    }
+    const required = Math.ceil(rows.length * coverage);
+    return countAlignedEdges(leftEdges, required) >= 1 || countAlignedEdges(rightEdges, required) >= 1;
+}
+
+/**
  * Grid-alignment test — the "non-tabular layout" half of the documented heuristic.
  *
  * Groups the cluster into y-bands (rows), then looks for x-edges that REPEAT down those
@@ -146,7 +193,7 @@ function insideAnyRegion(item: TextItem, regions: ChartRegion[]): boolean {
  */
 function looksTabular(cluster: TextItem[], opts: ChartRegionDetectorOptions): boolean {
     const minRows = opts.minTabularRows ?? 4;
-    const minColumns = opts.minTabularColumns ?? 3;
+    const minColumns = opts.minTabularColumns ?? 2;
     const coverage = opts.tabularColumnCoverage ?? 0.6;
     const tolerance = opts.tabularEdgeTolerance ?? 3;
 

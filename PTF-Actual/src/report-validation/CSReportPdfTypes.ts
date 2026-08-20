@@ -103,6 +103,12 @@ export interface ColumnBand {
     start: number;
     /** X-end of the column band (half-open). */
     end: number;
+    /**
+     * How many TRUE spanner labels sit above this column — labels that covered several
+     * sub-columns. Zero means every extra entry in `headerPath` is a wrapped continuation of
+     * one heading, which re-joins with a space rather than camel-casing into a path.
+     */
+    spannerDepth?: number;
     /** Header text for this column, or `null` when the column is auto-detected without a header row. */
     header: string | null;
     /** Multi-level header ancestry (top → bottom), e.g. `['Original Rating', 'Agency A']`. Empty when column is single-level. */
