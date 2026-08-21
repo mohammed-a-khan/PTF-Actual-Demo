@@ -599,46 +599,55 @@ function recoverHeaderRowFromData(
         const valuesBelow = rows[blockEnd].cells.filter((c) => c !== null && looksLikeValue(c)).length;
         if (valuesBelow < MIN_VALUE_CELLS_BELOW) continue;
 
-        // Re-read the header text from the ITEMS rather than from `row.cells`. The generic
-        // cell bucketing places each item in the band it overlaps most, independently — and
-        // header labels are wider than the values beneath them, so two adjacent labels can
-        // both land in one band, leaving the column next door headerless and its values
-        // unmapped. A header row has exactly one label per column, so it is a MATCHING
-        // problem: assign left-to-right, never moving backwards, which also re-joins a
-        // label wrapped over two lines.
-        // Read the heading from EVERY line of the block, so a wrapped heading is reassembled
-        // rather than truncated to whichever line happened to match first.
+        // ONE header matcher for the whole pipeline.
+        //
+        // This path used to carry its own greedy left-to-right matcher. Two implementations of
+        // the same job is how a fix to one of them changes nothing: with staggered headings —
+        // baselines a few points apart, which Crystal uses throughout — that matcher treated
+        // every heading as a separate line, never advanced its cursor past a band, and
+        // concatenated onto whatever was already there. The result was
+        // `Issue Name / Facility Name Identifier` on one column and six headings joined on
+        // another, no matter what the real resolver produced first.
+        //
+        // `resolveTableHeaders` is column-aware and handles staggered and wrapped headings, so
+        // the recovery path now uses it rather than a second copy of the logic.
         const headerLines = rows
             .slice(i, blockEnd)
             .flatMap((r) => headerLinesFor(r, sourceLines));
-        const headerItems = headerLines.flatMap((l) => l.items);
-        const headerTexts = headerTextsFromItems(headerItems, columns);
-        // Does this row name MOST of the columns that carry data, or only a few?
+
+        const probe: ColumnBand[] = columns.map((c) => ({ ...c, header: null, headerPath: [] }));
+        resolveTableHeaders(probe, headerLines);
+
+        // Does this block name MOST of the columns that carry data, or only a few?
         //
         // A complete header row sitting below a preamble is authoritative — the labels
         // currently on the bands came from the summary block above and are wrong, so it
-        // replaces them. A row naming only a few columns is a FRAGMENT: the leftover line of
-        // a heading block that was cut one line short, holding `Price` / `Amount` / `Rate`
-        // while the headings it belongs to were already read correctly above. Letting a
-        // fragment clear every band is how a column that WAS resolving comes back null.
-        const named = headerTexts.filter(
-            (t, ci) => carriesData[ci] && t !== null && t.trim().length > 0,
+        // replaces them. A block naming only a few columns is a FRAGMENT: the leftover line of
+        // a heading cut one line short, holding `Price` / `Amount` / `Rate` while the headings
+        // they belong to were already read correctly. Letting a fragment clear every band is how
+        // a column that WAS resolving comes back null.
+        const named = probe.filter(
+            (b, ci) => carriesData[ci] && b.header !== null && b.header.trim().length > 0,
         ).length;
         const authoritative = named * 2 >= dataBands;
 
         for (let ci = 0; ci < columns.length; ci++) {
-            const recovered = headerTexts[ci];
+            const recovered = probe[ci].header;
             const hasRecovered = recovered !== null && recovered.trim().length > 0;
             if (authoritative) {
                 columns[ci].header = hasRecovered ? recovered : null;
-                columns[ci].headerPath = hasRecovered ? [recovered as string] : [];
+                columns[ci].headerPath = hasRecovered ? [...probe[ci].headerPath] : [];
+                columns[ci].spannerDepth = probe[ci].spannerDepth;
+                columns[ci].headerLeft = probe[ci].headerLeft;
                 continue;
             }
             if (!hasRecovered) continue;
             const existing = columns[ci].header;
             if (existing && existing.trim().length > 0) continue;
             columns[ci].header = recovered;
-            columns[ci].headerPath = [recovered as string];
+            columns[ci].headerPath = [...probe[ci].headerPath];
+            columns[ci].spannerDepth = probe[ci].spannerDepth;
+            columns[ci].headerLeft = probe[ci].headerLeft;
         }
         return { rows: rows.slice(blockEnd), headerY: row.y, headerLines };
     }
@@ -692,55 +701,6 @@ function maxFontSizeOn(lines: LogicalLine[]): number {
     }
     return max;
 }
-
-/**
- * Assign header items to column bands as an ordered MATCHING: walking the items left to
- * right, each one takes the best-overlapping band at or after the last band used. Two
- * consequences, both wanted:
- *
- *   - No band can swallow two labels while the next goes headerless: a label on the SAME
- *     line as the previous one must look strictly forward of where that one landed.
- *     Independent per-item assignment gets this wrong whenever a label is wider than its
- *     values, so it lands on the band to its left and that column loses its name.
- *   - A label wrapped onto a SECOND line rejoins its own band, because a different line is
- *     allowed to reuse the band just used.
- *
- * Bands with no label get `null`, and `realignHeadersOntoDataBands` afterwards nudges a
- * header sitting over an empty band onto the neighbouring band that carries the values —
- * the usual right-aligned-numeric offset.
- */
-function headerTextsFromItems(items: TextItem[], bands: ColumnBand[]): (string | null)[] {
-    const out: (string | null)[] = bands.map(() => null);
-    const inked = items.filter((i) => i.str.trim().length > 0).sort((a, b) => a.x - b.x);
-    let last = 0;
-    let lastY: number | null = null;
-    for (const item of inked) {
-        const sameLine = lastY !== null && Math.abs(item.y - lastY) <= SAME_LINE_EPSILON;
-        const from = lastY === null ? 0 : sameLine ? last + 1 : last;
-        const right = item.x + Math.max(item.width, 0);
-        let best = -1;
-        let bestOverlap = -Infinity;
-        let bestDelta = Infinity;
-        for (let bi = from; bi < bands.length; bi++) {
-            const overlap = Math.min(right, bands[bi].end) - Math.max(item.x, bands[bi].start);
-            const delta = Math.abs(item.x - bands[bi].start);
-            if (overlap > bestOverlap || (overlap === bestOverlap && delta < bestDelta)) {
-                best = bi;
-                bestOverlap = overlap;
-                bestDelta = delta;
-            }
-        }
-        if (best < 0) continue;
-        const text = item.str.trim();
-        out[best] = out[best] === null ? text : `${out[best]} ${text}`;
-        last = best;
-        lastY = item.y;
-    }
-    return out;
-}
-
-/** Baseline distance (points) within which two header items count as the same printed line. */
-const SAME_LINE_EPSILON = 1;
 
 /** How far into a section the late-header pass will look before giving up. */
 const LATE_HEADER_SEARCH_ROWS = 6;
