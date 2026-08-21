@@ -91,6 +91,10 @@ export {
 // diagnostics, custom pipelines, or writing report-specific overrides.
 export { clusterLines, type LineClusterOptions } from './layout/CSLineClusterer';
 export {
+    detectColumnsByAlignment,
+    type AlignmentNetworkOptions,
+} from './layout/CSTextAlignmentNetwork';
+export {
     detectColumns,
     assignItemsToColumns,
     columnIndexFor,
