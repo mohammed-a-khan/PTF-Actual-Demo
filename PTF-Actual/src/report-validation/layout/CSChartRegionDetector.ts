@@ -29,6 +29,8 @@
  */
 
 import type { BoundingBox, ChartRegion, PageContent, TextItem } from '../CSReportPdfTypes';
+import { clusterLines } from './CSLineClusterer';
+import { detectColumnsByAlignment } from './CSTextAlignmentNetwork';
 
 export interface ChartRegionDetectorOptions {
     /** Max font size (points) for a text item to count as a "chart label". Default 8 — reports use 7-8pt for chart labels vs 10-12pt for table cells. */
@@ -91,12 +93,16 @@ export function detectChartRegions(
         if (area <= 0) continue;
         const density = cluster.length / area;
         if (density < minDensity) continue;
-        // GRID VETO — a dense small-font cluster that aligns to a column grid is a TABLE,
-        // not a chart. Reports that render their detail tables at 7-8pt (SSRS and Crystal
-        // both do) otherwise trip every density check above and get their entire data
-        // table deleted before column detection ever runs. Charts scatter their labels;
-        // tables repeat the same x-edges down every row.
-        if (looksTabular(cluster, opts) || looksLikeColumnRun(cluster, opts)) continue;
+        // GRID VETO — a dense small-font cluster that reads as a table is a TABLE, not a chart.
+        //
+        // Reports set their detail grids in the same 6-8pt type as chart labels, so every table
+        // trips the density test above and, without a veto, the whole grid is deleted before
+        // analysis begins. The question "is this tabular?" is exactly what the alignment network
+        // answers — a column is a coordinate shared by runs across several rows — so it decides
+        // here too, rather than a second set of hand-tuned shape rules that has to be kept in
+        // agreement with it. Chart labels sit wherever their data point falls and form no
+        // columns; a grid forms several.
+        if (readsAsTable(cluster, opts)) continue;
         // Find caption: a slightly-larger text item just above the region.
         const caption = findCaption(page.textItems, box, captionFont);
         // Confidence heuristic: higher density + presence of caption + font homogeneity.
@@ -140,6 +146,22 @@ function insideAnyRegion(item: TextItem, regions: ChartRegion[]): boolean {
 }
 
 // ---- helpers -------------------------------------------------------------
+
+/**
+ * Does this cluster read as a table? Decided by the alignment network — the same test that
+ * defines a column everywhere else in the pipeline.
+ *
+ * A single column still counts: clustering merges items within a fixed distance, so a grid whose
+ * columns are spaced further apart than that arrives as one cluster PER COLUMN. Judging each
+ * fragment on its own would find "no grid" in every one of them and delete the table a column at
+ * a time, which is why the single-column case is kept alongside.
+ */
+function readsAsTable(cluster: TextItem[], opts: ChartRegionDetectorOptions): boolean {
+    const lines = clusterLines(cluster);
+    if (lines.length < (opts.minTabularRows ?? 4)) return false;
+    if (detectColumnsByAlignment(lines).length >= 2) return true;
+    return looksLikeColumnRun(cluster, opts);
+}
 
 /**
  * Single-column veto — the other half of "this is a table, not a chart".

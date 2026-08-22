@@ -43,13 +43,13 @@ import type {
     ReportFormat,
     ReportSource,
 } from './CSReportModel';
-import { canonicalFieldFor, normalizeColumnName, normalizeValue } from './CSReportNormalizer';
+import { canonicalFieldFor, fieldNamesForSource, normalizeColumnName, normalizeValue } from './CSReportNormalizer';
 import type {
     AnalyzedReport,
     AnalyzedSection,
     TableRow,
 } from './CSReportPdfTypes';
-import type { RequiredSectionSpec, ReportSpec } from './CSReportSpec';
+import type { RequiredSectionSpec, ReportSpec, SummaryFieldSpec } from './CSReportSpec';
 
 /**
  * A flat data row as ingested from Excel, CSV, DB, XML, etc. Keys are the raw column
@@ -165,7 +165,13 @@ export class CSReportSectionMapper {
             );
             for (const [k, v] of Object.entries(canonicalChecksums)) checksums[k] = v;
 
-            const summary = extractSectionSummary(analyzedSection.preambleText ?? [], requiredMeta, spec);
+            // Summary figures are read from the section's whole line view, not just its preamble.
+            // A calculation block sits above a grid and arrives as preamble; a summary PAGE has
+            // no grid above it, so the same label/value lines arrive as rows instead. Both are
+            // the section's text, and which one a report uses is not something the spec should
+            // have to encode.
+            const sectionText = collectSectionText(analyzedSection);
+            const summary = extractSectionSummary(sectionText, requiredMeta, spec);
             const detectedColumns = describeColumns(analyzedSection, colIdxToCanonical);
 
             sections.push({
@@ -177,6 +183,8 @@ export class CSReportSectionMapper {
                 detectedRowCount: analyzedSection.tableRows.length,
                 detectedColumns,
                 ...(summary ? { summary } : {}),
+                chartCaptions: collectChartCaptions(analyzedSection),
+                textContent: sectionText,
             });
             records.push(...canonicalRecords);
         }
@@ -584,7 +592,7 @@ function rehomeMappingsOntoDataBands(section: AnalyzedSection, mapped: (string |
 function sourceColumnLookup(spec: ReportSpec, source: ReportSource): Map<string, string> {
     const out = new Map<string, string>();
     for (const [canonical, perSource] of Object.entries(spec.fieldMap)) {
-        const declared = perSource[source];
+        const declared = fieldNamesForSource(perSource, source);
         if (!declared) continue;
         // A source may declare several spellings for one column; every alias is a valid
         // piece of a run-together heading.
@@ -677,13 +685,46 @@ function extractSectionSummary(
             return !t.startsWith(label) && t.includes(label);
         });
 
+        // A label can reach the text layer incomplete. The common cause is geometric: a
+        // right-aligned label column whose left edge sits past the page edge, so the
+        // producer writes only the glyphs that land on the page and the head of the label
+        // is absent from the text layer entirely — "Total Number of Obligors:" arrives as
+        // "ber of Obligors:". No extractor can recover those glyphs; they were never
+        // written. So the printed text is matched as a SUFFIX of the declared label, which
+        // keeps the spec readable — a spec declares the label a person reads off the page,
+        // never a fragment reverse-engineered from a broken extraction.
+        const clipped = matchClippedLabel(preambleText, field, fields);
+
+        // `labelMatchers` remains for the cases geometry cannot explain (a label broken
+        // mid-word across two text runs, glyph substitution, a label that differs between
+        // report versions). Nothing needs it merely because a label was clipped.
+        const matchers = compileLabelMatchers(field.labelMatchers);
+        const matched: Array<{ line: string; at: number; length: number }> = [];
         for (const rawLine of [...startsWith, ...contains]) {
             const line = collapseSpaces(rawLine);
-            const at = line.toLowerCase().indexOf(label);
+            matched.push({ line, at: line.toLowerCase().indexOf(label), length: label.length });
+        }
+        for (const hit of clipped) matched.push(hit);
+        if (matchers.length > 0) {
+            for (const rawLine of preambleText) {
+                const line = collapseSpaces(rawLine);
+                for (const matcher of matchers) {
+                    const hit = matcher.exec(line);
+                    if (!hit) continue;
+                    matched.push({ line, at: hit.index, length: hit[0].length });
+                    break;
+                }
+            }
+        }
+
+        for (const { line, at, length } of matched) {
             if (at < 0) continue;
 
+            // Values are read from the right of the label, never the whole line: a summary block
+            // prints several label/value pairs side by side, so the line also carries the
+            // neighbouring columns' figures.
             const values: CanonicalValue[] = [];
-            for (const token of line.slice(at + label.length).split(' ')) {
+            for (const token of line.slice(at + length).split(' ')) {
                 if (token.length === 0) continue;
                 const value = normalizeValue(token, { dateFormats: spec.dateFormats });
                 if (value.kind === 'number' || value.kind === 'date') values.push(value);
@@ -693,6 +734,120 @@ function extractSectionSummary(
                 break;
             }
         }
+    }
+    return out;
+}
+
+/**
+ * Shortest label tail accepted as a clipped label. Below this a tail stops identifying the
+ * field it came from — "Date:" or "Amount:" is a suffix of half the labels a report prints.
+ */
+const MIN_CLIPPED_LABEL_CHARS = 8;
+
+/**
+ * Find lines that begin with a TAIL of `field`'s declared label — the signature of a label
+ * clipped at the left page edge.
+ *
+ * Three guards keep this from guessing. The tail must be at least MIN_CLIPPED_LABEL_CHARS
+ * long; the line must not be some other declared label printed in full, since a literal
+ * owner always beats a clipped reading; and the tail must identify one field, so a line
+ * that reads as a clipped form of any OTHER declared label matches nothing. An absent
+ * field is a coverage gap the run reports; a wrong field is a silent false pass.
+ */
+function matchClippedLabel(
+    preambleText: string[],
+    field: SummaryFieldSpec,
+    allFields: SummaryFieldSpec[],
+): Array<{ line: string; at: number; length: number }> {
+    const label = collapseSpaces(field.label).toLowerCase();
+    if (label.length <= MIN_CLIPPED_LABEL_CHARS) return [];
+
+    const others = allFields
+        .filter((f) => f.id !== field.id)
+        .map((f) => collapseSpaces(f.label).toLowerCase())
+        .filter((l) => l !== label);
+
+    const out: Array<{ line: string; at: number; length: number }> = [];
+    for (const rawLine of preambleText) {
+        const line = collapseSpaces(rawLine);
+        const lower = line.toLowerCase();
+        const tail = longestClippedTail(lower, label);
+        if (tail === 0) continue;
+        if (others.some((other) => lower.startsWith(other))) continue;
+        if (others.some((other) => longestClippedTail(lower, other) >= tail)) continue;
+        out.push({ line, at: 0, length: tail });
+    }
+    return out;
+}
+
+/**
+ * Length of the longest proper tail of `label` that `line` starts with, or 0 for none.
+ * A full match returns 0 — that is literal matching's job, handled before this runs.
+ */
+function longestClippedTail(line: string, label: string): number {
+    const max = Math.min(line.length, label.length - 1);
+    for (let k = max; k >= MIN_CLIPPED_LABEL_CHARS; k--) {
+        if (line.startsWith(label.slice(label.length - k))) return k;
+    }
+    return 0;
+}
+
+/**
+ * Compile a summary field's `labelMatchers`. A malformed pattern is skipped rather than thrown:
+ * the remaining matchers, and the literal label, still get their chance.
+ */
+function compileLabelMatchers(patterns: string[] | undefined): RegExp[] {
+    if (!patterns || patterns.length === 0) return [];
+    const out: RegExp[] = [];
+    for (const pattern of patterns) {
+        try {
+            out.push(new RegExp(pattern, 'i'));
+        } catch {
+            // Spec loading validates shape, not regex syntax.
+        }
+    }
+    return out;
+}
+
+/** Captions of the chart regions detected inside a section, blanks dropped. */
+function collectChartCaptions(section: AnalyzedSection): string[] {
+    const out: string[] = [];
+    for (const chart of section.charts ?? []) {
+        const caption = (chart.caption ?? '').trim();
+        if (caption.length > 0) out.push(caption);
+    }
+    return out;
+}
+
+/**
+ * Every text fragment the section rendered — preamble, free text and cell values.
+ *
+ * A chart title is ordinary text drawn above its plotted area, and it may land in a cell, in
+ * free text, or in the preamble depending on where the bands fell. Collecting all three is what
+ * lets "is this chart on the page" be answered without depending on which of them it happened
+ * to end up in.
+ */
+function collectSectionText(section: AnalyzedSection): string[] {
+    const out: string[] = [];
+    for (const line of section.preambleText ?? []) {
+        const text = line.trim();
+        if (text.length > 0) out.push(text);
+    }
+    for (const line of section.freeText ?? []) {
+        const text = line.trim();
+        if (text.length > 0) out.push(text);
+    }
+    // Rows are re-joined into LINES rather than emitted cell by cell. A summary block is
+    // label-then-value on one printed line, and whether that line arrived as preamble or as a
+    // row depends on whether the section also had a grid — which is not something the caller
+    // should have to know. Joining puts both shapes into the same form.
+    for (const row of section.tableRows) {
+        const text = row.cells
+            .map((cell) => (cell ?? '').trim())
+            .filter((cell) => cell.length > 0)
+            .join(' ')
+            .trim();
+        if (text.length > 0) out.push(text);
     }
     return out;
 }
@@ -728,7 +883,7 @@ function newCoverageAccumulator(): CoverageAccumulator {
 function finalizeCoverage(acc: CoverageAccumulator, spec: ReportSpec, source: ReportSource): CoverageMeta {
     const unmapped: string[] = [];
     for (const [canonical, perSource] of Object.entries(spec.fieldMap)) {
-        const declared = perSource[source];
+        const declared = fieldNamesForSource(perSource, source);
         if (!declared) continue;
         if (acc.mapped.has(canonical)) continue;
         unmapped.push(canonical);

@@ -93,17 +93,37 @@ export function normalizeColumnName(name: string): string {
  * caller decides whether to skip or raise).
  *
  * @param sourceName Column name as it appears in the source (any case, any separators).
- * @param source     Which source `fieldMap` lookup to use (`crystal`, `ssrs`, or `db`).
+ * @param source     Which source's names to look up — any label the spec's `fieldMap` uses.
  * @param fieldMap   The spec's field mapping.
  */
+/**
+ * The column name(s) a source declares for one canonical field, matched case-insensitively.
+ *
+ * A feature file writes the source as it reads — `Crystal`, `vendorA` — while the spec writes
+ * whatever its author chose. Neither should have to know the other's casing.
+ */
+export function fieldNamesForSource(
+    entry: Record<string, string | string[] | undefined> | undefined,
+    source: string,
+): string | string[] | undefined {
+    if (!entry) return undefined;
+    const direct = entry[source];
+    if (direct !== undefined) return direct;
+    const wanted = source.toLowerCase();
+    for (const [key, value] of Object.entries(entry)) {
+        if (key.toLowerCase() === wanted) return value;
+    }
+    return undefined;
+}
+
 export function canonicalFieldFor(
     sourceName: string,
-    source: 'crystal' | 'ssrs' | 'db',
-    fieldMap: Record<string, { crystal?: string | string[]; ssrs?: string | string[]; db?: string | string[] }>,
+    source: string,
+    fieldMap: Record<string, Record<string, string | string[] | undefined>>,
 ): string | null {
     const target = normalizeColumnName(sourceName);
     for (const [canonical, entry] of Object.entries(fieldMap)) {
-        const raw = entry[source];
+        const raw = fieldNamesForSource(entry, source);
         if (raw === undefined) continue;
         const names = Array.isArray(raw) ? raw : [raw];
         if (names.some((n) => normalizeColumnName(n) === target)) return canonical;

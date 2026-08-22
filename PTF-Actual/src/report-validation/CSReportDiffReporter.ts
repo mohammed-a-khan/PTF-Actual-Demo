@@ -27,6 +27,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import type {
+    ComparisonLedger,
+    ComparisonRow,
     CanonicalReport,
     CanonicalValue,
     Finding,
@@ -34,6 +36,7 @@ import type {
     ReconciliationResult,
 } from './CSReportModel';
 import type { ReportSpec } from './CSReportSpec';
+import { fieldNamesForSource } from './CSReportNormalizer';
 import type { SectionValidationResult } from './CSReportValidationService';
 
 /** Everything the reporter needs to render one diff. */
@@ -175,6 +178,8 @@ ${sectionValidation ? renderSectionPanel(sectionValidation) : ''}
   ${renderFindingsGroup('Notes', NOTE_CLASSIFICATIONS, reconciliation.findings, spec, a, b)}
 </section>
 
+${renderLedger(reconciliation.ledger, sourceA, sourceB)}
+
 <footer class="rv-footer">
   <span>CS Playwright Test Framework — Report Validation Diff</span>
   <span>${escapeHtml(generatedAt)}</span>
@@ -245,8 +250,8 @@ export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: 
         (f) =>
             !ignored.has(f) &&
             !keyed.has(f) &&
-            Boolean(spec.fieldMap[f]?.[a.source]) &&
-            Boolean(spec.fieldMap[f]?.[b.source]),
+            Boolean(fieldNamesForSource(spec.fieldMap[f], a.source)) &&
+            Boolean(fieldNamesForSource(spec.fieldMap[f], b.source)),
     );
 
     const bByKey = new Map<string, CanonicalReport['records'][number]>();
@@ -335,6 +340,106 @@ export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: 
  * section, so "both migrated sections were checked" is something a reader can verify rather
  * than take on trust.
  */
+/**
+ * The audit trail: every row compared, both sides stacked, pass or fail.
+ *
+ * A findings list answers "what differs". It cannot answer "was the comparison right",
+ * because a run that compared nothing produces the same empty list as a run that compared
+ * everything and agreed. This panel shows the reader what each side actually said for each
+ * row, so a green result can be checked rather than trusted.
+ */
+function renderLedger(ledger: ComparisonLedger | undefined, sourceA: string, sourceB: string): string {
+    if (!ledger || ledger.rows.length === 0) return '';
+
+    const bySection = new Map<string, ComparisonRow[]>();
+    for (const row of ledger.rows) {
+        const list = bySection.get(row.section);
+        if (list) list.push(row);
+        else bySection.set(row.section, [row]);
+    }
+
+    const failing = ledger.rows.filter((r) => r.status === 'FAIL').length;
+    const omitted = ledger.omittedRows > 0
+        ? `<p class="rv-ledger-note">${ledger.omittedRows} further row(s) were compared but not listed — the ledger cap of ${ledger.rowCap} rows was reached. Raise <code>ledgerMaxRows</code> in the spec to list them.</p>`
+        : '';
+
+    // The per-row side label uses the bare source name; the long description belongs in the
+    // lede, not repeated on every one of hundreds of lines.
+    const groups = [...bySection.entries()]
+        .map(([section, rows]) => renderLedgerSection(section, rows, ledger.aSource, ledger.bSource))
+        .join('\n');
+
+    return `<section class="rv-ledger">
+  <h2>Comparison ledger <span class="rv-count-inline">(${ledger.rows.length} row(s) compared, ${failing} failing)</span></h2>
+  <p class="rv-ledger-lede">Every row compared between <strong>${escapeHtml(sourceA)}</strong> and <strong>${escapeHtml(sourceB)}</strong>, each side shown as printed. Differing values are highlighted.</p>
+  <label class="rv-ledger-toggle"><input type="checkbox" id="rv-ledger-diffonly"> Show only rows with differences</label>
+  ${omitted}
+  ${groups}
+</section>`;
+}
+
+/** One section's rows as a two-line-per-row table: side A above side B. */
+function renderLedgerSection(section: string, rows: ComparisonRow[], sourceA: string, sourceB: string): string {
+    // Column order follows first appearance, so the table reads in the order the report
+    // presents its fields rather than alphabetically.
+    const fields: string[] = [];
+    const seen = new Set<string>();
+    for (const row of rows) {
+        for (const cell of row.cells) {
+            if (seen.has(cell.field)) continue;
+            seen.add(cell.field);
+            fields.push(cell.field);
+        }
+    }
+
+    const header = fields.map((fld) => `<th>${escapeHtml(fld)}</th>`).join('');
+    const body = rows.map((row) => renderLedgerRow(row, fields, sourceA, sourceB)).join('\n');
+    const failing = rows.filter((r) => r.status === 'FAIL').length;
+
+    return `<details class="rv-ledger-section"${failing > 0 ? ' open' : ''}>
+  <summary><span class="rv-ledger-section-name">${escapeHtml(section)}</span> <span class="rv-count-inline">${rows.length} row(s)${failing > 0 ? `, ${failing} failing` : ''}</span></summary>
+  <div class="rv-ledger-scroll">
+    <table class="rv-ledger-table">
+      <thead><tr><th class="rv-ledger-key">Row</th><th class="rv-ledger-side">Source</th>${header}<th class="rv-ledger-status">Status</th></tr></thead>
+      <tbody>
+${body}
+      </tbody>
+    </table>
+  </div>
+</details>`;
+}
+
+function renderLedgerRow(row: ComparisonRow, fields: string[], sourceA: string, sourceB: string): string {
+    const byField = new Map(row.cells.map((c) => [c.field, c]));
+    const keyText = row.kind === 'summary'
+        ? `${compositeKeyDisplay(row.key)} (figures)`
+        : compositeKeyDisplay(row.key);
+
+    const side = (which: 'a' | 'b'): string => fields.map((fld) => {
+        const cell = byField.get(fld);
+        if (!cell) return '<td class="rv-ledger-cell rv-ledger-absent">—</td>';
+        const raw = which === 'a' ? cell.aRaw : cell.bRaw;
+        const differs = cell.status !== 'MATCH';
+        const cls = `rv-ledger-cell${differs ? ' rv-ledger-diff' : ''}${raw === null ? ' rv-ledger-absent' : ''}`;
+        const title = differs
+            ? ` title="${escapeAttr(cell.status + (cell.reason ? ` — ${cell.reason}` : ''))}"`
+            : '';
+        return `<td class="${cls}"${title}>${raw === null ? '—' : escapeHtml(raw)}</td>`;
+    }).join('');
+
+    const statusCls = row.status === 'FAIL' ? 'rv-ledger-fail' : row.status === 'INFO' ? 'rv-ledger-info' : 'rv-ledger-pass';
+    const presence = row.presence === 'BOTH' ? '' : ` <span class="rv-ledger-presence">${row.presence === 'A_ONLY' ? 'only in A' : 'only in B'}</span>`;
+
+    return `        <tr class="rv-ledger-rowgroup" data-status="${row.status}">
+          <td class="rv-ledger-key" rowspan="2">${escapeHtml(keyText)}${presence}</td>
+          <td class="rv-ledger-side">${escapeHtml(sourceA)}</td>${side('a')}
+          <td class="rv-ledger-status ${statusCls}" rowspan="2">${row.status}</td>
+        </tr>
+        <tr class="rv-ledger-rowgroup rv-ledger-rowgroup-b" data-status="${row.status}">
+          <td class="rv-ledger-side">${escapeHtml(sourceB)}</td>${side('b')}
+        </tr>`;
+}
+
 function renderScopePanel(spec: ReportSpec, a?: CanonicalReport, b?: CanonicalReport): string {
     if (!a || !b) return '';
     const scope = computeComparisonScope(spec, a, b);
@@ -877,6 +982,7 @@ body[data-status="status-fail"] .rv-verdict-rail { background: var(--fail); }
   border-top: 1px solid var(--line); padding-top: 14px;
 }
 .rv-row.rv-hidden { display: none; }
+tr.rv-ledger-rowgroup.rv-hidden { display: none; }
 
 @media (max-width: 640px) {
   body { padding: 16px 12px 40px; }
@@ -888,6 +994,29 @@ body[data-status="status-fail"] .rv-verdict-rail { background: var(--fail); }
   .rv-chips { display: none; }
   .rv-summary, .rv-sections, .rv-findings, .rv-header { box-shadow: none; break-inside: avoid; }
 }
+
+.rv-ledger { margin-top: 2rem; }
+.rv-ledger-lede { color: var(--rv-muted, #64748b); margin: .25rem 0 .75rem; }
+.rv-ledger-note { color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: .5rem .75rem; margin: .5rem 0; }
+.rv-ledger-toggle { display: inline-flex; align-items: center; gap: .4rem; font-size: .85rem; margin-bottom: .75rem; cursor: pointer; }
+.rv-ledger-section { border: 1px solid var(--rv-border, #e2e8f0); border-radius: 8px; margin-bottom: .75rem; background: var(--rv-panel, #fff); }
+.rv-ledger-section > summary { cursor: pointer; padding: .6rem .8rem; font-weight: 600; }
+.rv-ledger-section-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rv-ledger-scroll { overflow-x: auto; }
+.rv-ledger-table { border-collapse: collapse; width: 100%; font-size: .82rem; }
+.rv-ledger-table th, .rv-ledger-table td { padding: .3rem .5rem; text-align: left; white-space: nowrap; border-bottom: 1px solid var(--rv-border, #e2e8f0); }
+.rv-ledger-table thead th { position: sticky; top: 0; background: var(--rv-panel-alt, #f8fafc); font-weight: 600; z-index: 1; }
+.rv-ledger-key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; vertical-align: middle; border-right: 1px solid var(--rv-border, #e2e8f0); max-width: 22rem; white-space: normal; }
+.rv-ledger-side { color: var(--rv-muted, #64748b); font-size: .75rem; text-transform: uppercase; letter-spacing: .03em; }
+.rv-ledger-rowgroup-b td { border-bottom: 2px solid var(--rv-border, #e2e8f0); }
+.rv-ledger-cell { font-variant-numeric: tabular-nums; }
+.rv-ledger-diff { background: #fef2f2; color: #991b1b; font-weight: 600; }
+.rv-ledger-absent { color: #94a3b8; }
+.rv-ledger-status { text-align: center; font-weight: 700; font-size: .75rem; vertical-align: middle; border-left: 1px solid var(--rv-border, #e2e8f0); }
+.rv-ledger-pass { color: #15803d; }
+.rv-ledger-fail { color: #b91c1c; }
+.rv-ledger-info { color: #b45309; }
+.rv-ledger-presence { display: block; color: #b45309; font-weight: 600; }
 </style>`;
 
 const INLINE_SCRIPT = `<script>
@@ -909,6 +1038,18 @@ const INLINE_SCRIPT = `<script>
         applyFilter(chip.getAttribute('data-classification'));
       });
     })(chips[i]);
+  }
+
+  var diffOnly = document.getElementById('rv-ledger-diffonly');
+  if (diffOnly) {
+    diffOnly.addEventListener('change', function() {
+      var groups = document.querySelectorAll('tr.rv-ledger-rowgroup');
+      for (var k = 0; k < groups.length; k++) {
+        var isPass = groups[k].getAttribute('data-status') === 'PASS';
+        if (diffOnly.checked && isPass) groups[k].classList.add('rv-hidden');
+        else groups[k].classList.remove('rv-hidden');
+      }
+    });
   }
 })();
 </script>`;

@@ -147,7 +147,19 @@ function analyzeOnePage(
         height: original.height,
         textItems: bodyItems,
     });
-    const nonChartItems = removeChartItems(bodyItems, chartRegions);
+    // Chart regions are RECORDED as evidence but their text is left in the body by default.
+    //
+    // Removal existed to stop a spray of chart labels minting spurious columns. Column detection
+    // is now an alignment network, which requires a coordinate shared across several rows before
+    // it will call anything a column — chart labels sit wherever their data point falls and never
+    // satisfy that. The protection is no longer needed, while the cost of removal is severe and
+    // recurring: report tables are set in the same small type as chart labels, so a page of
+    // 6.5pt text clusters into one dense region and the entire page — grid, headings and all —
+    // is deleted before analysis begins. A summary page carrying both a table and three charts
+    // is the clearest case: everything vanished and the section came back empty.
+    const nonChartItems = opts.removeChartText === false
+        ? bodyItems
+        : removeChartItems(bodyItems, chartRegions);
 
     // 3b. Line clustering over non-chart items.
     const lines = clusterLines(nonChartItems, {
@@ -473,6 +485,11 @@ function realignHeadersOntoDataBands(columns: ColumnBand[], rows: TableRow[]): v
         if (typeof left !== 'number') continue;
         for (let target = ci - 1; target >= 0; target--) {
             if (left >= columns[target].end) break;
+            // The heading's own left edge settles it: it must start inside the FIRST HALF of the
+            // earlier band for that band to be its column. A heading that merely clips into the
+            // tail of the band before it is still its own column's, and moving it there hands the
+            // field to the wrong values.
+            if (left >= (columns[target].start + columns[target].end) / 2) continue;
             if (columns[target].header || !hasData[target]) continue;
             columns[target].header = heading;
             columns[target].headerPath = columns[ci].headerPath;
@@ -611,9 +628,18 @@ function recoverHeaderRowFromData(
         //
         // `resolveTableHeaders` is column-aware and handles staggered and wrapped headings, so
         // the recovery path now uses it rather than a second copy of the logic.
-        const headerLines = rows
-            .slice(i, blockEnd)
-            .flatMap((r) => headerLinesFor(r, sourceLines));
+        // DEDUPLICATED. `headerLinesFor` resolves a row back to the source lines it was built
+        // from, and a wrapped heading spans several rows that all resolve to the SAME lines.
+        // Passing the duplicates through means every label on those lines is placed once per
+        // occurrence, so a band accumulates `Identifier Identifier` and headings appear to bleed
+        // across columns — which is what dropped every key-column mapping on the Crystal grid.
+        const headerLines = [
+            ...new Set(
+                rows
+                    .slice(i, blockEnd)
+                    .flatMap((r) => headerLinesFor(r, sourceLines)),
+            ),
+        ];
 
         const probe: ColumnBand[] = columns.map((c) => ({ ...c, header: null, headerPath: [] }));
         resolveTableHeaders(probe, headerLines);

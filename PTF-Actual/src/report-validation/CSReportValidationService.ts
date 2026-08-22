@@ -548,8 +548,28 @@ export class CSReportValidationService {
 // Internals — kept module-local; not exported to keep the surface small.
 // ---------------------------------------------------------------------------
 
+/**
+ * Where report specs live. `REPORT_SPECS_DIR` (config or environment) wins, so a consuming
+ * project can keep its specs outside the repo — they name a specific report's sections and
+ * every column heading, which is not something to commit.
+ */
 function defaultSpecsDir(): string {
+    const configured = readConfig('REPORT_SPECS_DIR') || process.env.REPORT_SPECS_DIR;
+    if (configured && configured.trim().length > 0) {
+        return path.resolve(process.cwd(), configured.trim());
+    }
     return path.join(process.cwd(), 'config', 'report-specs');
+}
+
+/** Read a framework config key, returning undefined when configuration isn't available. */
+function readConfig(key: string): string | undefined {
+    try {
+        const { CSConfigurationManager } = require('../core/CSConfigurationManager');
+        const value = CSConfigurationManager.getInstance().get(key);
+        return typeof value === 'string' ? value : undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 /**

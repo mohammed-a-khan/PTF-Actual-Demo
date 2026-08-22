@@ -105,13 +105,49 @@ export interface ActionDetail {
     timestamp: string;
 }
 
+interface CSReporterState {
+    results: TestResult[];
+    currentTest: TestResult | null;
+    currentStep: StepResult | null;
+    startTime: number;
+    logBuffer: string[];
+    reportPath: string;
+}
+
+/** Process-wide slot shared by every loaded copy of this module. */
+const CS_REPORTER_STATE = Symbol.for('cs.framework.reporter.state');
+
 export class CSReporter {
-    private static results: TestResult[] = [];
-    private static currentTest: TestResult | null = null;
-    private static currentStep: StepResult | null = null;
-    private static startTime: number = Date.now();
-    private static logBuffer: string[] = [];
-    private static reportPath: string = '';
+    // Mutable state lives on globalThis, not on the class.
+    //
+    // A run can end up with two copies of this module loaded — the framework running from
+    // dist/ while a step file is loaded from its .ts source through ts-node resolves
+    // '../reporter/CSReporter' to a second, independent class object. Per-class statics
+    // would then split in two: the runner opens a step on one copy while everything the
+    // step reports accumulates on the other, and the report renders with empty Steps tabs.
+    // Anchoring the state to a process-wide slot keeps both copies pointed at one store.
+    private static get state(): CSReporterState {
+        const g = globalThis as { [CS_REPORTER_STATE]?: CSReporterState };
+        let s = g[CS_REPORTER_STATE];
+        if (!s) {
+            s = { results: [], currentTest: null, currentStep: null, startTime: Date.now(), logBuffer: [], reportPath: '' };
+            g[CS_REPORTER_STATE] = s;
+        }
+        return s;
+    }
+
+    private static get results(): TestResult[] { return this.state.results; }
+    private static set results(v: TestResult[]) { this.state.results = v; }
+    private static get currentTest(): TestResult | null { return this.state.currentTest; }
+    private static set currentTest(v: TestResult | null) { this.state.currentTest = v; }
+    private static get currentStep(): StepResult | null { return this.state.currentStep; }
+    private static set currentStep(v: StepResult | null) { this.state.currentStep = v; }
+    private static get startTime(): number { return this.state.startTime; }
+    private static set startTime(v: number) { this.state.startTime = v; }
+    private static get logBuffer(): string[] { return this.state.logBuffer; }
+    private static set logBuffer(v: string[]) { this.state.logBuffer = v; }
+    private static get reportPath(): string { return this.state.reportPath; }
+    private static set reportPath(v: string) { this.state.reportPath = v; }
     
     public static initialize(): void {
         const reportDir = './reports';

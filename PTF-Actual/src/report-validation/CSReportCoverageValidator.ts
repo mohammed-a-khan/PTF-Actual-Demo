@@ -44,6 +44,7 @@
 
 import type { CanonicalReport, Finding } from './CSReportModel';
 import type { ReportSpec } from './CSReportSpec';
+import { fieldNamesForSource } from './CSReportNormalizer';
 
 /**
  * Produce `COVERAGE_GAP` findings for anything the spec asked for but the extraction never
@@ -97,7 +98,7 @@ export function validateCoverage(a: CanonicalReport, b: CanonicalReport, spec: R
         if (!coverage) continue; // Hand-built canonical — nothing to assert against.
         for (const field of coverage.unmappedFields) {
             if (exempt.has(field)) continue;
-            const declared = spec.fieldMap[field]?.[canonical.source];
+            const declared = fieldNamesForSource(spec.fieldMap[field], canonical.source);
             const declaredText = declared === undefined
                 ? '(unknown)'
                 : Array.isArray(declared) ? declared.join('" / "') : declared;

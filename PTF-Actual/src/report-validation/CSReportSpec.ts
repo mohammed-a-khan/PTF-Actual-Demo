@@ -41,9 +41,7 @@ export type ToleranceSpec =
  * prints; an array lists accepted spellings, any of which resolves to the canonical field.
  */
 export interface SpecFieldNames {
-    crystal?: string | string[];
-    ssrs?: string | string[];
-    db?: string | string[];
+    [source: string]: string | string[] | undefined;
 }
 
 /**
@@ -67,6 +65,15 @@ export interface SummaryFieldSpec {
      * Formula markers such as `(A)` or `(B)/(A)` are not values and are never counted.
      */
     valueIndex?: number;
+    /**
+     * Regex alternatives to `label`, tried when the literal label does not match.
+     *
+     * A label can reach the text layer incomplete — clipped at the page edge, or split so that
+     * only its tail survives as one run (`Total Number of Obligors:` arriving as
+     * `ber of Obligors:`). Rather than weaken label matching for every report, the reports that
+     * need it say so: `["ber of Obligors:?$"]`.
+     */
+    labelMatchers?: string[];
 }
 
 /** A section that MUST be present in the report (used by `CSReportSectionValidator`). */
@@ -91,6 +98,16 @@ export interface RequiredSectionSpec {
      * plain grid. See `SummaryFieldSpec`.
      */
     summaryFields?: SummaryFieldSpec[];
+    /**
+     * Charts that must appear in this section, given as regex patterns matched against the
+     * section's rendered text and any detected chart captions.
+     *
+     * A chart's title is drawn as ordinary text, so this asserts the titled block is present.
+     * It is deliberately a text check: chart-region detection identifies where the plotted
+     * area is, but a caption is not a reliable identity, and a missing chart shows up first as
+     * a missing title.
+     */
+    requiredCharts?: string[];
 }
 
 /** One entry in the intentional-difference allowlist. Findings that match it downgrade to `KNOWN_DIFFERENCE`. */
@@ -258,6 +275,12 @@ export interface ReportSpec {
      * sections you DO claim to cover.
      */
     allowCoverageGaps?: boolean;
+
+    /**
+     * Cap on rows recorded in the comparison ledger the diff report renders. Defaults to
+     * 2000. Rows past the cap are counted and reported as omitted, never dropped silently.
+     */
+    ledgerMaxRows?: number;
     /**
      * Canonical fields exempt from the "declared but never mapped" coverage check. Use for a
      * column that is genuinely optional in a source — present on some report instances, absent
@@ -408,11 +431,10 @@ export function validateReportSpecShape(obj: unknown): string[] {
         // read as "declared" everywhere downstream while matching no column at all.
         for (const [canonical, entry] of Object.entries(s.fieldMap as Record<string, unknown>)) {
             if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-                errors.push(`fieldMap.${canonical}: must be an object of {crystal?, ssrs?, db?}`);
+                errors.push(`fieldMap.${canonical}: must be an object of {<source>: name | [names]}`);
                 continue;
             }
-            for (const source of ['crystal', 'ssrs', 'db'] as const) {
-                const names = (entry as Record<string, unknown>)[source];
+            for (const [source, names] of Object.entries(entry as Record<string, unknown>)) {
                 if (names === undefined) continue;
                 if (typeof names === 'string') {
                     if (names.length === 0) errors.push(`fieldMap.${canonical}.${source}: must not be empty`);

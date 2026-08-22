@@ -23,8 +23,14 @@
  * @module report-validation/CSReportModel
  */
 
-/** Source system a canonical report was extracted from. */
-export type ReportSource = 'crystal' | 'ssrs' | 'db';
+/**
+ * Which producer a canonical report was extracted from — any label a spec chooses.
+ *
+ * Free-form so two reports from any pair of systems can be compared: a legacy engine against
+ * its replacement, one vendor against another, a rendering against its database. `spec.fieldMap`
+ * keys off the same labels, so `legacy`/`current` is as valid as `crystal`/`ssrs`.
+ */
+export type ReportSource = string;
 
 /** Serialization/rendering format the canonical report came out of. */
 export type ReportFormat = 'excel' | 'csv' | 'xml' | 'pdf' | 'db';
@@ -76,6 +82,21 @@ export interface CanonicalSection {
      * reconciler can tell "did not extract" from "extracted as empty".
      */
     summary?: Record<string, CanonicalValue>;
+    /**
+     * Captions of chart regions detected inside this section. Present for PDF sources.
+     *
+     * A caption is whatever text sits immediately above the region, so it is a hint rather than
+     * an identity — which is why chart presence is asserted against `textContent` as well.
+     */
+    chartCaptions?: string[];
+    /**
+     * Every text fragment the section rendered — cell values, free text and preamble lines.
+     *
+     * A chart's title is drawn as ordinary text, so this is what makes "the chart is on the
+     * page" checkable. It is also the only record of text that fell outside every column band,
+     * which would otherwise leave the section looking empty when it plainly was not.
+     */
+    textContent?: string[];
 }
 
 /** One comparable row in the canonical model. */
@@ -237,6 +258,55 @@ export interface ReconciliationCounts {
 }
 
 /** The full result of `CSReportReconciler.reconcile(...)`. */
+/**
+ * Per-field outcome inside a {@link ComparisonRow}. Recorded for EVERY field compared,
+ * matches included — a report that lists only differences cannot be audited, because
+ * nothing in it distinguishes "these agreed" from "this was never compared".
+ */
+export interface ComparisonCell {
+    /** Canonical field name. */
+    field: string;
+    /** Raw text as printed on the A side, or null when that side carried no value. */
+    aRaw: string | null;
+    /** Raw text as printed on the B side, or null when that side carried no value. */
+    bRaw: string | null;
+    /** `'MATCH'` when the two agreed, otherwise the classification that was recorded. */
+    status: FindingKind | 'MATCH';
+    /** Signed `b - a` for numeric comparisons that carried a delta. */
+    delta?: number;
+    reason?: string;
+}
+
+/** One compared business row, both sides side by side. */
+export interface ComparisonRow {
+    section: string;
+    /** Business-key values identifying the row. */
+    key: Record<string, string>;
+    /** Grid record, or a section's calculation-block figures. */
+    kind: 'record' | 'summary';
+    /** Which sides carried the row at all. */
+    presence: 'BOTH' | 'A_ONLY' | 'B_ONLY';
+    /** Roll-up: FAIL if any cell failed, INFO if any cell was noted, else PASS. */
+    status: 'PASS' | 'FAIL' | 'INFO';
+    cells: ComparisonCell[];
+}
+
+/**
+ * The full audit trail of a reconciliation: every row compared, passing or failing, with
+ * both sides' values as printed. This is what makes a green run checkable — a reader can
+ * see WHAT was compared and what each side actually said, rather than taking a pass on
+ * trust.
+ */
+export interface ComparisonLedger {
+    aSource: string;
+    bSource: string;
+    rows: ComparisonRow[];
+    /** Rows compared but not listed because the cap was reached. Reported, never silent. */
+    omittedRows: number;
+    /** The cap in force for this run. */
+    rowCap: number;
+}
+
 export interface ReconciliationResult {
     /**
      * True iff there are ZERO findings in the failing classifications: `DATA_MISMATCH`,
@@ -246,4 +316,9 @@ export interface ReconciliationResult {
     passed: boolean;
     counts: ReconciliationCounts;
     findings: Finding[];
+    /**
+     * Every comparison performed, pass or fail. Present unless the reconciler was asked to
+     * skip it; the diff report renders it as the audit trail.
+     */
+    ledger?: ComparisonLedger;
 }

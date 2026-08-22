@@ -261,4 +261,13 @@ export interface LayoutAnalyzerOptions {
     stitchCrossPageTables?: boolean;
     /** Regexes matching section-header text on a per-report basis. Passed in from the spec at run time. */
     sectionHeaderRegexes?: RegExp[];
+    /**
+     * Delete the text inside detected chart regions before analysis. Default TRUE.
+     *
+     * Chart labels would otherwise appear as rows of a section that happens to contain a chart.
+     * A cluster is only called a chart when the alignment network finds no columns in it, so a
+     * grid can no longer be removed this way — set false only to inspect what the detector
+     * classified, or for a report where a real chart's labels must be kept.
+     */
+    removeChartText?: boolean;
 }

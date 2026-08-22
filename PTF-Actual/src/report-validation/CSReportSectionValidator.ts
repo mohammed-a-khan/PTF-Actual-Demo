@@ -33,6 +33,8 @@ export interface SectionValidationResult {
     missingSections: string[];
     /** Human-readable notes describing any order violations (empty when order was fine or not enforced). */
     orderIssues: string[];
+    /** `sectionId:pattern` for each `requiredCharts` entry that no rendered text or caption matched. */
+    missingCharts: string[];
 }
 
 /**
@@ -74,6 +76,36 @@ export function validateSections(canonical: CanonicalReport, spec: ReportSpec): 
         }
     }
 
+    // Charts a section must carry. A chart's title is drawn as ordinary text, so presence is
+    // asserted against everything the section rendered plus any detected chart caption — a
+    // missing chart shows up first as a missing title.
+    const missingCharts: string[] = [];
+    for (const req of spec.requiredSections) {
+        if (!req.requiredCharts || req.requiredCharts.length === 0) continue;
+        const section = canonical.sections.find((s) => s.id === req.id && s.present);
+        if (!section) continue; // Already reported as a missing section.
+        const haystack = [...(section.textContent ?? []), ...(section.chartCaptions ?? [])];
+        for (const pattern of req.requiredCharts) {
+            let matcher: RegExp;
+            try {
+                matcher = new RegExp(pattern, 'i');
+            } catch {
+                continue; // Spec loading validates shape, not regex syntax.
+            }
+            if (haystack.some((text) => matcher.test(text))) continue;
+            missingCharts.push(`${req.id}:${pattern}`);
+            findings.push({
+                id: sectionFindingId(req.id, `chart:${pattern}`),
+                classification: 'MISSING',
+                section: req.id,
+                key: {},
+                reason:
+                    `Chart matching /${pattern}/ is missing from section "${req.title}" on the ` +
+                    `${canonical.source} report — no rendered text or chart caption in that section matches it`,
+            });
+        }
+    }
+
     const orderIssues: string[] = [];
     if (spec.enforceSectionOrder) {
         const expected = spec.requiredSections
@@ -97,8 +129,8 @@ export function validateSections(canonical: CanonicalReport, spec: ReportSpec): 
         }
     }
 
-    const passed = missingSections.length === 0 && orderIssues.length === 0;
-    return { passed, findings, presentSections, missingSections, orderIssues };
+    const passed = missingSections.length === 0 && orderIssues.length === 0 && missingCharts.length === 0;
+    return { passed, findings, presentSections, missingSections, orderIssues, missingCharts };
 }
 
 // ---------------------------------------------------------------------------

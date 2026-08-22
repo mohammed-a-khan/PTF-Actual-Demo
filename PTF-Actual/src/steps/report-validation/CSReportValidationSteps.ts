@@ -1,36 +1,35 @@
-// src/steps/reports/CSReportValidationSteps.ts
+// BDD step-defs for PDF report validation. Thin — every step delegates to
+// `CSReportValidationService`. Spec, entity and ingested canonicals live on
+// `CSBDDContext` under `reportvalidation.*` so later steps reuse them.
 //
-// BDD step-defs for report validation. Thin — every step delegates to
-// `CSReportValidationService`. Canonicals + spec + entity are stashed on
-// `CSBDDContext` under the `reportvalidation.*` namespace so later steps in
-// the same scenario can pick them up without re-doing acquisition or ingestion.
+// A SOURCE is any label the spec's fieldMap uses — crystal, ssrs, legacy, vendorA — so the
+// steps are not tied to a particular reporting engine. `database` folds onto `db`.
 //
 // Gherkin surface:
 //
-//   Given the report spec "example-report"
-//   Given the report spec "example-report" for entity "ENTITY-1"
-//   Given the report entity "ENTITY-1"
-//   Given the report parameter "asOfDate" is "2026-08-18"
-//   Given the report section column "SECTION_NAME"
+//   Given the report spec "<reportType>"
+//   Given the report spec "<reportType>" for entity "<entity>"
+//   Given the report entity "<entity>"
+//   Given the report parameter "<name>" is "<value>"
+//   Given the report section column "<COLUMN>"
 //
-//   When I acquire the SSRS report for entity "ENTITY-1" exporting as "Excel"
-//   When I acquire the Crystal report for entity "ENTITY-1"
-//   When I ingest the SSRS report from "path/to/file.xlsx"
-//   When I ingest the Crystal report from "path/to/file.pdf"
-//   When I ingest the SSRS report from the latest download
-//   When I ingest the Crystal report from the latest download
+//   When I acquire the <source> report for entity "<entity>" exporting as "<format>"
+//   When I acquire the <source> report for entity "<entity>"
+//   When I ingest the <source> report from "<path>"
+//   When I ingest the <source> report from the latest download
 //   When I ingest the database dataset
 //
-//   Then the SSRS report should match the Crystal report per the spec
-//   Then the SSRS report should match the database per the spec
-//   Then the Crystal report should match the database per the spec
+//   Then the <actual> report should match the <expected> report per the spec
+//   Then the <source> report should match the database per the spec
 //   Then the report should contain the required sections
-//   Then the {source} report should contain the required sections
+//   Then the <source> report should contain the required sections
+//   Then the <source> report should contain the required charts
+//   Then the <source> report section "<id>" should resolve every printed column
+//   Then the <source> report section "<id>" should report "<figure>" as "<value>"
 //
-// The "acquire" step drives the framework-registered `ReportAcquirer`
-// (default: LatestDownloadAcquirer, which just grabs the most recent file
-// dropped in the framework downloads folder — projects register their own
-// SSRS-UI-driving acquirer via CSReportValidationService.registerAcquirer).
+// "Acquire" drives the registered `ReportAcquirer` (default: pick up the most recent file the
+// framework downloaded — projects register their own via
+// CSReportValidationService.registerAcquirer).
 
 import { CSBDDStepDef } from '../../bdd/CSStepRegistry';
 import { CSBDDContext } from '../../bdd/CSBDDContext';
@@ -40,17 +39,17 @@ import {
     type IngestOptions,
     type SectionValidationResult,
 } from '../../report-validation/CSReportValidationService';
-import type { CanonicalReport, ReconciliationResult, ReportSource } from '../../report-validation/CSReportModel';
-import type { ReportSpec } from '../../report-validation/CSReportSpec';
+import type { CanonicalReport, CanonicalValue, ReconciliationResult, ReportSource } from '../../report-validation/CSReportModel';
+import { normalizeValue } from '../../report-validation/CSReportNormalizer';
+import type { ReportSpec, ToleranceSpec } from '../../report-validation/CSReportSpec';
 import { computeComparisonScope, type DiffReportInput } from '../../report-validation/CSReportDiffReporter';
 
 const CTX_SPEC = 'reportvalidation.spec';
 const CTX_ENTITY = 'reportvalidation.entity';
 const CTX_PARAMS = 'reportvalidation.params';
 const CTX_SECTION_COLUMN = 'reportvalidation.sectionColumn';
-const CTX_SSRS = 'reportvalidation.ssrs';
-const CTX_CRYSTAL = 'reportvalidation.crystal';
-const CTX_DB = 'reportvalidation.db';
+const CTX_SOURCES = 'reportvalidation.sources';
+const CTX_DB = 'reportvalidation.source.db';
 
 export class CSReportValidationSteps {
     private readonly ctx: CSBDDContext;
@@ -140,6 +139,7 @@ export class CSReportValidationSteps {
             params: this.ctx.get<Record<string, string | number>>(CTX_PARAMS) ?? {},
         });
         await this.ingest(filePath, spec, source, entity);
+        CSReporter.pass(`Acquired ${source} report for ${entity} as ${effectiveFormat}: ${filePath}`);
     }
 
     @CSBDDStepDef('I acquire the {word} report for entity {string}')
@@ -153,6 +153,7 @@ export class CSReportValidationSteps {
             params: this.ctx.get<Record<string, string | number>>(CTX_PARAMS) ?? {},
         });
         await this.ingest(filePath, spec, source, entity);
+        CSReporter.pass(`Acquired ${source} report for ${entity}: ${filePath}`);
     }
 
     // ------------------------------------------------------------------------
@@ -165,6 +166,7 @@ export class CSReportValidationSteps {
         const spec = requireSpec(this.ctx);
         const entity = requireEntity(this.ctx);
         await this.ingest(filePath, spec, source, entity);
+        CSReporter.pass(`${source} report ingested from ${filePath}`);
     }
 
     @CSBDDStepDef('I ingest the {word} report from the latest download')
@@ -178,6 +180,7 @@ export class CSReportValidationSteps {
             params: this.ctx.get<Record<string, string | number>>(CTX_PARAMS) ?? {},
         });
         await this.ingest(filePath, spec, source, entity);
+        CSReporter.pass(`${source} report ingested from latest download: ${filePath}`);
     }
 
     @CSBDDStepDef('I ingest the database dataset')
@@ -188,39 +191,33 @@ export class CSReportValidationSteps {
         const sectionColumn = this.ctx.get<string>(CTX_SECTION_COLUMN);
         const canonical = await this.service.ingestFromDatabase(spec, { entity, params, sectionColumn });
         this.ctx.set(CTX_DB, canonical);
-        CSReporter.info(`Ingested DB dataset: ${canonical.records.length} record(s), ${canonical.sections.length} section(s)`);
+        rememberSource(this.ctx, 'db');
         this.emitCanonicalDump(canonical);
+        CSReporter.pass(`Database dataset ingested: ${canonical.records.length} record(s), ${canonical.sections.length} section(s)`);
     }
 
     // ------------------------------------------------------------------------
     // Comparisons
     // ------------------------------------------------------------------------
 
-    @CSBDDStepDef('the SSRS report should match the Crystal report per the spec')
-    async ssrsMatchesCrystal(): Promise<void> {
+    /**
+     * Compare any two ingested sources. `expected` is the reference side, so a row it has and
+     * `actual` lacks reads as MISSING.
+     */
+    @CSBDDStepDef('the {word} report should match the {word} report per the spec')
+    async reportMatchesReport(actualWord: string, expectedWord: string): Promise<void> {
         const spec = requireSpec(this.ctx);
-        const a = requireCanonical(this.ctx, CTX_CRYSTAL, 'Crystal');
-        const b = requireCanonical(this.ctx, CTX_SSRS, 'SSRS');
+        const actual = parseSource(actualWord);
+        const expected = parseSource(expectedWord);
+        const a = requireCanonical(this.ctx, ctxKeyForSource(expected), expectedWord);
+        const b = requireCanonical(this.ctx, ctxKeyForSource(actual), actualWord);
         const result = this.service.reconcile(a, b, spec);
-        this.writeAndReportReconciliation(result, 'SSRS vs Crystal', spec, a, b);
+        this.writeAndReportReconciliation(result, `${actual} vs ${expected}`, spec, a, b);
     }
 
-    @CSBDDStepDef('the SSRS report should match the database per the spec')
-    async ssrsMatchesDb(): Promise<void> {
-        const spec = requireSpec(this.ctx);
-        const a = requireCanonical(this.ctx, CTX_DB, 'DB');
-        const b = requireCanonical(this.ctx, CTX_SSRS, 'SSRS');
-        const result = this.service.reconcile(a, b, spec);
-        this.writeAndReportReconciliation(result, 'SSRS vs DB', spec, a, b);
-    }
-
-    @CSBDDStepDef('the Crystal report should match the database per the spec')
-    async crystalMatchesDb(): Promise<void> {
-        const spec = requireSpec(this.ctx);
-        const a = requireCanonical(this.ctx, CTX_DB, 'DB');
-        const b = requireCanonical(this.ctx, CTX_CRYSTAL, 'Crystal');
-        const result = this.service.reconcile(a, b, spec);
-        this.writeAndReportReconciliation(result, 'Crystal vs DB', spec, a, b);
+    @CSBDDStepDef('the {word} report should match the database per the spec')
+    async reportMatchesDb(actualWord: string): Promise<void> {
+        await this.reportMatchesReport(actualWord, 'db');
     }
 
     @CSBDDStepDef('the report should contain the required sections')
@@ -241,6 +238,111 @@ export class CSReportValidationSteps {
         this.reportSectionValidation(result, source);
     }
 
+    /**
+     * Assert a figure from a section's summary block. Those sit outside every column band, so
+     * the row comparison cannot reach them — undeclared, they go unchecked.
+     *
+     * Write the expected value as printed; both sides are normalised before comparing.
+     */
+    @CSBDDStepDef('the {word} report section {string} should report {string} as {string}')
+    async summaryFigureShouldBe(
+        sourceWord: string,
+        sectionId: string,
+        figureId: string,
+        expected: string,
+    ): Promise<void> {
+        const spec = requireSpec(this.ctx);
+        const source = parseSource(sourceWord);
+        const canonical = requireCanonical(this.ctx, ctxKeyForSource(source), sourceWord);
+        const section = canonical.sections.find((s) => s.id === sectionId);
+        if (!section) {
+            throw new Error(
+                `CSReportValidationSteps: section "${sectionId}" was not found on the ${source} report — ` +
+                `found: [${canonical.sections.map((s) => s.id).join(', ')}]`,
+            );
+        }
+        const actual = section.summary?.[figureId];
+        if (!actual) {
+            throw new Error(
+                `CSReportValidationSteps: figure "${figureId}" was not extracted from section "${sectionId}" ` +
+                `on ${source} — declare it under requiredSections["${sectionId}"].summaryFields with the ` +
+                `label as printed; a label clipped at the page edge is matched on its tail automatically`,
+            );
+        }
+        const want = normalizeValue(expected, { dateFormats: spec.dateFormats });
+        const tolerance = spec.tolerances[figureId];
+        if (!valuesAgree(actual, want, tolerance)) {
+            throw new Error(
+                `Report figure mismatch on ${source} — section "${sectionId}", figure "${figureId}": ` +
+                `expected ${JSON.stringify(want.kind === 'null' ? expected : String(want.value))} ` +
+                `but read ${JSON.stringify(actual.kind === 'null' ? '' : String(actual.value))} ` +
+                `(printed as ${JSON.stringify(actual.raw)})`,
+            );
+        }
+        // Both sides of the comparison are logged, not just the verdict: a reader auditing a
+        // green run needs to see what was expected and what the report actually printed.
+        CSReporter.pass(
+            `${sectionId}.${figureId} on ${source} — expected ${JSON.stringify(expected)}, ` +
+            `read ${JSON.stringify(actual.raw)} (normalised ` +
+            `${JSON.stringify(actual.kind === 'null' ? '' : String(actual.value))}` +
+            `${tolerance ? ', tolerance applied' : ''}) — PASS`,
+        );
+    }
+
+    /**
+     * Assert every column the section prints resolved to a field. An unresolved column is
+     * dropped in silence, and if it is a key column the section goes with it.
+     */
+    @CSBDDStepDef('the {word} report section {string} should resolve every printed column')
+    async sectionColumnsShouldResolve(sourceWord: string, sectionId: string): Promise<void> {
+        const source = parseSource(sourceWord);
+        const canonical = requireCanonical(this.ctx, ctxKeyForSource(source), sourceWord);
+        const section = canonical.sections.find((s) => s.id === sectionId);
+        if (!section) {
+            throw new Error(
+                `CSReportValidationSteps: section "${sectionId}" was not found on the ${source} report — ` +
+                `found: [${canonical.sections.map((s) => s.id).join(', ')}]`,
+            );
+        }
+        const printed = section.detectedColumns ?? [];
+        const unresolved = printed.filter((c) => c.header && !c.mapsTo).map((c) => c.header);
+        if (unresolved.length > 0) {
+            throw new Error(
+                `Section "${sectionId}" on ${source} printed ${unresolved.length} column(s) that resolved to no ` +
+                `field: ${JSON.stringify(unresolved)} — add them to spec.fieldMap, or correct the names already there`,
+            );
+        }
+        const resolved = printed.filter((c) => c.mapsTo);
+        for (const column of resolved) {
+            CSReporter.info(`${sectionId} column "${column.header}" → field "${column.mapsTo}"`);
+        }
+        CSReporter.pass(`${sectionId} on ${source}: all ${resolved.length} printed column(s) resolved — PASS`);
+    }
+
+    /** Assert the charts a section declares. A chart title is ordinary text, so presence is a text check. */
+    @CSBDDStepDef('the {word} report should contain the required charts')
+    async requiredChartsPresent(sourceWord: string): Promise<void> {
+        const spec = requireSpec(this.ctx);
+        const source = parseSource(sourceWord);
+        const canonical = requireCanonical(this.ctx, ctxKeyForSource(source), sourceWord);
+        const result = this.service.validateSections(canonical, spec);
+        const declared = spec.requiredSections.flatMap((s) => s.requiredCharts ?? []);
+        if (declared.length === 0) {
+            throw new Error(
+                'CSReportValidationSteps: no charts are declared — add requiredCharts to a section in the spec, ' +
+                'otherwise this step asserts nothing',
+            );
+        }
+        if (result.missingCharts.length > 0) {
+            for (const missing of result.missingCharts) CSReporter.fail(`Missing chart: ${missing}`);
+            throw new Error(
+                `Required charts missing on ${source}: [${result.missingCharts.join(', ')}]`,
+            );
+        }
+        for (const chart of declared) CSReporter.info(`Chart declared "${chart}" → found on ${source}`);
+        CSReporter.pass(`All ${declared.length} required chart(s) present on ${source} — PASS`);
+    }
+
     // ------------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------------
@@ -256,6 +358,7 @@ export class CSReportValidationSteps {
         const opts: IngestOptions = { entity, params, sectionColumn };
         const canonical = await this.service.ingestFile(filePath, spec, source, opts);
         this.ctx.set(ctxKeyForSource(source), canonical);
+        rememberSource(this.ctx, source);
         CSReporter.info(
             `Ingested ${source} report from ${filePath}: ` +
             `${canonical.records.length} record(s), ${canonical.sections.length} section(s)`,
@@ -334,6 +437,21 @@ export class CSReportValidationSteps {
         const line = scope
             ? `${label}: ${scope} — ${c.total} difference(s) [${breakdown}]`
             : `${label}: ${c.total} difference(s) [${breakdown}]`;
+
+        // The ledger is the audit trail behind the verdict — say how much of it there is and
+        // where to read it, so a pass can be checked rather than taken on trust.
+        const ledger = result.ledger;
+        if (ledger) {
+            const failing = ledger.rows.filter((r) => r.status === 'FAIL').length;
+            const cells = ledger.rows.reduce((n, r) => n + r.cells.length, 0);
+            CSReporter.info(
+                `Comparison ledger (${ledger.aSource} vs ${ledger.bSource}): ${ledger.rows.length} row(s), ` +
+                `${cells} field comparison(s), ${ledger.rows.length - failing} passing / ${failing} failing` +
+                (ledger.omittedRows > 0 ? ` — ${ledger.omittedRows} row(s) beyond the ${ledger.rowCap}-row cap not listed` : '') +
+                ' — full row-by-row detail in the diff report',
+            );
+        }
+
         if (result.passed) {
             CSReporter.pass(`${line} — passed`);
             return;
@@ -376,20 +494,31 @@ export class CSReportValidationSteps {
 // Helpers — module-local; no side effects on load.
 // ---------------------------------------------------------------------------
 
+/** Where a source's ingested canonical is stashed. One slot per label, created on demand. */
 function ctxKeyForSource(source: ReportSource): string {
-    switch (source) {
-        case 'crystal': return CTX_CRYSTAL;
-        case 'ssrs': return CTX_SSRS;
-        case 'db': return CTX_DB;
-    }
+    return `reportvalidation.source.${source}`;
 }
 
+/**
+ * A source is whatever the spec's `fieldMap` calls it — `crystal`, `ssrs`, `legacy`, `vendorA`.
+ * Only `database` is folded onto `db`, so both spellings reach the DB steps.
+ */
 function parseSource(word: string): ReportSource {
     const norm = word.toLowerCase().trim();
-    if (norm === 'crystal') return 'crystal';
-    if (norm === 'ssrs') return 'ssrs';
-    if (norm === 'db' || norm === 'database') return 'db';
-    throw new Error(`CSReportValidationSteps: unknown report source "${word}" — expected one of crystal|ssrs|db`);
+    if (norm.length === 0) {
+        throw new Error('CSReportValidationSteps: report source is empty — name the source the spec uses, e.g. "legacy"');
+    }
+    return norm === 'database' ? 'db' : norm;
+}
+
+/** Labels ingested so far, in order, so a step can fall back to "whatever was loaded". */
+function ingestedSources(ctx: CSBDDContext): string[] {
+    return ctx.get<string[]>(CTX_SOURCES) ?? [];
+}
+
+function rememberSource(ctx: CSBDDContext, source: ReportSource): void {
+    const seen = ingestedSources(ctx);
+    if (!seen.includes(source)) ctx.set(CTX_SOURCES, [...seen, source]);
 }
 
 function requireSpec(ctx: CSBDDContext): ReportSpec {
@@ -410,15 +539,20 @@ function requireCanonical(ctx: CSBDDContext, key: string, label: string): Canoni
     return val;
 }
 
+/** Normalised comparison of an extracted figure against an expected one, honouring the field's tolerance. */
+function valuesAgree(actual: CanonicalValue, expected: CanonicalValue, tolerance?: ToleranceSpec): boolean {
+    if (actual.kind === 'null' || expected.kind === 'null') return actual.kind === expected.kind;
+    if (actual.kind === 'number' && expected.kind === 'number') {
+        const epsilon = tolerance && tolerance.type === 'number' ? tolerance.epsilon ?? 0 : 0;
+        return Math.abs(actual.value - expected.value) <= epsilon;
+    }
+    return String(actual.value).trim().toLowerCase() === String(expected.value).trim().toLowerCase();
+}
+
 /** Fallback for "the report should contain the required sections" — SSRS first, then Crystal, then DB. */
 function pickFirstIngested(ctx: CSBDDContext): CanonicalReport {
-    const candidates: Array<[string, string]> = [
-        [CTX_SSRS, 'SSRS'],
-        [CTX_CRYSTAL, 'Crystal'],
-        [CTX_DB, 'DB'],
-    ];
-    for (const [key] of candidates) {
-        const val = ctx.get<CanonicalReport>(key);
+    for (const source of ingestedSources(ctx)) {
+        const val = ctx.get<CanonicalReport>(ctxKeyForSource(source));
         if (val) return val;
     }
     throw new Error('CSReportValidationSteps: no canonical report ingested yet — run an ingestion step before section validation');

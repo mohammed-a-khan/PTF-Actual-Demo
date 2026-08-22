@@ -47,12 +47,15 @@ import type {
     CanonicalReport,
     CanonicalSection,
     CanonicalValue,
+    ComparisonCell,
+    ComparisonLedger,
+    ComparisonRow,
     Finding,
     FindingKind,
     ReconciliationCounts,
     ReconciliationResult,
 } from './CSReportModel';
-import { canonicalizeString } from './CSReportNormalizer';
+import { canonicalizeString, fieldNamesForSource } from './CSReportNormalizer';
 import { validateChecksums } from './CSReportChecksumValidator';
 import { validateCoverage } from './CSReportCoverageValidator';
 import { validateFooting } from './CSReportFootingValidator';
@@ -62,6 +65,92 @@ import type { KnownDifferenceSpec, ReportSpec, ToleranceSpec } from './CSReportS
 const KEY_SEP = '\x1f';
 
 /**
+ * Default ledger cap. High enough that ordinary reports are recorded whole, low enough that
+ * a runaway extraction cannot turn the diff report into a gigabyte of HTML. Override per
+ * spec with `ledgerMaxRows`.
+ */
+const DEFAULT_LEDGER_MAX_ROWS = 2000;
+
+/** Classifications that make a row fail; anything else that is not MATCH is a note. */
+const LEDGER_FAILING: ReadonlySet<string> = new Set([
+    'DATA_MISMATCH', 'MISSING', 'EXTRA', 'FOOTING_MISMATCH', 'COVERAGE_GAP', 'CHECKSUM_DRIFT',
+]);
+
+/**
+ * Accumulates the audit trail while the reconciler walks. Rows beyond the cap are counted,
+ * never dropped quietly — `omittedRows` reaches the report so a truncated ledger reads as
+ * truncated rather than as complete.
+ */
+class LedgerBuilder {
+    private readonly rows: ComparisonRow[] = [];
+    private omitted = 0;
+
+    constructor(
+        private readonly aSource: string,
+        private readonly bSource: string,
+        private readonly cap: number,
+    ) {}
+
+    addRow(
+        section: string,
+        key: Record<string, string>,
+        kind: ComparisonRow['kind'],
+        presence: ComparisonRow['presence'],
+        cells: ComparisonCell[],
+    ): void {
+        if (cells.length === 0) return;
+        if (this.rows.length >= this.cap) { this.omitted++; return; }
+        this.rows.push({ section, key, kind, presence, status: rollUp(cells), cells });
+    }
+
+    /** A row only one side carried: its values are recorded against an empty other side. */
+    addOneSided(
+        section: string,
+        record: CanonicalRecord,
+        presence: 'A_ONLY' | 'B_ONLY',
+        status: FindingKind,
+        spec: ReportSpec,
+        ignore: ReadonlySet<string>,
+        notComparable: ReadonlySet<string>,
+    ): void {
+        const cells: ComparisonCell[] = [];
+        for (const field of Object.keys(spec.fieldMap)) {
+            if (ignore.has(field) || notComparable.has(field)) continue;
+            if (spec.keyColumns.includes(field)) continue;
+            const v = record.fields[field];
+            if (v === undefined) continue;
+            cells.push({
+                field,
+                aRaw: presence === 'A_ONLY' ? v.raw : null,
+                bRaw: presence === 'B_ONLY' ? v.raw : null,
+                status,
+            });
+        }
+        this.addRow(section, record.key, 'record', presence, cells);
+    }
+
+    build(): ComparisonLedger {
+        return {
+            aSource: this.aSource,
+            bSource: this.bSource,
+            rows: this.rows,
+            omittedRows: this.omitted,
+            rowCap: this.cap,
+        };
+    }
+}
+
+/** Row verdict from its cells: any failure fails the row, any note marks it informational. */
+function rollUp(cells: ComparisonCell[]): ComparisonRow['status'] {
+    let info = false;
+    for (const c of cells) {
+        if (LEDGER_FAILING.has(c.status)) return 'FAIL';
+        if (c.status !== 'MATCH') info = true;
+    }
+    return info ? 'INFO' : 'PASS';
+}
+
+/**
  * `CSReportReconciler.reconcile(a, b, spec)` — compare two canonical reports and
  * classify every difference. Pure function; no I/O, no reporter side effects.
  */
@@ -69,6 +158,7 @@ export class CSReportReconciler {
     static reconcile(a: CanonicalReport, b: CanonicalReport, spec: ReportSpec): ReconciliationResult {
         const ignore = new Set(spec.ignoreFields);
         const findings: Finding[] = [];
+        const ledger = new LedgerBuilder(a.source, b.source, spec.ledgerMaxRows ?? DEFAULT_LEDGER_MAX_ROWS);
 
         // Fields that cannot meaningfully be compared between THESE two sources.
         //
@@ -85,7 +175,7 @@ export class CSReportReconciler {
         const bUnmapped = new Set(b.meta.coverage?.unmappedFields ?? []);
         for (const canonicalField of Object.keys(spec.fieldMap)) {
             const entry = spec.fieldMap[canonicalField];
-            if (!entry[a.source] || !entry[b.source]) {
+            if (!fieldNamesForSource(entry, a.source) || !fieldNamesForSource(entry, b.source)) {
                 notComparable.add(canonicalField);
                 continue;
             }
@@ -116,6 +206,7 @@ export class CSReportReconciler {
                         key: aRec.key,
                         reason: 'key present in A, absent in B',
                     });
+                    ledger.addOneSided(section, aRec, 'A_ONLY', 'MISSING', spec, ignore, notComparable);
                     continue;
                 }
                 if (!aRec && bRec) {
@@ -126,6 +217,7 @@ export class CSReportReconciler {
                         key: bRec.key,
                         reason: 'key present in B, absent in A',
                     });
+                    ledger.addOneSided(section, bRec, 'B_ONLY', 'EXTRA', spec, ignore, notComparable);
                     continue;
                 }
                 if (!aRec || !bRec) continue; // TS narrowing; unreachable.
@@ -133,6 +225,7 @@ export class CSReportReconciler {
                 // Field-by-field walk. We use fieldMap as the authoritative canonical field
                 // list so extraneous columns on either side are ignored (a common source
                 // of noise between Crystal and SSRS).
+                const cells: ComparisonCell[] = [];
                 for (const canonicalField of Object.keys(spec.fieldMap)) {
                     if (ignore.has(canonicalField)) continue;
                     if (notComparable.has(canonicalField)) continue;
@@ -151,6 +244,16 @@ export class CSReportReconciler {
                         bv ?? { kind: 'null', raw: '' },
                         tolerance,
                     );
+                    // Recorded whatever the outcome: the ledger is the audit trail, and a
+                    // trail that omits the agreements cannot show what a pass covered.
+                    cells.push({
+                        field: canonicalField,
+                        aRaw: av ? av.raw : null,
+                        bRaw: bv ? bv.raw : null,
+                        status: result.classification,
+                        delta: result.delta,
+                        reason: result.reason,
+                    });
                     if (result.classification === 'MATCH') continue;
 
                     findings.push({
@@ -165,6 +268,7 @@ export class CSReportReconciler {
                         reason: result.reason,
                     });
                 }
+                ledger.addRow(section, aRec.key, 'record', 'BOTH', cells);
             }
         }
 
@@ -172,7 +276,7 @@ export class CSReportReconciler {
         // above cannot reach them — and they are usually the numbers the section exists to
         // report. Compared here so a section whose grid agrees but whose ratio doesn't
         // cannot pass.
-        for (const f of compareSectionSummaries(a, b, spec)) findings.push(f);
+        for (const f of compareSectionSummaries(a, b, spec, ledger)) findings.push(f);
 
         // Footing: each side's printed totals against the rows extracted beneath them. Run
         // per side, not across sides — two identically truncated extractions agree with each
@@ -207,7 +311,7 @@ export class CSReportReconciler {
             counts.footingMismatch === 0 &&
             (spec.enforceChecksums ? counts.checksumDrift === 0 : true) &&
             (spec.allowCoverageGaps ? true : counts.coverageGap === 0);
-        return { passed, counts, findings };
+        return { passed, counts, findings, ledger: ledger.build() };
     }
 }
 
@@ -230,7 +334,12 @@ export class CSReportReconciler {
  * Sections absent from a side are left alone: the section validator already reports a
  * missing section, and repeating it once per figure would bury that finding.
  */
-function compareSectionSummaries(a: CanonicalReport, b: CanonicalReport, spec: ReportSpec): Finding[] {
+function compareSectionSummaries(
+    a: CanonicalReport,
+    b: CanonicalReport,
+    spec: ReportSpec,
+    ledger: LedgerBuilder,
+): Finding[] {
     const findings: Finding[] = [];
     const sectionOn = (report: CanonicalReport, id: string): CanonicalSection | undefined =>
         report.sections.find((s) => s.id === id && s.present && !s.outOfScope);
@@ -243,6 +352,7 @@ function compareSectionSummaries(a: CanonicalReport, b: CanonicalReport, spec: R
         const bSection = sectionOn(b, required.id);
         if (!aSection || !bSection) continue;
 
+        const summaryCells: ComparisonCell[] = [];
         for (const field of fields) {
             const av = aSection.summary?.[field.id];
             const bv = bSection.summary?.[field.id];
@@ -267,6 +377,14 @@ function compareSectionSummaries(a: CanonicalReport, b: CanonicalReport, spec: R
                 bv ?? { kind: 'null', raw: '' },
                 spec.tolerances[field.id],
             );
+            summaryCells.push({
+                field: field.id,
+                aRaw: av ? av.raw : null,
+                bRaw: bv ? bv.raw : null,
+                status: result.classification,
+                delta: result.delta,
+                reason: result.reason,
+            });
             if (result.classification === 'MATCH') continue;
 
             findings.push({
@@ -280,6 +398,9 @@ function compareSectionSummaries(a: CanonicalReport, b: CanonicalReport, spec: R
                 delta: result.delta,
                 reason: result.reason,
             });
+        }
+        if (summaryCells.length > 0) {
+            ledger.addRow(required.id, { figures: required.title }, 'summary', 'BOTH', summaryCells);
         }
     }
     return findings;

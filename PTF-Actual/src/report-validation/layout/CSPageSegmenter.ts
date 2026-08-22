@@ -158,6 +158,51 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
         }
     }
 
+    // DEEP FOOTER — a repeated line whose exact position drifts between pages.
+    //
+    // Crystal moves its company footer a few points between report subtemplates. That is enough
+    // to split an otherwise stable footer into several exact (x, y, text) signatures, so a long
+    // document can leave the footer in the BODY even though it is printed on every page. It then
+    // reads as a data row with no business key, and the section is charged with keyless rows it
+    // never had.
+    //
+    // A repeated text item in the deepest 5% of the page is unambiguous footer chrome; unlike the
+    // broad bottom strip, that depth does not include the final table rows. So the match is on
+    // TEXT across pages rather than on an exact position.
+    const deepFooterTextPages = new Map<string, Set<number>>();
+    for (let p = 0; p < strips.length; p++) {
+        const deepFooterCutoff = pages[p].height * DEEP_FOOTER_FRACTION;
+        const protectedItems = protectedItemsOn(strips[p].bottom, protectedPatterns, yTol);
+        for (const item of strips[p].bottom) {
+            if (item.y > deepFooterCutoff || protectedItems.has(item)) continue;
+            const text = item.str.trim();
+            // Letters only: a bare page number differs on every page and would never repeat.
+            if (text.length === 0 || !/[A-Za-z]/.test(text)) continue;
+            let pageSet = deepFooterTextPages.get(text);
+            if (!pageSet) {
+                pageSet = new Set<number>();
+                deepFooterTextPages.set(text, pageSet);
+            }
+            pageSet.add(p);
+        }
+    }
+
+    const alreadyChrome = strips.map((_, p) => new Set(chromeFooter[p]));
+    for (let p = 0; p < strips.length; p++) {
+        const deepFooterCutoff = pages[p].height * DEEP_FOOTER_FRACTION;
+        for (const item of strips[p].bottom) {
+            if (alreadyChrome[p].has(item)) continue;
+            const text = item.str.trim();
+            if (
+                item.y <= deepFooterCutoff &&
+                text.length > 0 &&
+                (deepFooterTextPages.get(text)?.size ?? 0) >= minRepeats
+            ) {
+                chromeFooter[p].push(item);
+            }
+        }
+    }
+
     // Body = original items minus everything classified as chrome.
     const chromeItemSets: Set<TextItem>[] = strips.map((_, p) => {
         const set = new Set<TextItem>();
@@ -184,6 +229,9 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
  * line but none of the fragments. When a line matches, every item on it is protected: the
  * fragments are the title.
  */
+/** Fraction of page height, measured from the bottom, that is unambiguously footer chrome. */
+const DEEP_FOOTER_FRACTION = 0.05;
+
 function protectedItemsOn(items: TextItem[], patterns: RegExp[], yTol: number): Set<TextItem> {
     const out = new Set<TextItem>();
     if (patterns.length === 0 || items.length === 0) return out;
