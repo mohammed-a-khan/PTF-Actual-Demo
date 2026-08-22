@@ -396,8 +396,8 @@ function renderLedgerSection(section: string, rows: ComparisonRow[], sourceA: st
     const body = rows.map((row) => renderLedgerRow(row, fields, sourceA, sourceB)).join('\n');
     const failing = rows.filter((r) => r.status === 'FAIL').length;
 
-    return `<details class="rv-ledger-section"${failing > 0 ? ' open' : ''}>
-  <summary><span class="rv-ledger-section-name">${escapeHtml(section)}</span> <span class="rv-count-inline">${rows.length} row(s)${failing > 0 ? `, ${failing} failing` : ''}</span></summary>
+    return `<details class="rv-ledger-section" open>
+  <summary><span class="rv-ledger-section-name">${escapeHtml(section)}</span> <span class="rv-count-inline">${rows.length} row(s), ${rows.length - failing} matching${failing > 0 ? `, ${failing} failing` : ''}</span></summary>
   <div class="rv-ledger-scroll">
     <table class="rv-ledger-table">
       <thead><tr><th class="rv-ledger-key">Row</th><th class="rv-ledger-side">Source</th>${header}<th class="rv-ledger-status">Status</th></tr></thead>
