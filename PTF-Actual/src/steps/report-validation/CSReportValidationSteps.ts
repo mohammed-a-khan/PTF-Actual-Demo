@@ -78,6 +78,25 @@ export class CSReportValidationSteps {
         CSReporter.info(`Report entity: ${entity}`);
     }
 
+    /**
+     * Pin the exact spec file this scenario runs against, ignoring the configured specs
+     * directory. Use when the spec lives beside the test, or when several specs would
+     * otherwise be loaded together and collide on reportType.
+     */
+    @CSBDDStepDef('the report spec file {string}')
+    async setActiveSpecFromFile(specPath: string): Promise<void> {
+        const spec = await this.service.loadSpecFromFile(specPath);
+        this.ctx.set(CTX_SPEC, spec);
+        CSReporter.info(`Report spec loaded from file: ${specPath} → ${spec.reportType} (${spec.project})`);
+    }
+
+    @CSBDDStepDef('the report spec file {string} for entity {string}')
+    async setActiveSpecFromFileAndEntity(specPath: string, entity: string): Promise<void> {
+        await this.setActiveSpecFromFile(specPath);
+        this.ctx.set(CTX_ENTITY, entity);
+        CSReporter.info(`Report entity: ${entity}`);
+    }
+
     @CSBDDStepDef('the report entity {string}')
     async setActiveEntity(entity: string): Promise<void> {
         this.ctx.set(CTX_ENTITY, entity);

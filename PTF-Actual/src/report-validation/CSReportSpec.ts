@@ -303,9 +303,15 @@ export class CSReportSpecLoader {
     private loaded = false;
 
     /**
-     * @param specsDir Absolute or workspace-relative path to the directory containing
-     *                 `*.json` spec files. One spec per file; filename ignored — the
+     * @param specsDir Where specs live. Each entry is either a directory of `*.json` spec
+     *                 files or a single `.json` spec file, and several may be given
+     *                 separated by `;` — matching how the framework's other path settings
+     *                 are written. One spec per file; the filename is ignored, since the
      *                 loader indexes by `spec.reportType`.
+     *
+     *                 Pointing at one file is the way to load ONLY that spec: a directory
+     *                 loads everything beside it, which is what makes an unrelated spec in
+     *                 the same folder able to break an otherwise unrelated run.
      */
     constructor(private readonly specsDir: string) {}
 
@@ -320,13 +326,42 @@ export class CSReportSpecLoader {
         // (dashboard bundle etc.) — the loader is only ever called server-side.
         const fs: typeof import('fs') = require('fs');
         const path: typeof import('path') = require('path');
-        if (!fs.existsSync(this.specsDir)) {
-            throw new Error(`CSReportSpecLoader: specsDir does not exist: ${this.specsDir}`);
+        const files: string[] = [];
+        const seenFiles = new Set<string>();
+        const addFile = (file: string): void => {
+            // Same file named twice — a directory plus one of its own files, say — is one
+            // spec, not a duplicate reportType.
+            if (seenFiles.has(file)) return;
+            seenFiles.add(file);
+            files.push(file);
+        };
+        for (const rawEntry of this.specsDir.split(';')) {
+            const entry = rawEntry.trim();
+            if (entry.length === 0) continue;
+            const resolved = path.resolve(entry);
+            if (!fs.existsSync(resolved)) {
+                throw new Error(`CSReportSpecLoader: specs path does not exist: ${resolved}`);
+            }
+            if (fs.statSync(resolved).isDirectory()) {
+                for (const name of fs.readdirSync(resolved)) {
+                    if (name.toLowerCase().endsWith('.json')) addFile(path.join(resolved, name));
+                }
+                continue;
+            }
+            // A single file. Required to be .json so a mistyped path fails here rather than
+            // as a parse error three lines later.
+            if (!resolved.toLowerCase().endsWith('.json')) {
+                throw new Error(
+                    `CSReportSpecLoader: specs path must be a directory or a .json spec file: ${resolved}`,
+                );
+            }
+            addFile(resolved);
         }
-        const files = fs
-            .readdirSync(this.specsDir)
-            .filter((f: string) => f.toLowerCase().endsWith('.json'))
-            .map((f: string) => path.join(this.specsDir, f));
+        if (files.length === 0) {
+            throw new Error(
+                `CSReportSpecLoader: no .json spec files found under: ${this.specsDir}`,
+            );
+        }
         for (const file of files) {
             const raw = fs.readFileSync(file, 'utf-8');
             let parsed: unknown;

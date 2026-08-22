@@ -239,6 +239,7 @@ export class CSReportValidationService {
     private readonly canonicalCache: CSCanonicalCache | null;
     private ocrAdapter?: OcrAdapter;
     private loaderInitialized = false;
+    private readonly fileSpecCache = new Map<string, ReportSpec>();
 
     constructor(opts: ServiceOptions = {}) {
         this.loader = opts.loader ?? new CSReportSpecLoader(opts.specsDir ?? defaultSpecsDir());
@@ -276,6 +277,32 @@ export class CSReportValidationService {
     /** Access the canonical cache. Returns null when caching is disabled. */
     getCanonicalCache(): CSCanonicalCache | null {
         return this.canonicalCache;
+    }
+
+    /**
+     * Load a spec from ONE named file, ignoring the configured specs directory entirely.
+     *
+     * For the case where a scenario must pin the exact spec it runs against — a spec kept
+     * beside the test rather than in the shared directory, or one of several versions of
+     * the same report. Loading a directory also loads everything else in it, so a spec that
+     * happens to sit alongside can collide on `reportType`; naming the file cannot.
+     */
+    async loadSpecFromFile(filePath: string): Promise<ReportSpec> {
+        const resolved = path.resolve(process.cwd(), filePath);
+        const cached = this.fileSpecCache.get(resolved);
+        if (cached) return cached;
+        const loader = new CSReportSpecLoader(resolved);
+        await loader.loadAll();
+        const types = loader.list();
+        if (types.length !== 1) {
+            throw new Error(
+                `CSReportValidationService: expected exactly one spec in ${resolved}, found ${types.length}` +
+                (types.length > 0 ? ` — [${types.join(', ')}]` : ''),
+            );
+        }
+        const spec = loader.get(types[0]);
+        this.fileSpecCache.set(resolved, spec);
+        return spec;
     }
 
     /** Load and return a spec. Idempotent — subsequent calls hit the loader's in-memory cache. */
@@ -556,7 +583,15 @@ export class CSReportValidationService {
 function defaultSpecsDir(): string {
     const configured = readConfig('REPORT_SPECS_DIR') || process.env.REPORT_SPECS_DIR;
     if (configured && configured.trim().length > 0) {
-        return path.resolve(process.cwd(), configured.trim());
+        // May name a directory, a single .json spec file, or several of either separated
+        // by `;`. Each entry is resolved against the working directory so relative paths in
+        // a consumer's env file behave the same as the framework's other path settings.
+        return configured
+            .split(';')
+            .map((entry) => entry.trim())
+            .filter((entry) => entry.length > 0)
+            .map((entry) => path.resolve(process.cwd(), entry))
+            .join(';');
     }
     return path.join(process.cwd(), 'config', 'report-specs');
 }
