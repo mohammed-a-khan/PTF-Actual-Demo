@@ -396,8 +396,8 @@ function renderLedgerSection(section: string, rows: ComparisonRow[], sourceA: st
     const body = rows.map((row) => renderLedgerRow(row, fields, sourceA, sourceB)).join('\n');
     const failing = rows.filter((r) => r.status === 'FAIL').length;
 
-    return `<details class="rv-ledger-section" open>
-  <summary><span class="rv-ledger-section-name">${escapeHtml(section)}</span> <span class="rv-count-inline">${rows.length} row(s), ${rows.length - failing} matching${failing > 0 ? `, ${failing} failing` : ''}</span></summary>
+    return `<div class="rv-ledger-section">
+  <h3 class="rv-ledger-section-head"><span class="rv-ledger-section-name">${escapeHtml(section)}</span> <span class="rv-count-inline">${rows.length} row(s), ${rows.length - failing} matching${failing > 0 ? `, ${failing} failing` : ''}</span></h3>
   <div class="rv-ledger-scroll">
     <table class="rv-ledger-table">
       <thead><tr><th class="rv-ledger-key">Row</th><th class="rv-ledger-side">Source</th>${header}<th class="rv-ledger-status">Status</th></tr></thead>
@@ -406,7 +406,7 @@ ${body}
       </tbody>
     </table>
   </div>
-</details>`;
+</div>`;
 }
 
 function renderLedgerRow(row: ComparisonRow, fields: string[], sourceA: string, sourceB: string): string {
@@ -1000,7 +1000,7 @@ tr.rv-ledger-rowgroup.rv-hidden { display: none; }
 .rv-ledger-note { color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: .5rem .75rem; margin: .5rem 0; }
 .rv-ledger-toggle { display: inline-flex; align-items: center; gap: .4rem; font-size: .85rem; margin-bottom: .75rem; cursor: pointer; }
 .rv-ledger-section { border: 1px solid var(--rv-border, #e2e8f0); border-radius: 8px; margin-bottom: .75rem; background: var(--rv-panel, #fff); }
-.rv-ledger-section > summary { cursor: pointer; padding: .6rem .8rem; font-weight: 600; }
+.rv-ledger-section-head { margin: 0; padding: .6rem .8rem; font-weight: 600; font-size: .95rem; border-bottom: 1px solid var(--rv-border, #e2e8f0); background: var(--rv-panel-alt, #f8fafc); border-radius: 8px 8px 0 0; }
 .rv-ledger-section-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .rv-ledger-scroll { overflow-x: auto; }
 .rv-ledger-table { border-collapse: collapse; width: 100%; font-size: .82rem; }
