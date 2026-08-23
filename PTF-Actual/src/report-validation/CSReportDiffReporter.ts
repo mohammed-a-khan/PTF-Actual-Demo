@@ -164,6 +164,8 @@ ${INLINE_STYLE}
 
 ${renderScopePanel(spec, a, b)}
 
+${renderLedger(reconciliation.ledger, sourceA, sourceB)}
+
 <section class="rv-summary">
   <h2>Differences found</h2>
   ${renderCountTiles(reconciliation.counts)}
@@ -177,8 +179,6 @@ ${sectionValidation ? renderSectionPanel(sectionValidation) : ''}
   ${renderFindingsGroup('Failures', FAILING_CLASSIFICATIONS, reconciliation.findings, spec, a, b)}
   ${renderFindingsGroup('Notes', NOTE_CLASSIFICATIONS, reconciliation.findings, spec, a, b)}
 </section>
-
-${renderLedger(reconciliation.ledger, sourceA, sourceB)}
 
 <footer class="rv-footer">
   <span>CS Playwright Test Framework — Report Validation Diff</span>
@@ -349,7 +349,15 @@ export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: 
  * row, so a green result can be checked rather than trusted.
  */
 function renderLedger(ledger: ComparisonLedger | undefined, sourceA: string, sourceB: string): string {
-    if (!ledger || ledger.rows.length === 0) return '';
+    // Rendering nothing here is indistinguishable from "there was nothing to compare", which is
+    // exactly the failure this panel exists to rule out. Say which one it was.
+    if (!ledger || ledger.rows.length === 0) {
+        return `<section class="rv-ledger">
+  <h2>Data compared</h2>
+  <p class="rv-ledger-absent-note">No comparison ledger was produced for this run, so the rows behind the
+  counters above cannot be shown. ${ledger ? 'The reconciler returned an empty ledger.' : 'The reconciler returned no ledger at all — this build predates the ledger, or the result was rebuilt before it reached the report.'}</p>
+</section>`;
+    }
 
     const bySection = new Map<string, ComparisonRow[]>();
     for (const row of ledger.rows) {
@@ -370,7 +378,7 @@ function renderLedger(ledger: ComparisonLedger | undefined, sourceA: string, sou
         .join('\n');
 
     return `<section class="rv-ledger">
-  <h2>Comparison ledger <span class="rv-count-inline">(${ledger.rows.length} row(s) compared, ${failing} failing)</span></h2>
+  <h2>Data compared <span class="rv-count-inline">(${ledger.rows.length} row(s), ${ledger.rows.length - failing} matching, ${failing} failing)</span></h2>
   <p class="rv-ledger-lede">Every row compared between <strong>${escapeHtml(sourceA)}</strong> and <strong>${escapeHtml(sourceB)}</strong>, each side shown as printed. Differing values are highlighted.</p>
   <label class="rv-ledger-toggle"><input type="checkbox" id="rv-ledger-diffonly"> Show only rows with differences</label>
   ${omitted}
@@ -996,6 +1004,7 @@ tr.rv-ledger-rowgroup.rv-hidden { display: none; }
 }
 
 .rv-ledger { margin-top: 2rem; }
+.rv-ledger-absent-note { color: #991b1b; background: #fef2f2; border: 1px solid #fecaca; border-radius: 6px; padding: .6rem .75rem; }
 .rv-ledger-lede { color: var(--rv-muted, #64748b); margin: .25rem 0 .75rem; }
 .rv-ledger-note { color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: .5rem .75rem; margin: .5rem 0; }
 .rv-ledger-toggle { display: inline-flex; align-items: center; gap: .4rem; font-size: .85rem; margin-bottom: .75rem; cursor: pointer; }
