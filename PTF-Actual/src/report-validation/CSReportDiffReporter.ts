@@ -27,8 +27,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import type {
+    ComparisonCell,
     ComparisonLedger,
     ComparisonRow,
+    CanonicalRecord,
     CanonicalReport,
     CanonicalValue,
     Finding,
@@ -164,7 +166,7 @@ ${INLINE_STYLE}
 
 ${renderScopePanel(spec, a, b)}
 
-${renderLedger(reconciliation.ledger, sourceA, sourceB)}
+${renderLedger(reconciliation.ledger ?? (a && b ? deriveLedger(spec, a, b, reconciliation.findings) : undefined), sourceA, sourceB, !reconciliation.ledger)}
 
 <section class="rv-summary">
   <h2>Differences found</h2>
@@ -348,7 +350,110 @@ export function computeComparisonScope(spec: ReportSpec, a: CanonicalReport, b: 
  * everything and agreed. This panel shows the reader what each side actually said for each
  * row, so a green result can be checked rather than trusted.
  */
-function renderLedger(ledger: ComparisonLedger | undefined, sourceA: string, sourceB: string): string {
+/**
+ * Rebuild the comparison ledger from the two canonical extractions plus the finding list.
+ *
+ * The reconciler normally hands one over, but the panel must not go blank when it doesn't —
+ * a report whose reconciler is a version behind would render counters over an empty space,
+ * which is indistinguishable from having compared nothing. Everything needed is already
+ * here: the canonicals carry both sides as printed, and a finding pins the classification
+ * onto the exact (section, key, field) it applies to. Anything with no finding against it
+ * agreed, which is precisely what a MATCH cell records.
+ *
+ * Walks the same pairing as {@link computeComparisonScope} so the rows listed are the rows
+ * counted.
+ */
+export function deriveLedger(
+    spec: ReportSpec,
+    a: CanonicalReport,
+    b: CanonicalReport,
+    findings: readonly Finding[],
+): ComparisonLedger {
+    const keyColumns = spec.keyColumns ?? [];
+    const ignored = new Set(spec.ignoreFields ?? []);
+    const keyed = new Set(keyColumns);
+    const candidateFields = Object.keys(spec.fieldMap ?? {}).filter(
+        (f) =>
+            !ignored.has(f) &&
+            !keyed.has(f) &&
+            Boolean(fieldNamesForSource(spec.fieldMap[f], a.source)) &&
+            Boolean(fieldNamesForSource(spec.fieldMap[f], b.source)),
+    );
+
+    const byFinding = new Map<string, Finding>();
+    for (const f of findings) {
+        if (!f.field) continue;
+        byFinding.set([f.section, ...keyColumns.map((k) => f.key?.[k] ?? ''), f.field].join(SCOPE_KEY_SEP), f);
+    }
+
+    const bByKey = new Map<string, CanonicalRecord>();
+    for (const r of b.records) bByKey.set(scopeKeyOf(r, keyColumns), r);
+    const aKeys = new Set(a.records.map((r) => scopeKeyOf(r, keyColumns)));
+
+    const cap = spec.ledgerMaxRows ?? DERIVED_LEDGER_MAX_ROWS;
+    const rows: ComparisonRow[] = [];
+    let omittedRows = 0;
+
+    const push = (row: ComparisonRow): void => {
+        if (rows.length >= cap) omittedRows++;
+        else rows.push(row);
+    };
+
+    const cellsFor = (rec: CanonicalRecord | undefined, other: CanonicalRecord | undefined, section: string, key: Record<string, string>): ComparisonCell[] => {
+        const cells: ComparisonCell[] = [];
+        for (const field of candidateFields) {
+            const av = rec?.fields[field];
+            const bv = other?.fields[field];
+            if (av === undefined && bv === undefined) continue;
+            const finding = byFinding.get([section, ...keyColumns.map((k) => key?.[k] ?? ''), field].join(SCOPE_KEY_SEP));
+            cells.push({
+                field,
+                aRaw: av?.raw ?? null,
+                bRaw: bv?.raw ?? null,
+                status: finding ? finding.classification : 'MATCH',
+                ...(finding?.delta !== undefined ? { delta: finding.delta } : {}),
+                ...(finding?.reason ? { reason: finding.reason } : {}),
+            });
+        }
+        return cells;
+    };
+
+    for (const aRec of a.records) {
+        const bRec = bByKey.get(scopeKeyOf(aRec, keyColumns));
+        if (!bRec) {
+            push({ section: aRec.sectionId, key: aRec.key ?? {}, kind: 'record', presence: 'A_ONLY', status: 'FAIL', cells: cellsFor(aRec, undefined, aRec.sectionId, aRec.key ?? {}) });
+            continue;
+        }
+        const cells = cellsFor(aRec, bRec, aRec.sectionId, aRec.key ?? {});
+        push({ section: aRec.sectionId, key: aRec.key ?? {}, kind: 'record', presence: 'BOTH', status: rollUpCells(cells), cells });
+    }
+
+    for (const bRec of b.records) {
+        if (aKeys.has(scopeKeyOf(bRec, keyColumns))) continue;
+        push({ section: bRec.sectionId, key: bRec.key ?? {}, kind: 'record', presence: 'B_ONLY', status: 'FAIL', cells: cellsFor(undefined, bRec, bRec.sectionId, bRec.key ?? {}) });
+    }
+
+    return { aSource: a.source, bSource: b.source, rows, omittedRows, rowCap: cap };
+}
+
+/** Mirrors the reconciler's roll-up: any failing cell fails the row, any note makes it INFO. */
+function rollUpCells(cells: readonly ComparisonCell[]): ComparisonRow['status'] {
+    let info = false;
+    for (const c of cells) {
+        if (LEDGER_FAILING_KINDS.includes(c.status)) return 'FAIL';
+        if (c.status !== 'MATCH') info = true;
+    }
+    return info ? 'INFO' : 'PASS';
+}
+
+const LEDGER_FAILING_KINDS: readonly string[] = [
+    'DATA_MISMATCH', 'MISSING', 'EXTRA', 'FOOTING_MISMATCH', 'CHECKSUM_DRIFT', 'COVERAGE_GAP',
+];
+
+/** Matches the reconciler's own default cap. */
+const DERIVED_LEDGER_MAX_ROWS = 2000;
+
+function renderLedger(ledger: ComparisonLedger | undefined, sourceA: string, sourceB: string, derived = false): string {
     // Rendering nothing here is indistinguishable from "there was nothing to compare", which is
     // exactly the failure this panel exists to rule out. Say which one it was.
     if (!ledger || ledger.rows.length === 0) {
@@ -379,7 +484,7 @@ function renderLedger(ledger: ComparisonLedger | undefined, sourceA: string, sou
 
     return `<section class="rv-ledger">
   <h2>Data compared <span class="rv-count-inline">(${ledger.rows.length} row(s), ${ledger.rows.length - failing} matching, ${failing} failing)</span></h2>
-  <p class="rv-ledger-lede">Every row compared between <strong>${escapeHtml(sourceA)}</strong> and <strong>${escapeHtml(sourceB)}</strong>, each side shown as printed. Differing values are highlighted.</p>
+  <p class="rv-ledger-lede">Every row compared between <strong>${escapeHtml(sourceA)}</strong> and <strong>${escapeHtml(sourceB)}</strong>, each side shown as printed. Differing values are highlighted.${derived ? ' <em>Reconstructed by the report from both canonical extractions and the finding list.</em>' : ''}</p>
   <label class="rv-ledger-toggle"><input type="checkbox" id="rv-ledger-diffonly"> Show only rows with differences</label>
   ${omitted}
   ${groups}
