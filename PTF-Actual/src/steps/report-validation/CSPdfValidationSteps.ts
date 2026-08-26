@@ -26,6 +26,7 @@
 import * as path from 'path';
 import { CSBDDStepDef } from '../../bdd/CSStepRegistry';
 import { CSBDDContext } from '../../bdd/CSBDDContext';
+import { CSConfigurationManager } from '../../core/CSConfigurationManager';
 import { CSReporter } from '../../reporter/CSReporter';
 import { CSTestResultsManager } from '../../reporter/CSTestResultsManager';
 import { loadSimpleReportSpec, type SimpleReportSpec } from '../../report-validation/CSReportSimpleSpec';
@@ -34,8 +35,22 @@ import {
     type ValidationResult,
 } from '../../report-validation/CSReportSimpleValidator';
 
-const EXPECTED_BAG_KEY = 'reportExpected';
+/**
+ * Config-overridable defaults. Consumers set either in their env files
+ * (e.g. `config/<project>/common/common.env`) or leave them at these defaults.
+ *
+ *   REPORT_SPECS_DIR       — root directory to search for spec files.
+ *                            Loader walks subfolders recursively — consumers
+ *                            can arrange specs as `<dir>/<team>/<name>.json`
+ *                            or flat, whichever they prefer. Default: `config/report-specs`.
+ *   REPORT_EXPECTED_KEY    — CSBDDContext key that holds the expected-values
+ *                            bag the `matches spec` step reads from. Consumers
+ *                            populate it via their own step-defs. Default: `reportExpected`.
+ */
+const CFG_KEY_SPEC_DIR = 'REPORT_SPECS_DIR';
+const CFG_KEY_EXPECTED_BAG = 'REPORT_EXPECTED_KEY';
 const DEFAULT_SPEC_DIR = 'config/report-specs';
+const DEFAULT_EXPECTED_BAG_KEY = 'reportExpected';
 
 export class CSPdfValidationSteps {
     /**
@@ -48,15 +63,16 @@ export class CSPdfValidationSteps {
     @CSBDDStepDef('the expected report values:')
     async setExpectedFromTable(rows: Array<Record<string, string>>): Promise<void> {
         const ctx = CSBDDContext.getInstance();
-        const bag: Record<string, unknown> = (ctx.get(EXPECTED_BAG_KEY) as Record<string, unknown>) ?? {};
+        const bagKey = resolveExpectedBagKey();
+        const bag: Record<string, unknown> = (ctx.get(bagKey) as Record<string, unknown>) ?? {};
         for (const row of rows) {
             const key = row.field ?? row.name ?? row.key;
             const value = row.value ?? row.expected ?? row.expectedValue;
             if (!key) throw new Error(`expected-values row missing 'field' column: ${JSON.stringify(row)}`);
             bag[key] = value ?? '';
         }
-        ctx.set(EXPECTED_BAG_KEY, bag);
-        CSReporter.info(`Expected report values set: ${Object.keys(bag).join(', ')}`);
+        ctx.set(bagKey, bag);
+        CSReporter.info(`Expected report values set (context key '${bagKey}'): ${Object.keys(bag).join(', ')}`);
     }
 
     /**
@@ -133,13 +149,19 @@ export class CSPdfValidationSteps {
 
 function getExpectedBag(): Record<string, unknown> {
     const ctx = CSBDDContext.getInstance();
-    const bag = ctx.get(EXPECTED_BAG_KEY) as Record<string, unknown> | undefined;
+    const bag = ctx.get(resolveExpectedBagKey()) as Record<string, unknown> | undefined;
     return bag ?? {};
 }
 
 function loadSpec(specNameOrPath: string): SimpleReportSpec {
-    const dir = resolveRelativePath(DEFAULT_SPEC_DIR);
+    const configuredDir = CSConfigurationManager.getInstance().get(CFG_KEY_SPEC_DIR, DEFAULT_SPEC_DIR);
+    const dir = resolveRelativePath(configuredDir || DEFAULT_SPEC_DIR);
     return loadSimpleReportSpec(specNameOrPath, dir);
+}
+
+function resolveExpectedBagKey(): string {
+    const configured = CSConfigurationManager.getInstance().get(CFG_KEY_EXPECTED_BAG, DEFAULT_EXPECTED_BAG_KEY);
+    return configured || DEFAULT_EXPECTED_BAG_KEY;
 }
 
 function resolveRelativePath(p: string): string {

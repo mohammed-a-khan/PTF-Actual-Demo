@@ -84,11 +84,39 @@ export interface SimpleReportSpec {
     tables?: Record<string, SimpleTableSpec>;
 }
 
-/** Reads a SimpleReportSpec JSON file from disk. */
+/**
+ * Locate + load a SimpleReportSpec JSON file.
+ *
+ * Resolution order:
+ *   1. If `specName` is an absolute path or contains `.json` — load it directly.
+ *   2. If `specName` contains a path separator (`/` or `\`) — treat as
+ *      `<dir>/<specName>.json` (backward-compatible path form).
+ *   3. Otherwise walk `dir` RECURSIVELY and return the first spec file where
+ *      EITHER the filename (minus `.json`) matches `specName` OR the file's
+ *      `name` field matches `specName`. Consumers can drop specs into any
+ *      subfolder layout — the loader finds them by name.
+ *
+ * Bare-name lookups error with a helpful list of every spec discovered under
+ * `dir`, so a typo produces "spec 'invoic-standard' not found; available:
+ * invoice-standard, invoice-mhfa, ..." rather than a raw file-not-found.
+ */
 export function loadSimpleReportSpec(specName: string, dir: string): SimpleReportSpec {
-    const filePath = path.isAbsolute(specName)
-        ? specName
-        : path.join(dir, specName.endsWith('.json') ? specName : `${specName}.json`);
+    let filePath: string;
+    if (path.isAbsolute(specName)) {
+        filePath = specName;
+    } else if (specName.endsWith('.json') || specName.includes('/') || specName.includes('\\')) {
+        filePath = path.join(dir, specName.endsWith('.json') ? specName : `${specName}.json`);
+    } else {
+        const found = findSpecByName(dir, specName);
+        if (!found) {
+            const available = listSpecNames(dir).sort();
+            throw new Error(
+                `SimpleReportSpec "${specName}" not found under ${dir}` +
+                    (available.length ? `\n  available: ${available.join(', ')}` : ' (no *.json files present)'),
+            );
+        }
+        filePath = found;
+    }
     if (!fs.existsSync(filePath)) {
         throw new Error(`SimpleReportSpec not found: ${filePath}`);
     }
@@ -104,6 +132,78 @@ export function loadSimpleReportSpec(specName: string, dir: string): SimpleRepor
         throw new Error(`SimpleReportSpec ${filePath} is malformed:\n  - ${errors.join('\n  - ')}`);
     }
     return parsed as SimpleReportSpec;
+}
+
+/**
+ * Recursively walk `root` for `*.json` files and return the first match on either:
+ *   - filename basename (minus `.json`) equal to `specName`, OR
+ *   - parsed `name` field equal to `specName`.
+ * Returns null if nothing matches. Silently skips unreadable / malformed files
+ * during the walk so one bad file doesn't hide a good sibling.
+ */
+function findSpecByName(root: string, specName: string): string | null {
+    if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return null;
+    const stack: string[] = [root];
+    while (stack.length > 0) {
+        const dir = stack.pop() as string;
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+        for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isDirectory()) {
+                stack.push(full);
+                continue;
+            }
+            if (!e.isFile() || !e.name.endsWith('.json')) continue;
+            const base = e.name.substring(0, e.name.length - '.json'.length);
+            if (base === specName) return full;
+            try {
+                const parsed = JSON.parse(fs.readFileSync(full, 'utf-8'));
+                if (parsed && typeof parsed === 'object' && parsed.name === specName) return full;
+            } catch {
+                // ignore malformed sibling
+            }
+        }
+    }
+    return null;
+}
+
+/** For error messages: list every discoverable spec name under `root`. */
+function listSpecNames(root: string): string[] {
+    if (!fs.existsSync(root) || !fs.statSync(root).isDirectory()) return [];
+    const names: string[] = [];
+    const stack: string[] = [root];
+    while (stack.length > 0) {
+        const dir = stack.pop() as string;
+        let entries: fs.Dirent[];
+        try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+        for (const e of entries) {
+            const full = path.join(dir, e.name);
+            if (e.isDirectory()) stack.push(full);
+            else if (e.isFile() && e.name.endsWith('.json')) {
+                const base = e.name.substring(0, e.name.length - '.json'.length);
+                let name = base;
+                try {
+                    const parsed = JSON.parse(fs.readFileSync(full, 'utf-8'));
+                    if (parsed && typeof parsed === 'object' && typeof parsed.name === 'string') {
+                        name = parsed.name;
+                    }
+                } catch {
+                    // fall back to filename base
+                }
+                names.push(name);
+            }
+        }
+    }
+    return names;
 }
 
 /** Structural validation. Returns a list of problems (empty = valid). */
