@@ -5,3 +5,4 @@
 
 export * from './CSReportValidationSteps';
 export * from './CSReportAssertionSteps';
+export * from './CSPdfValidationSteps';

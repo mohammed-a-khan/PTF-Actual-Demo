@@ -195,3 +195,29 @@ export {
     type FileLoader,
     type ServiceOptions,
 } from './CSReportValidationService';
+
+// ---- Simple PDF validator (the everyday case) -----------------------------
+export type {
+    SimpleFieldKind,
+    SimpleReadFrom,
+    SimpleFieldSpec,
+    SimpleTableColumnSpec,
+    SimpleTableSpec,
+    SimpleReportSpec,
+} from './CSReportSimpleSpec';
+export { loadSimpleReportSpec, validateSimpleReportSpecShape } from './CSReportSimpleSpec';
+export { extractField, type FieldExtractionResult } from './CSReportSimpleFieldExtractor';
+export { detectPresence } from './CSReportSimplePresenceDetector';
+export { extractTable, type TableExtractionResult } from './CSReportSimpleTableExtractor';
+export {
+    validatePdfAgainstSpec,
+    validatePdfFromTokens,
+    type FieldStatus,
+    type TableStatus,
+    type FieldFinding,
+    type TableRowFinding,
+    type TableFinding,
+    type ValidationSummary,
+    type ValidationResult,
+    type ValidateOptions,
+} from './CSReportSimpleValidator';

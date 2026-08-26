@@ -1,0 +1,175 @@
+/**
+ * Simple PDF-validation spec — the everyday shape.
+ *
+ * The full ReportSpec (CSReportSpec.ts) is designed for cross-source
+ * reconciliation (Crystal ↔ SSRS ↔ DB) with rich tolerance, coverage and
+ * field-map machinery. Consumers who only want to assert "the invoice number,
+ * billing date and total in this PDF match my expected values" don't need any
+ * of that. This spec is the small, first-class alternative — two keys, done.
+ *
+ * @module report-validation/CSReportSimpleSpec
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+
+export type SimpleFieldKind = 'string' | 'number' | 'date' | 'currency';
+
+/**
+ * Where to read a field's value relative to its label token.
+ * - `below`  → same x (± xTolerance), next token(s) at a smaller y
+ * - `right`  → same y (± yTolerance), next token(s) at a larger x
+ * - `inline` → the value is embedded in the same token as the label, separated by `inlineSeparator`
+ */
+export type SimpleReadFrom = 'below' | 'right' | 'inline';
+
+export interface SimpleFieldSpec {
+    /** Anchor text in the PDF. Case-insensitive substring match. Required unless presenceOfText is set. */
+    label?: string;
+    /** How to read the value relative to the label. Default: 'below'. */
+    readFrom?: SimpleReadFrom;
+    /** For `inline` mode: the separator string between label and value. Default: `: ` */
+    inlineSeparator?: string;
+    /** Type-aware normalization. Default: 'string'. */
+    kind?: SimpleFieldKind;
+    /** X-alignment tolerance (px) for `below` reads. Default: 25 */
+    xTolerance?: number;
+    /** Y-alignment tolerance (px) for `right` reads. Default: 4 */
+    yTolerance?: number;
+    /** Max vertical distance (px) below the anchor to look for the value. Default: 30 */
+    belowMaxDrop?: number;
+    /** Max horizontal distance (px) right of the anchor to look for the value. Default: unbounded */
+    rightMaxSpan?: number;
+    // ---- Alternative: presence-of-text state field --------------------------
+    /** Text that, if present anywhere in the PDF, makes this field's value = `meansValue`. */
+    presenceOfText?: string;
+    /** Value when `presenceOfText` matched. */
+    meansValue?: string;
+    /** Value when `presenceOfText` did NOT match. */
+    elseValue?: string;
+}
+
+export interface SimpleTableColumnSpec {
+    /** Consumer-facing key (matches expected-value JSON). */
+    key: string;
+    /**
+     * PDF header text for this column. Omit for a column that has no header
+     * (e.g. an amount column right of the last named header).
+     */
+    header?: string;
+}
+
+export interface SimpleTableSpec {
+    /** Anchor text that locates the table's section header. */
+    headerAnchor: string;
+    /** Column definitions in x-order (leftmost first). */
+    columns: SimpleTableColumnSpec[];
+    /** Column keys that uniquely identify a row (for key-based row matching). */
+    keyColumns?: string[];
+    /** Text that, when found, stops row reading (e.g. "Total Amount Due:"). */
+    stopAt?: string;
+    /** Row-alignment tolerance (px). Two tokens with |Δy| ≤ this are on the same row. Default: 4 */
+    rowYTolerance?: number;
+}
+
+/** The simple validation spec — flat, two-key. */
+export interface SimpleReportSpec {
+    /** Spec name — matches the filename (without .json) when loaded from disk. */
+    name: string;
+    /** Optional human description. */
+    description?: string;
+    /** Scalar fields to extract + assert. Keys are consumer-facing names. */
+    fields?: Record<string, SimpleFieldSpec>;
+    /** Line-item tables to extract + assert. Keys are consumer-facing table names. */
+    tables?: Record<string, SimpleTableSpec>;
+}
+
+/** Reads a SimpleReportSpec JSON file from disk. */
+export function loadSimpleReportSpec(specName: string, dir: string): SimpleReportSpec {
+    const filePath = path.isAbsolute(specName)
+        ? specName
+        : path.join(dir, specName.endsWith('.json') ? specName : `${specName}.json`);
+    if (!fs.existsSync(filePath)) {
+        throw new Error(`SimpleReportSpec not found: ${filePath}`);
+    }
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(raw);
+    } catch (e) {
+        throw new Error(`SimpleReportSpec ${filePath} is not valid JSON: ${(e as Error).message}`);
+    }
+    const errors = validateSimpleReportSpecShape(parsed);
+    if (errors.length > 0) {
+        throw new Error(`SimpleReportSpec ${filePath} is malformed:\n  - ${errors.join('\n  - ')}`);
+    }
+    return parsed as SimpleReportSpec;
+}
+
+/** Structural validation. Returns a list of problems (empty = valid). */
+export function validateSimpleReportSpecShape(obj: unknown): string[] {
+    const errors: string[] = [];
+    if (!obj || typeof obj !== 'object') {
+        return ['spec is not an object'];
+    }
+    const spec = obj as Record<string, unknown>;
+    if (typeof spec.name !== 'string' || spec.name.length === 0) {
+        errors.push('name is required and must be a non-empty string');
+    }
+    if (spec.fields !== undefined) {
+        if (typeof spec.fields !== 'object' || spec.fields === null || Array.isArray(spec.fields)) {
+            errors.push('fields must be an object (keyed by field name)');
+        } else {
+            for (const [key, val] of Object.entries(spec.fields)) {
+                const f = val as SimpleFieldSpec;
+                if (!f || typeof f !== 'object') {
+                    errors.push(`fields.${key} must be an object`);
+                    continue;
+                }
+                const hasAnchor = typeof f.label === 'string' && f.label.length > 0;
+                const hasPresence = typeof f.presenceOfText === 'string' && f.presenceOfText.length > 0;
+                if (!hasAnchor && !hasPresence) {
+                    errors.push(`fields.${key} requires either 'label' or 'presenceOfText'`);
+                }
+                if (hasPresence) {
+                    if (typeof f.meansValue !== 'string' || typeof f.elseValue !== 'string') {
+                        errors.push(`fields.${key} with 'presenceOfText' must set 'meansValue' AND 'elseValue' (both strings)`);
+                    }
+                }
+                if (f.readFrom !== undefined && !['below', 'right', 'inline'].includes(f.readFrom)) {
+                    errors.push(`fields.${key}.readFrom must be one of below|right|inline`);
+                }
+                if (f.kind !== undefined && !['string', 'number', 'date', 'currency'].includes(f.kind)) {
+                    errors.push(`fields.${key}.kind must be one of string|number|date|currency`);
+                }
+            }
+        }
+    }
+    if (spec.tables !== undefined) {
+        if (typeof spec.tables !== 'object' || spec.tables === null || Array.isArray(spec.tables)) {
+            errors.push('tables must be an object (keyed by table name)');
+        } else {
+            for (const [key, val] of Object.entries(spec.tables)) {
+                const t = val as SimpleTableSpec;
+                if (!t || typeof t !== 'object') {
+                    errors.push(`tables.${key} must be an object`);
+                    continue;
+                }
+                if (typeof t.headerAnchor !== 'string' || t.headerAnchor.length === 0) {
+                    errors.push(`tables.${key}.headerAnchor is required (non-empty string)`);
+                }
+                if (!Array.isArray(t.columns) || t.columns.length === 0) {
+                    errors.push(`tables.${key}.columns is required (non-empty array)`);
+                } else {
+                    for (let i = 0; i < t.columns.length; i++) {
+                        const c = t.columns[i];
+                        if (!c || typeof c !== 'object' || typeof c.key !== 'string') {
+                            errors.push(`tables.${key}.columns[${i}] must be an object with a 'key' string`);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return errors;
+}
