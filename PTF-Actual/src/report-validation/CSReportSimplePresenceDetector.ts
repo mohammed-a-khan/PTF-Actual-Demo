@@ -15,16 +15,20 @@ export function detectPresence(
     tokensByPage: TextItem[][],
     spec: SimpleFieldSpec,
 ): string {
-    if (!spec.presenceOfText || spec.meansValue === undefined || spec.elseValue === undefined) {
+    if (!spec.presenceOfText) {
         throw new Error('detectPresence called on non-presence field spec');
     }
+    // Defaults let consumers write terse specs: `{ "presenceOfText": "Some header text" }`
+    // and assert expected value = "present" | "missing".
+    const meansValue = spec.meansValue ?? 'present';
+    const elseValue = spec.elseValue ?? 'missing';
     const needle = spec.presenceOfText.toLowerCase();
     for (const page of tokensByPage) {
         for (const t of page) {
             if (t.str.toLowerCase().includes(needle)) {
-                return spec.meansValue;
+                return meansValue;
             }
         }
     }
-    return spec.elseValue;
+    return elseValue;
 }

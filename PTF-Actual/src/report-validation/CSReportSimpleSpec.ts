@@ -16,17 +16,26 @@ import * as path from 'path';
 export type SimpleFieldKind = 'string' | 'number' | 'date' | 'currency';
 
 /**
- * Where to read a field's value relative to its label token.
- * - `below`  → same x (± xTolerance), next token(s) at a smaller y
- * - `right`  → same y (± yTolerance), next token(s) at a larger x
- * - `inline` → the value is embedded in the same token as the label, separated by `inlineSeparator`
+ * Where to read a field's value relative to its label token. If omitted,
+ * the framework auto-detects — tries `below`, then `right`, then `inline`,
+ * and picks the first that returns a value. Set explicitly only when
+ * auto-detect picks wrong.
+ * - `below`     → same x (± xTolerance), next token(s) at a smaller y
+ * - `belowLine` → the entire next line below the anchor (any x); use `belowLineOffset` to skip N lines
+ * - `right`     → same y (± yTolerance), next token(s) at a larger x
+ * - `leftOf`    → same y (± yTolerance), token(s) to the LEFT of the anchor
+ * - `inline`    → the value is embedded in the same token as the label, separated by `inlineSeparator`
  */
-export type SimpleReadFrom = 'below' | 'right' | 'inline';
+export type SimpleReadFrom = 'below' | 'belowLine' | 'right' | 'leftOf' | 'inline';
 
 export interface SimpleFieldSpec {
-    /** Anchor text in the PDF. Case-insensitive substring match. Required unless presenceOfText is set. */
+    /** Anchor text in the PDF. Case-insensitive substring match. Required unless `presenceOfText` is set. */
     label?: string;
-    /** How to read the value relative to the label. Default: 'below'. */
+    /**
+     * How to read the value relative to the label. If omitted, the framework
+     * auto-detects by trying below → right → inline in order. Override only
+     * when auto picks wrong or for `leftOf` (payer-block style layouts).
+     */
     readFrom?: SimpleReadFrom;
     /** For `inline` mode: the separator string between label and value. Default: `: ` */
     inlineSeparator?: string;
@@ -34,18 +43,25 @@ export interface SimpleFieldSpec {
     kind?: SimpleFieldKind;
     /** X-alignment tolerance (px) for `below` reads. Default: 25 */
     xTolerance?: number;
-    /** Y-alignment tolerance (px) for `right` reads. Default: 4 */
+    /** Y-alignment tolerance (px) for `right`/`leftOf` reads. Default: 4 (right), 8 (leftOf) */
     yTolerance?: number;
     /** Max vertical distance (px) below the anchor to look for the value. Default: 30 */
     belowMaxDrop?: number;
     /** Max horizontal distance (px) right of the anchor to look for the value. Default: unbounded */
     rightMaxSpan?: number;
-    // ---- Alternative: presence-of-text state field --------------------------
-    /** Text that, if present anywhere in the PDF, makes this field's value = `meansValue`. */
+    /** For `belowLine` mode: number of lines to skip before reading. Default: 1 (immediately next line). */
+    belowLineOffset?: number;
+    // ---- Alternative: presence-of-text categorical state marker -------------
+    /**
+     * Text that, if present anywhere in the PDF, makes this field's value = `meansValue`.
+     * Use ONLY for categorical state markers (e.g. draft banner presence, brand detection).
+     * For any per-invoice value the consumer might source from UI/DB/JSON, declare a `label`
+     * so the value is EXTRACTED and can be compared against the consumer's expected value.
+     */
     presenceOfText?: string;
-    /** Value when `presenceOfText` matched. */
+    /** Value when `presenceOfText` matched. Default: 'present'. */
     meansValue?: string;
-    /** Value when `presenceOfText` did NOT match. */
+    /** Value when `presenceOfText` did NOT match. Default: 'missing'. */
     elseValue?: string;
 }
 
@@ -229,15 +245,18 @@ export function validateSimpleReportSpecShape(obj: unknown): string[] {
                 const hasAnchor = typeof f.label === 'string' && f.label.length > 0;
                 const hasPresence = typeof f.presenceOfText === 'string' && f.presenceOfText.length > 0;
                 if (!hasAnchor && !hasPresence) {
-                    errors.push(`fields.${key} requires either 'label' or 'presenceOfText'`);
+                    errors.push(`fields.${key} requires either 'label' (for extraction) or 'presenceOfText' (for state markers)`);
                 }
                 if (hasPresence) {
-                    if (typeof f.meansValue !== 'string' || typeof f.elseValue !== 'string') {
-                        errors.push(`fields.${key} with 'presenceOfText' must set 'meansValue' AND 'elseValue' (both strings)`);
+                    if (f.meansValue !== undefined && typeof f.meansValue !== 'string') {
+                        errors.push(`fields.${key}.meansValue must be a string when set`);
+                    }
+                    if (f.elseValue !== undefined && typeof f.elseValue !== 'string') {
+                        errors.push(`fields.${key}.elseValue must be a string when set`);
                     }
                 }
-                if (f.readFrom !== undefined && !['below', 'right', 'inline'].includes(f.readFrom)) {
-                    errors.push(`fields.${key}.readFrom must be one of below|right|inline`);
+                if (f.readFrom !== undefined && !['below', 'belowLine', 'right', 'leftOf', 'inline'].includes(f.readFrom)) {
+                    errors.push(`fields.${key}.readFrom must be one of below|belowLine|right|leftOf|inline`);
                 }
                 if (f.kind !== undefined && !['string', 'number', 'date', 'currency'].includes(f.kind)) {
                     errors.push(`fields.${key}.kind must be one of string|number|date|currency`);

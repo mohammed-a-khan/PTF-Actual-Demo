@@ -108,17 +108,32 @@ export function validatePdfFromTokens(opts: ValidateOptions & { tokensByPage: Te
     // Fields
     for (const [name, fieldSpec] of Object.entries(spec.fields ?? {})) {
         const hasExpected = Object.prototype.hasOwnProperty.call(expectedValues, name);
-        const expectedRaw = hasExpected ? String(expectedValues[name] ?? '') : null;
+        // Presence-of-text fields auto-assert against `meansValue` (default "present")
+        // when the consumer didn't provide an explicit expected. Rationale:
+        // declaring `presenceOfText` IS the assertion — the consumer's intent is
+        // "verify this exact string is rendered". They only need to override the
+        // expected value when they want to check for the ELSE state (missing) or
+        // a state marker with two categorical values (draft vs billed).
+        const isPresenceField = !!fieldSpec.presenceOfText;
+        let expectedRaw: string | null;
+        if (hasExpected) {
+            expectedRaw = String(expectedValues[name] ?? '');
+        } else if (isPresenceField) {
+            expectedRaw = fieldSpec.meansValue ?? 'present';
+        } else {
+            expectedRaw = null;
+        }
         let extracted: string | null;
         let reason: string | undefined;
-        if (fieldSpec.presenceOfText) {
+        if (isPresenceField) {
             extracted = detectPresence(tokensByPage, fieldSpec);
         } else {
             const res = extractField(tokensByPage, fieldSpec);
             extracted = res.value;
             reason = res.reason;
         }
-        if (!hasExpected) {
+        // Presence-fields with implicit expected are now always asserted (never informational).
+        if (expectedRaw === null) {
             fields.push({
                 name,
                 status: 'informational',

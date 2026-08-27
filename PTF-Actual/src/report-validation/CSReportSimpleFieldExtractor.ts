@@ -9,7 +9,7 @@
  */
 
 import type { TextItem } from './CSReportPdfTypes';
-import type { SimpleFieldSpec } from './CSReportSimpleSpec';
+import type { SimpleFieldSpec, SimpleReadFrom } from './CSReportSimpleSpec';
 
 const DEFAULT_X_TOLERANCE = 25;
 const DEFAULT_Y_TOLERANCE = 4;
@@ -40,26 +40,53 @@ export function extractField(
     if (!anchor) {
         return { value: null, reason: `anchor "${spec.label}" not found in PDF` };
     }
-    const mode = spec.readFrom ?? 'below';
     const pageTokens = tokensByPage[anchor.page];
+    // Auto-detect readFrom when omitted. Heuristic:
+    //   1. `inline` first — if the anchor token itself contains "<label><separator>",
+    //      take everything after the separator (matches labels like "Order ID: 12345").
+    //   2. If the label ends with `:` — try `right` (typical convention: `Total:  $10.00`).
+    //   3. Otherwise — try `below` (labels sitting above stacked value tokens: `Order ID` / `12345`).
+    //   4. Then the OPPOSITE of #2/#3 as a fallback.
+    // Consumer overrides with explicit `readFrom` when auto picks wrong.
+    let modes: SimpleReadFrom[];
+    if (spec.readFrom) {
+        modes = [spec.readFrom];
+    } else {
+        const colonSuffix = spec.label.trim().endsWith(':');
+        modes = colonSuffix ? ['inline', 'right', 'below'] : ['inline', 'below', 'right'];
+    }
     let value: string | null = null;
-    switch (mode) {
-        case 'inline':
-            value = readInline(anchor.token, spec.label, spec.inlineSeparator ?? DEFAULT_INLINE_SEPARATOR);
+    let tried: string[] = [];
+    for (const mode of modes) {
+        tried.push(mode);
+        let v: string | null = null;
+        switch (mode) {
+            case 'inline':
+                v = readInline(anchor.token, spec.label, spec.inlineSeparator ?? DEFAULT_INLINE_SEPARATOR);
+                break;
+            case 'right':
+                v = readRight(pageTokens, anchor.token, spec);
+                break;
+            case 'leftOf':
+                v = readLeftOf(pageTokens, anchor.token, spec);
+                break;
+            case 'belowLine':
+                v = readBelowLine(pageTokens, anchor.token, spec);
+                break;
+            case 'below':
+                v = readBelow(pageTokens, anchor.token, spec);
+                break;
+        }
+        if (v !== null && v.trim().length > 0) {
+            value = v;
             break;
-        case 'right':
-            value = readRight(pageTokens, anchor.token, spec);
-            break;
-        case 'below':
-        default:
-            value = readBelow(pageTokens, anchor.token, spec);
-            break;
+        }
     }
     const anchorMeta = { str: anchor.token.str, x: anchor.token.x, y: anchor.token.y, page: anchor.page };
     if (value === null) {
         return {
             value: null,
-            reason: `no value token found ${mode} anchor "${spec.label}" at (page ${anchor.page + 1}, x=${anchor.token.x}, y=${anchor.token.y})`,
+            reason: `no value token found ${tried.join('/')} anchor "${spec.label}" at (page ${anchor.page + 1}, x=${anchor.token.x}, y=${anchor.token.y})`,
             anchor: anchorMeta,
         };
     }
@@ -105,6 +132,28 @@ function readInline(anchorToken: TextItem, label: string, separator: string): st
 
 const DEFAULT_RIGHT_MAX_INTER_TOKEN_GAP = 40;
 
+const DEFAULT_LEFTOF_Y_TOLERANCE = 8; // cross-column reads see larger baseline offsets than same-column right/below
+
+function readLeftOf(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): string | null {
+    const yTol = spec.yTolerance ?? DEFAULT_LEFTOF_Y_TOLERANCE;
+    const candidates = pageTokens.filter(
+        (t) => t !== anchor && Math.abs(t.y - anchor.y) <= yTol && t.x + t.width <= anchor.x,
+    );
+    if (candidates.length === 0) return null;
+    // Take the contiguous group closest to the anchor from the left — stop at the first big gap.
+    candidates.sort((a, b) => b.x - a.x); // rightmost first (nearest to anchor)
+    const picked: TextItem[] = [candidates[0]];
+    for (let i = 1; i < candidates.length; i++) {
+        const prev = picked[picked.length - 1];
+        const gap = prev.x - (candidates[i].x + candidates[i].width);
+        if (gap > DEFAULT_RIGHT_MAX_INTER_TOKEN_GAP) break;
+        picked.push(candidates[i]);
+    }
+    // Return in left-to-right reading order.
+    picked.sort((a, b) => a.x - b.x);
+    return picked.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+}
+
 function readRight(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): string | null {
     const yTol = spec.yTolerance ?? DEFAULT_Y_TOLERANCE;
     const maxSpan = spec.rightMaxSpan;
@@ -129,6 +178,26 @@ function readRight(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSp
         picked.push(candidates[i]);
     }
     return picked.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+}
+
+function readBelowLine(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): string | null {
+    // "Below line" = the N-th distinct row of tokens strictly below the anchor,
+    // regardless of x-alignment. Used for values that sit under an anchor but on
+    // a different x column — e.g. a subheading line under an "Account Number: X"
+    // line whose value starts at the left margin.
+    const rowYTol = spec.yTolerance ?? DEFAULT_Y_TOLERANCE;
+    const offset = Math.max(1, spec.belowLineOffset ?? 1);
+    const below = pageTokens.filter((t) => t !== anchor && t.y < anchor.y).sort((a, b) => b.y - a.y);
+    if (below.length === 0) return null;
+    const rows: TextItem[][] = [];
+    for (const t of below) {
+        const bucket = rows.find((r) => Math.abs(r[0].y - t.y) <= rowYTol);
+        if (bucket) bucket.push(t);
+        else rows.push([t]);
+    }
+    if (rows.length < offset) return null;
+    const row = rows[offset - 1].slice().sort((a, b) => a.x - b.x);
+    return row.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
 }
 
 function readBelow(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): string | null {
