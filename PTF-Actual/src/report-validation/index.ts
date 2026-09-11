@@ -221,3 +221,88 @@ export {
     type ValidationResult,
     type ValidateOptions,
 } from './CSReportSimpleValidator';
+
+// ---- Phase-1 + Phase-3 checks (metadata, links, header/footer, watermarks, layout, integrity, text-quality,
+//      structural, interactive, attachments, table-depth) ----
+export * from './checks';
+export type {
+    Phase1Findings,
+    Phase3Findings,
+    Phase4Findings,
+    Phase5Findings,
+    Phase6Findings,
+} from './CSReportSimpleValidator';
+export type { SimpleReportSpecChecks } from './CSReportSimpleSpec';
+
+// ---- Tier-1 formatting validator (bold/italic/font-size/alignment/prefix) --
+export {
+    validateFormatting,
+    type FormattingFinding,
+} from './CSReportSimpleFormattingValidator';
+export type { SimpleFormattingRule } from './CSReportSimpleSpec';
+
+// ---- SimpleReportSpec auto-generator (starter spec from a sample PDF) ------
+export {
+    generateSimpleReportSpec,
+    buildSpecFromAnalyzed,
+    type GenerateSpecOptions,
+    type GenerateSpecResult,
+} from './CSReportSimpleSpecGenerator';
+export {
+    parseReportSpecInitArgs,
+    runReportSpecInit,
+    type ReportSpecInitOptions,
+    type ReportSpecInitResult,
+} from './CSReportSimpleSpecGeneratorCli';
+
+// ---- SimpleReportSpec HTML report renderer --------------------------------
+export {
+    writeSimpleValidatorHtmlReport,
+    type SimpleValidatorReporterOptions,
+    type SimpleValidatorReportWriteResult,
+} from './CSReportSimpleValidatorReporter';
+
+// ---- v1.52 test-data-first surface ----------------------------------------
+export {
+    validatePdfFromDataFile,
+    synthesiseSpecFromData,
+    extractPdfTokensByPage,
+    inferLabels,
+    type ValidateFromDataOptions,
+} from './CSReportSimpleValidatorFromData';
+
+// ---- v1.53 PDF-vs-PDF pair reconciler -------------------------------------
+export {
+    reconcilePdfsFromRules,
+    reconcileAnalyzedReports,
+    generateReconciliationRulesFromPair,
+    type ReconcileFinding,
+    type ReconcileFindingKind,
+    type ReconcileColumnRule,
+    type ReconcileSectionRule,
+    type KnownDifference,
+    type GlobalTolerance,
+    type ReconcileRules,
+    type ReconcileResult,
+    type ReconcileLedgerRow,
+    type ReconcileLedgerCell,
+    type ReconcilePdfPairOptions,
+} from './CSPdfPairReconciler';
+
+// ---- v1.53 PDF-vs-DB reconciler -------------------------------------------
+export {
+    reconcilePdfDbFromRules,
+    reconcilePdfDbAuto,
+    type DbSectionSpec,
+    type DbReferenceDataSource,
+    type PdfDbRulesJson,
+    type ReconcilePdfDbOptions,
+    type ReconcilePdfDbAutoOptions,
+} from './CSPdfDbReconciler';
+
+// ---- v1.53 reconciler HTML reporter --------------------------------------
+export {
+    writeReconcileHtmlReport,
+    type ReconcileReporterOptions,
+    type ReconcileReporterResult,
+} from './CSPdfReconcileReporter';

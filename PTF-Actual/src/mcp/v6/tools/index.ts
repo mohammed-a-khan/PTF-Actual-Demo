@@ -106,4 +106,23 @@ import './ado_gen_test_data_tool';
 import './ado_gen_a11y_test_tool';
 import './ado_gen_security_test_tool';
 
+// Wave 3 (v1.50.x) — PDF report validation surface. Ties the framework's
+// SimpleReportSpec + Phase 1-6 validators into MCP so Copilot can author
+// specs, run validation, and drive end-to-end UI→PDF→validate flows.
+import './report_spec_init_tool';
+import './report_validate_tool';
+import './report_spec_edit_tool';
+import './capture_ui_values_tool';
+import './report_download_wait_tool';
+import './intent_brief_tool';
+
+// v1.52 — test-data-first surface.
+import './report_validate_from_data_tool';
+import './report_infer_labels_tool';
+
+// v1.53 — PDF-vs-PDF + PDF-vs-DB reconciliation.
+import './report_reconcile_tool';
+import './report_recon_init_tool';
+import './report_reconcile_pdf_db_tool';
+
 export { listPrimitives, getPrimitive, registerPrimitive } from '../runtime/Primitive';

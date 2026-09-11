@@ -45,6 +45,14 @@ const DIRS = [
     { src: 'github/prompts',      key: '.github/prompts' },
 ];
 
+/**
+ * Nested-directory mappings: recurses into subdirectories, preserving the
+ * subpath under key. Used for `.github/skills/<skillName>/SKILL.md` layouts.
+ */
+const NESTED_DIRS = [
+    { src: 'github/skills', key: '.github/skills' },
+];
+
 const contents = {};
 
 for (const entry of FILES) {
@@ -68,6 +76,28 @@ for (const dir of DIRS) {
         contents[`${dir.key}/${entry.name}`] = fs.readFileSync(path.join(abs, entry.name), 'utf-8');
     }
 }
+
+function walkNested(baseSrc, baseKey) {
+    const abs = path.join(templatesRoot, baseSrc);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return;
+    const stack = [{ srcRel: '', keyRel: '' }];
+    while (stack.length > 0) {
+        const cur = stack.pop();
+        const curAbs = path.join(abs, cur.srcRel);
+        for (const entry of fs.readdirSync(curAbs, { withFileTypes: true })) {
+            if (entry.name.startsWith('.')) continue;
+            const nextSrcRel = path.join(cur.srcRel, entry.name);
+            const nextKeyRel = cur.keyRel ? `${cur.keyRel}/${entry.name}` : entry.name;
+            if (entry.isDirectory()) {
+                stack.push({ srcRel: nextSrcRel, keyRel: nextKeyRel });
+                continue;
+            }
+            const key = `${baseKey}/${nextKeyRel}`;
+            contents[key] = fs.readFileSync(path.join(abs, nextSrcRel), 'utf-8');
+        }
+    }
+}
+for (const dir of NESTED_DIRS) walkNested(dir.src, dir.key);
 
 const header = `/**
  * AUTO-GENERATED FILE - DO NOT EDIT MANUALLY

@@ -28,6 +28,49 @@ export type SimpleFieldKind = 'string' | 'number' | 'date' | 'currency';
  */
 export type SimpleReadFrom = 'below' | 'belowLine' | 'right' | 'leftOf' | 'inline';
 
+/**
+ * Optional per-field formatting-rule declarations. Every rule is asserted
+ * against the TextItem[] that produced the field's value — bold/italic/font
+ * size come from `TextItem.fontName` and `TextItem.fontSize`; alignment is
+ * inferred from item x-position within the field's own value span (or,
+ * when a `columnBand` is available on a table field, relative to that band).
+ * Every rule is OPTIONAL; a field with no `formatting:` block skips all
+ * formatting checks.
+ */
+export interface SimpleFormattingRule {
+    /** Every TextItem in the value must be a bold-font variant (matches /bold|black|heavy/i in fontName). */
+    bold?: boolean;
+    /** Every TextItem must be italic (matches /italic|oblique/i in fontName). */
+    italic?: boolean;
+    /** Font size band (in PDF points). All items must fall within [min, max] inclusive. `exact` overrides both. */
+    fontSize?: { min?: number; max?: number; exact?: number };
+    /**
+     * Casing rule on the raw string value:
+     *   - `upper`  → every alpha char is uppercase
+     *   - `lower`  → every alpha char is lowercase
+     *   - `title`  → first letter of each word is uppercase, rest lowercase
+     */
+    casing?: 'upper' | 'lower' | 'title';
+    /**
+     * Required currency-prefix on the raw value (e.g. `$`, `USD $`, `£`). Case-sensitive.
+     * Whitespace between prefix and value is tolerated.
+     */
+    currencyPrefix?: string;
+    /**
+     * When true, negative numeric values MUST use accounting-paren wrap `(1,234.56)`
+     * rather than leading-minus `-1234.56`. When false (default), either is accepted.
+     */
+    parenNegative?: boolean;
+    /**
+     * Text alignment. `left` → items' left edge sits at or near the leftmost point of the
+     * anchor's x-span; `right` → items' right edge sits at or near the rightmost point;
+     * `center` → item midpoint sits near anchor midpoint. Tolerance ±`alignmentTolerance`.
+     */
+    alignment?: 'left' | 'right' | 'center';
+    /** Alignment tolerance in PDF points. Default 4. */
+    alignmentTolerance?: number;
+}
+
 export interface SimpleFieldSpec {
     /** Anchor text in the PDF. Case-insensitive substring match. Required unless `presenceOfText` is set. */
     label?: string;
@@ -63,6 +106,13 @@ export interface SimpleFieldSpec {
     meansValue?: string;
     /** Value when `presenceOfText` did NOT match. Default: 'missing'. */
     elseValue?: string;
+    // ---- Optional formatting-rule declarations ------------------------------
+    /**
+     * Per-field formatting assertions (bold/italic/font-size/alignment/currency
+     * prefix/paren-negative/casing). Applied ONLY to extraction fields (skipped
+     * for presence-only fields). No formatting block = no formatting checks.
+     */
+    formatting?: SimpleFormattingRule;
 }
 
 export interface SimpleTableColumnSpec {
@@ -88,6 +138,59 @@ export interface SimpleTableSpec {
     rowYTolerance?: number;
 }
 
+/**
+ * Optional Phase-1 check blocks. Each is opt-in — declaring `checks.metadata`
+ * triggers the metadata validator, `checks.links` triggers the link validator,
+ * etc. Absent blocks skip the corresponding check. All findings roll into the
+ * top-level ValidationResult under `phase1Findings`.
+ */
+export interface SimpleReportSpecChecks {
+    /** PDF Info dict + XMP metadata rules (§5). */
+    metadata?: import('./checks/CSPdfMetadataValidator').MetadataRule;
+    /** Link annotation rules — URI presence, mailto syntax, dead-link scan (§14). */
+    links?: import('./checks/CSPdfLinkValidator').LinkRule;
+    /** Header/footer consistency + placeholder-leak scan (§17). */
+    headerFooter?: import('./checks/CSPdfHeaderFooterValidator').HeaderFooterRule;
+    /** Watermark presence/absence rules (§15). */
+    watermarks?: import('./checks/CSPdfWatermarkValidator').WatermarkRule[];
+    /** Page-count + orientation + size + blank-page detection (§2). */
+    layout?: import('./checks/CSPdfLayoutValidator').LayoutRule;
+    /** File SHA-256, TOC↔section count, attachment inventory (§20). */
+    integrity?: import('./checks/CSPdfIntegrityValidator').IntegrityRule;
+    /** Placeholder-leak, encoding, PII regex scans (§23). */
+    textQuality?: import('./checks/CSPdfTextQualityValidator').TextQualityRule;
+    // ---- Phase 3 ---------------------------------------------------------
+    /** Bookmarks / outlines / OCG layers / page labels / annotation inventory (§4). */
+    structural?: import('./checks/CSPdfStructuralValidator').StructuralRule;
+    /** AcroForm widgets + JS action allow/deny (§13). */
+    interactive?: import('./checks/CSPdfInteractiveValidator').InteractiveRule;
+    /** Embedded-file inventory + mime allow-list + XML well-formed (§9 / §16). */
+    attachments?: import('./checks/CSPdfAttachmentValidator').AttachmentRule;
+    /**
+     * Table-depth analyses, keyed by table name (must match a table declared
+     * in `tables`). Adds merged-row / arity / accuracy checks on top of the
+     * existing table extractor.
+     */
+    tableDepth?: Record<string, import('./checks/CSPdfTableDepthValidator').TableDepthRule>;
+    // ---- Phase 4 ---------------------------------------------------------
+    /** Image XObject inventory + resolution + colorSpace allow-list. */
+    images?: import('./checks/CSPdfImageInventoryValidator').ImageRule;
+    /** WCAG text-contrast checks. */
+    contrast?: import('./checks/CSPdfContrastValidator').ContrastRule;
+    /** Chart-region assertions (count, area, text-overlap). */
+    chartRegions?: import('./checks/CSPdfChartRegionValidator').ChartRegionRule;
+    /** Rasterize + pixel-diff pages against a persisted baseline. Requires optional deps. */
+    visualRegression?: import('./checks/CSPdfVisualRegressionValidator').VisualRegressionRule;
+    // ---- Phase 5 ---------------------------------------------------------
+    /** Encryption / permissions / digital-signature / redaction assertions. */
+    security?: import('./checks/CSPdfSecurityValidator').SecurityRule;
+    /** Decode + assert 1D/2D barcodes visible on pages. Requires optional deps. */
+    barcodes?: import('./checks/CSPdfBarcodeValidator').BarcodeRule;
+    // ---- Phase 6 ---------------------------------------------------------
+    /** Diff this PDF against a baseline PDF, either textually or by structural counters. */
+    versionDiff?: import('./checks/CSPdfVersionDiffValidator').VersionDiffRule;
+}
+
 /** The simple validation spec — flat, two-key. */
 export interface SimpleReportSpec {
     /** Spec name — matches the filename (without .json) when loaded from disk. */
@@ -98,6 +201,8 @@ export interface SimpleReportSpec {
     fields?: Record<string, SimpleFieldSpec>;
     /** Line-item tables to extract + assert. Keys are consumer-facing table names. */
     tables?: Record<string, SimpleTableSpec>;
+    /** Optional Phase-1 checks — metadata / links / header-footer / watermarks / layout / integrity / text-quality. */
+    checks?: SimpleReportSpecChecks;
 }
 
 /**

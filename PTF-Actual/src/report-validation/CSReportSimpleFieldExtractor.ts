@@ -22,6 +22,17 @@ export interface FieldExtractionResult {
     reason?: string;
     /** The anchor token found, when useful for diagnostics. */
     anchor?: { str: string; x: number; y: number; page: number };
+    /**
+     * Raw TextItem(s) that produced the value, in left-to-right reading order.
+     * Populated for every successful extraction. Formatting validators use
+     * these for font/style/color/alignment checks.
+     */
+    items?: TextItem[];
+}
+
+interface ReadResult {
+    value: string;
+    items: TextItem[];
 }
 
 /** Locate a field's value in the token stream, per the spec's rules. */
@@ -55,42 +66,42 @@ export function extractField(
         const colonSuffix = spec.label.trim().endsWith(':');
         modes = colonSuffix ? ['inline', 'right', 'below'] : ['inline', 'below', 'right'];
     }
-    let value: string | null = null;
+    let picked: ReadResult | null = null;
     let tried: string[] = [];
     for (const mode of modes) {
         tried.push(mode);
-        let v: string | null = null;
+        let r: ReadResult | null = null;
         switch (mode) {
             case 'inline':
-                v = readInline(anchor.token, spec.label, spec.inlineSeparator ?? DEFAULT_INLINE_SEPARATOR);
+                r = readInline(anchor.token, spec.label, spec.inlineSeparator ?? DEFAULT_INLINE_SEPARATOR);
                 break;
             case 'right':
-                v = readRight(pageTokens, anchor.token, spec);
+                r = readRight(pageTokens, anchor.token, spec);
                 break;
             case 'leftOf':
-                v = readLeftOf(pageTokens, anchor.token, spec);
+                r = readLeftOf(pageTokens, anchor.token, spec);
                 break;
             case 'belowLine':
-                v = readBelowLine(pageTokens, anchor.token, spec);
+                r = readBelowLine(pageTokens, anchor.token, spec);
                 break;
             case 'below':
-                v = readBelow(pageTokens, anchor.token, spec);
+                r = readBelow(pageTokens, anchor.token, spec);
                 break;
         }
-        if (v !== null && v.trim().length > 0) {
-            value = v;
+        if (r !== null && r.value.trim().length > 0) {
+            picked = r;
             break;
         }
     }
     const anchorMeta = { str: anchor.token.str, x: anchor.token.x, y: anchor.token.y, page: anchor.page };
-    if (value === null) {
+    if (picked === null) {
         return {
             value: null,
             reason: `no value token found ${tried.join('/')} anchor "${spec.label}" at (page ${anchor.page + 1}, x=${anchor.token.x}, y=${anchor.token.y})`,
             anchor: anchorMeta,
         };
     }
-    return { value: value.trim(), anchor: anchorMeta };
+    return { value: picked.value.trim(), anchor: anchorMeta, items: picked.items };
 }
 
 /** Case-insensitive substring anchor match. First hit (top-left-most) wins. */
@@ -116,9 +127,8 @@ function findAnchor(
     return null;
 }
 
-function readInline(anchorToken: TextItem, label: string, separator: string): string | null {
+function readInline(anchorToken: TextItem, label: string, separator: string): ReadResult | null {
     const raw = anchorToken.str;
-    // Case-insensitive find of the label followed by separator.
     const lowerRaw = raw.toLowerCase();
     const lowerLabel = label.toLowerCase();
     const idx = lowerRaw.indexOf(lowerLabel);
@@ -127,21 +137,24 @@ function readInline(anchorToken: TextItem, label: string, separator: string): st
     const sepIdx = after.indexOf(separator);
     if (sepIdx < 0) return null;
     const tail = after.substring(sepIdx + separator.length).trim();
-    return tail.length > 0 ? tail : null;
+    if (tail.length === 0) return null;
+    // Inline mode returns the anchor token itself as the source item — formatting
+    // checks on inline fields inspect the same TextItem that carries the label,
+    // which is the correct behaviour when label + value share a text run.
+    return { value: tail, items: [anchorToken] };
 }
 
 const DEFAULT_RIGHT_MAX_INTER_TOKEN_GAP = 40;
 
 const DEFAULT_LEFTOF_Y_TOLERANCE = 8; // cross-column reads see larger baseline offsets than same-column right/below
 
-function readLeftOf(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): string | null {
+function readLeftOf(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): ReadResult | null {
     const yTol = spec.yTolerance ?? DEFAULT_LEFTOF_Y_TOLERANCE;
     const candidates = pageTokens.filter(
         (t) => t !== anchor && Math.abs(t.y - anchor.y) <= yTol && t.x + t.width <= anchor.x,
     );
     if (candidates.length === 0) return null;
-    // Take the contiguous group closest to the anchor from the left — stop at the first big gap.
-    candidates.sort((a, b) => b.x - a.x); // rightmost first (nearest to anchor)
+    candidates.sort((a, b) => b.x - a.x);
     const picked: TextItem[] = [candidates[0]];
     for (let i = 1; i < candidates.length; i++) {
         const prev = picked[picked.length - 1];
@@ -149,12 +162,12 @@ function readLeftOf(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldS
         if (gap > DEFAULT_RIGHT_MAX_INTER_TOKEN_GAP) break;
         picked.push(candidates[i]);
     }
-    // Return in left-to-right reading order.
     picked.sort((a, b) => a.x - b.x);
-    return picked.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+    const value = picked.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+    return { value, items: picked };
 }
 
-function readRight(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): string | null {
+function readRight(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): ReadResult | null {
     const yTol = spec.yTolerance ?? DEFAULT_Y_TOLERANCE;
     const maxSpan = spec.rightMaxSpan;
     const anchorRight = anchor.x + anchor.width;
@@ -167,9 +180,6 @@ function readRight(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSp
     );
     if (candidates.length === 0) return null;
     candidates.sort((a, b) => a.x - b.x);
-    // Take the contiguous group closest to the anchor — stop at the first big horizontal gap.
-    // This prevents "File Review" (fee label) from vacuuming the "1,000 @ $1.00" middle column
-    // AND the "$1,000.00" amount column that sits far to the right.
     const picked: TextItem[] = [candidates[0]];
     for (let i = 1; i < candidates.length; i++) {
         const prev = picked[picked.length - 1];
@@ -177,14 +187,11 @@ function readRight(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSp
         if (gap > DEFAULT_RIGHT_MAX_INTER_TOKEN_GAP) break;
         picked.push(candidates[i]);
     }
-    return picked.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+    const value = picked.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+    return { value, items: picked };
 }
 
-function readBelowLine(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): string | null {
-    // "Below line" = the N-th distinct row of tokens strictly below the anchor,
-    // regardless of x-alignment. Used for values that sit under an anchor but on
-    // a different x column — e.g. a subheading line under an "Account Number: X"
-    // line whose value starts at the left margin.
+function readBelowLine(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): ReadResult | null {
     const rowYTol = spec.yTolerance ?? DEFAULT_Y_TOLERANCE;
     const offset = Math.max(1, spec.belowLineOffset ?? 1);
     const below = pageTokens.filter((t) => t !== anchor && t.y < anchor.y).sort((a, b) => b.y - a.y);
@@ -197,14 +204,13 @@ function readBelowLine(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFie
     }
     if (rows.length < offset) return null;
     const row = rows[offset - 1].slice().sort((a, b) => a.x - b.x);
-    return row.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+    const value = row.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+    return { value, items: row };
 }
 
-function readBelow(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): string | null {
+function readBelow(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSpec): ReadResult | null {
     const xTol = spec.xTolerance ?? DEFAULT_X_TOLERANCE;
     const maxDrop = spec.belowMaxDrop ?? DEFAULT_BELOW_MAX_DROP;
-    // "Below" in PDF space means smaller y. Consider tokens whose x-range overlaps the anchor's,
-    // whose y < anchor.y, and drop is within maxDrop.
     const anchorLeft = anchor.x;
     const anchorRight = anchor.x + anchor.width;
     const candidates = pageTokens.filter((t) => {
@@ -212,15 +218,14 @@ function readBelow(pageTokens: TextItem[], anchor: TextItem, spec: SimpleFieldSp
         if (t.y >= anchor.y) return false;
         if (anchor.y - t.y > maxDrop) return false;
         const tRight = t.x + t.width;
-        // horizontal overlap or near-alignment
         const overlaps = t.x <= anchorRight + xTol && tRight >= anchorLeft - xTol;
         return overlaps;
     });
     if (candidates.length === 0) return null;
-    // Pick the highest-y (closest below the anchor) row, then join tokens on that row.
     candidates.sort((a, b) => b.y - a.y);
     const topY = candidates[0].y;
     const sameRow = candidates.filter((t) => Math.abs(t.y - topY) <= (spec.yTolerance ?? DEFAULT_Y_TOLERANCE));
     sameRow.sort((a, b) => a.x - b.x);
-    return sameRow.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+    const value = sameRow.map((t) => t.str.trim()).filter((s) => s.length > 0).join(' ');
+    return { value, items: sameRow };
 }

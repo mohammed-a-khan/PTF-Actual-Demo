@@ -33,9 +33,23 @@ export class CSBDDContext {
     }
     
     public static getInstance(): CSBDDContext {
+        // Cross-module-instance singleton: when the framework is loaded via two
+        // different module paths (e.g. `npm link` in a dev workspace pointing at
+        // a source repo, or a duplicated dependency in the graph), a plain
+        // static field creates one instance per copy of this file. That splits
+        // `worldData` between the runner and step-defs — currentRow set by the
+        // runner isn't visible to a step-def that resolved CSBDDContext via the
+        // other path. Storing the instance on globalThis reunites them.
+        const GLOBAL_KEY = '__cs_qa_bdd_context_singleton__';
+        const g = globalThis as unknown as Record<string, CSBDDContext | undefined>;
+        if (g[GLOBAL_KEY]) {
+            CSBDDContext.instance = g[GLOBAL_KEY] as CSBDDContext;
+            return CSBDDContext.instance;
+        }
         if (!CSBDDContext.instance) {
             CSBDDContext.instance = new CSBDDContext();
         }
+        g[GLOBAL_KEY] = CSBDDContext.instance;
         return CSBDDContext.instance;
     }
     
