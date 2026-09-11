@@ -41,6 +41,12 @@ registerPrimitive({
             columnMissing: z.number(),
             knownDifferencesMatched: z.number(),
         }),
+        ledger: z.object({
+            totalRows: z.number(),
+            passRows: z.number(),
+            failRows: z.number(),
+            knownDiffRows: z.number(),
+        }),
         firstFindings: z.array(
             z.object({
                 kind: z.string(),
@@ -60,6 +66,7 @@ registerPrimitive({
             columnsInReferenceOnly: z.number(),
         }),
         resourceRef: z.string().optional(),
+        htmlReportPath: z.string().optional(),
         warnings: z.array(z.string()),
         error: z.string().optional(),
     }),
@@ -91,6 +98,41 @@ registerPrimitive({
                 `report-reconcile-${path.basename(candAbs, path.extname(candAbs))}-${stamp}.json`,
             );
             fs.writeFileSync(resourceRef, JSON.stringify(result, null, 2), 'utf-8');
+
+            // Emit the side-by-side ledger HTML alongside the JSON resource so
+            // Copilot can hand the reviewer a rendered audit — the same
+            // artefact the BDD auto step produces via CSPdfReconcileReporter.
+            let htmlReportPath: string | undefined;
+            try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const { writeReconcileHtmlReport } = require('../../../report-validation/CSPdfReconcileReporter');
+                const write = writeReconcileHtmlReport(result, {
+                    label: `${path.basename(candAbs)} vs ${path.basename(refAbs)}`,
+                    outputPath: path.join(
+                        resourcesDir(ctx),
+                        `report-reconcile-${path.basename(candAbs, path.extname(candAbs))}-${stamp}.html`,
+                    ),
+                    writeJsonCopy: false,
+                });
+                htmlReportPath = write.htmlPath;
+            } catch { /* reporter unavailable — resource JSON still written */ }
+
+            // Roll up the ledger into small counters — full ledger stays in the
+            // resource JSON for pagination downstream.
+            const ledgerRows: Array<{ cells: Array<{ outcome: string }> }> = Array.isArray(result.ledger) ? result.ledger : [];
+            let passRows = 0, failRows = 0, knownDiffRows = 0;
+            for (const r of ledgerRows) {
+                let worst: 'pass' | 'fail' | 'known' = 'pass';
+                for (const c of r.cells) {
+                    if (c.outcome === 'MISMATCH' || c.outcome === 'MISSING_CANDIDATE' || c.outcome === 'MISSING_REFERENCE') {
+                        worst = 'fail'; break;
+                    }
+                    if (c.outcome === 'KNOWN_DIFFERENCE') worst = 'known';
+                }
+                if (worst === 'fail') failRows++;
+                else if (worst === 'known') knownDiffRows++;
+                else passRows++;
+            }
             const firstFindings = result.findings
                 .filter((f: { kind: string }) => f.kind !== 'KNOWN_DIFFERENCE_MATCHED')
                 .slice(0, 20)
@@ -136,6 +178,12 @@ registerPrimitive({
                     columnMissing: result.summary.columnMissing,
                     knownDifferencesMatched: result.summary.knownDifferencesMatched,
                 },
+                ledger: {
+                    totalRows: ledgerRows.length,
+                    passRows,
+                    failRows,
+                    knownDiffRows,
+                },
                 firstFindings,
                 unmatchedCounts: {
                     sectionsInReferenceOnly: result.unmatched.sectionsInReferenceOnly.length,
@@ -143,6 +191,7 @@ registerPrimitive({
                     columnsInReferenceOnly: result.unmatched.columnsInReferenceOnly.length,
                 },
                 resourceRef,
+                htmlReportPath,
                 warnings: result.warnings,
             };
         } catch (e) {
@@ -166,6 +215,7 @@ function zero(status: 'ok' | 'error', error?: string) {
             columnMissing: 0,
             knownDifferencesMatched: 0,
         },
+        ledger: { totalRows: 0, passRows: 0, failRows: 0, knownDiffRows: 0 },
         firstFindings: [],
         unmatchedCounts: { sectionsInReferenceOnly: 0, sectionsInCandidateOnly: 0, columnsInReferenceOnly: 0 },
         warnings: [],
