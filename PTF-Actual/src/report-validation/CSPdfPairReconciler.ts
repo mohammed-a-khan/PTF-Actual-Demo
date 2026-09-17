@@ -224,6 +224,30 @@ export async function generateReconciliationRulesFromPair(opts: {
         `[generateReconciliationRulesFromPair] reference sections (${refSections.size}): ` +
         Array.from(refSections.keys()).map((s) => `"${s}"`).join(', '),
     );
+    const anonKey = /^\s*\(?anonymous\)?\s*$/i;
+    const dumpAnon = (label: string, secs: Map<string, AnalyzedSection>) => {
+        const anons: Array<{ title: string; rows: number; cols: string[] }> = [];
+        for (const [t, s] of secs.entries()) {
+            if (!anonKey.test(t)) continue;
+            const cols = (s.columns ?? []).map((c) => (c.header ?? '').trim()).filter((h) => h.length > 0);
+            anons.push({ title: t, rows: s.tableRows?.length ?? 0, cols });
+        }
+        if (anons.length > 0) {
+            CSReporter.warn(
+                `[generateReconciliationRulesFromPair] ${label} has ${anons.length} anonymous section(s) - ` +
+                `likely a multi-page section whose title was printed as a running header and the analyzer did ` +
+                `not merge the chunks. This silently drops sections from reconciliation. Details:`,
+            );
+            for (let i = 0; i < anons.length; i++) {
+                const a = anons[i];
+                CSReporter.warn(
+                    `  ${label} anon #${i + 1}: rows=${a.rows}, columns=[${a.cols.map((c) => `"${c}"`).join(', ')}]`,
+                );
+            }
+        }
+    };
+    dumpAnon('candidate', candSections);
+    dumpAnon('reference', refSections);
     CSReporter.info(
         `[generateReconciliationRulesFromPair] candidateAuthoritative=${candidateAuthoritative} (walk ` +
         `${candidateAuthoritative ? 'CANDIDATE' : 'REFERENCE'} sections, match against the other side)`,

@@ -803,18 +803,55 @@ function mergeCrossPageSections(
 ): AnalyzedSection[] {
     if (pages.length === 0) return [];
     const stitchAcrossPages = opts.stitchCrossPageTables !== false;
+    const bandTolerance = 5;
+    const isAnonymous = (t: string): boolean => /^\s*\(?anonymous\)?\s*$/i.test(t ?? '');
+    const columnBandsMatch = (a: AnalyzedSection['columns'], b: AnalyzedSection['columns']): boolean => {
+        if (!a || !b || a.length === 0 || a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (Math.abs(a[i].start - b[i].start) > bandTolerance) return false;
+            if (Math.abs(a[i].end - b[i].end) > bandTolerance) return false;
+        }
+        return true;
+    };
+    const columnHeadersMatch = (a: AnalyzedSection['columns'], b: AnalyzedSection['columns']): boolean => {
+        if (!a || !b || a.length === 0 || a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            const ha = (a[i].header ?? '').trim().toLowerCase();
+            const hb = (b[i].header ?? '').trim().toLowerCase();
+            if (!ha || !hb || ha !== hb) return false;
+        }
+        return true;
+    };
     const merged: AnalyzedSection[] = [];
     for (let p = 0; p < pages.length; p++) {
         for (const section of pages[p].sections) {
             const last = merged[merged.length - 1];
-            if (
+            const sameTitleMerge =
                 stitchAcrossPages &&
                 last &&
                 shouldMergeAcrossPages(
                     { title: last.title, bands: last.columns },
                     { title: section.title, bands: section.columns },
-                )
-            ) {
+                );
+            // Anonymous-continuation merge: the same section title is often
+            // printed as a running page-header on every continuation page but
+            // the section-header detector doesn't classify it as a real title
+            // (it sits in the page-header band, not above the table). The
+            // continuation page then arrives here as "(anonymous)". If it has
+            // the SAME column band positions AND either the same header text
+            // OR the previous section was titled (not anonymous), treat it as
+            // a continuation. Prevents multi-page tables from being silently
+            // split into 13× "(anonymous)" chunks that downstream reconcile
+            // then can't match.
+            const anonContinuationMerge =
+                stitchAcrossPages &&
+                !!last &&
+                !sameTitleMerge &&
+                isAnonymous(section.title) &&
+                !isAnonymous(last.title) &&
+                columnBandsMatch(last.columns, section.columns) &&
+                columnHeadersMatch(last.columns, section.columns);
+            if (sameTitleMerge || anonContinuationMerge) {
                 // Absorb this page's rows into the previous section's row list.
                 last.spansToNextPage = true;
                 const startRowIndex = last.tableRows.length;
