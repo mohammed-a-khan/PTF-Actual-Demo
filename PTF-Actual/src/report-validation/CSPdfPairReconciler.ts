@@ -23,6 +23,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { CSReporter } from '../reporter/CSReporter';
 import { extractPagesFromPdf } from './CSReportPdfExtractor';
 import { analyzeReport } from './CSReportPdfLayoutAnalyzer';
 import type { AnalyzedReport, AnalyzedSection, TableRow } from './CSReportPdfTypes';
@@ -200,10 +201,12 @@ export async function generateReconciliationRulesFromPair(opts: {
     candidatePdfPath: string;
     referencePdfPath: string;
     fuzzyThreshold?: number;
+    candidateAuthoritative?: boolean;
 }): Promise<ReconcileRules> {
     if (!fs.existsSync(opts.candidatePdfPath)) throw new Error(`Candidate PDF not found: ${opts.candidatePdfPath}`);
     if (!fs.existsSync(opts.referencePdfPath)) throw new Error(`Reference PDF not found: ${opts.referencePdfPath}`);
     const threshold = opts.fuzzyThreshold ?? 0.85;
+    const candidateAuthoritative = opts.candidateAuthoritative !== false;
     const [candPages, refPages] = await Promise.all([
         extractPagesFromPdf(opts.candidatePdfPath),
         extractPagesFromPdf(opts.referencePdfPath),
@@ -213,56 +216,90 @@ export async function generateReconciliationRulesFromPair(opts: {
     const candSections = mergeAnalyzedSections(candAnalyzed);
     const refSections = mergeAnalyzedSections(refAnalyzed);
 
+    CSReporter.info(
+        `[generateReconciliationRulesFromPair] candidate sections (${candSections.size}): ` +
+        Array.from(candSections.keys()).map((s) => `"${s}"`).join(', '),
+    );
+    CSReporter.info(
+        `[generateReconciliationRulesFromPair] reference sections (${refSections.size}): ` +
+        Array.from(refSections.keys()).map((s) => `"${s}"`).join(', '),
+    );
+    CSReporter.info(
+        `[generateReconciliationRulesFromPair] candidateAuthoritative=${candidateAuthoritative} (walk ` +
+        `${candidateAuthoritative ? 'CANDIDATE' : 'REFERENCE'} sections, match against the other side)`,
+    );
+
     const sections: Record<string, ReconcileSectionRule> = {};
-    for (const [refTitle, refSec] of refSections.entries()) {
-        // Find nearest candidate section by fuzzy match
-        const nearest = Array.from(candSections.keys())
-            .map((c) => ({ c, s: similarityRatio(refTitle.toLowerCase(), c.toLowerCase()) }))
+    const [drivingSections, otherSections] = candidateAuthoritative
+        ? [candSections, refSections]
+        : [refSections, candSections];
+
+    for (const [drivingTitle, drivingSec] of drivingSections.entries()) {
+        const nearest = Array.from(otherSections.keys())
+            .map((c) => ({ c, s: similarityRatio(drivingTitle.toLowerCase(), c.toLowerCase()) }))
             .sort((a, b) => b.s - a.s);
         const bestMatch = nearest[0];
-        if (!bestMatch || bestMatch.s < threshold) continue;
-        const candSec = candSections.get(bestMatch.c);
-        if (!candSec) continue;
+        if (!bestMatch || bestMatch.s < threshold) {
+            CSReporter.debug(
+                `[generateReconciliationRulesFromPair] no ${candidateAuthoritative ? 'reference' : 'candidate'} ` +
+                `match for section "${drivingTitle}" (best "${bestMatch?.c ?? 'n/a'}" at ${bestMatch?.s.toFixed(2) ?? 'n/a'} < ${threshold})`,
+            );
+            continue;
+        }
+        const otherSec = otherSections.get(bestMatch.c);
+        if (!otherSec) continue;
 
-        // Auto-detect keyColumns. Starts with the single best-scoring column,
-        // then greedily adds more columns until the COMPOSITE key is unique
-        // across the section's rows — this handles tables where the same ID
-        // appears in multiple rows (e.g. the same loan at different tranches
-        // or dates) and one column alone can't identify a row. Composite keys
-        // read as `col1=v1 | col2=v2` in the ledger — same as the legacy
-        // reconciler's format.
+        const candSec = candidateAuthoritative ? drivingSec : otherSec;
+        const refSec = candidateAuthoritative ? otherSec : drivingSec;
+        const candTitle = candidateAuthoritative ? drivingTitle : bestMatch.c;
+        const refTitle = candidateAuthoritative ? bestMatch.c : drivingTitle;
+
         const refCols = refSec.columns.map((c) => (c.header ?? '').trim()).filter((h) => h.length > 0);
-        if (refCols.length === 0) continue;
-        const keyColIndices = pickKeyColumnIndices(refSec, refCols);
-        if (keyColIndices.length === 0) continue;
-        const keyColumns = keyColIndices.map((i) => refCols[i]);
-
-        // Auto-match columns
         const candCols = candSec.columns.map((c) => (c.header ?? '').trim()).filter((h) => h.length > 0);
+        if (refCols.length === 0 && candCols.length === 0) continue;
+
+        const keyDrivingSec = candidateAuthoritative ? candSec : refSec;
+        const keyDrivingCols = candidateAuthoritative ? candCols : refCols;
+        if (keyDrivingCols.length === 0) continue;
+        const keyColIndices = pickKeyColumnIndices(keyDrivingSec, keyDrivingCols);
+        if (keyColIndices.length === 0) continue;
+        const keyColumns = keyColIndices.map((i) => keyDrivingCols[i]);
+
         const columns: Record<string, ReconcileColumnRule> = {};
-        for (const refCol of refCols) {
-            const nearestCol = candCols
-                .map((c) => ({ c, s: similarityRatio(refCol.toLowerCase(), c.toLowerCase()) }))
+        const colDriving = candidateAuthoritative ? candCols : refCols;
+        const colOther = candidateAuthoritative ? refCols : candCols;
+        const kindSec = candidateAuthoritative ? candSec : refSec;
+        for (const drivingCol of colDriving) {
+            const nearestCol = colOther
+                .map((c) => ({ c, s: similarityRatio(drivingCol.toLowerCase(), c.toLowerCase()) }))
                 .sort((a, b) => b.s - a.s)[0];
             if (nearestCol && nearestCol.s >= threshold) {
                 const rule: ReconcileColumnRule = {};
-                if (nearestCol.c !== refCol) rule.aliases = [nearestCol.c];
-                const kind = sniffColumnKindLocal(refSec, refCols.indexOf(refCol));
+                if (nearestCol.c !== drivingCol) rule.aliases = [nearestCol.c];
+                const kind = sniffColumnKindLocal(kindSec, colDriving.indexOf(drivingCol));
                 if (kind) rule.kind = kind;
-                columns[refCol] = rule;
+                columns[drivingCol] = rule;
             }
         }
         if (Object.keys(columns).length === 0) continue;
 
+        const canonicalTitle = candidateAuthoritative ? candTitle : refTitle;
         const rule: ReconcileSectionRule = { keyColumns, columns };
-        if (bestMatch.c !== refTitle) rule.aliases = [bestMatch.c];
-        sections[refTitle] = rule;
+        const aliasTitle = candidateAuthoritative ? refTitle : candTitle;
+        if (aliasTitle && aliasTitle !== canonicalTitle) rule.aliases = [aliasTitle];
+        sections[canonicalTitle] = rule;
     }
+
+    CSReporter.info(
+        `[generateReconciliationRulesFromPair] generated ${Object.keys(sections).length} section rule(s): ` +
+        Object.keys(sections).map((s) => `"${s}"`).join(', '),
+    );
+
     return {
         _meta: {
             candidateSource: `pdf:${opts.candidatePdfPath}`,
             referenceSource: `pdf:${opts.referencePdfPath}`,
-            description: `Auto-generated rules (zero-config, fuzzy threshold ${threshold}).`,
+            description: `Auto-generated rules (zero-config, fuzzy threshold ${threshold}, candidateAuthoritative=${candidateAuthoritative}).`,
         },
         sections,
         globalTolerance: { currency: 0.01, percentage: 0.001, count: 0, number: 0.01 },
