@@ -803,22 +803,32 @@ function mergeCrossPageSections(
 ): AnalyzedSection[] {
     if (pages.length === 0) return [];
     const stitchAcrossPages = opts.stitchCrossPageTables !== false;
-    const bandTolerance = 5;
+    // 20pt tolerance for the anonymous-continuation merge check. Column band
+    // start positions are computed from midpoints between adjacent columns'
+    // text extents; those midpoints flex with cell content between pages, so
+    // a strict 5pt tolerance (used by shouldMergeAcrossPages for the same-
+    // title case) rejects legitimate continuations. 20pt still safely rejects
+    // unrelated tables that happen to share a column count.
+    const bandTolerance = 20;
     const isAnonymous = (t: string): boolean => /^\s*\(?anonymous\)?\s*$/i.test(t ?? '');
     const columnBandsMatch = (a: AnalyzedSection['columns'], b: AnalyzedSection['columns']): boolean => {
         if (!a || !b || a.length === 0 || a.length !== b.length) return false;
+        // Only require column START positions to match within tolerance.
+        // Column END positions flex with the widest cell in each column,
+        // which varies naturally between a 26-row page and a 52-row page,
+        // so strict end-match blocks legitimate continuation merges.
         for (let i = 0; i < a.length; i++) {
             if (Math.abs(a[i].start - b[i].start) > bandTolerance) return false;
-            if (Math.abs(a[i].end - b[i].end) > bandTolerance) return false;
         }
         return true;
     };
-    const columnHeadersMatch = (a: AnalyzedSection['columns'], b: AnalyzedSection['columns']): boolean => {
+    const columnHeadersCompatible = (a: AnalyzedSection['columns'], b: AnalyzedSection['columns']): boolean => {
         if (!a || !b || a.length === 0 || a.length !== b.length) return false;
         for (let i = 0; i < a.length; i++) {
             const ha = (a[i].header ?? '').trim().toLowerCase();
             const hb = (b[i].header ?? '').trim().toLowerCase();
-            if (!ha || !hb || ha !== hb) return false;
+            if (!ha || !hb) continue;
+            if (ha !== hb) return false;
         }
         return true;
     };
@@ -850,7 +860,7 @@ function mergeCrossPageSections(
                 isAnonymous(section.title) &&
                 !isAnonymous(last.title) &&
                 columnBandsMatch(last.columns, section.columns) &&
-                columnHeadersMatch(last.columns, section.columns);
+                columnHeadersCompatible(last.columns, section.columns);
             if (sameTitleMerge || anonContinuationMerge) {
                 // Absorb this page's rows into the previous section's row list.
                 last.spansToNextPage = true;

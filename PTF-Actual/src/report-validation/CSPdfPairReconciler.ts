@@ -925,9 +925,26 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
         columnMissing: findings.filter((f) => f.kind === 'COLUMN_MISSING_CANDIDATE' || f.kind === 'COLUMN_MISSING_REFERENCE').length,
         knownDifferencesMatched,
     };
-    // A run passes when there are no CELL_MISMATCH / ROW_MISSING / SECTION_MISSING / COLUMN_MISSING findings.
+    // A run passes when there are no CELL_MISMATCH / ROW_MISSING / SECTION_MISSING / COLUMN_MISSING findings
+    // AND at least one section was actually reconciled. Zero-comparison runs used to trivially pass because
+    // every mismatch counter was zero by default; that hides the real failure mode where rule generation or
+    // section resolution matched nothing between the two PDFs. Passing on "we compared nothing" is a false
+    // positive and masks real diffs (see Market Value Detail multi-page continuation case).
     // KNOWN_DIFFERENCE_MATCHED is recorded but not gating.
-    const passed = summary.cellMismatches === 0 && summary.rowMissing === 0 && summary.sectionMissing === 0 && summary.columnMissing === 0;
+    const noMismatches = summary.cellMismatches === 0 && summary.rowMissing === 0 && summary.sectionMissing === 0 && summary.columnMissing === 0;
+    const somethingCompared = summary.sectionsCompared > 0 && summary.cellsCompared > 0;
+    if (!somethingCompared) {
+        const cand = unmatched?.sectionsInCandidateOnly ?? [];
+        const ref = unmatched?.sectionsInReferenceOnly ?? [];
+        warnings.push(
+            `Nothing was reconciled: sectionsCompared=${summary.sectionsCompared}, cellsCompared=${summary.cellsCompared}. ` +
+            `Rule generation or section resolution produced no matched section pair. ` +
+            `Candidate-only sections (${cand.length}): ${cand.map((t) => `"${t}"`).join(', ') || 'none'}. ` +
+            `Reference-only sections (${ref.length}): ${ref.map((r) => `"${r.name}"`).join(', ') || 'none'}. ` +
+            `Report will FAIL because a zero-comparison run cannot be trusted as a pass.`,
+        );
+    }
+    const passed = noMismatches && somethingCompared;
 
     return { passed, summary, findings, ledger, unmatched, warnings };
 }
