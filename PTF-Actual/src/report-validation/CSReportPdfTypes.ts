@@ -259,6 +259,10 @@ export interface LayoutAnalyzerOptions {
     stitchMultiLineCells?: boolean;
     /** Cross-page table continuation on/off. Default true. */
     stitchCrossPageTables?: boolean;
+    /** When true, emit console.log diagnostics for every anonymous-continuation
+     *  merge decision (pass or fail, with band positions and header text).
+     *  Also enabled by setting the env var CS_LAYOUT_DEBUG=1. Default false. */
+    debugCrossPageMerge?: boolean;
     /** Regexes matching section-header text on a per-report basis. Passed in from the spec at run time. */
     sectionHeaderRegexes?: RegExp[];
     /**

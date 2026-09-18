@@ -282,24 +282,52 @@ export async function generateReconciliationRulesFromPair(opts: {
         const candCols = candSec.columns.map((c) => (c.header ?? '').trim()).filter((h) => h.length > 0);
         if (refCols.length === 0 && candCols.length === 0) continue;
 
-        const keyDrivingSec = candidateAuthoritative ? candSec : refSec;
-        const keyDrivingCols = candidateAuthoritative ? candCols : refCols;
+        // Column-header fallback: when the driving side has NO detected column
+        // headers (typical of continuation-heavy SSRS renders that only print
+        // the header row on page 1 and lose it during merge), fall back to the
+        // other side's headers so the section still enters rules. Row-level
+        // reconciliation then reads cells positionally, matching what the eye
+        // sees on the page even without a header string on one side.
+        const drivingHasCols = candidateAuthoritative ? candCols.length > 0 : refCols.length > 0;
+        const otherHasCols = candidateAuthoritative ? refCols.length > 0 : candCols.length > 0;
+
+        const keyDrivingSec = drivingHasCols
+            ? (candidateAuthoritative ? candSec : refSec)
+            : (candidateAuthoritative ? refSec : candSec);
+        const keyDrivingCols = drivingHasCols
+            ? (candidateAuthoritative ? candCols : refCols)
+            : (candidateAuthoritative ? refCols : candCols);
         if (keyDrivingCols.length === 0) continue;
         const keyColIndices = pickKeyColumnIndices(keyDrivingSec, keyDrivingCols);
         if (keyColIndices.length === 0) continue;
         const keyColumns = keyColIndices.map((i) => keyDrivingCols[i]);
 
         const columns: Record<string, ReconcileColumnRule> = {};
-        const colDriving = candidateAuthoritative ? candCols : refCols;
-        const colOther = candidateAuthoritative ? refCols : candCols;
-        const kindSec = candidateAuthoritative ? candSec : refSec;
+        const colDriving = drivingHasCols
+            ? (candidateAuthoritative ? candCols : refCols)
+            : (candidateAuthoritative ? refCols : candCols);
+        const colOther = drivingHasCols && otherHasCols
+            ? (candidateAuthoritative ? refCols : candCols)
+            : colDriving;
+        const kindSec = drivingHasCols
+            ? (candidateAuthoritative ? candSec : refSec)
+            : (candidateAuthoritative ? refSec : candSec);
         for (const drivingCol of colDriving) {
-            const nearestCol = colOther
-                .map((c) => ({ c, s: similarityRatio(drivingCol.toLowerCase(), c.toLowerCase()) }))
-                .sort((a, b) => b.s - a.s)[0];
-            if (nearestCol && nearestCol.s >= threshold) {
+            if (drivingHasCols && otherHasCols) {
+                const nearestCol = colOther
+                    .map((c) => ({ c, s: similarityRatio(drivingCol.toLowerCase(), c.toLowerCase()) }))
+                    .sort((a, b) => b.s - a.s)[0];
+                if (nearestCol && nearestCol.s >= threshold) {
+                    const rule: ReconcileColumnRule = {};
+                    if (nearestCol.c !== drivingCol) rule.aliases = [nearestCol.c];
+                    const kind = sniffColumnKindLocal(kindSec, colDriving.indexOf(drivingCol));
+                    if (kind) rule.kind = kind;
+                    columns[drivingCol] = rule;
+                }
+            } else {
+                // Only one side has headers — use it authoritatively and hope
+                // positional column alignment on the other side matches.
                 const rule: ReconcileColumnRule = {};
-                if (nearestCol.c !== drivingCol) rule.aliases = [nearestCol.c];
                 const kind = sniffColumnKindLocal(kindSec, colDriving.indexOf(drivingCol));
                 if (kind) rule.kind = kind;
                 columns[drivingCol] = rule;
@@ -691,7 +719,6 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
         const refSec = refSections.get(refTitle);
         if (!candSec || !refSec) continue;
 
-        // Column resolution
         const candCols = candSec.columns.map((c) => (c.header ?? '').trim()).filter((h) => h.length > 0);
         const refCols = refSec.columns.map((c) => (c.header ?? '').trim()).filter((h) => h.length > 0);
         const columnResolution = resolveColumns(sectionRule.columns, candCols, refCols, threshold, opts.rules.autoMode);
@@ -976,6 +1003,23 @@ function validateRulesShape(rules: ReconcileRules): void {
  */
 function mergeAnalyzedSections(analyzed: AnalyzedReport): Map<string, AnalyzedSection> {
     const merged = new Map<string, AnalyzedSection>();
+    // Prefer analyzer's own cross-page merge if it produced one — it carries the
+    // anonymous-continuation merge + column-header title synthesis, both of
+    // which the naive per-page title index below cannot reproduce.
+    const analyzerMerged = (analyzed as unknown as { mergedSections?: AnalyzedSection[] }).mergedSections;
+    if (Array.isArray(analyzerMerged) && analyzerMerged.length > 0) {
+        for (const sec of analyzerMerged) {
+            const title = (sec.title ?? '').trim();
+            if (!title) continue;
+            const existing = merged.get(title);
+            if (!existing) {
+                merged.set(title, { ...sec, tableRows: [...sec.tableRows], columns: [...sec.columns] });
+            } else {
+                existing.tableRows.push(...sec.tableRows);
+            }
+        }
+        return merged;
+    }
     for (const page of analyzed.pages) {
         for (const sec of page.sections) {
             const title = (sec.title ?? '').trim();
@@ -1064,10 +1108,30 @@ function findFirstMatch(candidates: string[], pool: string[], threshold: number,
 }
 
 /**
+ * Normalise a section/column title for fuzzy comparison. Strips parenthesised
+ * qualifiers so renderer differences like "Loan Participation Detail" (SSRS)
+ * vs "Loan Participation (Selling Institution) Detail" (Crystal) fuzzy-match
+ * at 1.0 after normalisation. The original string is preserved in the actual
+ * section rule — normalisation is only applied inside the comparator.
+ */
+function normaliseTitleForFuzzy(s: string): string {
+    return s
+        .replace(/^\s*\[cols\]\s*/i, '')
+        .replace(/\s*\([^)]*\)\s*/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+}
+
+/**
  * Damerau-Levenshtein similarity ratio in [0, 1]. 1.0 = identical.
  * Threshold 0.85 = "near-identical, tiny typos or word-order stability".
+ * Both sides pass through normaliseTitleForFuzzy() first so parenthesised
+ * qualifiers, extra whitespace, and case differences don't reduce similarity.
  */
 function similarityRatio(a: string, b: string): number {
+    a = normaliseTitleForFuzzy(a);
+    b = normaliseTitleForFuzzy(b);
     if (a === b) return 1;
     if (!a.length || !b.length) return 0;
     const m = a.length;
@@ -1088,6 +1152,7 @@ function similarityRatio(a: string, b: string): number {
 function indexOfHeader(sec: AnalyzedSection, header: string): number {
     return sec.columns.findIndex((c) => (c.header ?? '').trim() === header);
 }
+
 
 function valueAt(row: TableRow, idx: number): string | null {
     if (idx < 0 || idx >= row.cells.length) return null;

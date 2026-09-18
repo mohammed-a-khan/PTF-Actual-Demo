@@ -123,6 +123,11 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
     const totalPages = pages.length;
     const minRepeats = Math.max(1, Math.ceil(totalPages * repeatThreshold));
 
+    // Per-page median body font size — used by the auto-protect heuristic to decide if a
+    // top-strip item is likely a section title (larger than surrounding body text) vs.
+    // a running page header/date/report name.
+    const bodyMedianFontSize: number[] = strips.map((s) => medianFontSize(s.body));
+
     const chromeHeader: TextItem[][] = strips.map(() => []);
     const chromeFooter: TextItem[][] = strips.map(() => []);
 
@@ -133,11 +138,12 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
             new Map();
         for (let p = 0; p < strips.length; p++) {
             const items = strips[p][region];
-            const protectedItems = protectedItemsOn(items, protectedPatterns, yTol);
+            const patternProtected = protectedItemsOn(items, protectedPatterns, yTol);
+            const autoProtected = autoProtectedItemsOn(items, yTol, bodyMedianFontSize[p]);
             for (const item of items) {
                 // A protected item never enters the signature index, so it can never reach
                 // the repeat threshold and can never be removed from the body.
-                if (protectedItems.has(item)) continue;
+                if (patternProtected.has(item) || autoProtected.has(item)) continue;
                 const sig = itemSignature(item, xTol, yTol);
                 let entry = signatures.get(sig);
                 if (!entry) {
@@ -172,9 +178,10 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
     const deepFooterTextPages = new Map<string, Set<number>>();
     for (let p = 0; p < strips.length; p++) {
         const deepFooterCutoff = pages[p].height * DEEP_FOOTER_FRACTION;
-        const protectedItems = protectedItemsOn(strips[p].bottom, protectedPatterns, yTol);
+        const patternProtected = protectedItemsOn(strips[p].bottom, protectedPatterns, yTol);
+        const autoProtected = autoProtectedItemsOn(strips[p].bottom, yTol, bodyMedianFontSize[p]);
         for (const item of strips[p].bottom) {
-            if (item.y > deepFooterCutoff || protectedItems.has(item)) continue;
+            if (item.y > deepFooterCutoff || patternProtected.has(item) || autoProtected.has(item)) continue;
             const text = item.str.trim();
             // Letters only: a bare page number differs on every page and would never repeat.
             if (text.length === 0 || !/[A-Za-z]/.test(text)) continue;
@@ -231,6 +238,73 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
  */
 /** Fraction of page height, measured from the bottom, that is unambiguously footer chrome. */
 const DEEP_FOOTER_FRACTION = 0.05;
+
+/**
+ * Auto-protect: items that look like a section title even without a caller-supplied
+ * regex. This lets zero-config callers (PDF-vs-PDF pair reconciler) survive on reports
+ * that print the same section title on every page as a running header — a title
+ * repeats identically at the same position and passes every chrome test, then gets
+ * silently deleted before section detection sees it.
+ *
+ * A cluster of same-baseline items looks like a section title when the joined text:
+ *   - is 4-80 chars long (page numbers are shorter, legal footer text longer),
+ *   - is NOT a page-number pattern ("Page N of M", bare number, "- N -"),
+ *   - AND at least one of:
+ *       - dominant font in the cluster is bold, or
+ *       - font size >= 1.2× median body font size on the page.
+ *
+ * Being at least 1 of the two font signals is enough — many Crystal templates put the
+ * running section title in normal-weight but at a font 1-2 pt larger than the tabular
+ * body, and many SSRS templates use bold-but-same-size for the running title.
+ */
+function autoProtectedItemsOn(items: TextItem[], yTol: number, bodyMedianFontSize: number): Set<TextItem> {
+    const out = new Set<TextItem>();
+    if (items.length === 0) return out;
+    const byLine = new Map<number, TextItem[]>();
+    for (const item of items) {
+        const bucket = Math.round(item.y / yTol);
+        const line = byLine.get(bucket);
+        if (line) line.push(item);
+        else byLine.set(bucket, [item]);
+    }
+    const largeFontThreshold = bodyMedianFontSize > 0 ? bodyMedianFontSize * 1.2 : 0;
+    for (const line of byLine.values()) {
+        const sorted = [...line].sort((a, b) => a.x - b.x);
+        const joined = sorted.map((i) => i.str).join(' ').replace(/\s+/g, ' ').trim();
+        if (!looksLikeSectionTitle(joined)) continue;
+        const dominantFontSize = median(sorted.map((i) => i.fontSize).filter((s) => s > 0));
+        const anyBold = sorted.some((i) => /bold|black|heavy|semibold|demibold/i.test(i.fontName));
+        const largeFont = largeFontThreshold > 0 && dominantFontSize >= largeFontThreshold;
+        if (anyBold || largeFont) {
+            for (const item of sorted) out.add(item);
+        }
+    }
+    return out;
+}
+
+function looksLikeSectionTitle(text: string): boolean {
+    if (text.length < 4 || text.length > 80) return false;
+    // Reject common page-number / footer patterns.
+    if (/^page\s+\d+(\s+of\s+\d+)?$/i.test(text)) return false;
+    if (/^\d+$/.test(text)) return false;
+    if (/^-\s*\d+\s*-$/.test(text)) return false;
+    if (/^\d+\s*\/\s*\d+$/.test(text)) return false;
+    // Must contain at least one letter.
+    if (!/[A-Za-z]/.test(text)) return false;
+    return true;
+}
+
+function medianFontSize(items: TextItem[]): number {
+    const sizes = items.map((i) => i.fontSize).filter((s) => s > 0);
+    return median(sizes);
+}
+
+function median(values: number[]): number {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
 
 function protectedItemsOn(items: TextItem[], patterns: RegExp[], yTol: number): Set<TextItem> {
     const out = new Set<TextItem>();

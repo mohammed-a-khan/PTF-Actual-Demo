@@ -22,6 +22,7 @@ import type {
     ReconcileLedgerRow,
     ReconcileResult,
 } from './CSPdfPairReconciler';
+import type { AnalyzedReport, AnalyzedSection } from './CSReportPdfTypes';
 import { resolveReportValidationOutputDir } from './CSReportDiffReporter';
 
 export interface ReconcileReporterOptions {
@@ -31,12 +32,20 @@ export interface ReconcileReporterOptions {
     outputPath?: string;
     /** Also emit `<file>.json` alongside the HTML with the full ReconcileResult. */
     writeJsonCopy?: boolean;
+    /** When supplied, also emit per-section CSV dumps of the extracted rows on
+     *  each side, alongside the HTML report. Directory: same as the HTML,
+     *  named `<runSlug>/<side>-<sectionSlug>.csv`. Useful when reconcile
+     *  reports zero cells compared and you need to see what was actually
+     *  extracted from each PDF to diagnose the miss. */
+    candidateAnalyzed?: AnalyzedReport;
+    referenceAnalyzed?: AnalyzedReport;
 }
 
 export interface ReconcileReporterResult {
     htmlPath: string;
     jsonPath?: string;
     byteCount: number;
+    csvPaths?: string[];
 }
 
 export function writeReconcileHtmlReport(
@@ -59,7 +68,55 @@ export function writeReconcileHtmlReport(
         jsonPath = abs.replace(/\.html$/, '.json');
         fs.writeFileSync(jsonPath, JSON.stringify(result, null, 2), 'utf-8');
     }
-    return { htmlPath: abs, jsonPath, byteCount: Buffer.byteLength(html, 'utf-8') };
+
+    const csvPaths: string[] = [];
+    if (opts.candidateAnalyzed) {
+        csvPaths.push(...writeAnalyzedCsvDumps(opts.candidateAnalyzed, path.dirname(abs), `${slug}-candidate`));
+    }
+    if (opts.referenceAnalyzed) {
+        csvPaths.push(...writeAnalyzedCsvDumps(opts.referenceAnalyzed, path.dirname(abs), `${slug}-reference`));
+    }
+
+    return { htmlPath: abs, jsonPath, byteCount: Buffer.byteLength(html, 'utf-8'), csvPaths };
+}
+
+function writeAnalyzedCsvDumps(analyzed: AnalyzedReport, outDir: string, filePrefix: string): string[] {
+    const written: string[] = [];
+    const sections = (analyzed?.mergedSections ?? []) as AnalyzedSection[];
+    if (sections.length === 0) return written;
+    const indexLines: string[] = [`section,rowCount,columnCount,columns`];
+    for (let i = 0; i < sections.length; i++) {
+        const sec = sections[i];
+        const title = (sec.title ?? `section-${i + 1}`).trim();
+        const secSlug = slugify(title) || `section-${i + 1}`;
+        const cols = (sec.columns ?? []).map((c) => (c.header ?? '').trim());
+        const filled = cols.map((h, idx) => h || `col_${idx + 1}`);
+        const csvRows: string[] = [];
+        csvRows.push(filled.map((h) => csvEscape(h)).join(','));
+        for (const row of sec.tableRows ?? []) {
+            const cells = row.cells ?? [];
+            const padded: string[] = [];
+            for (let c = 0; c < filled.length; c++) {
+                padded.push(csvEscape(String(cells[c] ?? '')));
+            }
+            csvRows.push(padded.join(','));
+        }
+        const csvFile = path.join(outDir, `${filePrefix}-${i + 1}-${secSlug}.csv`);
+        fs.writeFileSync(csvFile, csvRows.join('\n') + '\n', 'utf-8');
+        written.push(csvFile);
+        indexLines.push(`${csvEscape(title)},${(sec.tableRows ?? []).length},${filled.length},${csvEscape(filled.join(' | '))}`);
+    }
+    const indexFile = path.join(outDir, `${filePrefix}-sections-index.csv`);
+    fs.writeFileSync(indexFile, indexLines.join('\n') + '\n', 'utf-8');
+    written.push(indexFile);
+    return written;
+}
+
+function csvEscape(value: string): string {
+    let v = value ?? '';
+    if (/^[=+@\t\r]/.test(v)) v = `'${v}`;
+    if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+    return v;
 }
 
 function renderHtml(result: ReconcileResult, label: string): string {

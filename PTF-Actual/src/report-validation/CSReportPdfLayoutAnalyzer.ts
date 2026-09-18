@@ -235,9 +235,15 @@ function analyzeOnePage(
             const above = nextHeader ? midY > nextHeader.line.y : true;
             return below && above;
         });
-        sections.push(
-            analyzeSectionRegion(pageNumber, header.title, header.line.y, sectionLines, sectionCharts, opts, sectionCandidates),
-        );
+        const splitGroups = maybeSplitByItemCount(sectionLines);
+        for (let sg = 0; sg < splitGroups.length; sg++) {
+            const groupLines = splitGroups[sg];
+            const groupTitle = sg === 0 ? header.title : `${header.title} (part ${sg + 1})`;
+            const groupCharts = sg === 0 ? sectionCharts : [];
+            sections.push(
+                analyzeSectionRegion(pageNumber, groupTitle, header.line.y, groupLines, groupCharts, opts, sectionCandidates),
+            );
+        }
     }
 
     return {
@@ -254,6 +260,70 @@ function analyzeOnePage(
  * multi-level headers, converts lines to rows, tags group headers + totals, then stitches
  * multi-line cells.
  */
+/**
+ * Split a section's lines into groups when it visually contains two disjoint tables:
+ * a compliance/summary table (few columns) stacked above a detail table (many columns),
+ * or vice versa. Detection is heuristic — cluster consecutive lines by their item-count
+ * band, then split whenever the band changes and there's a vertical gap larger than 2×
+ * the median inter-line spacing. Returns the original single group when no clean split
+ * is found (default behaviour). Prevents CSColumnDetector from voting one column
+ * skeleton over two tables and producing garbage bands.
+ */
+function maybeSplitByItemCount(lines: LogicalLine[]): LogicalLine[][] {
+    if (lines.length < 6) return [lines];
+    // Sort top-to-bottom (PDF y grows upward → highest y first).
+    const sorted = [...lines].sort((a, b) => b.y - a.y);
+    const counts = sorted.map((l) => l.items.length);
+    // Compute median spacing between consecutive lines.
+    const gaps: number[] = [];
+    for (let i = 1; i < sorted.length; i++) gaps.push(Math.abs(sorted[i - 1].y - sorted[i].y));
+    if (gaps.length === 0) return [lines];
+    const sortedGaps = [...gaps].sort((a, b) => a - b);
+    const medianGap = sortedGaps[Math.floor(sortedGaps.length / 2)] || 0;
+    if (medianGap <= 0) return [lines];
+    // Find the best split index: a run of small-count lines followed by a large gap
+    // followed by a run of large-count lines (or vice versa).
+    let bestSplit = -1;
+    let bestScore = 0;
+    for (let i = 2; i < sorted.length - 2; i++) {
+        const gap = Math.abs(sorted[i - 1].y - sorted[i].y);
+        if (gap < medianGap * 2.0) continue;
+        const upperCounts = counts.slice(0, i);
+        const lowerCounts = counts.slice(i);
+        const upperMode = mode(upperCounts);
+        const lowerMode = mode(lowerCounts);
+        if (upperMode === lowerMode) continue;
+        if (upperMode < 2 || lowerMode < 2) continue;
+        // Require the counts to be visibly different (2+).
+        if (Math.abs(upperMode - lowerMode) < 2) continue;
+        // Both groups must have at least 2 lines matching their mode.
+        const upperMatch = upperCounts.filter((c) => Math.abs(c - upperMode) <= 1).length;
+        const lowerMatch = lowerCounts.filter((c) => Math.abs(c - lowerMode) <= 1).length;
+        if (upperMatch < 2 || lowerMatch < 2) continue;
+        const score = gap / medianGap + upperMatch + lowerMatch;
+        if (score > bestScore) {
+            bestScore = score;
+            bestSplit = i;
+        }
+    }
+    if (bestSplit < 0) return [lines];
+    const upperGroup = sorted.slice(0, bestSplit);
+    const lowerGroup = sorted.slice(bestSplit);
+    return [upperGroup, lowerGroup];
+}
+
+function mode(values: number[]): number {
+    if (values.length === 0) return 0;
+    const counts = new Map<number, number>();
+    for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+    let best = values[0];
+    let bestCount = 0;
+    for (const [v, c] of counts) {
+        if (c > bestCount) { best = v; bestCount = c; }
+    }
+    return best;
+}
+
 function analyzeSectionRegion(
     pageNumber: number,
     title: string,
@@ -809,14 +879,10 @@ function mergeCrossPageSections(
     // a strict 5pt tolerance (used by shouldMergeAcrossPages for the same-
     // title case) rejects legitimate continuations. 20pt still safely rejects
     // unrelated tables that happen to share a column count.
-    const bandTolerance = 20;
+    const bandTolerance = 60;
     const isAnonymous = (t: string): boolean => /^\s*\(?anonymous\)?\s*$/i.test(t ?? '');
     const columnBandsMatch = (a: AnalyzedSection['columns'], b: AnalyzedSection['columns']): boolean => {
         if (!a || !b || a.length === 0 || a.length !== b.length) return false;
-        // Only require column START positions to match within tolerance.
-        // Column END positions flex with the widest cell in each column,
-        // which varies naturally between a 26-row page and a 52-row page,
-        // so strict end-match blocks legitimate continuation merges.
         for (let i = 0; i < a.length; i++) {
             if (Math.abs(a[i].start - b[i].start) > bandTolerance) return false;
         }
@@ -832,7 +898,22 @@ function mergeCrossPageSections(
         }
         return true;
     };
+    const synthesiseTitleFromColumns = (sec: AnalyzedSection): string | null => {
+        const headers = (sec.columns ?? [])
+            .map((c) => (c.header ?? '').trim())
+            .filter((h) => h.length > 0);
+        if (headers.length === 0) return null;
+        const take = headers.slice(0, 3);
+        return `[cols] ${take.join(' | ')}`;
+    };
     const merged: AnalyzedSection[] = [];
+    const debug = opts.debugCrossPageMerge === true || process.env.CS_LAYOUT_DEBUG === '1';
+    const dbg = (msg: string): void => {
+        if (debug) {
+            // eslint-disable-next-line no-console
+            console.log(`[mergeCrossPageSections] ${msg}`);
+        }
+    };
     for (let p = 0; p < pages.length; p++) {
         for (const section of pages[p].sections) {
             const last = merged[merged.length - 1];
@@ -842,25 +923,31 @@ function mergeCrossPageSections(
                 shouldMergeAcrossPages(
                     { title: last.title, bands: last.columns },
                     { title: section.title, bands: section.columns },
+                    bandTolerance,
                 );
-            // Anonymous-continuation merge: the same section title is often
-            // printed as a running page-header on every continuation page but
-            // the section-header detector doesn't classify it as a real title
-            // (it sits in the page-header band, not above the table). The
-            // continuation page then arrives here as "(anonymous)". If it has
-            // the SAME column band positions AND either the same header text
-            // OR the previous section was titled (not anonymous), treat it as
-            // a continuation. Prevents multi-page tables from being silently
-            // split into 13× "(anonymous)" chunks that downstream reconcile
-            // then can't match.
             const anonContinuationMerge =
                 stitchAcrossPages &&
                 !!last &&
                 !sameTitleMerge &&
                 isAnonymous(section.title) &&
-                !isAnonymous(last.title) &&
                 columnBandsMatch(last.columns, section.columns) &&
                 columnHeadersCompatible(last.columns, section.columns);
+            if (debug && last && isAnonymous(section.title)) {
+                const prevStarts = (last.columns ?? []).map((c) => Math.round(c.start));
+                const nextStarts = (section.columns ?? []).map((c) => Math.round(c.start));
+                const prevHeaders = (last.columns ?? []).map((c) => (c.header ?? '').trim());
+                const nextHeaders = (section.columns ?? []).map((c) => (c.header ?? '').trim());
+                const countMatch = (last.columns?.length ?? 0) === (section.columns?.length ?? 0);
+                const bandsMatch = columnBandsMatch(last.columns, section.columns);
+                const headersOk = columnHeadersCompatible(last.columns, section.columns);
+                dbg(
+                    `anonymous candidate on page ${p + 1} vs prev "${last.title}": ` +
+                    `countMatch=${countMatch} (prev=${last.columns?.length ?? 0} next=${section.columns?.length ?? 0}), ` +
+                    `bandsMatch=${bandsMatch} (prevStarts=[${prevStarts.join(',')}] nextStarts=[${nextStarts.join(',')}]), ` +
+                    `headersOk=${headersOk} (prevHeaders=[${prevHeaders.map((h) => `"${h}"`).join(',')}] nextHeaders=[${nextHeaders.map((h) => `"${h}"`).join(',')}]) => ` +
+                    `merged=${anonContinuationMerge}`,
+                );
+            }
             if (sameTitleMerge || anonContinuationMerge) {
                 // Absorb this page's rows into the previous section's row list.
                 last.spansToNextPage = true;
@@ -883,6 +970,27 @@ function mergeCrossPageSections(
     // only meaningful for intermediate pages of a multi-page section.
     for (let i = 0; i < merged.length - 1; i++) merged[i].spansToNextPage = merged[i].spansToNextPage;
     if (merged.length > 0) merged[merged.length - 1].spansToNextPage = false;
+
+    // Synthesise a section title for any anonymous section whose column
+    // headers survived. On real reports the running page-title text often
+    // gets stripped by segmentPages as chrome (it repeats identically on
+    // every continuation page), leaving whole sections as `(anonymous)` on
+    // both sides. The reconciler's fuzzy title matcher then fails to pair
+    // "Market Value Detail" (candidate `(anonymous)`) with the same table
+    // on reference (also `(anonymous)`) even though the columns are
+    // identical. A column-header-derived synthetic title like
+    // `[cols] Investment Description | Par / Notional Amount | Market Price`
+    // matches identically on both sides at fuzzy similarity 1.0, so the
+    // reconcile pair up. Prefixed with `[cols]` so it's obvious the title
+    // was synthesised, not read from the PDF.
+    for (const sec of merged) {
+        if (!isAnonymous(sec.title)) continue;
+        const synth = synthesiseTitleFromColumns(sec);
+        if (synth) {
+            dbg(`synthesised title for anonymous section (${sec.tableRows?.length ?? 0} rows): "${synth}"`);
+            sec.title = synth;
+        }
+    }
     return merged;
 }
 
