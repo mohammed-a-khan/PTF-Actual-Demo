@@ -704,13 +704,22 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
             if (maxN > 0) {
                 const ratio = Math.min(candN, refN) / maxN;
                 if (ratio < 0.5) {
-                    warnings.push(
-                        `Section "${canonicalSectionName}" skipped — candidate has ${candN} rows, ` +
-                        `reference has ${refN} (ratio ${ratio.toFixed(2)}). One side appears to be ` +
-                        `a subset view; row-level parity is not meaningful. Author rules JSON to ` +
-                        `override and force a comparison.`,
-                    );
-                    continue;
+                    const structuralAsymmetry = columnsAreCandidateSubsetOfReference(candSec, refSecForSize);
+                    if (structuralAsymmetry) {
+                        warnings.push(
+                            `Section "${canonicalSectionName}" retained despite row-count asymmetry (candN=${candN}, refN=${refN}, ratio=${ratio.toFixed(2)}). ` +
+                            `Candidate columns are a proper subset of reference columns — likely a section-splitting asymmetry, not a genuine subset view. ` +
+                            `Reconciling on the ${countSharedColumnNames(candSec, refSecForSize)} shared columns only.`,
+                        );
+                    } else {
+                        warnings.push(
+                            `Section "${canonicalSectionName}" skipped — candidate has ${candN} rows, ` +
+                            `reference has ${refN} (ratio ${ratio.toFixed(2)}). One side appears to be ` +
+                            `a subset view; row-level parity is not meaningful. Author rules JSON to ` +
+                            `override and force a comparison.`,
+                        );
+                        continue;
+                    }
                 }
             }
         }
@@ -1042,7 +1051,13 @@ function appendRowsWithRealign(accumulator: AnalyzedSection, incoming: AnalyzedS
             return b && Math.abs(c.start - b.start) <= 5 && Math.abs(c.end - b.end) <= 5;
         });
     if (sameShape) {
-        accumulator.tableRows.push(...incoming.tableRows);
+        for (const row of incoming.tableRows) {
+            if (isReconcileRowJustHeaderText(row.cells ?? [], accCols)) {
+                CSReporter.debug(`[mergeAnalyzedSections] dropped leftover header-shaped row in same-shape append for section "${title}"`);
+                continue;
+            }
+            accumulator.tableRows.push(row);
+        }
         return;
     }
     CSReporter.warn(
@@ -1050,6 +1065,65 @@ function appendRowsWithRealign(accumulator: AnalyzedSection, incoming: AnalyzedS
     );
     const realigned = realignRowsBetweenColumnLayouts(incoming, accumulator);
     accumulator.tableRows.push(...realigned);
+}
+
+function isReconcileRowJustHeaderText(cells: (string | null)[], cols: AnalyzedSection['columns']): boolean {
+    if (!cells || !cols || cells.length === 0) return false;
+    let nonEmpty = 0;
+    let matches = 0;
+    const n = Math.min(cells.length, cols.length);
+    for (let i = 0; i < n; i++) {
+        const v = cells[i];
+        if (v == null || String(v).trim() === '') continue;
+        nonEmpty++;
+        const header = (cols[i]?.header ?? '').trim();
+        if (!header) continue;
+        if (normaliseHeaderTextReconcile(String(v)) === normaliseHeaderTextReconcile(header)) matches++;
+    }
+    if (nonEmpty < 2) return false;
+    return matches / nonEmpty >= 0.6;
+}
+
+function normaliseHeaderTextReconcile(s: string): string {
+    return String(s ?? '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
+
+function columnsAreCandidateSubsetOfReference(candSec: AnalyzedSection, refSec: AnalyzedSection): boolean {
+    const candNames = new Set(
+        (candSec.columns ?? [])
+            .map((c) => normaliseHeaderTextReconcile(c.header ?? ''))
+            .filter((s) => s.length > 0),
+    );
+    const refNames = new Set(
+        (refSec.columns ?? [])
+            .map((c) => normaliseHeaderTextReconcile(c.header ?? ''))
+            .filter((s) => s.length > 0),
+    );
+    if (candNames.size === 0 || refNames.size === 0) return false;
+    if (candNames.size >= refNames.size) return false;
+    for (const n of candNames) {
+        if (!refNames.has(n)) return false;
+    }
+    return true;
+}
+
+function countSharedColumnNames(candSec: AnalyzedSection, refSec: AnalyzedSection): number {
+    const candNames = new Set(
+        (candSec.columns ?? [])
+            .map((c) => normaliseHeaderTextReconcile(c.header ?? ''))
+            .filter((s) => s.length > 0),
+    );
+    const refNames = new Set(
+        (refSec.columns ?? [])
+            .map((c) => normaliseHeaderTextReconcile(c.header ?? ''))
+            .filter((s) => s.length > 0),
+    );
+    let shared = 0;
+    for (const n of candNames) if (refNames.has(n)) shared++;
+    return shared;
 }
 
 function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator: AnalyzedSection): TableRow[] {
@@ -1097,6 +1171,10 @@ function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator:
             } else {
                 cells[dst] = `${cells[dst]} ${val}`;
             }
+        }
+        if (isReconcileRowJustHeaderText(cells, accCols)) {
+            CSReporter.debug(`[mergeAnalyzedSections] dropped leftover header-shaped row in realign for section "${accumulator.title}"`);
+            continue;
         }
         out.push({
             rowIndex: row.rowIndex,

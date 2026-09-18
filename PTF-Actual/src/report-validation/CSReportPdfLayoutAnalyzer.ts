@@ -305,9 +305,13 @@ function maybeSplitByItemCount(lines: LogicalLine[]): LogicalLine[][] {
     if (bestSplit >= 0) {
         return [sorted.slice(0, bestSplit), sorted.slice(bestSplit)];
     }
-    const headerBasedSplit = findHeaderRowSplit(sorted);
+    const headerBasedSplit = findHeaderRowSplit(sorted, counts);
     if (headerBasedSplit > 0) {
         return [sorted.slice(0, headerBasedSplit), sorted.slice(headerBasedSplit)];
+    }
+    const rollingSplit = findRollingModeSplit(sorted, counts);
+    if (rollingSplit > 0) {
+        return [sorted.slice(0, rollingSplit), sorted.slice(rollingSplit)];
     }
     const xSignatureSplit = findXSignatureSplit(sorted, medianGap);
     if (xSignatureSplit > 0) {
@@ -316,17 +320,56 @@ function maybeSplitByItemCount(lines: LogicalLine[]): LogicalLine[][] {
     return [lines];
 }
 
-function findHeaderRowSplit(sortedLines: LogicalLine[]): number {
+function findHeaderRowSplit(sortedLines: LogicalLine[], counts: number[]): number {
     const headerIndices: number[] = [];
     for (let i = 0; i < sortedLines.length; i++) {
         if (looksLikeColumnHeaderRow(sortedLines[i])) headerIndices.push(i);
     }
-    if (headerIndices.length < 2) return -1;
-    const firstHeader = headerIndices[0];
-    const secondHeader = headerIndices[1];
-    if (secondHeader - firstHeader < 1) return -1;
-    if (sortedLines.length - secondHeader < 2) return -1;
-    return secondHeader;
+    if (headerIndices.length >= 2) {
+        const firstHeader = headerIndices[0];
+        const secondHeader = headerIndices[1];
+        if (secondHeader - firstHeader >= 1 && sortedLines.length - secondHeader >= 2) {
+            return secondHeader;
+        }
+    }
+    if (headerIndices.length >= 1) {
+        const firstHeader = headerIndices[0];
+        if (firstHeader === 0 && sortedLines.length >= 4) {
+            const headerCount = counts[firstHeader];
+            const rest = counts.slice(firstHeader + 1);
+            for (let split = firstHeader + 2; split < sortedLines.length - 1; split++) {
+                const upper = counts.slice(0, split);
+                const lower = counts.slice(split);
+                if (lower.length < 2 || upper.length < 2) continue;
+                const upperMode = mode(upper);
+                const lowerMode = mode(lower);
+                if (Math.abs(upperMode - lowerMode) >= 2 && upperMode >= 2 && lowerMode >= 2) {
+                    const upperMatch = upper.filter((c) => Math.abs(c - upperMode) <= 1).length;
+                    const lowerMatch = lower.filter((c) => Math.abs(c - lowerMode) <= 1).length;
+                    if (upperMatch >= 1 && lowerMatch >= 2) return split;
+                }
+            }
+            void headerCount;
+            void rest;
+        }
+    }
+    return -1;
+}
+
+function findRollingModeSplit(sortedLines: LogicalLine[], counts: number[]): number {
+    if (counts.length < 5) return -1;
+    const window = 3;
+    const rollingModes: number[] = [];
+    for (let i = 0; i <= counts.length - window; i++) {
+        rollingModes.push(mode(counts.slice(i, i + window)));
+    }
+    for (let i = 1; i < rollingModes.length; i++) {
+        if (Math.abs(rollingModes[i] - rollingModes[i - 1]) >= 2) {
+            const split = i + Math.floor(window / 2);
+            if (split >= 2 && split <= sortedLines.length - 2) return split;
+        }
+    }
+    return -1;
 }
 
 function looksLikeColumnHeaderRow(line: LogicalLine): boolean {
@@ -1073,6 +1116,7 @@ export function realignRowsToAccumulator(
     if (accCols.length === 0 || inCols.length === 0) return incoming.tableRows ?? [];
     const mapping = buildColumnIndexMapping(inCols, accCols, bandTolerance);
     if (mapping.every((v) => v === -1)) return incoming.tableRows ?? [];
+    const debug = process.env.CS_LAYOUT_DEBUG === '1';
     const out: TableRow[] = [];
     for (const row of incoming.tableRows ?? []) {
         const cells: (string | null)[] = new Array(accCols.length).fill(null);
@@ -1091,6 +1135,13 @@ export function realignRowsToAccumulator(
                 cells[dst] = `${cells[dst]} ${val}`;
             }
         }
+        if (isRowJustHeaderText(cells, accCols)) {
+            if (debug) {
+                // eslint-disable-next-line no-console
+                console.log(`[mergeCrossPageSections] dropped leftover header-shaped row in realign for section "${accumulator.title}"`);
+            }
+            continue;
+        }
         out.push({
             rowIndex: row.rowIndex,
             y: row.y,
@@ -1102,6 +1153,30 @@ export function realignRowsToAccumulator(
         });
     }
     return out;
+}
+
+export function isRowJustHeaderText(cells: (string | null)[], cols: ColumnBand[]): boolean {
+    if (!cells || !cols || cells.length === 0) return false;
+    let nonEmpty = 0;
+    let matches = 0;
+    const n = Math.min(cells.length, cols.length);
+    for (let i = 0; i < n; i++) {
+        const v = cells[i];
+        if (v == null || String(v).trim() === '') continue;
+        nonEmpty++;
+        const header = (cols[i]?.header ?? '').trim();
+        if (!header) continue;
+        if (normaliseHeaderText(String(v)) === normaliseHeaderText(header)) matches++;
+    }
+    if (nonEmpty < 2) return false;
+    return matches / nonEmpty >= 0.6;
+}
+
+function normaliseHeaderText(s: string): string {
+    return String(s ?? '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
 }
 
 function buildColumnIndexMapping(
