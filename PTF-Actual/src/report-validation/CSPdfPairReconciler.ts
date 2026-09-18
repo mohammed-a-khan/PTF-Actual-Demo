@@ -216,6 +216,9 @@ export async function generateReconciliationRulesFromPair(opts: {
     const candSections = mergeAnalyzedSections(candAnalyzed);
     const refSections = mergeAnalyzedSections(refAnalyzed);
 
+    propagateHeadersAcrossSides(candSections, refSections, threshold);
+    splitReferenceBySubTableSignatures(candSections, refSections);
+
     CSReporter.info(
         `[generateReconciliationRulesFromPair] candidate sections (${candSections.size}): ` +
         Array.from(candSections.keys()).map((s) => `"${s}"`).join(', '),
@@ -258,9 +261,23 @@ export async function generateReconciliationRulesFromPair(opts: {
         ? [candSections, refSections]
         : [refSections, candSections];
 
+    const otherByBase = groupSectionsByBaseTitle(otherSections);
     for (const [drivingTitle, drivingSec] of drivingSections.entries()) {
+        const drivingBase = drivingTitle.split(' :: ')[0];
+        const drivingIsSub = drivingTitle.includes(' :: ');
         const nearest = Array.from(otherSections.keys())
-            .map((c) => ({ c, s: similarityRatio(drivingTitle.toLowerCase(), c.toLowerCase()) }))
+            .map((c) => {
+                const cBase = c.split(' :: ')[0];
+                const cIsSub = c.includes(' :: ');
+                let score = similarityRatio(drivingTitle.toLowerCase(), c.toLowerCase());
+                if (drivingIsSub && cIsSub && drivingBase.toLowerCase() === cBase.toLowerCase()) {
+                    score = Math.max(score, 0.9);
+                }
+                if (drivingIsSub && !cIsSub && drivingBase.toLowerCase() === cBase.toLowerCase()) {
+                    score = Math.max(score, 0.86);
+                }
+                return { c, s: score };
+            })
             .sort((a, b) => b.s - a.s);
         const bestMatch = nearest[0];
         if (!bestMatch || bestMatch.s < threshold) {
@@ -272,6 +289,7 @@ export async function generateReconciliationRulesFromPair(opts: {
         }
         const otherSec = otherSections.get(bestMatch.c);
         if (!otherSec) continue;
+        void otherByBase;
 
         const candSec = candidateAuthoritative ? drivingSec : otherSec;
         const refSec = candidateAuthoritative ? otherSec : drivingSec;
@@ -647,6 +665,8 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
     // we merge by title equality (identical titles across pages = one logical section).
     const candSections = mergeAnalyzedSections(opts.candidateAnalyzed);
     const refSections = mergeAnalyzedSections(opts.referenceAnalyzed);
+    propagateHeadersAcrossSides(candSections, refSections, threshold);
+    splitReferenceBySubTableSignatures(candSections, refSections);
     const ignoreSections = new Set((opts.rules.ignoreSections ?? []).map((s) => s.toLowerCase()));
     const ignoreColumns = new Set((opts.rules.ignoreColumns ?? []).map((s) => s.toLowerCase()));
 
@@ -714,6 +734,12 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
                 );
                 continue;
             }
+            if (candN <= 2 && refN <= 2) {
+                warnings.push(
+                    `Section "${canonicalSectionName}" — both sides have very few rows (candidate=${candN}, reference=${refN}); row-keying is unreliable at this scale, treating as info-only`,
+                );
+                continue;
+            }
             const maxN = Math.max(candN, refN);
             if (maxN > 0) {
                 const ratio = Math.min(candN, refN) / maxN;
@@ -758,6 +784,9 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
         });
         const candByKey = groupRowsByKey(candSec.tableRows, candKeyIndices, opts.rules.autoMode);
         const refByKey = groupRowsByKey(refSec.tableRows, refKeyIndices, opts.rules.autoMode);
+        if (opts.rules.autoMode) {
+            reconcileFuzzyKeyPairs(candByKey, refByKey);
+        }
         const allRowKeys = new Set<string>([...candByKey.keys(), ...refByKey.keys()]);
 
         for (const rowKey of allRowKeys) {
@@ -1025,27 +1054,26 @@ function validateRulesShape(rules: ReconcileRules): void {
  * multiple times with the same title.)
  */
 function mergeAnalyzedSections(analyzed: AnalyzedReport): Map<string, AnalyzedSection> {
-    const buckets = new Map<string, AnalyzedSection[]>();
     const analyzerMerged = (analyzed as unknown as { mergedSections?: AnalyzedSection[] }).mergedSections;
+    const rawList: AnalyzedSection[] = [];
     if (Array.isArray(analyzerMerged) && analyzerMerged.length > 0) {
-        for (const sec of analyzerMerged) {
-            const title = (sec.title ?? '').trim();
-            if (!title) continue;
-            const arr = buckets.get(title) ?? [];
-            arr.push(sec);
-            buckets.set(title, arr);
-        }
+        for (const sec of analyzerMerged) rawList.push(sec);
     } else {
         for (const page of analyzed.pages) {
-            for (const sec of page.sections) {
-                const title = (sec.title ?? '').trim();
-                if (!title) continue;
-                const arr = buckets.get(title) ?? [];
-                arr.push(sec);
-                buckets.set(title, arr);
-            }
+            for (const sec of page.sections) rawList.push(sec);
         }
     }
+    const afterOrphanFold = foldOrphansIntoSubTables(rawList);
+
+    const buckets = new Map<string, AnalyzedSection[]>();
+    for (const sec of afterOrphanFold) {
+        const title = (sec.title ?? '').trim();
+        if (!title) continue;
+        const arr = buckets.get(title) ?? [];
+        arr.push(sec);
+        buckets.set(title, arr);
+    }
+
     const merged = new Map<string, AnalyzedSection>();
     for (const [title, sections] of buckets) {
         const chosen = pickAccumulatorByEvidence(sections);
@@ -1053,6 +1081,7 @@ function mergeAnalyzedSections(analyzed: AnalyzedReport): Map<string, AnalyzedSe
             ...chosen,
             tableRows: [...(chosen.tableRows ?? [])],
             columns: [...(chosen.columns ?? [])],
+            subTables: chosen.subTables ? chosen.subTables.map((s) => ({ ...s, tableRows: [...s.tableRows], columns: [...s.columns] })) : undefined,
         };
         if (sections.length > 1) {
             const alts = sections.filter((s) => s !== chosen);
@@ -1069,7 +1098,102 @@ function mergeAnalyzedSections(analyzed: AnalyzedReport): Map<string, AnalyzedSe
         }
         merged.set(title, accumulator);
     }
-    return merged;
+
+    return expandSubTablesIntoMap(merged);
+}
+
+function isOrphanTitle(t: string): boolean {
+    if (!t) return true;
+    const s = t.trim();
+    return /^\(?anonymous\)?$/i.test(s) || s.startsWith('[cols]');
+}
+
+function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSection[] {
+    const out: AnalyzedSection[] = [];
+    for (const sec of list) {
+        const title = (sec.title ?? '').trim();
+        if (!isOrphanTitle(title)) {
+            out.push(sec);
+            continue;
+        }
+        const rowCount = sec.tableRows?.length ?? 0;
+        const colCount = sec.columns?.length ?? 0;
+        if (rowCount === 0 || colCount === 0) {
+            out.push(sec);
+            continue;
+        }
+        const host = findOrphanHost(out, sec);
+        if (!host) {
+            out.push(sec);
+            continue;
+        }
+        const subLabel = buildSubTableLabel(sec);
+        const hostSubs = host.subTables ?? [];
+        if (hostSubs.length === 0) {
+            hostSubs.push({
+                title: 'primary',
+                columns: [...(host.columns ?? [])],
+                tableRows: [...(host.tableRows ?? [])],
+            });
+        }
+        hostSubs.push({
+            title: subLabel,
+            columns: [...(sec.columns ?? [])],
+            tableRows: [...(sec.tableRows ?? [])],
+        });
+        host.subTables = hostSubs;
+        CSReporter.info(`[foldOrphansIntoSubTables] orphan "${title}" (${rowCount}r/${colCount}c) folded into "${host.title}" as sub-table "${subLabel}"`);
+    }
+    return out;
+}
+
+function findOrphanHost(precedingSections: AnalyzedSection[], orphan: AnalyzedSection): AnalyzedSection | null {
+    for (let i = precedingSections.length - 1; i >= 0; i--) {
+        const cand = precedingSections[i];
+        const t = (cand.title ?? '').trim();
+        if (isOrphanTitle(t)) continue;
+        const dp = Math.abs((orphan.startPage ?? 0) - (cand.startPage ?? 0));
+        if (dp > 1) return null;
+        const orphanCols = (orphan.columns ?? []).length;
+        const hostCols = (cand.columns ?? []).length;
+        if (orphanCols === hostCols && orphanCols > 0) return null;
+        return cand;
+    }
+    return null;
+}
+
+function buildSubTableLabel(sec: AnalyzedSection): string {
+    const headers = (sec.columns ?? [])
+        .map((c) => (c.header ?? '').trim())
+        .filter((h) => h.length > 0);
+    if (headers.length > 0) {
+        return headers.slice(0, 2).join(' | ');
+    }
+    return `secondary-${sec.startPage ?? 0}`;
+}
+
+function expandSubTablesIntoMap(base: Map<string, AnalyzedSection>): Map<string, AnalyzedSection> {
+    const out = new Map<string, AnalyzedSection>();
+    for (const [title, sec] of base.entries()) {
+        const subs = sec.subTables;
+        if (!Array.isArray(subs) || subs.length === 0) {
+            out.set(title, sec);
+            continue;
+        }
+        for (let i = 0; i < subs.length; i++) {
+            const st = subs[i];
+            const key = i === 0 ? title : `${title} :: ${st.title || `sub-${i + 1}`}`;
+            const clone: AnalyzedSection = {
+                ...sec,
+                title: i === 0 ? sec.title : key,
+                columns: [...(st.columns ?? [])],
+                tableRows: [...(st.tableRows ?? [])],
+                subTables: undefined,
+            };
+            out.set(key, clone);
+        }
+    }
+    return out;
 }
 
 function pickAccumulatorByEvidence(sections: AnalyzedSection[]): AnalyzedSection {
@@ -1137,6 +1261,340 @@ function normaliseHeaderTextReconcile(s: string): string {
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, ' ')
         .trim();
+}
+
+function propagateHeadersAcrossSides(
+    candSections: Map<string, AnalyzedSection>,
+    refSections: Map<string, AnalyzedSection>,
+    threshold: number,
+): void {
+    for (const [candTitle, candSec] of candSections.entries()) {
+        const partner = findMatchingByTitleOrShape(candTitle, candSec, refSections, threshold);
+        if (!partner) continue;
+        alignColumnsByDataSignature(candSec, partner, `candidate "${candTitle}"`, 'candidate');
+    }
+    for (const [refTitle, refSec] of refSections.entries()) {
+        const partner = findMatchingByTitleOrShape(refTitle, refSec, candSections, threshold);
+        if (!partner) continue;
+        alignColumnsByDataSignature(refSec, partner, `reference "${refTitle}"`, 'reference');
+    }
+}
+
+function alignColumnsByDataSignature(
+    target: AnalyzedSection,
+    source: AnalyzedSection,
+    label: string,
+    side: 'candidate' | 'reference',
+): void {
+    const targetCols = target.columns ?? [];
+    const sourceCols = source.columns ?? [];
+    if (targetCols.length === 0 || sourceCols.length === 0) return;
+
+    const targetHeaders = targetCols.map((c) => (c.header ?? '').trim());
+    const sourceHeaders = sourceCols.map((c) => (c.header ?? '').trim());
+    const sourceHasHeaders = sourceHeaders.some((h) => h.length > 0);
+    if (!sourceHasHeaders) return;
+
+    const targetEmptyIndices: number[] = [];
+    for (let i = 0; i < targetHeaders.length; i++) {
+        if (targetHeaders[i].length === 0) targetEmptyIndices.push(i);
+    }
+    if (targetEmptyIndices.length === 0) return;
+
+    if (targetEmptyIndices.length === targetCols.length && (target.tableRows?.length ?? 0) < 3) return;
+
+    const targetSigs = targetCols.map((_, i) => collectColumnSignature(target.tableRows ?? [], i));
+    const sourceSigs = sourceCols.map((_, i) => collectColumnSignature(source.tableRows ?? [], i));
+
+    const existingTargetHeadersSet = new Set(targetHeaders.filter((h) => h.length > 0).map((h) => h.toLowerCase()));
+    const availableSourceIndices: number[] = [];
+    for (let si = 0; si < sourceHeaders.length; si++) {
+        if (existingTargetHeadersSet.has(sourceHeaders[si].toLowerCase())) continue;
+        availableSourceIndices.push(si);
+    }
+    if (availableSourceIndices.length === 0) return;
+
+    const emptySet = new Set(targetEmptyIndices);
+    const usedSource = new Set<number>();
+    const map = new Map<number, number>();
+    const candidates: Array<{ ti: number; si: number; score: number }> = [];
+    for (const ti of targetEmptyIndices) {
+        for (const si of availableSourceIndices) {
+            const score = columnSignatureSimilarity(targetSigs[ti], sourceSigs[si]);
+            if (score > 0) candidates.push({ ti, si, score });
+        }
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    for (const c of candidates) {
+        if (!emptySet.has(c.ti)) continue;
+        if (map.has(c.ti)) continue;
+        if (usedSource.has(c.si)) continue;
+        if (c.score < 0.2) break;
+        map.set(c.ti, c.si);
+        usedSource.add(c.si);
+    }
+
+    if (map.size === 0) return;
+
+    let changed = 0;
+    for (const [ti, si] of map.entries()) {
+        const desired = (sourceHeaders[si] ?? '').trim();
+        if (!desired) continue;
+        target.columns[ti] = { ...target.columns[ti], header: desired };
+        changed++;
+    }
+    if (changed > 0) {
+        const finalHeaders = target.columns.map((c) => (c.header ?? '').trim());
+        CSReporter.info(`[alignColumnsByDataSignature] ${label} (${side}) filled ${changed} empty header(s): [${finalHeaders.map((h) => `"${h}"`).join(', ')}]`);
+    }
+}
+
+function collectColumnSignature(rows: TableRow[], colIdx: number): ColumnSignature {
+    const values = new Set<string>();
+    const numeric: number[] = [];
+    const dates: number[] = [];
+    let textCount = 0;
+    let total = 0;
+    for (const r of rows) {
+        const raw = r.cells?.[colIdx];
+        if (raw == null) continue;
+        const v = String(raw).trim();
+        if (v.length === 0) continue;
+        total++;
+        const norm = v.toLowerCase().replace(/[\s,]+/g, ' ').trim();
+        values.add(norm);
+        const asNum = tryParseNumericSignature(v);
+        if (asNum !== null) numeric.push(asNum);
+        const asDate = tryParseDateSignature(v);
+        if (asDate !== null) dates.push(asDate);
+        if (asNum === null && asDate === null && v.length > 3) textCount++;
+    }
+    return { values, numeric, dates, textCount, total };
+}
+
+interface ColumnSignature {
+    values: Set<string>;
+    numeric: number[];
+    dates: number[];
+    textCount: number;
+    total: number;
+}
+
+function tryParseNumericSignature(s: string): number | null {
+    const cleaned = s.replace(/[,$%\s()]/g, '').replace(/^-/, '-');
+    if (!/^-?\d+(\.\d+)?$/.test(cleaned)) return null;
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+}
+
+function tryParseDateSignature(s: string): number | null {
+    const m = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
+    if (m) {
+        const mo = Number(m[1]);
+        const d = Number(m[2]);
+        let y = Number(m[3]);
+        if (y < 100) y += 2000;
+        if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && y >= 1900 && y <= 2200) return y * 10000 + mo * 100 + d;
+    }
+    const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (iso) {
+        const y = Number(iso[1]);
+        const mo = Number(iso[2]);
+        const d = Number(iso[3]);
+        if (mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && y >= 1900 && y <= 2200) return y * 10000 + mo * 100 + d;
+    }
+    return null;
+}
+
+function columnSignatureSimilarity(a: ColumnSignature, b: ColumnSignature): number {
+    if (a.total === 0 || b.total === 0) return 0;
+    let inter = 0;
+    for (const v of a.values) if (b.values.has(v)) inter++;
+    const union = a.values.size + b.values.size - inter;
+    const jaccard = union > 0 ? inter / union : 0;
+    if (jaccard >= 0.05) return jaccard + 0.5;
+
+    const aIsDate = a.dates.length / a.total >= 0.6;
+    const bIsDate = b.dates.length / b.total >= 0.6;
+    const aIsNum = a.numeric.length / a.total >= 0.6;
+    const bIsNum = b.numeric.length / b.total >= 0.6;
+    const aIsText = a.textCount / a.total >= 0.6;
+    const bIsText = b.textCount / b.total >= 0.6;
+
+    if (aIsDate !== bIsDate) return 0;
+    if (aIsText !== bIsText) return 0;
+    if (aIsNum && bIsNum) {
+        const aMed = medianNum(a.numeric);
+        const bMed = medianNum(b.numeric);
+        if (aMed === 0 && bMed === 0) return 0.3;
+        const ratio = Math.min(Math.abs(aMed), Math.abs(bMed)) / Math.max(Math.abs(aMed), Math.abs(bMed) || 1);
+        return 0.3 * ratio;
+    }
+    if (aIsText && bIsText) return 0.3;
+    if (aIsDate && bIsDate) return 0.4;
+    return 0.1;
+}
+
+function medianNum(values: number[]): number {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function arraysEqualIgnoreCase(a: string[], b: string[]): boolean {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if ((a[i] || '').toLowerCase() !== (b[i] || '').toLowerCase()) return false;
+    return true;
+}
+
+function arraysCoverSet(source: string[], target: string[]): boolean {
+    const s = new Set(source.map((h) => (h || '').toLowerCase().trim()).filter(Boolean));
+    for (const t of target) if (!s.has((t || '').toLowerCase().trim())) return false;
+    return true;
+}
+
+function findMatchingByTitleOrShape(
+    title: string,
+    sec: AnalyzedSection,
+    others: Map<string, AnalyzedSection>,
+    threshold: number,
+): AnalyzedSection | null {
+    if (others.has(title)) return others.get(title) || null;
+    const t = title.toLowerCase();
+    const base = title.split(' :: ')[0].toLowerCase();
+    const isSub = title.includes(' :: ');
+    if (isSub) {
+        const otherSubs: Array<{ key: string; sec: AnalyzedSection }> = [];
+        for (const [otherTitle, otherSec] of others.entries()) {
+            const otherBase = otherTitle.split(' :: ')[0].toLowerCase();
+            if (otherBase === base && otherTitle.includes(' :: ')) {
+                otherSubs.push({ key: otherTitle, sec: otherSec });
+            }
+        }
+        if (otherSubs.length === 1) return otherSubs[0].sec;
+        if (otherSubs.length > 1) {
+            const secRows = sec.tableRows?.length ?? 0;
+            let bestOther: AnalyzedSection | null = null;
+            let bestScore = -1;
+            for (const os of otherSubs) {
+                const orows = os.sec.tableRows?.length ?? 0;
+                const maxR = Math.max(secRows, orows) || 1;
+                const s = Math.min(secRows, orows) / maxR;
+                if (s > bestScore) { bestScore = s; bestOther = os.sec; }
+            }
+            if (bestOther) return bestOther;
+        }
+    }
+    let bestOther: AnalyzedSection | null = null;
+    let bestScore = 0;
+    for (const [otherTitle, otherSec] of others.entries()) {
+        const s = similarityRatio(t, otherTitle.toLowerCase());
+        if (s >= threshold && s > bestScore) {
+            bestOther = otherSec;
+            bestScore = s;
+        }
+    }
+    if (bestOther) return bestOther;
+    const secCols = (sec.columns ?? []).length;
+    if (secCols === 0) return null;
+    for (const [, otherSec] of others.entries()) {
+        const otherCols = (otherSec.columns ?? []).length;
+        if (otherCols !== secCols) continue;
+        const candRows = sec.tableRows?.length ?? 0;
+        const refRows = otherSec.tableRows?.length ?? 0;
+        if (candRows === 0 || refRows === 0) continue;
+        const maxR = Math.max(candRows, refRows);
+        const minR = Math.min(candRows, refRows);
+        if (maxR > 0 && minR / maxR >= 0.7) return otherSec;
+    }
+    return null;
+}
+
+function splitReferenceBySubTableSignatures(
+    candSections: Map<string, AnalyzedSection>,
+    refSections: Map<string, AnalyzedSection>,
+): void {
+    const additions = new Map<string, AnalyzedSection>();
+    const groupedByBase = groupSectionsByBaseTitle(candSections);
+    for (const [baseTitle, entries] of groupedByBase.entries()) {
+        if (entries.length < 2) continue;
+        const refHasBase = refSections.has(baseTitle);
+        const refHasSubs = Array.from(refSections.keys()).some((k) => k.startsWith(`${baseTitle} :: `));
+        if (refHasSubs) continue;
+        if (!refHasBase) continue;
+        const refBase = refSections.get(baseTitle);
+        if (!refBase) continue;
+        const refBaseRows = refBase.tableRows ?? [];
+        if (refBaseRows.length < 3) continue;
+
+        for (let i = 1; i < entries.length; i++) {
+            const candSub = entries[i];
+            const candColCount = (candSub.columns ?? []).length;
+            if (candColCount === 0) continue;
+            const splitRange = locateContiguousRowsMatchingColumnCount(refBaseRows, candColCount);
+            if (!splitRange || splitRange.count < 2) continue;
+            const subRows = refBaseRows.slice(splitRange.start, splitRange.start + splitRange.count);
+            const subKey = `${baseTitle} :: ${candSub.title.split(' :: ')[1] || `sub-${i}`}`;
+            if (refSections.has(subKey) || additions.has(subKey)) continue;
+            const synthetic: AnalyzedSection = {
+                ...refBase,
+                title: subKey,
+                columns: adoptColumnsFromCandidate(candSub, refBase),
+                tableRows: subRows.map((r, idx) => ({ ...r, rowIndex: idx })),
+                subTables: undefined,
+            };
+            additions.set(subKey, synthetic);
+            refBaseRows.splice(splitRange.start, splitRange.count);
+            CSReporter.info(`[splitReferenceBySubTableSignatures] split reference "${baseTitle}" — extracted ${splitRange.count} rows into sub-table "${subKey}"`);
+        }
+        refBase.tableRows = refBaseRows;
+    }
+    for (const [k, v] of additions.entries()) refSections.set(k, v);
+}
+
+function groupSectionsByBaseTitle(m: Map<string, AnalyzedSection>): Map<string, AnalyzedSection[]> {
+    const groups = new Map<string, AnalyzedSection[]>();
+    for (const [k, v] of m.entries()) {
+        const base = k.split(' :: ')[0];
+        const arr = groups.get(base) ?? [];
+        arr.push(v);
+        groups.set(base, arr);
+    }
+    return groups;
+}
+
+function locateContiguousRowsMatchingColumnCount(rows: TableRow[], targetCols: number): { start: number; count: number } | null {
+    if (rows.length === 0) return null;
+    const filledCounts = rows.map((r) => (r.cells ?? []).filter((c) => c != null && c !== '').length);
+    let bestStart = -1;
+    let bestCount = 0;
+    let curStart = -1;
+    let curCount = 0;
+    for (let i = 0; i < filledCounts.length; i++) {
+        const fc = filledCounts[i];
+        const match = fc === targetCols || fc === targetCols - 1 || fc === targetCols + 1;
+        if (match) {
+            if (curStart < 0) curStart = i;
+            curCount++;
+            if (curCount > bestCount) {
+                bestCount = curCount;
+                bestStart = curStart;
+            }
+        } else {
+            curStart = -1;
+            curCount = 0;
+        }
+    }
+    if (bestStart < 0 || bestCount < 2) return null;
+    return { start: bestStart, count: bestCount };
+}
+
+function adoptColumnsFromCandidate(candSec: AnalyzedSection, refSec: AnalyzedSection): AnalyzedSection['columns'] {
+    const candCols = candSec.columns ?? [];
+    const refCols = refSec.columns ?? [];
+    if (candCols.length === refCols.length) return refCols.map((r, i) => ({ ...r, header: (r.header ?? '').trim() || (candCols[i].header ?? '') }));
+    return candCols.map((c) => ({ ...c }));
 }
 
 function columnsAreCandidateSubsetOfReference(candSec: AnalyzedSection, refSec: AnalyzedSection): boolean {
@@ -1354,6 +1812,70 @@ function indexOfHeader(sec: AnalyzedSection, header: string): number {
     return sec.columns.findIndex((c) => (c.header ?? '').trim() === header);
 }
 
+function reconcileFuzzyKeyPairs(candByKey: Map<string, TableRow>, refByKey: Map<string, TableRow>): void {
+    const candOnly: string[] = [];
+    const refOnly: string[] = [];
+    for (const k of candByKey.keys()) if (!refByKey.has(k)) candOnly.push(k);
+    for (const k of refByKey.keys()) if (!candByKey.has(k)) refOnly.push(k);
+    if (candOnly.length === 0 || refOnly.length === 0) return;
+
+    const usedRef = new Set<string>();
+    for (const ck of candOnly) {
+        let bestRef = '';
+        let bestScore = 0;
+        for (const rk of refOnly) {
+            if (usedRef.has(rk)) continue;
+            const s = keySimilarity(ck, rk);
+            if (s > bestScore) { bestScore = s; bestRef = rk; }
+        }
+        if (bestScore >= 0.85 && bestRef) {
+            const refRow = refByKey.get(bestRef);
+            if (refRow) {
+                refByKey.delete(bestRef);
+                refByKey.set(ck, refRow);
+                usedRef.add(bestRef);
+            }
+        }
+    }
+}
+
+function keySimilarity(a: string, b: string): number {
+    if (a === b) return 1;
+    if (!a.length || !b.length) return 0;
+    const partsA = a.split('|');
+    const partsB = b.split('|');
+    if (partsA.length !== partsB.length) return 0;
+    let sum = 0;
+    for (let i = 0; i < partsA.length; i++) {
+        sum += stringSimilarity(partsA[i].trim(), partsB[i].trim());
+    }
+    return sum / partsA.length;
+}
+
+function stringSimilarity(a: string, b: string): number {
+    if (a === b) return 1;
+    if (!a.length || !b.length) return 0;
+    if (a.startsWith(b) || b.startsWith(a)) {
+        const min = Math.min(a.length, b.length);
+        const max = Math.max(a.length, b.length);
+        return min / max;
+    }
+    const m = a.length;
+    const n = b.length;
+    if (m === 0) return n === 0 ? 1 : 0;
+    if (n === 0) return 0;
+    const dp: number[][] = [];
+    for (let i = 0; i <= m; i++) { dp.push(new Array(n + 1).fill(0)); dp[i][0] = i; }
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+            const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+            dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+        }
+    }
+    return 1 - dp[m][n] / Math.max(m, n);
+}
+
 
 function valueAt(row: TableRow, idx: number): string | null {
     if (idx < 0 || idx >= row.cells.length) return null;
@@ -1492,8 +2014,20 @@ export function compareValues(
         const isoB = normaliseDateToIsoIfPossible(nb);
         if (isoA && isoB && isoA === isoB) return { equal: true };
         if (normalizeForMatch(na) === normalizeForMatch(nb)) return { equal: true };
+        if (textPrefixEqual(na, nb)) return { equal: true };
     }
     return { equal: false };
+}
+
+function textPrefixEqual(a: string, b: string): boolean {
+    const na = normalizeForMatch(a);
+    const nb = normalizeForMatch(b);
+    if (na.length === 0 || nb.length === 0) return false;
+    const shorter = na.length < nb.length ? na : nb;
+    const longer = na.length < nb.length ? nb : na;
+    if (shorter.length < 6) return false;
+    if (shorter.length / longer.length < 0.6) return false;
+    return longer.startsWith(shorter);
 }
 
 const MONTH_NAMES: Record<string, number> = {

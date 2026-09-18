@@ -58,6 +58,7 @@ import { detectSectionHeaders, type SectionHeaderCandidate } from './layout/CSSe
 import { resolveTableHeaders } from './layout/CSTableHeaderResolver';
 import { tagTotalRows } from './layout/CSTotalRowTagger';
 import { extractToc, findTocEntryLines } from './layout/CSTocExtractor';
+import { validateAndRepairSections } from './CSAnalyzedSectionValidator';
 
 /**
  * Full Layer-2 analysis. Given the raw pages from Layer 1, returns an `AnalyzedReport`
@@ -110,7 +111,8 @@ export function analyzeReport(pages: PageContent[], opts: LayoutAnalyzerOptions 
     }
 
     // 4. Cross-page section merging.
-    const mergedSections = mergeCrossPageSections(analyzedPages, opts);
+    const mergedSectionsRaw = mergeCrossPageSections(analyzedPages, opts);
+    const mergedSections = validateAndRepairSections(mergedSectionsRaw, { debug: opts.debugCrossPageMerge });
 
     return {
         pageCount: pages.length,

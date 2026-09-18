@@ -158,6 +158,12 @@ export interface CellMeta {
  * sub-header. Sections that span
  * multiple pages have `spansToNextPage` set so the cross-page merger can join them.
  */
+export interface AnalyzedSubTable {
+    title?: string;
+    columns: ColumnBand[];
+    tableRows: TableRow[];
+}
+
 export interface AnalyzedSection {
     /** As-detected title text. */
     title: string;
@@ -184,6 +190,7 @@ export interface AnalyzedSection {
     spansToNextPage: boolean;
     /** 1-indexed page number where this section START appears (may end on a later page). */
     startPage: number;
+    subTables?: AnalyzedSubTable[];
 }
 
 /**
