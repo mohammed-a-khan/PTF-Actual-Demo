@@ -1003,9 +1003,6 @@ function validateRulesShape(rules: ReconcileRules): void {
  */
 function mergeAnalyzedSections(analyzed: AnalyzedReport): Map<string, AnalyzedSection> {
     const merged = new Map<string, AnalyzedSection>();
-    // Prefer analyzer's own cross-page merge if it produced one — it carries the
-    // anonymous-continuation merge + column-header title synthesis, both of
-    // which the naive per-page title index below cannot reproduce.
     const analyzerMerged = (analyzed as unknown as { mergedSections?: AnalyzedSection[] }).mergedSections;
     if (Array.isArray(analyzerMerged) && analyzerMerged.length > 0) {
         for (const sec of analyzerMerged) {
@@ -1015,7 +1012,7 @@ function mergeAnalyzedSections(analyzed: AnalyzedReport): Map<string, AnalyzedSe
             if (!existing) {
                 merged.set(title, { ...sec, tableRows: [...sec.tableRows], columns: [...sec.columns] });
             } else {
-                existing.tableRows.push(...sec.tableRows);
+                appendRowsWithRealign(existing, sec, title);
             }
         }
         return merged;
@@ -1028,12 +1025,90 @@ function mergeAnalyzedSections(analyzed: AnalyzedReport): Map<string, AnalyzedSe
             if (!existing) {
                 merged.set(title, { ...sec, tableRows: [...sec.tableRows], columns: [...sec.columns] });
             } else {
-                existing.tableRows.push(...sec.tableRows);
-                // Columns: keep the first-page's columns (assume consistent)
+                appendRowsWithRealign(existing, sec, title);
             }
         }
     }
     return merged;
+}
+
+function appendRowsWithRealign(accumulator: AnalyzedSection, incoming: AnalyzedSection, title: string): void {
+    const accCols = accumulator.columns ?? [];
+    const inCols = incoming.columns ?? [];
+    const sameShape =
+        accCols.length === inCols.length &&
+        accCols.every((c, i) => {
+            const b = inCols[i];
+            return b && Math.abs(c.start - b.start) <= 5 && Math.abs(c.end - b.end) <= 5;
+        });
+    if (sameShape) {
+        accumulator.tableRows.push(...incoming.tableRows);
+        return;
+    }
+    CSReporter.warn(
+        `[mergeAnalyzedSections] realigning "${title}" incoming rows: accumulator has ${accCols.length} cols, incoming has ${inCols.length} cols`,
+    );
+    const realigned = realignRowsBetweenColumnLayouts(incoming, accumulator);
+    accumulator.tableRows.push(...realigned);
+}
+
+function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator: AnalyzedSection): TableRow[] {
+    const accCols = accumulator.columns ?? [];
+    const inCols = incoming.columns ?? [];
+    if (accCols.length === 0 || inCols.length === 0) return incoming.tableRows ?? [];
+    const looseTolerance = 40;
+    const mapping: number[] = new Array(inCols.length).fill(-1);
+    for (let i = 0; i < inCols.length; i++) {
+        const inMid = (inCols[i].start + inCols[i].end) / 2;
+        let bestJ = -1;
+        let bestDist = Infinity;
+        for (let j = 0; j < accCols.length; j++) {
+            if (inMid >= accCols[j].start - looseTolerance && inMid <= accCols[j].end + looseTolerance) {
+                const accMid = (accCols[j].start + accCols[j].end) / 2;
+                const dist = Math.abs(inMid - accMid);
+                if (dist < bestDist) { bestDist = dist; bestJ = j; }
+            }
+        }
+        if (bestJ < 0) {
+            const inHeader = (inCols[i].header ?? '').trim().toLowerCase();
+            if (inHeader) {
+                for (let j = 0; j < accCols.length; j++) {
+                    const accHeader = (accCols[j].header ?? '').trim().toLowerCase();
+                    if (accHeader && accHeader === inHeader) { bestJ = j; break; }
+                }
+            }
+        }
+        mapping[i] = bestJ;
+    }
+    const out: TableRow[] = [];
+    for (const row of incoming.tableRows ?? []) {
+        const cells: (string | null)[] = new Array(accCols.length).fill(null);
+        const cellMeta: (import('./CSReportPdfTypes').CellMeta | null)[] = new Array(accCols.length).fill(null);
+        const srcCells = row.cells ?? [];
+        const srcMeta = row.cellMeta ?? [];
+        for (let i = 0; i < srcCells.length; i++) {
+            const dst = mapping[i];
+            if (dst < 0) continue;
+            const val = srcCells[i];
+            if (val == null || String(val).trim() === '') continue;
+            if (cells[dst] == null || String(cells[dst]).trim() === '') {
+                cells[dst] = val;
+                cellMeta[dst] = srcMeta[i] ?? null;
+            } else {
+                cells[dst] = `${cells[dst]} ${val}`;
+            }
+        }
+        out.push({
+            rowIndex: row.rowIndex,
+            y: row.y,
+            cells,
+            cellMeta,
+            isGroupHeader: row.isGroupHeader,
+            isTotalRow: row.isTotalRow,
+            groupLabel: row.groupLabel,
+        });
+    }
+    return out;
 }
 
 function resolveSections(

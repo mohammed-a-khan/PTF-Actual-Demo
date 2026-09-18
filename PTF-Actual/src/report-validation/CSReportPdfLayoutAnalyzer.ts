@@ -47,6 +47,7 @@ import { detectChartRegions, removeChartItems } from './layout/CSChartRegionDete
 import {
     linesToTableRows,
     shouldMergeAcrossPages,
+    shouldMergeAcrossPagesEx,
     stitchMultiLineCells,
     extractGroupLabelIfHeader,
 } from './layout/CSCellStitcher';
@@ -301,10 +302,67 @@ function maybeSplitByItemCount(lines: LogicalLine[]): LogicalLine[][] {
             bestSplit = i;
         }
     }
-    if (bestSplit < 0) return [lines];
-    const upperGroup = sorted.slice(0, bestSplit);
-    const lowerGroup = sorted.slice(bestSplit);
-    return [upperGroup, lowerGroup];
+    if (bestSplit >= 0) {
+        return [sorted.slice(0, bestSplit), sorted.slice(bestSplit)];
+    }
+    const headerBasedSplit = findHeaderRowSplit(sorted);
+    if (headerBasedSplit > 0) {
+        return [sorted.slice(0, headerBasedSplit), sorted.slice(headerBasedSplit)];
+    }
+    const xSignatureSplit = findXSignatureSplit(sorted, medianGap);
+    if (xSignatureSplit > 0) {
+        return [sorted.slice(0, xSignatureSplit), sorted.slice(xSignatureSplit)];
+    }
+    return [lines];
+}
+
+function findHeaderRowSplit(sortedLines: LogicalLine[]): number {
+    const headerIndices: number[] = [];
+    for (let i = 0; i < sortedLines.length; i++) {
+        if (looksLikeColumnHeaderRow(sortedLines[i])) headerIndices.push(i);
+    }
+    if (headerIndices.length < 2) return -1;
+    const firstHeader = headerIndices[0];
+    const secondHeader = headerIndices[1];
+    if (secondHeader - firstHeader < 1) return -1;
+    if (sortedLines.length - secondHeader < 2) return -1;
+    return secondHeader;
+}
+
+function looksLikeColumnHeaderRow(line: LogicalLine): boolean {
+    const items = line.items ?? [];
+    if (items.length < 3) return false;
+    let shortTextCount = 0;
+    let numericCount = 0;
+    for (const it of items) {
+        const s = (it.str ?? '').trim();
+        if (!s) continue;
+        if (/^[-+]?\d[\d.,%$/-]*$/.test(s)) numericCount++;
+        else if (s.length <= 30 && /^[A-Za-z]/.test(s)) shortTextCount++;
+    }
+    if (numericCount > 0) return false;
+    return shortTextCount >= Math.min(3, items.filter((it) => (it.str ?? '').trim().length > 0).length);
+}
+
+function findXSignatureSplit(sortedLines: LogicalLine[], medianGap: number): number {
+    const signatures = sortedLines.map((l) => {
+        const xs = (l.items ?? [])
+            .map((it) => Math.round(it.x / 30))
+            .filter((_, idx, arr) => idx === arr.indexOf(_));
+        return xs.sort((a, b) => a - b).join(',');
+    });
+    for (let i = 2; i < sortedLines.length - 2; i++) {
+        const gap = Math.abs(sortedLines[i - 1].y - sortedLines[i].y);
+        if (gap < medianGap * 0.8) continue;
+        const upperSigs = new Set(signatures.slice(0, i).filter((s) => s));
+        const lowerSigs = new Set(signatures.slice(i).filter((s) => s));
+        if (upperSigs.size === 0 || lowerSigs.size === 0) continue;
+        let overlap = 0;
+        for (const s of upperSigs) if (lowerSigs.has(s)) overlap++;
+        const minSize = Math.min(upperSigs.size, lowerSigs.size);
+        if (overlap === 0 && minSize >= 1) return i;
+    }
+    return -1;
 }
 
 function mode(values: number[]): number {
@@ -912,14 +970,15 @@ function mergeCrossPageSections(
     for (let p = 0; p < pages.length; p++) {
         for (const section of pages[p].sections) {
             const last = merged[merged.length - 1];
-            const sameTitleMerge =
-                stitchAcrossPages &&
-                last &&
-                shouldMergeAcrossPages(
-                    { title: last.title, bands: last.columns },
-                    { title: section.title, bands: section.columns },
-                    bandTolerance,
-                );
+            const sameTitleDecision =
+                stitchAcrossPages && last
+                    ? shouldMergeAcrossPagesEx(
+                        { title: last.title, bands: last.columns },
+                        { title: section.title, bands: section.columns },
+                        bandTolerance,
+                    )
+                    : { merge: false, requiresRealign: false };
+            const sameTitleMerge = sameTitleDecision.merge;
             const anonContinuationMerge =
                 stitchAcrossPages &&
                 !!last &&
@@ -943,21 +1002,36 @@ function mergeCrossPageSections(
                     `merged=${anonContinuationMerge}`,
                 );
             }
+            if (debug && last && sameTitleMerge && sameTitleDecision.requiresRealign) {
+                const prevStarts = (last.columns ?? []).map((c) => Math.round(c.start));
+                const nextStarts = (section.columns ?? []).map((c) => Math.round(c.start));
+                dbg(
+                    `same-title realign on page ${p + 1} for "${last.title}": ` +
+                    `reason=${sameTitleDecision.reason}, ` +
+                    `prev=${last.columns?.length ?? 0}cols starts=[${prevStarts.join(',')}], ` +
+                    `next=${section.columns?.length ?? 0}cols starts=[${nextStarts.join(',')}]`,
+                );
+            }
             if (sameTitleMerge || anonContinuationMerge) {
-                // Absorb this page's rows into the previous section's row list.
                 last.spansToNextPage = true;
+                const needsRealign = sameTitleMerge && sameTitleDecision.requiresRealign;
                 const startRowIndex = last.tableRows.length;
-                for (const row of section.tableRows) {
-                    row.rowIndex = startRowIndex + row.rowIndex;
-                    last.tableRows.push(row);
+                if (needsRealign) {
+                    const realigned = realignRowsToAccumulator(section, last, bandTolerance);
+                    for (const row of realigned) {
+                        row.rowIndex = startRowIndex + row.rowIndex;
+                        last.tableRows.push(row);
+                    }
+                } else {
+                    for (const row of section.tableRows) {
+                        row.rowIndex = startRowIndex + row.rowIndex;
+                        last.tableRows.push(row);
+                    }
                 }
-                // Merge chart regions + free text too.
                 last.charts.push(...section.charts);
                 last.freeText.push(...section.freeText);
                 continue;
             }
-            // Deep-ish clone so downstream mutations to `merged[]` don't corrupt the
-            // per-page arrays (the section mapper is expected to add more per-row fields).
             merged.push({ ...section });
         }
     }
@@ -989,7 +1063,82 @@ function mergeCrossPageSections(
     return merged;
 }
 
-/** Emit a synthetic section for a page that has only charts + no text sections. */
+export function realignRowsToAccumulator(
+    incoming: AnalyzedSection,
+    accumulator: AnalyzedSection,
+    bandTolerance: number,
+): TableRow[] {
+    const accCols = accumulator.columns ?? [];
+    const inCols = incoming.columns ?? [];
+    if (accCols.length === 0 || inCols.length === 0) return incoming.tableRows ?? [];
+    const mapping = buildColumnIndexMapping(inCols, accCols, bandTolerance);
+    if (mapping.every((v) => v === -1)) return incoming.tableRows ?? [];
+    const out: TableRow[] = [];
+    for (const row of incoming.tableRows ?? []) {
+        const cells: (string | null)[] = new Array(accCols.length).fill(null);
+        const cellMeta: (import('./CSReportPdfTypes').CellMeta | null)[] = new Array(accCols.length).fill(null);
+        const srcCells = row.cells ?? [];
+        const srcMeta = row.cellMeta ?? [];
+        for (let i = 0; i < srcCells.length; i++) {
+            const dst = mapping[i];
+            if (dst < 0) continue;
+            const val = srcCells[i];
+            if (val == null || String(val).trim() === '') continue;
+            if (cells[dst] == null || String(cells[dst]).trim() === '') {
+                cells[dst] = val;
+                cellMeta[dst] = srcMeta[i] ?? null;
+            } else {
+                cells[dst] = `${cells[dst]} ${val}`;
+            }
+        }
+        out.push({
+            rowIndex: row.rowIndex,
+            y: row.y,
+            cells,
+            cellMeta,
+            isGroupHeader: row.isGroupHeader,
+            isTotalRow: row.isTotalRow,
+            groupLabel: row.groupLabel,
+        });
+    }
+    return out;
+}
+
+function buildColumnIndexMapping(
+    inCols: ColumnBand[],
+    accCols: ColumnBand[],
+    bandTolerance: number,
+): number[] {
+    const looseTolerance = Math.max(bandTolerance, 40);
+    const mapping: number[] = new Array(inCols.length).fill(-1);
+    for (let i = 0; i < inCols.length; i++) {
+        const inMid = (inCols[i].start + inCols[i].end) / 2;
+        let bestJ = -1;
+        let bestDist = Infinity;
+        for (let j = 0; j < accCols.length; j++) {
+            if (inMid >= accCols[j].start - looseTolerance && inMid <= accCols[j].end + looseTolerance) {
+                const accMid = (accCols[j].start + accCols[j].end) / 2;
+                const dist = Math.abs(inMid - accMid);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestJ = j;
+                }
+            }
+        }
+        if (bestJ < 0) {
+            const inHeader = (inCols[i].header ?? '').trim().toLowerCase();
+            if (inHeader) {
+                for (let j = 0; j < accCols.length; j++) {
+                    const accHeader = (accCols[j].header ?? '').trim().toLowerCase();
+                    if (accHeader && accHeader === inHeader) { bestJ = j; break; }
+                }
+            }
+        }
+        mapping[i] = bestJ;
+    }
+    return mapping;
+}
+
 function emptySectionWithCharts(
     pageNumber: number,
     charts: import('./CSReportPdfTypes').ChartRegion[],

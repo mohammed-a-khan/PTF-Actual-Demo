@@ -301,13 +301,36 @@ export function shouldMergeAcrossPages(
     next: { title: string; bands: ColumnBand[] },
     bandTolerance = 5,
 ): boolean {
-    if (prev.title.toLowerCase().trim() !== next.title.toLowerCase().trim()) return false;
-    if (prev.bands.length !== next.bands.length) return false;
-    for (let i = 0; i < prev.bands.length; i++) {
-        if (Math.abs(prev.bands[i].start - next.bands[i].start) > bandTolerance) return false;
-        if (Math.abs(prev.bands[i].end - next.bands[i].end) > bandTolerance) return false;
+    const decision = shouldMergeAcrossPagesEx(prev, next, bandTolerance);
+    return decision.merge && !decision.requiresRealign;
+}
+
+export interface CrossPageMergeDecision {
+    merge: boolean;
+    requiresRealign: boolean;
+    reason?: string;
+}
+
+export function shouldMergeAcrossPagesEx(
+    prev: { title: string; bands: ColumnBand[] },
+    next: { title: string; bands: ColumnBand[] },
+    bandTolerance = 5,
+): CrossPageMergeDecision {
+    if (prev.title.toLowerCase().trim() !== next.title.toLowerCase().trim()) {
+        return { merge: false, requiresRealign: false, reason: 'title-mismatch' };
     }
-    return true;
+    if (prev.bands.length !== next.bands.length) {
+        return { merge: true, requiresRealign: true, reason: 'column-count-mismatch' };
+    }
+    for (let i = 0; i < prev.bands.length; i++) {
+        if (Math.abs(prev.bands[i].start - next.bands[i].start) > bandTolerance) {
+            return { merge: true, requiresRealign: true, reason: 'band-drift-start' };
+        }
+        if (Math.abs(prev.bands[i].end - next.bands[i].end) > bandTolerance) {
+            return { merge: true, requiresRealign: true, reason: 'band-drift-end' };
+        }
+    }
+    return { merge: true, requiresRealign: false };
 }
 
 /**
