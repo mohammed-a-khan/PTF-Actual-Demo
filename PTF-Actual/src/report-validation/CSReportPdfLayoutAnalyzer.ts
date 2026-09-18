@@ -317,7 +317,31 @@ function maybeSplitByItemCount(lines: LogicalLine[]): LogicalLine[][] {
     if (xSignatureSplit > 0) {
         return [sorted.slice(0, xSignatureSplit), sorted.slice(xSignatureSplit)];
     }
+    const transitionSplit = findItemCountTransitionSplit(sorted, counts);
+    if (transitionSplit > 0) {
+        return [sorted.slice(0, transitionSplit), sorted.slice(transitionSplit)];
+    }
     return [lines];
+}
+
+function findItemCountTransitionSplit(sortedLines: LogicalLine[], counts: number[]): number {
+    if (counts.length < 4) return -1;
+    for (let i = 1; i < counts.length - 1; i++) {
+        const leftLast = counts[i - 1];
+        const rightFirst = counts[i];
+        if (Math.abs(rightFirst - leftLast) < 3) continue;
+        let rightConsistent = 0;
+        for (let j = i; j < counts.length; j++) {
+            if (Math.abs(counts[j] - rightFirst) <= 1) rightConsistent++;
+            else break;
+        }
+        if (rightConsistent < 2) continue;
+        const isHeaderLikeAtI = looksLikeColumnHeaderRow(sortedLines[i]);
+        const isHeaderLikeAtIm1 = looksLikeColumnHeaderRow(sortedLines[i - 1]);
+        if (!isHeaderLikeAtI && !isHeaderLikeAtIm1) continue;
+        return i;
+    }
+    return -1;
 }
 
 function findHeaderRowSplit(sortedLines: LogicalLine[], counts: number[]): number {

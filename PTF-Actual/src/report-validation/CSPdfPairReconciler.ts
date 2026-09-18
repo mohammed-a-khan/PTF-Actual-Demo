@@ -339,6 +339,14 @@ export async function generateReconciliationRulesFromPair(opts: {
         const rule: ReconcileSectionRule = { keyColumns, columns };
         const aliasTitle = candidateAuthoritative ? refTitle : candTitle;
         if (aliasTitle && aliasTitle !== canonicalTitle) rule.aliases = [aliasTitle];
+        const candRows = candSec.tableRows?.length ?? 0;
+        const refRows = refSec.tableRows?.length ?? 0;
+        if (candRows === 0 || refRows === 0) {
+            rule.skip = true;
+            CSReporter.warn(
+                `[generateReconciliationRulesFromPair] "${canonicalTitle}" — one side has 0 rows (candidate=${candRows}, reference=${refRows}); marking rule as skip=true`,
+            );
+        }
         sections[canonicalTitle] = rule;
     }
 
@@ -700,6 +708,12 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
         if (opts.rules.autoMode && candSec && refSecForSize) {
             const candN = candSec.tableRows?.length ?? 0;
             const refN = refSecForSize.tableRows?.length ?? 0;
+            if (candN === 0 || refN === 0) {
+                warnings.push(
+                    `Section "${canonicalSectionName}" — one side has 0 rows (candidate=${candN}, reference=${refN}); treating as info-only, no findings emitted`,
+                );
+                continue;
+            }
             const maxN = Math.max(candN, refN);
             if (maxN > 0) {
                 const ratio = Math.min(candN, refN) / maxN;
@@ -1011,34 +1025,68 @@ function validateRulesShape(rules: ReconcileRules): void {
  * multiple times with the same title.)
  */
 function mergeAnalyzedSections(analyzed: AnalyzedReport): Map<string, AnalyzedSection> {
-    const merged = new Map<string, AnalyzedSection>();
+    const buckets = new Map<string, AnalyzedSection[]>();
     const analyzerMerged = (analyzed as unknown as { mergedSections?: AnalyzedSection[] }).mergedSections;
     if (Array.isArray(analyzerMerged) && analyzerMerged.length > 0) {
         for (const sec of analyzerMerged) {
             const title = (sec.title ?? '').trim();
             if (!title) continue;
-            const existing = merged.get(title);
-            if (!existing) {
-                merged.set(title, { ...sec, tableRows: [...sec.tableRows], columns: [...sec.columns] });
-            } else {
-                appendRowsWithRealign(existing, sec, title);
+            const arr = buckets.get(title) ?? [];
+            arr.push(sec);
+            buckets.set(title, arr);
+        }
+    } else {
+        for (const page of analyzed.pages) {
+            for (const sec of page.sections) {
+                const title = (sec.title ?? '').trim();
+                if (!title) continue;
+                const arr = buckets.get(title) ?? [];
+                arr.push(sec);
+                buckets.set(title, arr);
             }
         }
-        return merged;
     }
-    for (const page of analyzed.pages) {
-        for (const sec of page.sections) {
-            const title = (sec.title ?? '').trim();
-            if (!title) continue;
-            const existing = merged.get(title);
-            if (!existing) {
-                merged.set(title, { ...sec, tableRows: [...sec.tableRows], columns: [...sec.columns] });
-            } else {
-                appendRowsWithRealign(existing, sec, title);
-            }
+    const merged = new Map<string, AnalyzedSection>();
+    for (const [title, sections] of buckets) {
+        const chosen = pickAccumulatorByEvidence(sections);
+        const accumulator: AnalyzedSection = {
+            ...chosen,
+            tableRows: [...(chosen.tableRows ?? [])],
+            columns: [...(chosen.columns ?? [])],
+        };
+        if (sections.length > 1) {
+            const alts = sections.filter((s) => s !== chosen);
+            const altSummary = alts
+                .map((s) => `${(s.tableRows?.length ?? 0)}r/${(s.columns?.length ?? 0)}c`)
+                .join(', ');
+            CSReporter.warn(
+                `[mergeAnalyzedSections] "${title}" — chose ${(chosen.tableRows?.length ?? 0)}-row/${(chosen.columns?.length ?? 0)}-col accumulator over alternatives: ${altSummary}`,
+            );
         }
+        for (const sec of sections) {
+            if (sec === chosen) continue;
+            appendRowsWithRealign(accumulator, sec, title);
+        }
+        merged.set(title, accumulator);
     }
     return merged;
+}
+
+function pickAccumulatorByEvidence(sections: AnalyzedSection[]): AnalyzedSection {
+    if (sections.length === 1) return sections[0];
+    const scored = sections.map((s) => {
+        const rows = s.tableRows?.length ?? 0;
+        const cols = s.columns ?? [];
+        const filled = cols.filter((c) => (c?.header ?? '').trim().length > 0).length;
+        const headerCompleteness = filled / Math.max(1, cols.length);
+        return { s, score: rows * headerCompleteness, rows, colCount: cols.length };
+    });
+    scored.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (b.rows !== a.rows) return b.rows - a.rows;
+        return b.colCount - a.colCount;
+    });
+    return scored[0].s;
 }
 
 function appendRowsWithRealign(accumulator: AnalyzedSection, incoming: AnalyzedSection, title: string): void {
@@ -1348,20 +1396,37 @@ function groupRowsByKey(rows: TableRow[], keyIndices: number[], autoMode?: boole
     const out = new Map<string, TableRow>();
     if (keyIndices.some((i) => i < 0)) return out; // any key column unresolvable → no rows keyable
     for (const row of rows) {
-        // In auto-mode, skip rows tagged as totals/summary — they're aggregates
-        // over data rows, not identity rows, and legitimately differ across
-        // report versions (rounding, running-total order, decimal precision).
-        // Hand-authored rules (autoMode=false) don't skip anything — the
-        // consumer explicitly opted in.
         if (autoMode && row.isTotalRow) continue;
         const keyParts = keyIndices.map((i) => valueAt(row, i) ?? '');
-        const rawKey = keyParts.join('|').trim();
-        if (!rawKey || keyParts.every((k) => !k)) continue; // skip totally-empty key rows
-        const key = autoMode ? normalizeForMatch(rawKey) : rawKey;
+        if (keyParts.every((k) => !k)) continue;
+        let key: string;
+        if (autoMode) {
+            const normParts = keyParts.map((v) => normalizeKeyValue(v));
+            key = normParts.join('|').trim();
+        } else {
+            key = keyParts.join('|').trim();
+        }
         if (!key) continue;
         out.set(key, row);
     }
     return out;
+}
+
+function normalizeKeyValue(v: string): string {
+    const s = (v ?? '').trim();
+    if (!s) return '';
+    const iso = normaliseDateToIsoIfPossible(s);
+    if (iso) return iso;
+    return normalizeForMatch(s);
+}
+
+function normaliseDateToIsoIfPossible(s: string): string | null {
+    if (!looksLikeDate(s)) return null;
+    const d = parseCalendarDay(s);
+    if (!d) return null;
+    const mm = String(d.m).padStart(2, '0');
+    const dd = String(d.d).padStart(2, '0');
+    return `${d.y}-${mm}-${dd}`;
 }
 
 /**
@@ -1423,6 +1488,9 @@ export function compareValues(
         }
     }
     if (autoMode && (kind === 'string' || kind === 'date' || kind === undefined)) {
+        const isoA = normaliseDateToIsoIfPossible(na);
+        const isoB = normaliseDateToIsoIfPossible(nb);
+        if (isoA && isoB && isoA === isoB) return { equal: true };
         if (normalizeForMatch(na) === normalizeForMatch(nb)) return { equal: true };
     }
     return { equal: false };
