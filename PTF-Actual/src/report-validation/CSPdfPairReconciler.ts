@@ -1239,7 +1239,7 @@ function resolveTolerance(colRule: ReconcileColumnRule, global?: GlobalTolerance
     return 0;
 }
 
-function compareValues(
+export function compareValues(
     a: string,
     b: string,
     kind: 'string' | 'number' | 'date' | undefined,
@@ -1260,10 +1260,79 @@ function compareValues(
             return { equal: delta <= tolerance, delta };
         }
     }
+    if (kind === 'date' || (kind === undefined && looksLikeDate(na) && looksLikeDate(nb))) {
+        const da = parseCalendarDay(na);
+        const db = parseCalendarDay(nb);
+        if (da && db) {
+            const equal = da.y === db.y && da.m === db.m && da.d === db.d;
+            if (equal) return { equal: true };
+            if (kind === 'date') return { equal: false };
+        }
+    }
     if (autoMode && (kind === 'string' || kind === 'date' || kind === undefined)) {
         if (normalizeForMatch(na) === normalizeForMatch(nb)) return { equal: true };
     }
     return { equal: false };
+}
+
+const MONTH_NAMES: Record<string, number> = {
+    jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
+    may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8, sep: 9, sept: 9, september: 9,
+    oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
+};
+
+function looksLikeDate(s: string): boolean {
+    if (!s) return false;
+    return /^\s*(\d{1,4}[-/.\s]\d{1,2}[-/.\s]\d{1,4}|\d{1,2}[-/\s][A-Za-z]{3,9}[-/\s]\d{2,4}|[A-Za-z]{3,9}[-/\s]\d{1,2}[,\s]+\d{2,4})\s*$/.test(s);
+}
+
+function parseCalendarDay(s: string): { y: number; m: number; d: number } | null {
+    if (!s) return null;
+    const raw = s.trim();
+    let m: RegExpMatchArray | null;
+    m = raw.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+    if (m) {
+        const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+        if (validYmd(y, mo, d)) return { y, m: mo, d };
+    }
+    m = raw.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$/);
+    if (m) {
+        const first = Number(m[1]), second = Number(m[2]);
+        let y = Number(m[3]);
+        if (y < 100) y += y >= 70 ? 1900 : 2000;
+        if (first > 12 && second <= 12 && validYmd(y, second, first)) return { y, m: second, d: first };
+        if (validYmd(y, first, second)) return { y, m: first, d: second };
+    }
+    m = raw.match(/^(\d{1,2})[-/\s]([A-Za-z]{3,9})[-/\s](\d{2,4})$/);
+    if (m) {
+        const d = Number(m[1]);
+        const mo = MONTH_NAMES[m[2].toLowerCase()];
+        let y = Number(m[3]);
+        if (y < 100) y += y >= 70 ? 1900 : 2000;
+        if (mo && validYmd(y, mo, d)) return { y, m: mo, d };
+    }
+    m = raw.match(/^([A-Za-z]{3,9})[-/\s](\d{1,2})[,\s]+(\d{2,4})$/);
+    if (m) {
+        const mo = MONTH_NAMES[m[1].toLowerCase()];
+        const d = Number(m[2]);
+        let y = Number(m[3]);
+        if (y < 100) y += y >= 70 ? 1900 : 2000;
+        if (mo && validYmd(y, mo, d)) return { y, m: mo, d };
+    }
+    return null;
+}
+
+function validYmd(y: number, m: number, d: number): boolean {
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return false;
+    if (y < 1900 || y > 2200) return false;
+    if (m < 1 || m > 12) return false;
+    if (d < 1 || d > 31) return false;
+    const daysInMonth = [31, 28 + (leap(y) ? 1 : 0), 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return d <= daysInMonth[m - 1];
+}
+
+function leap(y: number): boolean {
+    return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
 }
 
 /**

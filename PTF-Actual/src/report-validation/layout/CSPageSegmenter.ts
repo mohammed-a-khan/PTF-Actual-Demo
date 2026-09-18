@@ -92,7 +92,9 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
     const topStripRatio = opts.topStripRatio ?? 0.15;
     const bottomStripRatio = opts.bottomStripRatio ?? 0.1;
     const yTol = opts.yTolerance ?? 3;
-    const xTol = opts.xTolerance ?? 5;
+    const baseXTol = opts.xTolerance ?? 5;
+    const medianPageWidth = medianOf(pages.map((p) => p.width || 0));
+    const xTol = Math.max(baseXTol, Math.round(medianPageWidth * 0.02));
     const protectedPatterns = opts.protectedPatterns ?? [];
 
     // For each page, split items into "top strip" (candidate header), "bottom strip"
@@ -304,6 +306,11 @@ function median(values: number[]): number {
     const sorted = [...values].sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
     return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function medianOf(values: number[]): number {
+    const filtered = values.filter((v) => Number.isFinite(v) && v > 0);
+    return median(filtered);
 }
 
 function protectedItemsOn(items: TextItem[], patterns: RegExp[], yTol: number): Set<TextItem> {
