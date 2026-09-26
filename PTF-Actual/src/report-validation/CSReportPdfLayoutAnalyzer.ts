@@ -112,7 +112,8 @@ export function analyzeReport(pages: PageContent[], opts: LayoutAnalyzerOptions 
 
     // 4. Cross-page section merging.
     const mergedSectionsRaw = mergeCrossPageSections(analyzedPages, opts);
-    const mergedSections = validateAndRepairSections(mergedSectionsRaw, { debug: opts.debugCrossPageMerge });
+    const mergedSectionsValidated = validateAndRepairSections(mergedSectionsRaw, { debug: opts.debugCrossPageMerge });
+    const mergedSections = stripLeftoverHeaderRows(mergedSectionsValidated);
 
     return {
         pageCount: pages.length,
@@ -120,6 +121,35 @@ export function analyzeReport(pages: PageContent[], opts: LayoutAnalyzerOptions 
         toc,
         mergedSections,
     };
+}
+
+function stripLeftoverHeaderRows(sections: AnalyzedSection[]): AnalyzedSection[] {
+    for (const sec of sections) {
+        sec.tableRows = sec.tableRows.filter((r) => !isRowJustHeaderTextAnalyzer(r.cells, sec.columns));
+        if (Array.isArray(sec.subTables)) {
+            for (const st of sec.subTables) {
+                st.tableRows = st.tableRows.filter((r) => !isRowJustHeaderTextAnalyzer(r.cells, st.columns));
+            }
+        }
+    }
+    return sections;
+}
+
+function isRowJustHeaderTextAnalyzer(cells: (string | null)[], columns: AnalyzedSection['columns']): boolean {
+    if (!cells || !columns || columns.length === 0) return false;
+    const norm = (v: string): string => v.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    let matches = 0;
+    let filled = 0;
+    for (let i = 0; i < cells.length && i < columns.length; i++) {
+        const c = cells[i];
+        if (c == null || String(c).trim().length === 0) continue;
+        filled++;
+        const cellNorm = norm(String(c));
+        const headerNorm = norm(String(columns[i].header ?? ''));
+        if (headerNorm.length > 0 && cellNorm === headerNorm) matches++;
+    }
+    if (filled === 0) return false;
+    return matches / filled >= 0.6;
 }
 
 // ---------------------------------------------------------------------------
@@ -239,13 +269,30 @@ function analyzeOnePage(
             return below && above;
         });
         const splitGroups = maybeSplitByItemCount(sectionLines);
-        for (let sg = 0; sg < splitGroups.length; sg++) {
-            const groupLines = splitGroups[sg];
-            const groupTitle = sg === 0 ? header.title : '(anonymous)';
-            const groupCharts = sg === 0 ? sectionCharts : [];
+        const analyzedGroups = splitGroups.map((groupLines, sg) =>
+            analyzeSectionRegion(
+                pageNumber,
+                sg === 0 ? header.title : '(anonymous)',
+                header.line.y,
+                groupLines,
+                sg === 0 ? sectionCharts : [],
+                opts,
+                sectionCandidates,
+            ),
+        );
+        // The section title sits at the top, so the leading group inherits it. When that group is
+        // the section's summary block (balances, a ratio against its threshold) rather than a
+        // table, the section ends up named after its preamble while the rows that matter land
+        // under a synthesised "(anonymous)" title — so a lookup by title finds a section with no
+        // data in it, and the preamble machinery that exists to compare those very figures is
+        // starved. Re-read the section whole in that case; `recoverHeaderRowFromData` then finds
+        // the header below the block and keeps the figures as `preambleText`.
+        if (splitLostTheTable(analyzedGroups)) {
             sections.push(
-                analyzeSectionRegion(pageNumber, groupTitle, header.line.y, groupLines, groupCharts, opts, sectionCandidates),
+                analyzeSectionRegion(pageNumber, header.title, header.line.y, sectionLines, sectionCharts, opts, sectionCandidates),
             );
+        } else {
+            sections.push(...analyzedGroups);
         }
     }
 
@@ -294,6 +341,12 @@ function maybeSplitByItemCount(lines: LogicalLine[]): LogicalLine[][] {
         if (upperMode === lowerMode) continue;
         if (upperMode < 2 || lowerMode < 2) continue;
         if (Math.abs(upperMode - lowerMode) < 2) continue;
+        // The cut must land where the row shape actually changes, not inside a run of identical
+        // rows. `upperMode` is taken over the whole upper group, so a data row or two dragged
+        // above the boundary leaves it unchanged — and since an ordinary row pitch clears the gap
+        // test, every boundary inside the grid is a candidate whose score rises with the number
+        // of rows below it. The row immediately above the cut is what tells the two apart.
+        if (Math.abs(counts[i - 1] - lowerMode) <= 1) continue;
         const upperMatch = upperCounts.filter((c) => Math.abs(c - upperMode) <= 1).length;
         const lowerMatch = lowerCounts.filter((c) => Math.abs(c - lowerMode) <= 1).length;
         if (upperMatch < 1 || lowerMatch < 2) continue;
@@ -307,26 +360,83 @@ function maybeSplitByItemCount(lines: LogicalLine[]): LogicalLine[][] {
     if (bestSplit >= 0) {
         return [sorted.slice(0, bestSplit), sorted.slice(bestSplit)];
     }
-    const headerBasedSplit = findHeaderRowSplit(sorted, counts);
-    if (headerBasedSplit > 0) {
+    const accepted = (index: number): boolean => index > 0;
+    const headerBasedSplit = findHeaderRowSplit(sorted, counts, medianGap);
+    if (accepted(headerBasedSplit)) {
         return [sorted.slice(0, headerBasedSplit), sorted.slice(headerBasedSplit)];
     }
-    const rollingSplit = findRollingModeSplit(sorted, counts);
-    if (rollingSplit > 0) {
+    const rollingSplit = findRollingModeSplit(sorted, counts, medianGap);
+    if (accepted(rollingSplit)) {
         return [sorted.slice(0, rollingSplit), sorted.slice(rollingSplit)];
     }
     const xSignatureSplit = findXSignatureSplit(sorted, medianGap);
-    if (xSignatureSplit > 0) {
+    if (accepted(xSignatureSplit)) {
         return [sorted.slice(0, xSignatureSplit), sorted.slice(xSignatureSplit)];
     }
-    const transitionSplit = findItemCountTransitionSplit(sorted, counts);
-    if (transitionSplit > 0) {
+    const transitionSplit = findItemCountTransitionSplit(sorted, counts, medianGap);
+    if (accepted(transitionSplit)) {
         return [sorted.slice(0, transitionSplit), sorted.slice(transitionSplit)];
     }
     return [lines];
 }
 
-function findItemCountTransitionSplit(sortedLines: LogicalLine[], counts: number[]): number {
+/**
+ * Did the split take the section's table apart instead of separating two tables?
+ *
+ * A summary block is label/value pairs with nothing naming its columns, so header resolution
+ * leaves every band unlabelled. A genuinely stacked second table — the compliance-above-detail
+ * layout this split exists for — carries its own column headings, which is what tells the two
+ * apart; row counts do not, since both sit above a longer grid.
+ */
+function splitLostTheTable(groups: AnalyzedSection[]): boolean {
+    if (groups.length < 2) return false;
+    const [leading, ...rest] = groups;
+    if (leading.tableRows.length === 0) return true;
+    const named = (section: AnalyzedSection): boolean =>
+        section.columns.some((c) => (c.header ?? '').trim().length > 0);
+    if (named(leading)) return false;
+    // Something below it names its columns: the leading group is the block above the table.
+    if (rest.some(named)) return true;
+    // Nothing anywhere names a column, and the leading group's rows are all label text with no
+    // figures in them — those rows ARE the heading the groups below are missing. This is a
+    // heading wrapped over several lines, which the split read as a narrow table stacked on a
+    // wide one. Judging it here, on the analysed groups, rather than on the raw lines matters:
+    // the same line shapes also occur where a split is genuinely needed, and vetoing the split
+    // up front loses those sections entirely.
+    return rowsAreAllHeadingText(leading);
+}
+
+/** Do these rows carry only column labels — short text, no figures — and so name a table? */
+function rowsAreAllHeadingText(section: AnalyzedSection): boolean {
+    if (section.tableRows.length === 0) return false;
+    for (const row of section.tableRows) {
+        let labels = 0;
+        for (const cell of row.cells) {
+            const text = (cell ?? '').trim();
+            if (text.length === 0) continue;
+            if (/\d/.test(text)) return false;
+            if (text.length <= 40) labels++;
+        }
+        if (labels < 2) return false;
+    }
+    return true;
+}
+
+
+/**
+ * A genuine "two tables stacked on one page" boundary always has visible whitespace between
+ * the tables. That is the only signal separating it from an ordinary multi-line wrapped row,
+ * whose lines sit closer together than the normal row pitch. Every fallback split-finder must
+ * reject a candidate whose gap is tighter than the section's median inter-line gap, or it
+ * severs a wrapped row across two independently-processed chunks — which from a pure
+ * item-count view looks exactly like a short description line beside a numbers-only line.
+ */
+function gapAt(sortedLines: LogicalLine[], index: number): number {
+    if (index <= 0 || index >= sortedLines.length) return Infinity;
+    return Math.abs(sortedLines[index - 1].y - sortedLines[index].y);
+}
+
+function findItemCountTransitionSplit(sortedLines: LogicalLine[], counts: number[], medianGap: number): number {
     if (counts.length < 4) return -1;
     for (let i = 1; i < counts.length - 1; i++) {
         const leftLast = counts[i - 1];
@@ -341,12 +451,49 @@ function findItemCountTransitionSplit(sortedLines: LogicalLine[], counts: number
         const isHeaderLikeAtI = looksLikeColumnHeaderRow(sortedLines[i]);
         const isHeaderLikeAtIm1 = looksLikeColumnHeaderRow(sortedLines[i - 1]);
         if (!isHeaderLikeAtI && !isHeaderLikeAtIm1) continue;
+        if (gapAt(sortedLines, i) < medianGap * 0.8) continue;
         return i;
     }
     return -1;
 }
 
-function findHeaderRowSplit(sortedLines: LogicalLine[], counts: number[]): number {
+/** Points within which two runs count as sitting in the same column. */
+const COLUMN_BUCKET_POINTS = 12;
+
+/**
+ * Does the line at `index` occupy a column the rows above it do not use?
+ *
+ * `looksLikeColumnHeaderRow` asks only whether a line is short text with no figures, and an
+ * ordinary data row can be exactly that — a group label above its members, or a row whose only
+ * numeric columns are ones this report never populates. Treating one as the heading of a second
+ * table cuts the grid in two and leaves everything below it under a synthesised title that no
+ * lookup by section name reaches, so those rows are dropped from the comparison while the run
+ * still reports the section as present.
+ *
+ * What separates them is that a second table brings its own columns. A candidate whose runs all
+ * sit where the rows above already print is one of those rows; and if a repeated heading really
+ * does line up with the table above, then it is that same table continuing and not splitting is
+ * right either way.
+ */
+function startsNewColumnLayout(sortedLines: LogicalLine[], index: number): boolean {
+    if (index <= 0 || index >= sortedLines.length) return false;
+    const bucketOf = (x: number): number => Math.round(x / COLUMN_BUCKET_POINTS);
+    const above = new Set<number>();
+    for (let i = 0; i < index; i++) {
+        for (const it of sortedLines[i].items ?? []) {
+            if ((it.str ?? '').trim().length === 0) continue;
+            above.add(bucketOf(it.x));
+        }
+    }
+    for (const it of sortedLines[index].items ?? []) {
+        if ((it.str ?? '').trim().length === 0) continue;
+        const bucket = bucketOf(it.x);
+        if (!above.has(bucket) && !above.has(bucket - 1) && !above.has(bucket + 1)) return true;
+    }
+    return false;
+}
+
+function findHeaderRowSplit(sortedLines: LogicalLine[], counts: number[], medianGap: number): number {
     const headerIndices: number[] = [];
     for (let i = 0; i < sortedLines.length; i++) {
         if (looksLikeColumnHeaderRow(sortedLines[i])) headerIndices.push(i);
@@ -354,7 +501,12 @@ function findHeaderRowSplit(sortedLines: LogicalLine[], counts: number[]): numbe
     if (headerIndices.length >= 2) {
         const firstHeader = headerIndices[0];
         const secondHeader = headerIndices[1];
-        if (secondHeader - firstHeader >= 1 && sortedLines.length - secondHeader >= 2) {
+        if (
+            secondHeader - firstHeader >= 1 &&
+            sortedLines.length - secondHeader >= 2 &&
+            gapAt(sortedLines, secondHeader) >= medianGap * 0.8 &&
+            startsNewColumnLayout(sortedLines, secondHeader)
+        ) {
             return secondHeader;
         }
     }
@@ -372,7 +524,7 @@ function findHeaderRowSplit(sortedLines: LogicalLine[], counts: number[]): numbe
                 if (Math.abs(upperMode - lowerMode) >= 2 && upperMode >= 2 && lowerMode >= 2) {
                     const upperMatch = upper.filter((c) => Math.abs(c - upperMode) <= 1).length;
                     const lowerMatch = lower.filter((c) => Math.abs(c - lowerMode) <= 1).length;
-                    if (upperMatch >= 1 && lowerMatch >= 2) return split;
+                    if (upperMatch >= 1 && lowerMatch >= 2 && gapAt(sortedLines, split) >= medianGap * 0.8) return split;
                 }
             }
             void headerCount;
@@ -382,7 +534,7 @@ function findHeaderRowSplit(sortedLines: LogicalLine[], counts: number[]): numbe
     return -1;
 }
 
-function findRollingModeSplit(sortedLines: LogicalLine[], counts: number[]): number {
+function findRollingModeSplit(sortedLines: LogicalLine[], counts: number[], medianGap: number): number {
     if (counts.length < 5) return -1;
     const window = 3;
     const rollingModes: number[] = [];
@@ -392,7 +544,7 @@ function findRollingModeSplit(sortedLines: LogicalLine[], counts: number[]): num
     for (let i = 1; i < rollingModes.length; i++) {
         if (Math.abs(rollingModes[i] - rollingModes[i - 1]) >= 2) {
             const split = i + Math.floor(window / 2);
-            if (split >= 2 && split <= sortedLines.length - 2) return split;
+            if (split >= 2 && split <= sortedLines.length - 2 && gapAt(sortedLines, split) >= medianGap * 0.8) return split;
         }
     }
     return -1;
@@ -549,6 +701,8 @@ function analyzeSectionRegion(
             preambleText = preambleAbove(lines, recovered.headerY, recovered.headerLines);
         }
     }
+
+    rows = dropHeaderEchoRows(columns, rows);
 
     // Reindex after stitching so rowIndex reflects the final visible order.
     rows.forEach((r, i) => (r.rowIndex = i + 1));
@@ -719,6 +873,31 @@ function isTocEntryLine(
 ): boolean {
     if (!tocEntryYBuckets || tocEntryYBuckets.size === 0) return false;
     return tocEntryYBuckets.has(Math.round(candidate.line.y / TOC_Y_TOLERANCE));
+}
+
+/**
+ * Drop a row that is a verbatim copy of the table's own column headers.
+ *
+ * A fragmented or realigned section can leave its header line classified as data. It then
+ * reaches row comparison as a record, matching nothing on the other side and reporting as a
+ * difference that no one can act on.
+ */
+function dropHeaderEchoRows(columns: ColumnBand[], rows: TableRow[]): TableRow[] {
+    const norm = (v: string): string => v.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const headers = columns.map((c) => (c.header ? norm(c.header) : ''));
+    if (headers.filter(Boolean).length < 2) return rows;
+
+    return rows.filter((row) => {
+        let matched = 0;
+        for (let ci = 0; ci < row.cells.length; ci++) {
+            const cell = row.cells[ci];
+            if (cell === null || cell.trim().length === 0) continue;
+            const header = headers[ci];
+            if (!header || norm(cell) !== header) return true; // a real value — keep the row
+            matched++;
+        }
+        return matched < 2; // every filled cell echoed its header
+    });
 }
 
 /**
@@ -1039,8 +1218,14 @@ function mergeCrossPageSections(
     for (let p = 0; p < pages.length; p++) {
         for (const section of pages[p].sections) {
             const last = merged[merged.length - 1];
+            // "(anonymous)" is a placeholder, not a recurring title — two anonymous fragments
+            // sharing that literal string is no evidence they are the same table continuing.
+            // Header compatibility between two blank-header fragments is near-vacuous (an
+            // empty header always "matches"), so without this guard unrelated content merges
+            // across a page boundary purely because both landed in the anonymous bucket.
+            const lastIsAnonymous = !!last && isAnonymous(last.title);
             const sameTitleDecision =
-                stitchAcrossPages && last
+                stitchAcrossPages && last && !lastIsAnonymous
                     ? shouldMergeAcrossPagesEx(
                         { title: last.title, bands: last.columns },
                         { title: section.title, bands: section.columns },
@@ -1051,6 +1236,7 @@ function mergeCrossPageSections(
             const anonContinuationMerge =
                 stitchAcrossPages &&
                 !!last &&
+                !lastIsAnonymous &&
                 !sameTitleMerge &&
                 isAnonymous(section.title) &&
                 columnBandsMatch(last.columns, section.columns) &&
@@ -1083,6 +1269,7 @@ function mergeCrossPageSections(
             }
             if (sameTitleMerge || anonContinuationMerge) {
                 last.spansToNextPage = true;
+                last.endPage = section.startPage ?? last.endPage ?? last.startPage;
                 const needsRealign = sameTitleMerge && sameTitleDecision.requiresRealign;
                 const startRowIndex = last.tableRows.length;
                 if (needsRealign) {

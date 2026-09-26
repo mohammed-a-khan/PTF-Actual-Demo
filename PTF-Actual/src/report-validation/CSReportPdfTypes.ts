@@ -190,6 +190,14 @@ export interface AnalyzedSection {
     spansToNextPage: boolean;
     /** 1-indexed page number where this section START appears (may end on a later page). */
     startPage: number;
+    /**
+     * 1-indexed page number of the LAST page merged into this section. Defaults to `startPage`
+     * for a single-page section; a cross-page merge advances it to whichever page's rows were
+     * absorbed most recently. Page-adjacency checks (e.g. orphan-fragment folding) must compare
+     * against this, not `startPage`, or every multi-page section looks arbitrarily far from
+     * content that is actually right after it.
+     */
+    endPage?: number;
     subTables?: AnalyzedSubTable[];
 }
 

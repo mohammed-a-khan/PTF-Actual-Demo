@@ -678,6 +678,8 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
         Array.from(candSections.keys()),
         Array.from(refSections.keys()),
         threshold,
+        candSections,
+        refSections,
     );
 
     let sectionsCompared = 0;
@@ -1127,6 +1129,31 @@ function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSection[] {
             out.push(sec);
             continue;
         }
+        // Two reasons an orphan exists: (1) a genuinely different table stacked on the same
+        // page — a real sub-table; (2) the SAME table, column-detected with a different band
+        // count on this page — a mis-parse. Folding (2) as a sub-table silently drops its rows
+        // whenever a different fragment wins the accumulator vote, since only the chosen
+        // accumulator's own subTables survive the merge. Try realigning onto the host's schema
+        // first: if most rows come out carrying real data, it was (2) and they go straight in.
+        const realigned = realignRowsBetweenColumnLayouts(sec, host);
+        const usableRows = realigned.filter(
+            (r) => r.cells.filter((c) => c != null && String(c).trim() !== '').length >= 2,
+        );
+        if (realigned.length > 0 && usableRows.length / realigned.length >= 0.5) {
+            host.tableRows.push(...realigned);
+            CSReporter.info(`[foldOrphansIntoSubTables] orphan "${title}" (${rowCount}r/${colCount}c) realigned directly into "${host.title}" (${realigned.length} row(s), same table, mis-detected column count)`);
+            continue;
+        }
+
+        // Not the same table. A genuine second sub-table is only ever a SAME-PAGE phenomenon;
+        // anything further away is an unrelated section that merely failed to get its title
+        // recognised, and gluing it onto whichever host precedes it corrupts that host's
+        // comparison. Unmatched-but-visible beats silently-wrong.
+        const hostPage = host.endPage ?? host.startPage;
+        if ((sec.startPage ?? 0) !== hostPage) {
+            out.push(sec);
+            continue;
+        }
         const subLabel = buildSubTableLabel(sec);
         const hostSubs = host.subTables ?? [];
         if (hostSubs.length === 0) {
@@ -1152,8 +1179,12 @@ function findOrphanHost(precedingSections: AnalyzedSection[], orphan: AnalyzedSe
         const cand = precedingSections[i];
         const t = (cand.title ?? '').trim();
         if (isOrphanTitle(t)) continue;
-        const dp = Math.abs((orphan.startPage ?? 0) - (cand.startPage ?? 0));
-        if (dp > 1) return null;
+        // No page-distance gate: `precedingSections` is already in page order and already
+        // cross-page-merged, so a multi-page host keeps the page number it STARTED on. An
+        // orphan on page 10 is 7 pages from a host that began on page 3 even though it is the
+        // very next thing in the document — a distance check can never pass for exactly the
+        // sections most likely to need folding. Being the nearest preceding non-orphan in list
+        // order already is the adjacency proof.
         const orphanCols = (orphan.columns ?? []).length;
         const hostCols = (cand.columns ?? []).length;
         if (orphanCols === hostCols && orphanCols > 0) return null;
@@ -1180,12 +1211,28 @@ function expandSubTablesIntoMap(base: Map<string, AnalyzedSection>): Map<string,
             out.set(title, sec);
             continue;
         }
+        // Combined view under the PLAIN title: every sub-table's rows together, on the schema
+        // of whichever sub-table has the most columns (the detail grid, not the summary block,
+        // is where a real key column lives). A reference PDF that renders this content as ONE
+        // unsplit table produces a single plain-title section with the full row count, and
+        // fuzzy title matching pairs it with this. Exposing only the first sub-table there —
+        // often 1-2 summary rows — made the size mismatch trip the subset-view skip guard and
+        // dropped the whole section from reconciliation.
+        const widest = subs.reduce((a, b) => ((b.columns?.length ?? 0) > (a.columns?.length ?? 0) ? b : a));
+        out.set(title, {
+            ...sec,
+            columns: [...(widest.columns ?? [])],
+            tableRows: subs.flatMap((st) => st.tableRows ?? []),
+            subTables: undefined,
+        });
+        // Each sub-table stays individually addressable by its "::" label for debug tooling
+        // and hand-authored rules JSON.
         for (let i = 0; i < subs.length; i++) {
             const st = subs[i];
-            const key = i === 0 ? title : `${title} :: ${st.title || `sub-${i + 1}`}`;
+            const key = `${title} :: ${st.title || `sub-${i + 1}`}`;
             const clone: AnalyzedSection = {
                 ...sec,
-                title: i === 0 ? sec.title : key,
+                title: key,
                 columns: [...(st.columns ?? [])],
                 tableRows: [...(st.tableRows ?? [])],
                 subTables: undefined,
@@ -1474,14 +1521,20 @@ function findMatchingByTitleOrShape(
         }
         if (otherSubs.length === 1) return otherSubs[0].sec;
         if (otherSubs.length > 1) {
+            // Shape first, size second. A section holding two differently-shaped sub-tables
+            // (a compliance summary plus a transaction grid) pairs correctly only by column
+            // signature: on row count alone a 7-row detail grid can win against a 2-row
+            // summary chunk and both sides then fail the size guard.
             const secRows = sec.tableRows?.length ?? 0;
             let bestOther: AnalyzedSection | null = null;
             let bestScore = -1;
             for (const os of otherSubs) {
                 const orows = os.sec.tableRows?.length ?? 0;
                 const maxR = Math.max(secRows, orows) || 1;
-                const s = Math.min(secRows, orows) / maxR;
-                if (s > bestScore) { bestScore = s; bestOther = os.sec; }
+                const sizeScore = Math.min(secRows, orows) / maxR;
+                const shape = sectionShapeSimilarity(sec, os.sec);
+                const score = shape * 10 + sizeScore;
+                if (score > bestScore) { bestScore = score; bestOther = os.sec; }
             }
             if (bestOther) return bestOther;
         }
@@ -1511,6 +1564,29 @@ function findMatchingByTitleOrShape(
     return null;
 }
 
+/**
+ * How alike two sections' column signatures are: header-text overlap when both sides name
+ * their columns, otherwise column-count proximity.
+ */
+export function sectionShapeSimilarity(a: AnalyzedSection, b: AnalyzedSection): number {
+    const norm = (v: string): string => (v || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const headersOf = (s: AnalyzedSection): string[] =>
+        (s.columns ?? []).map((c) => norm(c?.header ?? '')).filter((h) => h.length > 0);
+
+    const ha = headersOf(a);
+    const hb = headersOf(b);
+    if (ha.length > 0 && hb.length > 0) {
+        const setB = new Set(hb);
+        const hits = ha.filter((h) => setB.has(h)).length;
+        return hits / Math.max(ha.length, hb.length);
+    }
+
+    const ca = (a.columns ?? []).length;
+    const cb = (b.columns ?? []).length;
+    if (ca === 0 || cb === 0) return 0;
+    return Math.min(ca, cb) / Math.max(ca, cb);
+}
+
 function splitReferenceBySubTableSignatures(
     candSections: Map<string, AnalyzedSection>,
     refSections: Map<string, AnalyzedSection>,
@@ -1532,7 +1608,7 @@ function splitReferenceBySubTableSignatures(
             const candSub = entries[i];
             const candColCount = (candSub.columns ?? []).length;
             if (candColCount === 0) continue;
-            const splitRange = locateContiguousRowsMatchingColumnCount(refBaseRows, candColCount);
+            const splitRange = locateContiguousRowsMatchingColumnCount(refBaseRows, candColCount, candSub.tableRows?.length ?? 0);
             if (!splitRange || splitRange.count < 2) continue;
             const subRows = refBaseRows.slice(splitRange.start, splitRange.start + splitRange.count);
             const subKey = `${baseTitle} :: ${candSub.title.split(' :: ')[1] || `sub-${i}`}`;
@@ -1564,11 +1640,15 @@ function groupSectionsByBaseTitle(m: Map<string, AnalyzedSection>): Map<string, 
     return groups;
 }
 
-function locateContiguousRowsMatchingColumnCount(rows: TableRow[], targetCols: number): { start: number; count: number } | null {
+export function locateContiguousRowsMatchingColumnCount(
+    rows: TableRow[],
+    targetCols: number,
+    targetRows = 0,
+): { start: number; count: number } | null {
     if (rows.length === 0) return null;
     const filledCounts = rows.map((r) => (r.cells ?? []).filter((c) => c != null && c !== '').length);
-    let bestStart = -1;
-    let bestCount = 0;
+
+    const runs: Array<{ start: number; count: number }> = [];
     let curStart = -1;
     let curCount = 0;
     for (let i = 0; i < filledCounts.length; i++) {
@@ -1577,17 +1657,31 @@ function locateContiguousRowsMatchingColumnCount(rows: TableRow[], targetCols: n
         if (match) {
             if (curStart < 0) curStart = i;
             curCount++;
-            if (curCount > bestCount) {
-                bestCount = curCount;
-                bestStart = curStart;
-            }
         } else {
+            if (curCount >= 2) runs.push({ start: curStart, count: curCount });
             curStart = -1;
             curCount = 0;
         }
     }
-    if (bestStart < 0 || bestCount < 2) return null;
-    return { start: bestStart, count: bestCount };
+    if (curCount >= 2) runs.push({ start: curStart, count: curCount });
+    if (runs.length === 0) return null;
+
+    // Longest-run-wins picks whatever stretch happens to be longest, which on a blob holding
+    // a summary row, a label row, a header row and then the real grid can be a two-row
+    // stretch — paired against a seven-row candidate, the size ratio then trips the
+    // subset-skip guard and the whole section is dropped. Prefer the run closest in size to
+    // the candidate it is being sliced for.
+    if (targetRows > 0) {
+        runs.sort((a, b) => {
+            const da = Math.abs(a.count - targetRows);
+            const db = Math.abs(b.count - targetRows);
+            if (da !== db) return da - db;
+            return b.count - a.count;
+        });
+    } else {
+        runs.sort((a, b) => b.count - a.count);
+    }
+    return runs[0];
 }
 
 function adoptColumnsFromCandidate(candSec: AnalyzedSection, refSec: AnalyzedSection): AnalyzedSection['columns'] {
@@ -1701,16 +1795,123 @@ function resolveSections(
     candTitles: string[],
     refTitles: string[],
     threshold: number,
+    candSections?: Map<string, AnalyzedSection>,
+    refSections?: Map<string, AnalyzedSection>,
 ): Map<string, { candTitle?: string; refTitle?: string }> {
     const out = new Map<string, { candTitle?: string; refTitle?: string }>();
     for (const canonical of canonicalNames) {
         const rule = sectionRules[canonical];
         const candidatesForMatch = [canonical, ...(rule.aliases ?? [])];
-        const candMatch = findFirstMatch(candidatesForMatch, candTitles, threshold);
-        const refMatch = findFirstMatch(candidatesForMatch, refTitles, threshold);
+        let candMatch = findFirstMatch(candidatesForMatch, candTitles, threshold);
+        let refMatch = findFirstMatch(candidatesForMatch, refTitles, threshold);
+        if (!refMatch && canonical.includes(' :: ') && candSections && refSections) {
+            const canonSec = candSections.get(candMatch ?? canonical) ?? candSections.get(canonical);
+            if (canonSec) {
+                refMatch = pickBestSubTableByShape(canonical, canonSec, refSections) ?? refMatch;
+            }
+        }
+        if (!candMatch && canonical.includes(' :: ') && candSections && refSections) {
+            const refSec = refSections.get(refMatch ?? canonical);
+            if (refSec) {
+                candMatch = pickBestSubTableByShape(canonical, refSec, candSections) ?? candMatch;
+            }
+        }
         out.set(canonical, { candTitle: candMatch, refTitle: refMatch });
     }
     return out;
+}
+
+function pickBestSubTableByShape(
+    canonicalWithSub: string,
+    knownSide: AnalyzedSection,
+    otherPool: Map<string, AnalyzedSection>,
+): string | undefined {
+    const base = canonicalWithSub.split(' :: ')[0].toLowerCase();
+    const candidates: Array<{ key: string; sec: AnalyzedSection }> = [];
+    for (const [k, v] of otherPool.entries()) {
+        if (k.split(' :: ')[0].toLowerCase() !== base) continue;
+        if (!k.includes(' :: ')) continue;
+        candidates.push({ key: k, sec: v });
+    }
+    if (candidates.length === 0) return undefined;
+    if (candidates.length === 1) return candidates[0].key;
+    const known = subTableSignature(knownSide);
+    let best: { key: string; score: number } | null = null;
+    for (const c of candidates) {
+        const s = subTableSignature(c.sec);
+        const jaccard = jaccardHeaderSets(known.headerSet, s.headerSet);
+        const colDelta = Math.abs(known.colCount - s.colCount);
+        const rowRatio = known.rowCount === 0 || s.rowCount === 0
+            ? 0
+            : Math.min(known.rowCount, s.rowCount) / Math.max(known.rowCount, s.rowCount);
+        const kindOverlap = kindSequenceOverlap(known.kinds, s.kinds);
+        const score = jaccard * 0.5 + kindOverlap * 0.25 + rowRatio * 0.2 - colDelta * 0.02;
+        if (!best || score > best.score) best = { key: c.key, score };
+    }
+    return best?.key;
+}
+
+function subTableSignature(sec: AnalyzedSection): { colCount: number; rowCount: number; headerSet: Set<string>; kinds: string[] } {
+    const cols = sec.columns ?? [];
+    const rows = sec.tableRows ?? [];
+    const headerSet = new Set<string>();
+    for (const c of cols) {
+        const h = normaliseHeaderTextReconcile(c.header ?? '');
+        if (h) headerSet.add(h);
+    }
+    const kinds: string[] = [];
+    for (let i = 0; i < cols.length; i++) {
+        const values: string[] = [];
+        for (const r of rows) {
+            const v = (r.cells ?? [])[i];
+            if (v != null && String(v).trim().length > 0) values.push(String(v).trim());
+        }
+        kinds.push(sniffCellKind(values));
+    }
+    return { colCount: cols.length, rowCount: rows.length, headerSet, kinds };
+}
+
+function jaccardHeaderSets(a: Set<string>, b: Set<string>): number {
+    if (a.size === 0 && b.size === 0) return 0;
+    let inter = 0;
+    for (const x of a) if (b.has(x)) inter++;
+    const union = a.size + b.size - inter;
+    return union === 0 ? 0 : inter / union;
+}
+
+function kindSequenceOverlap(a: string[], b: string[]): number {
+    if (a.length === 0 || b.length === 0) return 0;
+    const ac = a.slice().sort();
+    const bc = b.slice().sort();
+    let match = 0;
+    let i = 0;
+    let j = 0;
+    while (i < ac.length && j < bc.length) {
+        if (ac[i] === bc[j]) { match++; i++; j++; }
+        else if (ac[i] < bc[j]) i++;
+        else j++;
+    }
+    return match / Math.max(ac.length, bc.length);
+}
+
+function sniffCellKind(values: string[]): string {
+    if (values.length === 0) return 'empty';
+    let numeric = 0;
+    let date = 0;
+    let currency = 0;
+    for (const v of values) {
+        if (/^-?\$?[\d,]+(\.\d+)?%?$/.test(v)) {
+            if (v.includes('$') || v.replace(/[^\d.]/g, '').length >= 4) currency++;
+            numeric++;
+        } else if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(v) || /^\d{4}-\d{2}-\d{2}/.test(v)) {
+            date++;
+        }
+    }
+    const total = values.length;
+    if (date / total >= 0.6) return 'date';
+    if (currency / total >= 0.4) return 'currency';
+    if (numeric / total >= 0.6) return 'number';
+    return 'text';
 }
 
 function resolveColumns(

@@ -123,13 +123,19 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
     // appears. Similarity = (x, y) within tolerance AND text either exact-match OR the
     // "shape" matches after digits normalised (so "Page 5" ~ "Page 6").
     const totalPages = pages.length;
-    const minRepeats = Math.max(1, Math.ceil(totalPages * repeatThreshold));
+    // Chrome is defined by repetition, so it takes two pages to establish any. At a floor of one
+    // a single page has every top-strip item "repeating on every page it appears on", and a
+    // report whose summary block starts high on the page loses its opening rows to the header.
+    // Analysing one page alone is ordinary — a caller checking a summary page does exactly that.
+    // For real multi-page documents the ceil term already dominates, so nothing else moves.
+    const minRepeats = Math.max(2, Math.ceil(totalPages * repeatThreshold));
 
     // Per-page median body font size — used by the auto-protect heuristic to decide if a
     // top-strip item is likely a section title (larger than surrounding body text) vs.
     // a running page header/date/report name.
     const bodyMedianFontSize: number[] = strips.map((s) => medianFontSize(s.body));
 
+    const autoProtectedByPage: Array<Set<TextItem>> = strips.map(() => new Set<TextItem>());
     const chromeHeader: TextItem[][] = strips.map(() => []);
     const chromeFooter: TextItem[][] = strips.map(() => []);
 
@@ -141,11 +147,13 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
         for (let p = 0; p < strips.length; p++) {
             const items = strips[p][region];
             const patternProtected = protectedItemsOn(items, protectedPatterns, yTol);
-            const autoProtected = autoProtectedItemsOn(items, yTol, bodyMedianFontSize[p]);
+            autoProtectedByPage[p] = autoProtectedItemsOn(items, yTol, bodyMedianFontSize[p]);
             for (const item of items) {
-                // A protected item never enters the signature index, so it can never reach
-                // the repeat threshold and can never be removed from the body.
-                if (patternProtected.has(item) || autoProtected.has(item)) continue;
+                // Pattern-protected items never enter the index: a spec matcher naming this
+                // text is an explicit instruction and outranks every heuristic. AUTO-protected
+                // items DO enter it — their repeat count is what tells a section title apart
+                // from a running header, and skipping them here throws that signal away.
+                if (patternProtected.has(item)) continue;
                 const sig = itemSignature(item, xTol, yTol);
                 let entry = signatures.get(sig);
                 if (!entry) {
@@ -159,6 +167,18 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
         // Items whose signature appears on ≥ minRepeats pages = chrome.
         for (const entry of signatures.values()) {
             if (entry.pages.size < minRepeats) continue;
+            // A title-shaped line that repeats on only SOME pages is a section title spanning
+            // those pages. One that repeats on EVERY page is the running header — a report
+            // name or as-of date is title-shaped and larger than body text too, so shape and
+            // font alone cannot separate them, and exempting both leaks the page header into
+            // the body of every page. "Every page" only means anything with enough pages to
+            // repeat across; below that a lone title-shaped line is evidence of nothing.
+            const allAutoProtected =
+                entry.items.length > 0 &&
+                entry.items.every(({ page, item }) => autoProtectedByPage[page]?.has(item));
+            if (allAutoProtected && (totalPages < MIN_PAGES_FOR_RUNNING_HEADER || entry.pages.size < totalPages)) {
+                continue;
+            }
             for (const { page, item } of entry.items) {
                 if (region === 'top') chromeHeader[page].push(item);
                 else chromeFooter[page].push(item);
@@ -240,6 +260,9 @@ export function segmentPages(pages: PageContent[], opts: PageSegmenterOptions = 
  */
 /** Fraction of page height, measured from the bottom, that is unambiguously footer chrome. */
 const DEEP_FOOTER_FRACTION = 0.05;
+
+/** Below this page count, "appears on every page" carries no evidence either way. */
+const MIN_PAGES_FOR_RUNNING_HEADER = 3;
 
 /**
  * Auto-protect: items that look like a section title even without a caller-supplied

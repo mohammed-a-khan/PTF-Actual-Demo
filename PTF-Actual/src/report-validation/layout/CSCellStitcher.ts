@@ -89,9 +89,21 @@ export function stitchMultiLineCells(rows: TableRow[], opts: CellStitcherOptions
     }));
     const absorbed = new Array<boolean>(rows.length).fill(false);
 
+    // Columns that carry data somewhere in this table. Spacer bands are empty on every row,
+    // so without this every row would look "incomplete".
+    const dataColumns: number[] = [];
+    const width = Math.max(...rows.map((r) => r.cells.length), 0);
+    for (let ci = 0; ci < width; ci++) {
+        if (rows.some((r, i) => anchor[i] && r.cells[ci] !== null && (r.cells[ci] as string).trim().length > 0)) {
+            dataColumns.push(ci);
+        }
+    }
+
     for (let i = 0; i < working.length; i++) {
         if (!continuation[i]) continue;
-        const target = pickAnchorIndex(working, anchor, i, maxGap);
+        // Anchor choice reads the ORIGINAL rows: `working` mutates as merges land, and a row
+        // that just absorbed a fragment would otherwise stop looking like it needed one.
+        const target = pickAnchorIndex(rows, anchor, i, maxGap, dataColumns);
         if (target === null) continue; // Orphan wrap — keep it as its own row rather than lose the text.
         mergeContinuationInto(working[target], working[i]);
         absorbed[i] = true;
@@ -123,6 +135,7 @@ function pickAnchorIndex(
     anchor: boolean[],
     index: number,
     maxGap: number,
+    dataColumns: number[],
 ): number | null {
     let prev: number | null = null;
     for (let j = index - 1; j >= 0; j--) {
@@ -133,25 +146,31 @@ function pickAnchorIndex(
         if (anchor[j]) { next = j; break; }
     }
 
-    const gapPrev = prev === null ? Infinity : Math.abs(rows[prev].y - rows[index].y);
-    const gapNext = next === null ? Infinity : Math.abs(rows[next].y - rows[index].y);
-    const prevOk = gapPrev <= maxGap;
-    const nextOk = gapNext <= maxGap;
+    const gapOf = (j: number): number => Math.abs(rows[j].y - rows[index].y);
+    const within = [prev, next].filter((j): j is number => j !== null && gapOf(j) <= maxGap);
+    if (within.length === 0) return null;
 
-    if (!prevOk && !nextOk) return null;
-    if (prevOk && !nextOk) return prev;
-    if (nextOk && !prevOk) return next;
-    if (gapPrev < gapNext) return prev;
-    if (gapNext < gapPrev) return next;
+    const nearest = (pool: number[]): number =>
+        pool.reduce((best, j) => {
+            const d = gapOf(j) - gapOf(best);
+            if (d < 0) return j;
+            if (d > 0) return best;
+            return best < index ? best : j; // equidistant: backward, as before
+        });
 
-    // Equidistant — fall back to the column-emptiness signal, then to backward.
+    // A row with every data column already filled is not waiting for a continuation. Some
+    // layouts print a long name as "first half / numbers / second half", so the fragment
+    // above a complete row belongs to the incomplete row BELOW it, not to the complete one.
+    const incomplete = within.filter((j) => dataColumns.some((ci) => isCellEmpty(rows[j], ci)));
+    const pool = incomplete.length > 0 ? incomplete : within;
+
+    // Within that, prefer a row missing the continuation's own column.
     const column = filledColumnIndex(rows[index]);
     if (column !== null) {
-        const prevEmpty = isCellEmpty(rows[prev as number], column);
-        const nextEmpty = isCellEmpty(rows[next as number], column);
-        if (nextEmpty && !prevEmpty) return next;
+        const missing = pool.filter((j) => isCellEmpty(rows[j], column));
+        if (missing.length > 0) return nearest(missing);
     }
-    return prev;
+    return nearest(pool);
 }
 
 /** Index of the first cell with content, or null when the row is empty. */
