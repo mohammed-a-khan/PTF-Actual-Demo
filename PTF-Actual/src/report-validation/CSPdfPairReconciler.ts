@@ -1110,7 +1110,7 @@ function isOrphanTitle(t: string): boolean {
     return /^\(?anonymous\)?$/i.test(s) || s.startsWith('[cols]');
 }
 
-function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSection[] {
+export function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSection[] {
     const out: AnalyzedSection[] = [];
     for (const sec of list) {
         const title = (sec.title ?? '').trim();
@@ -1135,7 +1135,15 @@ function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSection[] {
         // whenever a different fragment wins the accumulator vote, since only the chosen
         // accumulator's own subTables survive the merge. Try realigning onto the host's schema
         // first: if most rows come out carrying real data, it was (2) and they go straight in.
-        const realigned = realignRowsBetweenColumnLayouts(sec, host);
+        // Cells fitting the host's bands is not evidence of (2). Any grid of the right width
+        // fits, so a page holding a compliance summary above a transaction grid folds the
+        // transactions into the summary and files them under ITS headings: their keys are then
+        // built from the wrong fields, and every row of both tables reports as missing on the
+        // other side. Shape decides it — two fragments that each name their columns and share
+        // none of them are different tables, while the mis-parse of (2) either shares headings
+        // or has none of its own, and is scored on column count instead.
+        const sameTable = sectionShapeSimilarity(sec, host) > 0;
+        const realigned = sameTable ? realignRowsBetweenColumnLayouts(sec, host) : [];
         const usableRows = realigned.filter(
             (r) => r.cells.filter((c) => c != null && String(c).trim() !== '').length >= 2,
         );

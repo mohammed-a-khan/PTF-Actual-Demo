@@ -55,7 +55,7 @@ import { detectColumns } from './layout/CSColumnDetector';
 import { clusterLines } from './layout/CSLineClusterer';
 import { segmentPages } from './layout/CSPageSegmenter';
 import { detectSectionHeaders, type SectionHeaderCandidate } from './layout/CSSectionDetector';
-import { resolveTableHeaders } from './layout/CSTableHeaderResolver';
+import { resolveTableHeaders, splitBandsUnderCrowdedHeadings } from './layout/CSTableHeaderResolver';
 import { tagTotalRows } from './layout/CSTotalRowTagger';
 import { extractToc, findTocEntryLines } from './layout/CSTocExtractor';
 import { validateAndRepairSections } from './CSAnalyzedSectionValidator';
@@ -643,6 +643,10 @@ function analyzeSectionRegion(
     // the section-detector's "shape" signal (bold/all-caps) OR whose items span all the
     // detected column bands. Below the header rows, the remaining lines are data.
     const { headerRows, dataLines } = splitHeaderAndData(lines, columns);
+    // A column the report prints but never fills has no values to form a band from, so its
+    // heading would be absorbed by the neighbouring band and take that column's name down with
+    // it. Give it its own band first, so both headings resolve and the empty column reads empty.
+    splitBandsUnderCrowdedHeadings(columns, headerRows);
     resolveTableHeaders(columns, headerRows);
 
     // Data lines → TableRows.
