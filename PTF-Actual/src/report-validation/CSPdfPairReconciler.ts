@@ -1110,6 +1110,17 @@ function isOrphanTitle(t: string): boolean {
     return /^\(?anonymous\)?$/i.test(s) || s.startsWith('[cols]');
 }
 
+/** Fraction of a section's columns that must carry a heading before it counts as self-headed. */
+const SELF_HEADED_COLUMN_FRACTION = 0.6;
+
+/** Did this fragment print a heading row of its own, rather than inheriting one? */
+function isFullyHeaded(section: AnalyzedSection): boolean {
+    const columns = section.columns ?? [];
+    if (columns.length === 0) return false;
+    const named = columns.filter((c) => (c?.header ?? '').trim().length > 0).length;
+    return named / columns.length >= SELF_HEADED_COLUMN_FRACTION;
+}
+
 export function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSection[] {
     const out: AnalyzedSection[] = [];
     for (const sec of list) {
@@ -1135,15 +1146,16 @@ export function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSecti
         // whenever a different fragment wins the accumulator vote, since only the chosen
         // accumulator's own subTables survive the merge. Try realigning onto the host's schema
         // first: if most rows come out carrying real data, it was (2) and they go straight in.
-        // Cells fitting the host's bands is not evidence of (2). Any grid of the right width
-        // fits, so a page holding a compliance summary above a transaction grid folds the
-        // transactions into the summary and files them under ITS headings: their keys are then
-        // built from the wrong fields, and every row of both tables reports as missing on the
-        // other side. Shape decides it — two fragments that each name their columns and share
-        // none of them are different tables, while the mis-parse of (2) either shares headings
-        // or has none of its own, and is scored on column count instead.
-        const sameTable = sectionShapeSimilarity(sec, host) > 0;
-        const realigned = sameTable ? realignRowsBetweenColumnLayouts(sec, host) : [];
+        // Cells fitting the host's bands is no evidence of (2) — any grid of the right width
+        // fits. What separates the two is whether the fragment brought a heading row of its own:
+        // the continuation of (2) lost its headings along with its title, while a genuinely
+        // different table prints its own and shares none of the host's. Both sides must be fully
+        // headed before the disjointness counts, because a fragment that named only a column or
+        // two has not said enough to contradict its host, and refusing to merge it would strand
+        // its rows outside the section they belong to.
+        const differentTable =
+            isFullyHeaded(sec) && isFullyHeaded(host) && sectionShapeSimilarity(sec, host) === 0;
+        const realigned = differentTable ? [] : realignRowsBetweenColumnLayouts(sec, host);
         const usableRows = realigned.filter(
             (r) => r.cells.filter((c) => c != null && String(c).trim() !== '').length >= 2,
         );
