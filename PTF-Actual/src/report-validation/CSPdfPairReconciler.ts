@@ -26,7 +26,7 @@ import * as path from 'path';
 import { CSReporter } from '../reporter/CSReporter';
 import { extractPagesFromPdf } from './CSReportPdfExtractor';
 import { analyzeReport } from './CSReportPdfLayoutAnalyzer';
-import type { AnalyzedReport, AnalyzedSection, TableRow } from './CSReportPdfTypes';
+import type { AnalyzedReport, AnalyzedSection, ColumnBand, TableRow } from './CSReportPdfTypes';
 
 export type ReconcileFindingKind =
     | 'CELL_MISMATCH'
@@ -1110,17 +1110,6 @@ function isOrphanTitle(t: string): boolean {
     return /^\(?anonymous\)?$/i.test(s) || s.startsWith('[cols]');
 }
 
-/** Fraction of a section's columns that must carry a heading before it counts as self-headed. */
-const SELF_HEADED_COLUMN_FRACTION = 0.6;
-
-/** Did this fragment print a heading row of its own, rather than inheriting one? */
-function isFullyHeaded(section: AnalyzedSection): boolean {
-    const columns = section.columns ?? [];
-    if (columns.length === 0) return false;
-    const named = columns.filter((c) => (c?.header ?? '').trim().length > 0).length;
-    return named / columns.length >= SELF_HEADED_COLUMN_FRACTION;
-}
-
 export function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSection[] {
     const out: AnalyzedSection[] = [];
     for (const sec of list) {
@@ -1153,9 +1142,9 @@ export function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSecti
         // headed before the disjointness counts, because a fragment that named only a column or
         // two has not said enough to contradict its host, and refusing to merge it would strand
         // its rows outside the section they belong to.
-        const differentTable =
-            isFullyHeaded(sec) && isFullyHeaded(host) && sectionShapeSimilarity(sec, host) === 0;
-        const realigned = differentTable ? [] : realignRowsBetweenColumnLayouts(sec, host);
+        const realigned = realignPreservesEveryCell(sec, host)
+            ? realignRowsBetweenColumnLayouts(sec, host)
+            : [];
         const usableRows = realigned.filter(
             (r) => r.cells.filter((c) => c != null && String(c).trim() !== '').length >= 2,
         );
@@ -1746,10 +1735,11 @@ function countSharedColumnNames(candSec: AnalyzedSection, refSec: AnalyzedSectio
     return shared;
 }
 
-function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator: AnalyzedSection): TableRow[] {
-    const accCols = accumulator.columns ?? [];
-    const inCols = incoming.columns ?? [];
-    if (accCols.length === 0 || inCols.length === 0) return incoming.tableRows ?? [];
+/**
+ * Which accumulator band each incoming column belongs to, by position, or -1 for none.
+ * Shared so the decision to realign is judged against the mapping that would be used.
+ */
+function columnMappingBetween(inCols: ColumnBand[], accCols: ColumnBand[]): number[] {
     const looseTolerance = 40;
     const mapping: number[] = new Array(inCols.length).fill(-1);
     for (let i = 0; i < inCols.length; i++) {
@@ -1774,6 +1764,49 @@ function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator:
         }
         mapping[i] = bestJ;
     }
+    return mapping;
+}
+
+/**
+ * Would realigning this fragment onto the host's bands keep every value it carries?
+ *
+ * Realignment writes each cell into the host band its column maps to. A column that maps
+ * nowhere has its values dropped, and two columns that map to the SAME band have theirs joined
+ * end to end — which is where cells like a security type fused onto a par amount come from. A
+ * fragment that is really the host's own table mis-detected maps one column to one band and
+ * loses nothing; a different table stacked on the same page does not fit, and the damage is
+ * silent because the row count still comes out right and only the values are wrong.
+ *
+ * Only columns that actually carry data are considered: an empty column mapping nowhere costs
+ * nothing, and reports routinely print one.
+ */
+export function realignPreservesEveryCell(incoming: AnalyzedSection, host: AnalyzedSection): boolean {
+    const inCols = incoming.columns ?? [];
+    const accCols = host.columns ?? [];
+    if (inCols.length === 0 || accCols.length === 0) return true;
+    const rows = incoming.tableRows ?? [];
+    const carriesData = (ci: number): boolean =>
+        rows.some((r) => {
+            const v = (r.cells ?? [])[ci];
+            return v != null && String(v).trim() !== '';
+        });
+    const mapping = columnMappingBetween(inCols, accCols);
+    const claimed = new Set<number>();
+    for (let i = 0; i < inCols.length; i++) {
+        if (!carriesData(i)) continue;
+        const dst = mapping[i];
+        if (dst < 0) return false;
+        if (claimed.has(dst)) return false;
+        claimed.add(dst);
+    }
+    return true;
+}
+
+function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator: AnalyzedSection): TableRow[] {
+    const accCols = accumulator.columns ?? [];
+    const inCols = incoming.columns ?? [];
+    if (accCols.length === 0 || inCols.length === 0) return incoming.tableRows ?? [];
+    const mapping = columnMappingBetween(inCols, accCols);
     const out: TableRow[] = [];
     for (const row of incoming.tableRows ?? []) {
         const cells: (string | null)[] = new Array(accCols.length).fill(null);

@@ -132,8 +132,16 @@ export function detectSectionHeaders(
         const isTitleCase = isTitleCased(title);
         if (isAllCaps || (isTitleCase && hasSectionWord)) signals.push('shape');
 
-        // Signal 3: REGEX
-        if (regexes.some((r) => r.test(title))) signals.push('regex');
+        // Signal 3: REGEX. Matched against the whole line AND against each group of runs the
+        // line separates with clear space, because a report may print its section title beside
+        // something else — an as-of date on the same baseline is common. An anchored matcher
+        // (`^Discretionary Sales Detail$`, which is what a spec's section title becomes) cannot
+        // match the joined line then, so the section is never detected: the page reads as one
+        // untitled block, one column skeleton is voted over every table on it, and the rows of
+        // the wider table are squeezed into the narrower table's bands. Downstream that shows up
+        // as the section missing on one side while its values appear merged into single cells.
+        const matchedGroup = regexes.length > 0 ? matchingRunGroup(line, regexes, maxGap) : null;
+        if (regexes.some((r) => r.test(title)) || matchedGroup !== null) signals.push('regex');
 
         if (signals.length === 0) continue;
 
@@ -145,7 +153,10 @@ export function detectSectionHeaders(
             line,
             signals,
             isFullSectionHeader: !vetoed && signals.length >= votesRequired,
-            title,
+            // When a matcher claimed one group of runs, that group is the title — naming the
+            // section after the whole line would carry the date into its identity and stop it
+            // pairing with the same section on the other side.
+            title: matchedGroup ?? title,
         });
     }
     return candidates;
@@ -159,6 +170,38 @@ export function detectSectionHeaders(
  *
  * Returns 0 for a line with fewer than two inked runs.
  */
+/**
+ * The text of the run group a spec matcher claims, or null when none does.
+ *
+ * A line is split where its runs leave clear space wider than a title's own word spacing —
+ * the same measure the geometric veto uses — so "As of: 03/11/2026    Discretionary Sales
+ * Detail" offers both halves to the matchers separately.
+ */
+function matchingRunGroup(line: LogicalLine, regexes: RegExp[], maxGap: number): string | null {
+    const inked = line.items
+        .filter((i) => i.str.trim().length > 0)
+        .sort((a, b) => a.x - b.x);
+    if (inked.length < 2) return null;
+    const gapLimit = Number.isFinite(maxGap) ? maxGap : DEFAULT_RUN_GROUP_GAP;
+    const groups: string[][] = [[inked[0].str.trim()]];
+    for (let i = 1; i < inked.length; i++) {
+        const prev = inked[i - 1];
+        const gap = inked[i].x - (prev.x + prev.width);
+        if (gap > gapLimit) groups.push([inked[i].str.trim()]);
+        else groups[groups.length - 1].push(inked[i].str.trim());
+    }
+    if (groups.length < 2) return null;
+    for (const group of groups) {
+        const text = group.join(' ').replace(/\s+/g, ' ').trim();
+        if (text.length === 0) continue;
+        if (regexes.some((r) => r.test(text))) return text;
+    }
+    return null;
+}
+
+/** Clear space treated as separating two labels when the page width is unknown. */
+const DEFAULT_RUN_GROUP_GAP = 24;
+
 function widestInternalGap(line: LogicalLine): number {
     const inked = line.items
         .filter((i) => i.str.trim().length > 0)
