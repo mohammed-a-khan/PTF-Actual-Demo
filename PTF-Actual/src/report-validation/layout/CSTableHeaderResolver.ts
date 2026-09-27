@@ -342,3 +342,83 @@ function flattenPath(path: string[], normalize: boolean): string {
     }
     return out;
 }
+
+/** Narrowest sub-band worth creating for a column that carries no data. */
+const MIN_EMPTY_BAND_POINTS = 6;
+
+/**
+ * Give a column that the report prints but never fills a band of its own.
+ *
+ * Bands are derived from where values sit, so a column with no values produces none, and its
+ * heading is absorbed by whichever band does exist there — leaving one column headed
+ * `Identifier Security Type`. Field mapping is header-driven, so that costs BOTH names: the
+ * empty column and the populated one beside it each stop resolving, and a column that is fully
+ * populated drops out of the comparison for want of a name.
+ *
+ * The cut is only ever made through a stretch of the band where NO value sits. That is what
+ * makes this safe: every value is wholly on one side of it, so nothing changes column and no
+ * row's contents move. A band whose headings have values between them is left exactly as it
+ * was — the headings there are not describing an empty column, and guessing would shift data.
+ *
+ * Only headings on the SAME line are considered. A heading wrapped over several lines puts its
+ * words in one column by design, and splitting between them would invent a column that the
+ * report does not print.
+ *
+ * Mutates and returns `bands`.
+ */
+export function splitBandsAroundUnfilledColumns(
+    bands: ColumnBand[],
+    headerLines: LogicalLine[],
+    dataLines: LogicalLine[],
+): ColumnBand[] {
+    if (bands.length === 0 || headerLines.length === 0) return bands;
+
+    const valueCentres: number[] = [];
+    for (const line of dataLines) {
+        for (const item of line.items ?? []) {
+            if ((item.str ?? '').trim().length === 0) continue;
+            valueCentres.push(item.x + Math.max(item.width, 0) / 2);
+        }
+    }
+
+    for (const line of headerLines) {
+        const labels = groupRunsIntoLabels(line.items);
+        if (labels.length < 2) continue;
+
+        const perBand = new Map<number, Array<{ text: string; left: number; right: number }>>();
+        for (const label of labels) {
+            const mid = (label.left + label.right) / 2;
+            const bi = bands.findIndex((b) => mid >= b.start && mid < b.end);
+            if (bi < 0) continue;
+            const list = perBand.get(bi);
+            if (list) list.push(label);
+            else perBand.set(bi, [label]);
+        }
+
+        // Highest band index first, so splicing cannot shift an index still to be processed.
+        const crowded = [...perBand.entries()].filter(([, ls]) => ls.length > 1).sort((a, b) => b[0] - a[0]);
+        for (const [bi, ls] of crowded) {
+            const band = bands[bi];
+            const sorted = [...ls].sort((a, b) => a.left - b.left);
+            const cuts: number[] = [];
+            for (let i = 1; i < sorted.length; i++) {
+                const gapStart = sorted[i - 1].right;
+                const gapEnd = sorted[i].left;
+                if (gapEnd - gapStart < MIN_EMPTY_BAND_POINTS) continue;
+                // The gap has to be empty of values, or a cut through it would move one.
+                if (valueCentres.some((x) => x > gapStart && x < gapEnd)) continue;
+                const cut = (gapStart + gapEnd) / 2;
+                if (cut > band.start && cut < band.end) cuts.push(cut);
+            }
+            if (cuts.length === 0) continue;
+            const edges = [band.start, ...cuts, band.end];
+            if (edges.some((e, i) => i > 0 && e - edges[i - 1] < MIN_EMPTY_BAND_POINTS)) continue;
+            const replacements: ColumnBand[] = [];
+            for (let i = 0; i < edges.length - 1; i++) {
+                replacements.push({ ...band, start: edges[i], end: edges[i + 1], header: null, headerPath: [] });
+            }
+            bands.splice(bi, 1, ...replacements);
+        }
+    }
+    return bands;
+}

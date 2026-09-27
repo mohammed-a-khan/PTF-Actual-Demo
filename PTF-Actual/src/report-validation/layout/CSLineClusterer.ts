@@ -114,3 +114,118 @@ function median(values: number[]): number {
     const mid = Math.floor(sorted.length / 2);
     return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
+
+/** Fewest lines a section needs before a stagger can be established at all. */
+const MIN_STAGGER_LINES = 4;
+/** Fewest lines below the headings that must show the offset before it is believed. */
+const MIN_STAGGER_RUN = 3;
+
+/**
+ * Repair a grid whose right-hand columns were printed one row out of step with its left-hand
+ * ones.
+ *
+ * Some report writers emit such a grid as two column groups on separate baselines, the right
+ * group sitting a row higher. Clustering by y then cuts every logical row diagonally: the first
+ * line carries only the right group's HEADINGS, the next pairs the left group's headings with
+ * the first row's right-hand values, and so on down the table. The left-hand headings therefore
+ * never become column headings — they arrive as a data row — and every figure is read against
+ * its neighbouring row, so a total lands on the last detail row.
+ *
+ * Detection is deliberately narrow, because an ordinary table must never be touched. It needs
+ * two ADJACENT heading lines, neither carrying a figure, whose columns are not merely distinct
+ * but SEPARATED: the upper line must begin to the right of where the lower one ends. A heading
+ * wrapped over several lines fails that test — its lines span the same columns and interleave —
+ * which is what keeps this away from the multi-row headers that are far more common. The offset
+ * must then hold for several lines below before it is acted on.
+ *
+ * Returns the input unchanged when no stagger is found.
+ */
+export function repairStaggeredColumns(lines: LogicalLine[], opts: LineClusterOptions = {}): LogicalLine[] {
+    if (lines.length < MIN_STAGGER_LINES) return lines;
+    const ordered = [...lines].sort((a, b) => b.y - a.y);
+    // The heading pair can sit below a preamble, so scan for it rather than assuming it is first.
+    for (let i = 0; i < ordered.length - MIN_STAGGER_RUN; i++) {
+        const splitX = splitPointBetweenHeadings(ordered[i], ordered[i + 1]);
+        if (splitX === null) continue;
+        if (staggerRunLength(ordered, i, splitX) < MIN_STAGGER_RUN) continue;
+        return restagger(ordered, i, splitX, opts);
+    }
+    return lines;
+}
+
+/** Every run on a line that carries text, left to right. */
+function inkedRuns(line: LogicalLine): TextItem[] {
+    return (line.items ?? [])
+        .filter((it) => (it.str ?? '').trim().length > 0)
+        .sort((a, b) => a.x - b.x);
+}
+
+/**
+ * If these two lines are the two halves of one heading row, the x separating them; else null.
+ *
+ * The upper line is the right-hand half: labels only, no figures. The lower line carries the
+ * left-hand half — also labels — and, precisely BECAUSE the grid is staggered, the first row's
+ * right-hand values sitting beside them. Those values are what separate this from a heading
+ * merely wrapped onto a second line: a wrapped heading's second line carries more labels, so
+ * there are no figures to the right of the split and nothing is repaired. That test is what
+ * keeps this away from the multi-row headers that are far more common than any stagger.
+ */
+function splitPointBetweenHeadings(upper: LogicalLine, lower: LogicalLine): number | null {
+    const upperRuns = inkedRuns(upper);
+    const lowerRuns = inkedRuns(lower);
+    if (upperRuns.length < 2 || lowerRuns.length < 2) return null;
+    if (upperRuns.some((it) => /\d/.test(it.str))) return null;
+    const upperLeft = Math.min(...upperRuns.map((it) => it.x));
+    const rightEdge = (it: TextItem): number => it.x + Math.max(it.width, 0);
+
+    const leftHalf = lowerRuns.filter((it) => rightEdge(it) <= upperLeft);
+    if (leftHalf.length < 2) return null;
+    if (leftHalf.some((it) => /\d/.test(it.str))) return null;
+
+    const besideIt = lowerRuns.filter((it) => rightEdge(it) > upperLeft);
+    if (!besideIt.some((it) => /\d/.test(it.str))) return null;
+
+    const leftHalfRight = Math.max(...leftHalf.map(rightEdge));
+    return (leftHalfRight + upperLeft) / 2;
+}
+
+/** How many lines below `start` carry cells on both sides of `splitX`. */
+function staggerRunLength(ordered: LogicalLine[], start: number, splitX: number): number {
+    let run = 0;
+    for (let i = start + 1; i < ordered.length; i++) {
+        const runs = inkedRuns(ordered[i]);
+        const left = runs.some((it) => it.x + Math.max(it.width, 0) / 2 < splitX);
+        const right = runs.some((it) => it.x + Math.max(it.width, 0) / 2 >= splitX);
+        if (!left || !right) break;
+        run++;
+    }
+    return run;
+}
+
+/**
+ * Pair the right group of each line with the left group of the line BELOW it, which is the row
+ * they were printed for. Lines above `start` are left exactly as they were.
+ */
+function restagger(
+    ordered: LogicalLine[],
+    start: number,
+    splitX: number,
+    opts: LineClusterOptions,
+): LogicalLine[] {
+    const sideOf = (line: LogicalLine, right: boolean): TextItem[] =>
+        inkedRuns(line).filter((it) => {
+            const mid = it.x + Math.max(it.width, 0) / 2;
+            return right ? mid >= splitX : mid < splitX;
+        });
+    const medianFont = median(ordered.flatMap((l) => (l.items ?? []).map((it) => it.fontSize)));
+    const headerRatio = opts.headerFontRatio ?? 1.2;
+    const repaired: LogicalLine[] = ordered.slice(0, start);
+    for (let i = start; i < ordered.length; i++) {
+        const right = sideOf(ordered[i], true);
+        const left = i + 1 < ordered.length ? sideOf(ordered[i + 1], false) : [];
+        const items = [...left, ...right];
+        if (items.length === 0) continue;
+        repaired.push(finaliseLine(items, medianFont, headerRatio));
+    }
+    return repaired;
+}

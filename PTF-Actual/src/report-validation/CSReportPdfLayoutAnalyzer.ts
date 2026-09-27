@@ -52,10 +52,10 @@ import {
     extractGroupLabelIfHeader,
 } from './layout/CSCellStitcher';
 import { detectColumns } from './layout/CSColumnDetector';
-import { clusterLines } from './layout/CSLineClusterer';
+import { clusterLines, repairStaggeredColumns } from './layout/CSLineClusterer';
 import { segmentPages } from './layout/CSPageSegmenter';
 import { detectSectionHeaders, type SectionHeaderCandidate } from './layout/CSSectionDetector';
-import { resolveTableHeaders } from './layout/CSTableHeaderResolver';
+import { resolveTableHeaders, splitBandsAroundUnfilledColumns } from './layout/CSTableHeaderResolver';
 import { tagTotalRows } from './layout/CSTotalRowTagger';
 import { extractToc, findTocEntryLines } from './layout/CSTocExtractor';
 import { validateAndRepairSections } from './CSAnalyzedSectionValidator';
@@ -620,6 +620,12 @@ function analyzeSectionRegion(
         };
     }
 
+    // A grid whose right-hand columns were printed a row out of step with its left-hand ones
+    // clusters into diagonal lines: its left-hand headings never become headings, and every
+    // figure is read against the neighbouring row. Put those cells back on the row they were
+    // printed for before anything reads them.
+    lines = repairStaggeredColumns(lines, { headerFontRatio: opts.sectionHeaderFontRatio });
+
     // Column detection over ALL lines in the section. If it returns [] we have no
     // tabular content — everything is free text.
     const columns = detectColumns(lines, {
@@ -643,6 +649,10 @@ function analyzeSectionRegion(
     // the section-detector's "shape" signal (bold/all-caps) OR whose items span all the
     // detected column bands. Below the header rows, the remaining lines are data.
     const { headerRows, dataLines } = splitHeaderAndData(lines, columns);
+    // A column the report prints but never fills has no values to form a band from, so its
+    // heading is absorbed by the neighbouring band and takes that column's name down with it.
+    // Give it a band of its own, cutting only where no value sits so nothing moves column.
+    splitBandsAroundUnfilledColumns(columns, headerRows, dataLines);
     resolveTableHeaders(columns, headerRows);
 
     // Data lines → TableRows.

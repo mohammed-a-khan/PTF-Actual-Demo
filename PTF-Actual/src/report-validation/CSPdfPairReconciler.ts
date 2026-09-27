@@ -462,6 +462,9 @@ function keySetFor(sec: AnalyzedSection, indices: number[]): Set<string> {
     return out;
 }
 
+/** How much a numeric column is marked down as a row key, against a composite score of ~1. */
+const MEASURE_AS_KEY_PENALTY = 0.25;
+
 function pickKeyColumnIndex(
     sec: AnalyzedSection,
     cols: string[],
@@ -523,14 +526,24 @@ function pickKeyColumnIndex(
             stability * 0.15 +
             coverage * 0.15;
 
-        // Gentle nudges — smaller than any real signal, only decide ties:
-        //   1. Leftmost columns first (report authors typically put keys first).
-        //   2. Non-numeric strings preferred over numeric strings only when
-        //      uniqueness/coverage/stability tie — because pure-number columns
-        //      like amounts can look identity-shaped by coincidence.
+        // Leftmost columns first — report authors typically put keys first. Smaller than any
+        // real signal, so it only decides ties.
         score -= i * 0.001;
+
+        // A numeric column is a MEASURE, and a measure is the wrong thing to identify a row by,
+        // because it is also what the comparison exists to check. Keyed on an amount, a row
+        // whose amount genuinely differs between the two reports stops matching at all: the
+        // one changed figure is reported as a row missing from each side rather than as a
+        // single cell that differs, so the difference survives but is no longer attached to the
+        // transaction it belongs to, and the row counts on both sides look wrong as well.
+        //
+        // Amounts otherwise make attractive-looking keys — they are unique, reliably filled and
+        // uniform in length, which is most of the score above — so the preference has to be a
+        // real one rather than a tie-break. A numeric column still wins when nothing else
+        // identifies the row. Dates are not measures and are left eligible.
         const kind = sniffColumnKindLocal(sec, i);
-        if (kind !== 'number') score += 0.002;
+        if (kind === 'number') score -= MEASURE_AS_KEY_PENALTY;
+        else score += 0.002;
 
         if (score > bestScore) {
             bestScore = score;
