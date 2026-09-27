@@ -149,7 +149,20 @@ function isRowJustHeaderTextAnalyzer(cells: (string | null)[], columns: Analyzed
         if (headerNorm.length > 0 && cellNorm === headerNorm) matches++;
     }
     if (filled === 0) return false;
-    return matches / filled >= 0.6;
+    if (matches / filled >= 0.6) return true;
+    // A heading that landed under a column it does not name is still a heading. Position is
+    // only disregarded when EVERY populated cell is one of this table's headings, so a data row
+    // repeating a single label is untouched.
+    const headings = new Set(
+        columns.map((c) => norm(String(c.header ?? ''))).filter((h) => h.length > 0),
+    );
+    if (headings.size === 0 || filled < 2) return false;
+    let anywhere = 0;
+    for (const c of cells) {
+        if (c == null || String(c).trim().length === 0) continue;
+        if (headings.has(norm(String(c)))) anywhere++;
+    }
+    return anywhere === filled;
 }
 
 // ---------------------------------------------------------------------------

@@ -797,8 +797,19 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
             const r = columnResolution.get(k);
             return r?.refTitle ? indexOfHeader(refSec, r.refTitle) : -1;
         });
-        const candByKey = groupRowsByKey(candSec.tableRows, candKeyIndices, opts.rules.autoMode);
-        const refByKey = groupRowsByKey(refSec.tableRows, refKeyIndices, opts.rules.autoMode);
+        // A key that repeats is worth saying out loud: the rows are still compared, but pairing
+        // them by order is an assumption, and the spec can name a better key.
+        const duplicateKeys = new Set<string>();
+        const noteDuplicate = (key: string): void => { duplicateKeys.add(key); };
+        const candByKey = groupRowsByKey(candSec.tableRows, candKeyIndices, opts.rules.autoMode, noteDuplicate);
+        const refByKey = groupRowsByKey(refSec.tableRows, refKeyIndices, opts.rules.autoMode, noteDuplicate);
+        if (duplicateKeys.size > 0) {
+            warnings.push(
+                `Section "${canonicalSectionName}": key [${sectionRule.keyColumns.join(', ')}] does not identify a row uniquely — ` +
+                `${duplicateKeys.size} key(s) name more than one row, matched in the order they are printed. ` +
+                `Name a column that differs between them in spec.keyColumns to compare them by identity instead.`,
+            );
+        }
         if (opts.rules.autoMode) {
             reconcileFuzzyKeyPairs(candByKey, refByKey);
         }
@@ -1310,19 +1321,77 @@ function appendRowsWithRealign(accumulator: AnalyzedSection, incoming: AnalyzedS
 
 function isReconcileRowJustHeaderText(cells: (string | null)[], cols: AnalyzedSection['columns']): boolean {
     if (!cells || !cols || cells.length === 0) return false;
+    // A heading row does not have to sit in the columns it names. When a grid is read onto
+    // another table's bands its headings are carried along with its values, so each label ends
+    // up under a column it has nothing to do with — a "Settlement Date" heading landing beneath
+    // "CALCULATION". Comparing each cell only to its OWN column's header finds no match there
+    // and the row survives as data: it then joins on nothing, and is reported as a row missing
+    // from both sides. What identifies it is that everything in it is a heading of this table,
+    // wherever it landed.
+    const headings = new Set(
+        (cols ?? [])
+            .map((c) => normaliseHeaderTextReconcile(c?.header ?? ''))
+            .filter((h) => h.length > 0),
+    );
     let nonEmpty = 0;
-    let matches = 0;
-    const n = Math.min(cells.length, cols.length);
-    for (let i = 0; i < n; i++) {
+    let inOwnColumn = 0;
+    let anywhere = 0;
+    for (let i = 0; i < cells.length; i++) {
         const v = cells[i];
         if (v == null || String(v).trim() === '') continue;
         nonEmpty++;
-        const header = (cols[i]?.header ?? '').trim();
-        if (!header) continue;
-        if (normaliseHeaderTextReconcile(String(v)) === normaliseHeaderTextReconcile(header)) matches++;
+        const value = normaliseHeaderTextReconcile(String(v));
+        const own = normaliseHeaderTextReconcile(cols[i]?.header ?? '');
+        if (own.length > 0 && value === own) inOwnColumn++;
+        if (headings.has(value)) anywhere++;
     }
     if (nonEmpty < 2) return false;
-    return matches / nonEmpty >= 0.6;
+    if (inOwnColumn / nonEmpty >= 0.6) return true;
+    // Every populated cell must be a heading before position is disregarded — a data row that
+    // happens to repeat one label is still data.
+    return anywhere === nonEmpty;
+}
+
+/** Rows needed before a column's contents establish what that column holds. */
+const KIND_EVIDENCE_ROWS = 3;
+
+/**
+ * Is this row the table's heading, rather than one of its rows?
+ *
+ * A heading carried onto another table's bands names none of THOSE columns, so matching against
+ * column headers cannot recognise it. What still gives it away is that it is made entirely of
+ * words while the column it sits in holds dates or amounts in every other row: a sales grid's
+ * heading has text where every sale has a settlement date and a par amount.
+ *
+ * Both halves are required — all words, and at least one column that demonstrably holds figures
+ * — so a group label above its members, or a row of genuinely textual fields, is left alone.
+ */
+function isRowLabelsWhereFiguresBelong(row: TableRow, rows: TableRow[], width: number): boolean {
+    const cells = row.cells ?? [];
+    const populated: number[] = [];
+    for (let i = 0; i < width; i++) {
+        const v = cells[i];
+        if (v == null || String(v).trim() === '') continue;
+        // A figure anywhere in the row means it carries data, whatever else it holds.
+        if (isNumericLike(String(v).trim()) || isDateLike(String(v).trim())) return false;
+        populated.push(i);
+    }
+    if (populated.length < 2) return false;
+
+    for (const i of populated) {
+        let figures = 0;
+        let seen = 0;
+        for (const other of rows) {
+            if (other === row) continue;
+            const v = (other.cells ?? [])[i];
+            if (v == null || String(v).trim() === '') continue;
+            seen++;
+            const t = String(v).trim();
+            if (isNumericLike(t) || isDateLike(t)) figures++;
+        }
+        if (seen >= KIND_EVIDENCE_ROWS && figures === seen) return true;
+    }
+    return false;
 }
 
 function normaliseHeaderTextReconcile(s: string): string {
@@ -1852,7 +1921,10 @@ function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator:
             groupLabel: row.groupLabel,
         });
     }
-    return out;
+    // The incoming table's own heading travelled across with its rows and names none of THESE
+    // columns, so the header-text test cannot recognise it. What does is the contrast with the
+    // rows around it — and that needs all of them, so it is judged here rather than per row.
+    return out.filter((r) => !isRowLabelsWhereFiguresBelong(r, out, accCols.length));
 }
 
 function resolveSections(
@@ -2181,9 +2253,29 @@ function buildKeyPairs(
     return out;
 }
 
-function groupRowsByKey(rows: TableRow[], keyIndices: number[], autoMode?: boolean): Map<string, TableRow> {
+/**
+ * Index a section's rows by their key.
+ *
+ * A key is not guaranteed unique. Two sales of the same security settling on the same day share
+ * a security type and a settlement date, so any key built from those columns names both rows.
+ * Writing them to one map entry kept whichever came last and DISCARDED the rest — silently, and
+ * in the worst possible way: the discarded rows were gone from both the comparison and the row
+ * count, so a run could report every row passing while never having looked at some of them.
+ *
+ * Repeats are therefore numbered in document order and compared positionally, which is the
+ * order both engines print them in. Where one side has more repeats than the other, the surplus
+ * has no counterpart and is reported as a row missing from the other side — visible, which is
+ * what a weak key deserves.
+ */
+function groupRowsByKey(
+    rows: TableRow[],
+    keyIndices: number[],
+    autoMode?: boolean,
+    onDuplicateKey?: (key: string, count: number) => void,
+): Map<string, TableRow> {
     const out = new Map<string, TableRow>();
     if (keyIndices.some((i) => i < 0)) return out; // any key column unresolvable → no rows keyable
+    const occurrences = new Map<string, number>();
     for (const row of rows) {
         if (autoMode && row.isTotalRow) continue;
         const keyParts = keyIndices.map((i) => valueAt(row, i) ?? '');
@@ -2196,10 +2288,16 @@ function groupRowsByKey(rows: TableRow[], keyIndices: number[], autoMode?: boole
             key = keyParts.join('|').trim();
         }
         if (!key) continue;
-        out.set(key, row);
+        const nth = (occurrences.get(key) ?? 0) + 1;
+        occurrences.set(key, nth);
+        if (nth > 1 && onDuplicateKey) onDuplicateKey(key, nth);
+        out.set(nth === 1 ? key : `${key}${DUPLICATE_KEY_SUFFIX}${nth}`, row);
     }
     return out;
 }
+
+/** Marks the 2nd and later rows sharing one key, so none is lost to the one before it. */
+const DUPLICATE_KEY_SUFFIX = '#';
 
 function normalizeKeyValue(v: string): string {
     const s = (v ?? '').trim();
