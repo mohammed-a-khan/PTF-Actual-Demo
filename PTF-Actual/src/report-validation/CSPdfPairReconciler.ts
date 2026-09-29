@@ -1226,13 +1226,15 @@ export function foldOrphansIntoSubTables(list: AnalyzedSection[]): AnalyzedSecti
             hostSubs.push({
                 title: 'primary',
                 columns: [...(host.columns ?? [])],
-                tableRows: [...(host.tableRows ?? [])],
+                tableRows: withoutStrayHeadingRows(host.tableRows ?? [], host.columns ?? []),
             });
         }
         hostSubs.push({
             title: subLabel,
             columns: [...(sec.columns ?? [])],
-            tableRows: [...(sec.tableRows ?? [])],
+            // Kept beside the host rather than realigned onto it — but it still arrived with its
+            // own heading, which is no more a row here than it would have been there.
+            tableRows: withoutStrayHeadingRows(sec.tableRows ?? [], sec.columns ?? []),
         });
         host.subTables = hostSubs;
         CSReporter.info(`[foldOrphansIntoSubTables] orphan "${title}" (${rowCount}r/${colCount}c) folded into "${host.title}" as sub-table "${subLabel}"`);
@@ -1272,11 +1274,19 @@ function buildSubTableLabel(sec: AnalyzedSection): string {
 function expandSubTablesIntoMap(base: Map<string, AnalyzedSection>): Map<string, AnalyzedSection> {
     const out = new Map<string, AnalyzedSection>();
     for (const [title, sec] of base.entries()) {
+        // Last gate before anything is compared. A fragment's own heading can be carried along
+        // by several different routes through the merge, and covering them one at a time has
+        // meant covering them one at a time — a heading that slips through any of them is
+        // compared against the other side, which resolved the same labels into column names, and
+        // reports as a row missing from one side. Sweeping here covers every route at once,
+        // including any added later.
+        sec.tableRows = withoutStrayHeadingRows(sec.tableRows ?? [], sec.columns ?? []);
         const subs = sec.subTables;
         if (!Array.isArray(subs) || subs.length === 0) {
             out.set(title, sec);
             continue;
         }
+        for (const st of subs) st.tableRows = withoutStrayHeadingRows(st.tableRows ?? [], st.columns ?? []);
         // Combined view under the PLAIN title: every sub-table's rows together, on the schema
         // of whichever sub-table has the most columns (the detail grid, not the summary block,
         // is where a real key column lives). A reference PDF that renders this content as ONE
@@ -1394,6 +1404,25 @@ const KIND_EVIDENCE_ROWS = 3;
  * carried past its values to the last when the grid is read onto another table's bands. A group
  * label names the rows that FOLLOW it, so every other position is content and is left alone.
  */
+/**
+ * The rows minus any stray heading among them.
+ *
+ * Applied wherever a fragment's rows are taken over — realigned onto a host's bands, or kept
+ * beside it as a sub-table. Both paths carry the fragment's own heading along with its values,
+ * and only one of them used to remove it: the same page then produced a heading row on whichever
+ * side took the other path, and a row present on one side only reads as a difference between the
+ * two reports when it is the same content parsed two ways.
+ */
+function withoutStrayHeadingRows(rows: TableRow[], columns: AnalyzedSection['columns']): TableRow[] {
+    const width = (columns ?? []).length;
+    if (width === 0) return rows;
+    return rows.filter(
+        (r, i) =>
+            !isReconcileRowJustHeaderText(r.cells, columns) &&
+            !(canBeStrayHeadingRecon(i, rows.length) && isRowLabelsWhereFiguresBelong(r, rows, width)),
+    );
+}
+
 function canBeStrayHeadingRecon(index: number, total: number): boolean {
     return index === 0 || index === total - 1;
 }
@@ -1970,10 +1999,7 @@ function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator:
     // Only the topmost rows can be a leftover heading — a heading is printed above its table.
     // Further down, words among figures are a group label naming the rows beneath it, and
     // dropping that loses real content.
-    return out.filter(
-        (r, i) =>
-            !(canBeStrayHeadingRecon(i, out.length) && isRowLabelsWhereFiguresBelong(r, out, accCols.length)),
-    );
+    return withoutStrayHeadingRows(out, accCols);
 }
 
 function resolveSections(
