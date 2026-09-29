@@ -231,6 +231,7 @@ export async function generateReconciliationRulesFromPair(opts: {
     const refSections = mergeAnalyzedSections(refAnalyzed);
 
     propagateHeadersAcrossSides(candSections, refSections, threshold);
+
     splitReferenceBySubTableSignatures(candSections, refSections);
 
     CSReporter.info(
@@ -696,6 +697,23 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
     const candSections = mergeAnalyzedSections(opts.candidateAnalyzed);
     const refSections = mergeAnalyzedSections(opts.referenceAnalyzed);
     propagateHeadersAcrossSides(candSections, refSections, threshold);
+
+    // A heading only fails to resolve on one side; the other side turned the same text into a
+    // column name. Pooling both sides' headings is therefore what recognises it — and unlike
+    // reading the rows around it, this works in a two-row compliance block as well as in a grid.
+    const headingVocabulary = collectHeadingVocabulary(candSections, refSections);
+    for (const side of [candSections, refSections]) {
+        for (const section of side.values()) {
+            section.tableRows = (section.tableRows ?? []).filter(
+                (r) => !isUnresolvedHeadingRow(r, headingVocabulary),
+            );
+            for (const st of section.subTables ?? []) {
+                st.tableRows = (st.tableRows ?? []).filter(
+                    (r) => !isUnresolvedHeadingRow(r, headingVocabulary),
+                );
+            }
+        }
+    }
     splitReferenceBySubTableSignatures(candSections, refSections);
     const ignoreSections = new Set((opts.rules.ignoreSections ?? []).map((s) => s.toLowerCase()));
     const compareOnly = (opts.rules.compareSections ?? [])
@@ -1413,6 +1431,86 @@ const KIND_EVIDENCE_ROWS = 3;
  * side took the other path, and a row present on one side only reads as a difference between the
  * two reports when it is the same content parsed two ways.
  */
+/**
+ * Every column heading either side of the comparison resolved, as a lookup.
+ *
+ * A heading that failed to resolve on ONE side is still printed there, and it is the same text
+ * the other side turned into a column name. That is what identifies it, and it needs no
+ * inference from the rows around it: the surrounding rows may be a two-line compliance block
+ * with no figures in it at all, which is where this kept going wrong.
+ */
+function collectHeadingVocabulary(...sides: Array<Map<string, AnalyzedSection>>): Set<string> {
+    const vocabulary = new Set<string>();
+    const add = (columns: AnalyzedSection['columns']): void => {
+        for (const c of columns ?? []) {
+            const key = normaliseHeadingToken(c?.header ?? '');
+            if (key.length >= MIN_HEADING_TOKEN_LENGTH) vocabulary.add(key);
+        }
+    };
+    for (const side of sides) {
+        for (const section of side.values()) {
+            add(section.columns);
+            for (const st of section.subTables ?? []) add(st.columns);
+        }
+    }
+    return vocabulary;
+}
+
+/** Case, spacing and punctuation carry no meaning when matching a heading. */
+function normaliseHeadingToken(s: string): string {
+    return String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+/** Shorter than this and a "heading" would match ordinary words by accident. */
+const MIN_HEADING_TOKEN_LENGTH = 4;
+
+/**
+ * Is this cell made up entirely of column headings?
+ *
+ * Exactly one heading, or several run together — a grid whose headings are squeezed into a
+ * narrower table's band arrives as `Trade Date Settlement Date Issue Name/Facility Name` in a
+ * single cell, so matching whole cells alone is not enough.
+ */
+function cellIsMadeOfHeadings(value: string, vocabulary: Set<string>): boolean {
+    const text = normaliseHeadingToken(value);
+    if (text.length < MIN_HEADING_TOKEN_LENGTH) return false;
+    if (vocabulary.has(text)) return true;
+    // Greedy from the left, longest heading first, so a short heading cannot eat the prefix of
+    // a longer one and strand the rest.
+    const byLength = [...vocabulary].sort((a, b) => b.length - a.length);
+    let rest = text;
+    let matched = 0;
+    while (rest.length > 0) {
+        const hit = byLength.find((h) => rest.startsWith(h));
+        if (!hit) return false;
+        rest = rest.slice(hit.length);
+        matched++;
+    }
+    return matched > 1;
+}
+
+/**
+ * Is this row a heading that failed to resolve, rather than content?
+ *
+ * Every value in it is a column heading, and none of it is a figure. A row carrying a real
+ * value — an amount, a date, a percentage — is content whatever else it holds, and a group
+ * label naming the rows beneath it is not a column heading anywhere in the document, so
+ * neither is touched. Position does not come into it, which matters because these rows turn up
+ * at the top of one table and the end of another.
+ */
+function isUnresolvedHeadingRow(row: TableRow, vocabulary: Set<string>): boolean {
+    if (vocabulary.size === 0) return false;
+    let populated = 0;
+    for (const cell of row.cells ?? []) {
+        const text = String(cell ?? '').trim();
+        if (text.length === 0) continue;
+        populated++;
+        if (isNumericLike(text) || isDateLike(text)) return false;
+        if (!cellIsMadeOfHeadings(text, vocabulary)) return false;
+    }
+    return populated > 0;
+}
+
 function withoutStrayHeadingRows(rows: TableRow[], columns: AnalyzedSection['columns']): TableRow[] {
     const width = (columns ?? []).length;
     if (width === 0) return rows;
