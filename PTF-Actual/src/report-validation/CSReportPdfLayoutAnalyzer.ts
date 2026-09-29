@@ -128,7 +128,7 @@ function stripLeftoverHeaderRows(sections: AnalyzedSection[]): AnalyzedSection[]
         rows.filter(
             (r, i) =>
                 !isRowJustHeaderTextAnalyzer(r.cells, columns) &&
-                !(i < MAX_LEADING_HEADING_ROWS
+                !(canBeStrayHeading(i, rows.length)
                     && isRowLabelsWhereFiguresBelongAnalyzer(r, rows, columns.length)),
         );
     for (const sec of sections) {
@@ -143,15 +143,21 @@ function stripLeftoverHeaderRows(sections: AnalyzedSection[]): AnalyzedSection[]
 /** Rows needed before a column's contents establish what that column holds. */
 const KIND_EVIDENCE_ROWS_ANALYZER = 3;
 
+
 /**
- * How far into a table a leftover heading can be.
+ * Can the row at this position be a stray heading rather than content?
  *
- * A heading is printed above its table, so an unresolved one is at the top; two allows for a
- * heading wrapped over a second line. Further down, a row of words among rows of figures is a
- * GROUP LABEL — a category or issuer named above the rows it covers — and deleting that loses
- * real content. Position is what separates them; nothing about the text itself does.
+ * Nothing in the TEXT separates a table's heading from a group label — both are words among
+ * rows of figures. Position does. A heading belongs above its table, so an unresolved one is the
+ * FIRST row; where a grid was read onto another table's bands it can instead be carried past its
+ * values and be the last. Anywhere else the row names the rows that FOLLOW it — a group label —
+ * and only its position says so, so every other position is left alone whatever the text looks
+ * like. One row at the top, not two: a label opening a group is as likely as a wrapped heading,
+ * and keeping content matters more than tidying a heading.
  */
-const MAX_LEADING_HEADING_ROWS = 2;
+function canBeStrayHeading(index: number, total: number): boolean {
+    return index === 0 || index === total - 1;
+}
 
 /**
  * Is this row the table's heading rather than one of its rows?

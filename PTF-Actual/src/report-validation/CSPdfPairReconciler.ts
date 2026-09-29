@@ -1388,8 +1388,15 @@ function isReconcileRowJustHeaderText(cells: (string | null)[], cols: AnalyzedSe
 /** Rows needed before a column's contents establish what that column holds. */
 const KIND_EVIDENCE_ROWS = 3;
 
-/** How far into a table a leftover heading can be; past that, words among figures are a label. */
-const MAX_LEADING_HEADING_ROWS_RECON = 2;
+
+/**
+ * Can the row at this position be a stray heading rather than content? A heading is the FIRST row, or is
+ * carried past its values to the last when the grid is read onto another table's bands. A group
+ * label names the rows that FOLLOW it, so every other position is content and is left alone.
+ */
+function canBeStrayHeadingRecon(index: number, total: number): boolean {
+    return index === 0 || index === total - 1;
+}
 
 /**
  * Is this row the table's heading, rather than one of its rows?
@@ -1964,7 +1971,8 @@ function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator:
     // Further down, words among figures are a group label naming the rows beneath it, and
     // dropping that loses real content.
     return out.filter(
-        (r, i) => !(i < MAX_LEADING_HEADING_ROWS_RECON && isRowLabelsWhereFiguresBelong(r, out, accCols.length)),
+        (r, i) =>
+            !(canBeStrayHeadingRecon(i, out.length) && isRowLabelsWhereFiguresBelong(r, out, accCols.length)),
     );
 }
 
