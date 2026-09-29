@@ -124,15 +124,85 @@ export function analyzeReport(pages: PageContent[], opts: LayoutAnalyzerOptions 
 }
 
 function stripLeftoverHeaderRows(sections: AnalyzedSection[]): AnalyzedSection[] {
+    const keep = (rows: TableRow[], columns: AnalyzedSection['columns']): TableRow[] =>
+        rows.filter(
+            (r, i) =>
+                !isRowJustHeaderTextAnalyzer(r.cells, columns) &&
+                !(i < MAX_LEADING_HEADING_ROWS
+                    && isRowLabelsWhereFiguresBelongAnalyzer(r, rows, columns.length)),
+        );
     for (const sec of sections) {
-        sec.tableRows = sec.tableRows.filter((r) => !isRowJustHeaderTextAnalyzer(r.cells, sec.columns));
+        sec.tableRows = keep(sec.tableRows, sec.columns);
         if (Array.isArray(sec.subTables)) {
-            for (const st of sec.subTables) {
-                st.tableRows = st.tableRows.filter((r) => !isRowJustHeaderTextAnalyzer(r.cells, st.columns));
-            }
+            for (const st of sec.subTables) st.tableRows = keep(st.tableRows, st.columns);
         }
     }
     return sections;
+}
+
+/** Rows needed before a column's contents establish what that column holds. */
+const KIND_EVIDENCE_ROWS_ANALYZER = 3;
+
+/**
+ * How far into a table a leftover heading can be.
+ *
+ * A heading is printed above its table, so an unresolved one is at the top; two allows for a
+ * heading wrapped over a second line. Further down, a row of words among rows of figures is a
+ * GROUP LABEL — a category or issuer named above the rows it covers — and deleting that loses
+ * real content. Position is what separates them; nothing about the text itself does.
+ */
+const MAX_LEADING_HEADING_ROWS = 2;
+
+/**
+ * Is this row the table's heading rather than one of its rows?
+ *
+ * A heading whose labels did not become this table's column names cannot be recognised by
+ * comparing cells to headers — there is nothing to compare against. What still gives it away is
+ * that it is made entirely of words while the column it sits in holds a date or an amount in
+ * every other row.
+ *
+ * This runs for every section, not only those the reconciler realigns, because the same heading
+ * survives on whichever side happens not to be realigned — and a row dropped on one side but
+ * kept on the other is reported as a difference between the two reports when it is neither.
+ *
+ * Both halves are required — all words, and a column that demonstrably holds figures — so a
+ * group label above its members, or a row of genuinely textual fields, is left alone.
+ */
+function isRowLabelsWhereFiguresBelongAnalyzer(
+    row: TableRow,
+    rows: TableRow[],
+    width: number,
+): boolean {
+    const cells = row.cells ?? [];
+    const populated: number[] = [];
+    for (let i = 0; i < width; i++) {
+        const v = cells[i];
+        if (v == null || String(v).trim() === '') continue;
+        if (looksLikeFigure(String(v))) return false;
+        populated.push(i);
+    }
+    if (populated.length < 2) return false;
+    for (const i of populated) {
+        let figures = 0;
+        let seen = 0;
+        for (const other of rows) {
+            if (other === row) continue;
+            const v = (other.cells ?? [])[i];
+            if (v == null || String(v).trim() === '') continue;
+            seen++;
+            if (looksLikeFigure(String(v))) figures++;
+        }
+        if (seen >= KIND_EVIDENCE_ROWS_ANALYZER && figures === seen) return true;
+    }
+    return false;
+}
+
+/** A number, a currency amount, a percentage or a date — anything a heading would not be. */
+function looksLikeFigure(value: string): boolean {
+    const s = value.trim();
+    if (s.length === 0) return false;
+    if (/^[-+(]?[$£€¥]?[\d,. ]+%?\)?$/.test(s) && /\d/.test(s)) return true;
+    return /^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$/.test(s);
 }
 
 function isRowJustHeaderTextAnalyzer(cells: (string | null)[], columns: AnalyzedSection['columns']): boolean {

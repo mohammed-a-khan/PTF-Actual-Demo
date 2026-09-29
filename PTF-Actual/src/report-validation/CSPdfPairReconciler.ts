@@ -101,6 +101,18 @@ export interface ReconcileRules {
     sections: Record<string, ReconcileSectionRule>;
     knownDifferences?: KnownDifference[];
     globalTolerance?: GlobalTolerance;
+    /**
+     * The sections to compare, naming them as the report prints them. When given, ONLY these are
+     * compared and every other section is left out — the inverse of `ignoreSections`, and the
+     * way round a report is usually described: a page of contents, a covering letter or a set of
+     * disclaimers is laid out differently by each engine and comparing it row by row produces
+     * differences that mean nothing, while the schedules under test are known by name up front.
+     *
+     * Matching ignores case and surrounding space, and a name also matches a section whose title
+     * carries a trailing code the engines disagree on (`Market Value Detail` matches
+     * `Market Value Detail 1D`). Omit it to compare every section that pairs up.
+     */
+    compareSections?: string[];
     ignoreSections?: string[];
     ignoreColumns?: string[];
     /** Fuzzy alias auto-detection — strict = 0.85, moderate = 0.70, loose = 0.55. Default 0.85. */
@@ -202,6 +214,8 @@ export async function generateReconciliationRulesFromPair(opts: {
     referencePdfPath: string;
     fuzzyThreshold?: number;
     candidateAuthoritative?: boolean;
+    /** The sections to compare, by the name the report prints. See `ReconcileRules.compareSections`. */
+    compareSections?: string[];
 }): Promise<ReconcileRules> {
     if (!fs.existsSync(opts.candidatePdfPath)) throw new Error(`Candidate PDF not found: ${opts.candidatePdfPath}`);
     if (!fs.existsSync(opts.referencePdfPath)) throw new Error(`Reference PDF not found: ${opts.referencePdfPath}`);
@@ -383,6 +397,9 @@ export async function generateReconciliationRulesFromPair(opts: {
         globalTolerance: { currency: 0.01, percentage: 0.001, count: 0, number: 0.01 },
         aliasFuzzyThreshold: threshold,
         autoMode: true,
+        ...(opts.compareSections && opts.compareSections.length > 0
+            ? { compareSections: [...opts.compareSections] }
+            : {}),
     };
 }
 
@@ -681,6 +698,12 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
     propagateHeadersAcrossSides(candSections, refSections, threshold);
     splitReferenceBySubTableSignatures(candSections, refSections);
     const ignoreSections = new Set((opts.rules.ignoreSections ?? []).map((s) => s.toLowerCase()));
+    const compareOnly = (opts.rules.compareSections ?? [])
+        .map((s) => normaliseSectionSelector(s))
+        .filter((s) => s.length > 0);
+    // Left out by the caller's own list. Named in the result so a section missing from the
+    // comparison is never a silent omission — the commonest way a parity run passes vacuously.
+    const notSelected: string[] = [];
     const ignoreColumns = new Set((opts.rules.ignoreColumns ?? []).map((s) => s.toLowerCase()));
 
     // Section resolution: rule name (canonical) → { candTitle?, refTitle? }
@@ -707,6 +730,10 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
     for (const [canonicalSectionName, sectionRule] of Object.entries(opts.rules.sections)) {
         if (sectionRule.skip) continue;
         if (ignoreSections.has(canonicalSectionName.toLowerCase())) continue;
+        if (compareOnly.length > 0 && !sectionIsSelected(canonicalSectionName, compareOnly)) {
+            notSelected.push(canonicalSectionName);
+            continue;
+        }
 
         const res = sectionResolution.get(canonicalSectionName);
         const candTitle = res?.candTitle;
@@ -1036,6 +1063,12 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
     // section resolution matched nothing between the two PDFs. Passing on "we compared nothing" is a false
     // positive and masks real diffs (see Market Value Detail multi-page continuation case).
     // KNOWN_DIFFERENCE_MATCHED is recorded but not gating.
+    if (notSelected.length > 0) {
+        warnings.push(
+            `Not compared — left out by compareSections (${notSelected.length}): ${notSelected.join(', ')}. ` +
+            `Add a name to spec.compareSections to include one.`,
+        );
+    }
     const noMismatches = summary.cellMismatches === 0 && summary.rowMissing === 0 && summary.sectionMissing === 0 && summary.columnMissing === 0;
     const somethingCompared = summary.sectionsCompared > 0 && summary.cellsCompared > 0;
     if (!somethingCompared) {
@@ -1354,6 +1387,9 @@ function isReconcileRowJustHeaderText(cells: (string | null)[], cols: AnalyzedSe
 
 /** Rows needed before a column's contents establish what that column holds. */
 const KIND_EVIDENCE_ROWS = 3;
+
+/** How far into a table a leftover heading can be; past that, words among figures are a label. */
+const MAX_LEADING_HEADING_ROWS_RECON = 2;
 
 /**
  * Is this row the table's heading, rather than one of its rows?
@@ -1924,7 +1960,12 @@ function realignRowsBetweenColumnLayouts(incoming: AnalyzedSection, accumulator:
     // The incoming table's own heading travelled across with its rows and names none of THESE
     // columns, so the header-text test cannot recognise it. What does is the contrast with the
     // rows around it — and that needs all of them, so it is judged here rather than per row.
-    return out.filter((r) => !isRowLabelsWhereFiguresBelong(r, out, accCols.length));
+    // Only the topmost rows can be a leftover heading — a heading is printed above its table.
+    // Further down, words among figures are a group label naming the rows beneath it, and
+    // dropping that loses real content.
+    return out.filter(
+        (r, i) => !(i < MAX_LEADING_HEADING_ROWS_RECON && isRowLabelsWhereFiguresBelong(r, out, accCols.length)),
+    );
 }
 
 function resolveSections(
@@ -2267,6 +2308,34 @@ function buildKeyPairs(
  * has no counterpart and is reported as a row missing from the other side — visible, which is
  * what a weak key deserves.
  */
+/** Case- and space-insensitive form used to match a caller's section name against a title. */
+function normaliseSectionSelector(s: string): string {
+    return String(s ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Does this section's title match one of the names the caller asked for?
+ *
+ * A title is accepted when it equals a selector, or when it is that selector followed by a short
+ * trailing code — the two engines label the same schedule `Market Value Detail` and
+ * `Market Value Detail 1D`, and a caller naming the schedule should not have to know which.
+ * A sub-table published under `<title> :: <label>` belongs to its section and is accepted with it.
+ */
+function sectionIsSelected(title: string, selectors: string[]): boolean {
+    const norm = normaliseSectionSelector(title);
+    const base = normaliseSectionSelector(norm.split('::')[0]);
+    for (const want of selectors) {
+        if (norm === want || base === want) return true;
+        for (const candidate of [norm, base]) {
+            if (!candidate.startsWith(want)) continue;
+            const tail = candidate.slice(want.length).trim();
+            // Only a short code may follow — enough for "1D" or "(B)", not another section name.
+            if (tail.length > 0 && tail.length <= 4 && !/[a-z]{3}/.test(tail)) return true;
+        }
+    }
+    return false;
+}
+
 function groupRowsByKey(
     rows: TableRow[],
     keyIndices: number[],
