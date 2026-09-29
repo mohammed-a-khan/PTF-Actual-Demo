@@ -465,6 +465,14 @@ function splitLostTheTable(groups: AnalyzedSection[]): boolean {
     if (named(leading)) return false;
     // Something below it names its columns: the leading group is the block above the table.
     if (rest.some(named)) return true;
+    // Nothing anywhere resolved a single column heading. Splitting a section into two tables is
+    // only meaningful when there ARE two tables, and a table announces itself by naming its
+    // columns; where nothing does, this is one block of label-and-value pairs whose rows simply
+    // taper as the left-hand pairs run out before the right-hand ones. Item counts read that
+    // taper as a second table, and wherever the cut falls it strands half the pairs under a
+    // synthesised title — so the figures on that side are never found under the section that
+    // names them. Reading the block whole is what keeps the pairs together.
+    if (!groups.some(named)) return true;
     // Nothing anywhere names a column, and the leading group's rows are all label text with no
     // figures in them — those rows ARE the heading the groups below are missing. This is a
     // heading wrapped over several lines, which the split read as a narrow table stacked on a
