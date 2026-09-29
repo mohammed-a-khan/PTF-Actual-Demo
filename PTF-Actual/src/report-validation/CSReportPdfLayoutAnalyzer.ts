@@ -126,10 +126,9 @@ export function analyzeReport(pages: PageContent[], opts: LayoutAnalyzerOptions 
 function stripLeftoverHeaderRows(sections: AnalyzedSection[]): AnalyzedSection[] {
     const keep = (rows: TableRow[], columns: AnalyzedSection['columns']): TableRow[] =>
         rows.filter(
-            (r, i) =>
+            (r) =>
                 !isRowJustHeaderTextAnalyzer(r.cells, columns) &&
-                !(canBeStrayHeading(i, rows.length)
-                    && isRowLabelsWhereFiguresBelongAnalyzer(r, rows, columns.length)),
+                !isHeadingByColumnCoverageAnalyzer(r, rows, columns.length),
         );
     for (const sec of sections) {
         sec.tableRows = keep(sec.tableRows, sec.columns);
@@ -140,67 +139,47 @@ function stripLeftoverHeaderRows(sections: AnalyzedSection[]): AnalyzedSection[]
     return sections;
 }
 
-/** Rows needed before a column's contents establish what that column holds. */
-const KIND_EVIDENCE_ROWS_ANALYZER = 3;
-
-
-/**
- * Can the row at this position be a stray heading rather than content?
- *
- * Nothing in the TEXT separates a table's heading from a group label — both are words among
- * rows of figures. Position does. A heading belongs above its table, so an unresolved one is the
- * FIRST row; where a grid was read onto another table's bands it can instead be carried past its
- * values and be the last. Anywhere else the row names the rows that FOLLOW it — a group label —
- * and only its position says so, so every other position is left alone whatever the text looks
- * like. One row at the top, not two: a label opening a group is as likely as a wrapped heading,
- * and keeping content matters more than tidying a heading.
- */
-function canBeStrayHeading(index: number, total: number): boolean {
-    return index === 0 || index === total - 1;
-}
+/** Fewest columns a table needs before "covers every column" means anything. */
+const MIN_HEADING_COVERAGE_COLUMNS = 2;
+/** Fewest other rows needed before they can establish what a column holds. */
+const MIN_HEADING_EVIDENCE_ROWS = 3;
+/** Share of rows that must fill a column before it counts as one the table uses. */
+const MIN_COLUMN_FILL_RATIO = 0.6;
 
 /**
- * Is this row the table's heading rather than one of its rows?
+ * Is this row the table's heading, rather than one of its rows?
  *
- * A heading whose labels did not become this table's column names cannot be recognised by
- * comparing cells to headers — there is nothing to compare against. What still gives it away is
- * that it is made entirely of words while the column it sits in holds a date or an amount in
- * every other row.
+ * A heading that fails to resolve stays among the rows, and the obvious signals miss it: its
+ * labels are column names nowhere when the grid has been squeezed into another table's bands,
+ * and its position is not fixed — it follows whatever preamble the section carries, so it is
+ * neither first nor last.
  *
- * This runs for every section, not only those the reconciler realigns, because the same heading
- * survives on whichever side happens not to be realigned — and a row dropped on one side but
- * kept on the other is reported as a difference between the two reports when it is neither.
- *
- * Both halves are required — all words, and a column that demonstrably holds figures — so a
- * group label above its members, or a row of genuinely textual fields, is left alone.
+ * Its SHAPE is what holds. A heading names every column the table uses and carries no figure at
+ * all. A group label is the opposite — it names one thing and leaves the rest of the row empty —
+ * so it survives, which matters because deleting it loses real content. The table must itself
+ * hold figures, so a genuinely textual grid is never judged by this.
  */
-function isRowLabelsWhereFiguresBelongAnalyzer(
-    row: TableRow,
-    rows: TableRow[],
-    width: number,
-): boolean {
-    const cells = row.cells ?? [];
-    const populated: number[] = [];
-    for (let i = 0; i < width; i++) {
-        const v = cells[i];
-        if (v == null || String(v).trim() === '') continue;
-        if (looksLikeFigure(String(v))) return false;
-        populated.push(i);
+function isHeadingByColumnCoverageAnalyzer(row: TableRow, rows: TableRow[], width: number): boolean {
+    if (width < MIN_HEADING_COVERAGE_COLUMNS) return false;
+    const others = rows.filter((r) => r !== row);
+    if (others.length < MIN_HEADING_EVIDENCE_ROWS) return false;
+    const filled = (r: TableRow, c: number): boolean => String((r.cells ?? [])[c] ?? '').trim() !== '';
+
+    for (let c = 0; c < width; c++) {
+        if (filled(row, c) && looksLikeFigure(String((row.cells ?? [])[c]))) return false;
     }
-    if (populated.length < 2) return false;
-    for (const i of populated) {
-        let figures = 0;
-        let seen = 0;
-        for (const other of rows) {
-            if (other === row) continue;
-            const v = (other.cells ?? [])[i];
-            if (v == null || String(v).trim() === '') continue;
-            seen++;
-            if (looksLikeFigure(String(v))) figures++;
+    const dataColumns: number[] = [];
+    for (let c = 0; c < width; c++) {
+        if (others.filter((r) => filled(r, c)).length >= others.length * MIN_COLUMN_FILL_RATIO) {
+            dataColumns.push(c);
         }
-        if (seen >= KIND_EVIDENCE_ROWS_ANALYZER && figures === seen) return true;
     }
-    return false;
+    if (dataColumns.length < MIN_HEADING_COVERAGE_COLUMNS) return false;
+    if (!dataColumns.every((c) => filled(row, c))) return false;
+    return dataColumns.some((c) => {
+        const values = others.map((r) => (r.cells ?? [])[c]).filter((v) => String(v ?? '').trim() !== '');
+        return values.length >= MIN_HEADING_EVIDENCE_ROWS && values.every((v) => looksLikeFigure(String(v)));
+    });
 }
 
 /** A number, a currency amount, a percentage or a date — anything a heading would not be. */

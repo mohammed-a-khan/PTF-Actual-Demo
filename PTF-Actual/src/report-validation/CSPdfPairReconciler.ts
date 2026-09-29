@@ -1515,15 +1515,69 @@ function withoutStrayHeadingRows(rows: TableRow[], columns: AnalyzedSection['col
     const width = (columns ?? []).length;
     if (width === 0) return rows;
     return rows.filter(
-        (r, i) =>
+        (r) =>
             !isReconcileRowJustHeaderText(r.cells, columns) &&
-            !(canBeStrayHeadingRecon(i, rows.length) && isRowLabelsWhereFiguresBelong(r, rows, width)),
+            !isHeadingByColumnCoverage(r, rows, width),
     );
 }
 
-function canBeStrayHeadingRecon(index: number, total: number): boolean {
-    return index === 0 || index === total - 1;
+/**
+ * Is this row the table's heading, rather than one of its rows?
+ *
+ * A heading that fails to resolve stays among the rows, and none of the obvious signals finds
+ * it: its labels are not column names anywhere when BOTH engines squeeze the grid into another
+ * table's bands, and its position is not fixed — it sits after whatever preamble the section
+ * carries, so it is neither the first row nor the last.
+ *
+ * What holds in every case is the shape. A heading names every column the table uses, and names
+ * nothing else: it covers each column the other rows fill, and carries no figure at all. A group
+ * label is the opposite — it names ONE thing and leaves the rest of the row empty — so it is
+ * kept, which matters because deleting it would lose real content.
+ *
+ * The table must also be one with figures in it, so that a genuinely textual grid is never
+ * judged by this at all.
+ */
+function isHeadingByColumnCoverage(row: TableRow, rows: TableRow[], width: number): boolean {
+    if (width < MIN_HEADING_COVERAGE_COLUMNS) return false;
+    const others = rows.filter((r) => r !== row);
+    if (others.length < MIN_HEADING_EVIDENCE_ROWS) return false;
+
+    const filled = (r: TableRow, c: number): boolean => String((r.cells ?? [])[c] ?? '').trim() !== '';
+    const isFigure = (v: unknown): boolean => {
+        const t = String(v ?? '').trim();
+        return t.length > 0 && (isNumericLike(t) || isDateLike(t));
+    };
+
+    // Nothing in a heading is a value.
+    for (let c = 0; c < width; c++) {
+        if (!filled(row, c)) continue;
+        if (isFigure((row.cells ?? [])[c])) return false;
+    }
+
+    // The columns the rest of the table actually uses.
+    const dataColumns: number[] = [];
+    for (let c = 0; c < width; c++) {
+        const count = others.filter((r) => filled(r, c)).length;
+        if (count >= others.length * MIN_COLUMN_FILL_RATIO) dataColumns.push(c);
+    }
+    if (dataColumns.length < MIN_HEADING_COVERAGE_COLUMNS) return false;
+
+    // A heading names every one of them; a group label names one and leaves the rest blank.
+    if (!dataColumns.every((c) => filled(row, c))) return false;
+
+    // …and this is a table of figures, not prose.
+    return dataColumns.some((c) => {
+        const values = others.map((r) => (r.cells ?? [])[c]).filter((v) => String(v ?? '').trim() !== '');
+        return values.length >= MIN_HEADING_EVIDENCE_ROWS && values.every(isFigure);
+    });
 }
+
+/** Fewest columns a table needs before "covers every column" means anything. */
+const MIN_HEADING_COVERAGE_COLUMNS = 2;
+/** Fewest other rows needed before they can establish what a column holds. */
+const MIN_HEADING_EVIDENCE_ROWS = 3;
+/** Share of rows that must fill a column before it counts as one the table uses. */
+const MIN_COLUMN_FILL_RATIO = 0.6;
 
 /**
  * Is this row the table's heading, rather than one of its rows?

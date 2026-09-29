@@ -181,6 +181,17 @@ export interface AnalyzedSection {
      * be compared. Empty for an ordinary grid. See `RequiredSectionSpec.summaryFields`.
      */
     preambleText?: string[];
+    /**
+     * The text of every run the analyzer read as a column heading for this section, whether or
+     * not it became a column name.
+     *
+     * A heading that fails to resolve is still a heading, and it lands in the rows as though it
+     * were data. Downstream that is indistinguishable from content — the labels are not column
+     * names anywhere to compare them against, which is exactly the case where a grid is squeezed
+     * into a narrower table's bands and NEITHER side resolves them. Keeping what the analyzer
+     * already knew is what makes those rows recognisable later.
+     */
+    headerTexts?: string[];
     /** Chart regions detected within this section — kept for debug/evidence; NOT used for data compare. */
     charts: ChartRegion[];
     /**
