@@ -722,6 +722,9 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
     // Left out by the caller's own list. Named in the result so a section missing from the
     // comparison is never a silent omission — the commonest way a parity run passes vacuously.
     const notSelected: string[] = [];
+    // Which `compareSections` selectors actually ended up reconciled. A selector that never does
+    // is a failure, not a filter miss: see the post-loop check below.
+    const satisfiedSelectors = new Set<string>();
     const ignoreColumns = new Set((opts.rules.ignoreColumns ?? []).map((s) => s.toLowerCase()));
 
     // Section resolution: rule name (canonical) → { candTitle?, refTitle? }
@@ -824,6 +827,9 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
             }
         }
         sectionsCompared++;
+        for (const want of compareOnly) {
+            if (selectorMatchesTitle(canonicalSectionName, want)) satisfiedSelectors.add(want);
+        }
 
         const refSec = refSections.get(refTitle);
         if (!candSec || !refSec) continue;
@@ -1062,6 +1068,48 @@ export function reconcileAnalyzedReports(opts: ReconcileInternalOpts): Reconcile
     // and vice versa (for auto-discover helpers to seed the JSON).
     const unmatched = computeUnmatched(candSections, refSections, sectionResolution, opts.rules.sections, threshold);
 
+    // `compareSections` is an assertion, not just a filter. Auto-generated rules only exist for
+    // sections whose titles matched on BOTH sides, so a section printed without its heading on one
+    // side never becomes a rule — and before this check it then vanished from the run with nothing
+    // but a debug line. The caller named it, so not comparing it is a finding: exactly the case
+    // where the data is present on both sides but one engine omitted the section heading.
+    for (const want of compareOnly) {
+        if (satisfiedSelectors.has(want)) continue;
+        const printed = (opts.rules.compareSections ?? [])
+            .find((raw) => normaliseSectionSelector(raw) === want) ?? want;
+        const onCandidate = Array.from(candSections.keys()).filter((t) => selectorMatchesTitle(t, want));
+        const onReference = Array.from(refSections.keys()).filter((t) => selectorMatchesTitle(t, want));
+        const ruleExists = Object.keys(opts.rules.sections)
+            .some((name) => selectorMatchesTitle(name, want));
+        const where = `candidate titles matching: ${onCandidate.length > 0 ? onCandidate.map((t) => `"${t}"`).join(', ') : 'none'}; ` +
+            `reference titles matching: ${onReference.length > 0 ? onReference.map((t) => `"${t}"`).join(', ') : 'none'}`;
+        const diag = ruleExists
+            ? 'a rule exists for it but neither side resolved to a comparable table'
+            : 'no rule was generated for it, meaning its title was not recognised on at least one side ' +
+              '(a section whose heading one engine does not print lands under a different or anonymous title)';
+        if (onReference.length > 0 && onCandidate.length === 0) {
+            findings.push({
+                kind: 'SECTION_MISSING_CANDIDATE',
+                section: printed,
+                reason: `Section "${printed}" was requested via compareSections but was never compared — ` +
+                    `found on reference only. ${diag}. ${where}`,
+            });
+        } else if (onCandidate.length > 0 && onReference.length === 0) {
+            findings.push({
+                kind: 'SECTION_MISSING_REFERENCE',
+                section: printed,
+                reason: `Section "${printed}" was requested via compareSections but was never compared — ` +
+                    `found on candidate only. ${diag}. ${where}`,
+            });
+        } else {
+            findings.push({
+                kind: 'SECTION_MISSING_CANDIDATE',
+                section: printed,
+                reason: `Section "${printed}" was requested via compareSections but was never compared — ` +
+                    `${diag}. ${where}`,
+            });
+        }
+    }
     const summary = {
         candidatePdf: opts.candidatePdf,
         referencePdf: opts.referencePdf,
@@ -2508,16 +2556,19 @@ function normaliseSectionSelector(s: string): string {
  * A sub-table published under `<title> :: <label>` belongs to its section and is accepted with it.
  */
 function sectionIsSelected(title: string, selectors: string[]): boolean {
+    return selectors.some((want) => selectorMatchesTitle(title, want));
+}
+
+/** Does one already-normalised selector match this section title? See `sectionIsSelected`. */
+export function selectorMatchesTitle(title: string, want: string): boolean {
     const norm = normaliseSectionSelector(title);
     const base = normaliseSectionSelector(norm.split('::')[0]);
-    for (const want of selectors) {
-        if (norm === want || base === want) return true;
-        for (const candidate of [norm, base]) {
-            if (!candidate.startsWith(want)) continue;
-            const tail = candidate.slice(want.length).trim();
-            // Only a short code may follow — enough for "1D" or "(B)", not another section name.
-            if (tail.length > 0 && tail.length <= 4 && !/[a-z]{3}/.test(tail)) return true;
-        }
+    if (norm === want || base === want) return true;
+    for (const candidate of [norm, base]) {
+        if (!candidate.startsWith(want)) continue;
+        const tail = candidate.slice(want.length).trim();
+        // Only a short code may follow — enough for "1D" or "(B)", not another section name.
+        if (tail.length > 0 && tail.length <= 4 && !/[a-z]{3}/.test(tail)) return true;
     }
     return false;
 }
