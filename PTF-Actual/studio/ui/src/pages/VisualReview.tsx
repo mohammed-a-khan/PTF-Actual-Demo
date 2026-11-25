@@ -215,7 +215,7 @@ function VisualTab() {
                         ]} />}
             </div>
             <Drawer open={!!current} onClose={() => setOpen(null)} width={980} destroyOnClose
-                title={current && <span style={{ display: 'flex', alignItems: 'center', minWidth: 0 }}><Typography.Text className="mono" ellipsis={{ tooltip: current.name.replace(/_region_.*/, '') }} style={{ minWidth: 0 }}>{current.name.replace(/_region_.*/, '')}</Typography.Text>{current.region && <Tag bordered={false} style={{ marginInlineStart: 8 }}>region</Tag>}</span>}>
+                title={current && <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}><Typography.Text className="mono" ellipsis={{ tooltip: current.name.replace(/_region_.*/, '') }} style={{ minWidth: 0 }}>{current.name.replace(/_region_.*/, '')}</Typography.Text>{current.region && <Tag bordered={false} style={{ marginInlineStart: 8 }}>region</Tag>}</span>}>
                 {current && <VisualDetail v={current} onDone={() => { setOpen(null); void load(); }} />}
             </Drawer>
         </div>

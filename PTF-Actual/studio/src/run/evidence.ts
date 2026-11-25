@@ -194,7 +194,15 @@ export function projectPlaywrightCli(repoRoot: string): string | null {
         ]),
     ];
     for (const c of cands) {
-        try { if (fs.statSync(c).isFile() && inside(fs.realpathSync(repoRoot), fs.realpathSync(c))) return c; } catch { /* next */ }
+        try {
+            if (!fs.statSync(c).isFile()) continue;
+            const real = fs.realpathSync(c);
+            if (inside(fs.realpathSync(repoRoot), real)) return c;
+            // The project's node_modules may link elsewhere (pnpm, a shared install): accepted when it is
+            // really Playwright's command line (its package says so), never any other program.
+            const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(real), 'package.json'), 'utf8')) as { name?: string };
+            if (path.basename(real) === 'cli.js' && (pkg.name === 'playwright-core' || pkg.name === 'playwright')) return c;
+        } catch { /* next */ }
     }
     return null;
 }

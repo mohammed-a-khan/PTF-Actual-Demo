@@ -121,7 +121,11 @@ export function Runs() {
             await followRun(id, 0, (l) => { lines.push(l); if (!pending) { pending = true; requestAnimationFrame(flush); } },
                 (r) => { setRuns((rs) => rs.some((x) => x.id === r.id) ? rs.map((x) => x.id === r.id ? r : x) : [r, ...rs]); }, ctrl.signal);
             flush();
-        } catch (e) { if (!ctrl.signal.aborted) message.error(errText(e)); }
+        } catch (e) {
+            if (ctrl.signal.aborted) return;
+            if ((e as { status?: number }).status === 404) { message.warning('That run is not in this Studio (it was removed, or it belongs to another repository).'); navigate(['runs'], true); }
+            else message.error(errText(e));
+        }
     }, [message]);
     React.useEffect(() => () => follow.current?.abort(), []);
 
@@ -198,8 +202,9 @@ export function Runs() {
                 onPressEnter={(e) => (e.currentTarget.closest('.ant-modal-content')?.querySelector('.ant-modal-confirm-btns .ant-btn-primary') as HTMLButtonElement | null)?.click()} /></Space>,
             // The dialog closes itself only when saved (a missing name or a declined replace keeps it open, without errors).
             onOk: (close: () => void) => { void (async () => {
-                if (!name.trim()) { message.warning('Give it a name.'); return; }
-                if (configs.some((c) => c.name.toLowerCase() === name.trim().toLowerCase()) && !window.confirm(`A saved run named "${name.trim()}" exists. Replace it?`)) return;
+                if (!name.trim()) { message.warning({ content: 'Give it a name.', key: 'save-run-name' }); return; }
+                if (configs.some((c) => c.name.toLowerCase() === name.trim().toLowerCase())
+                    && !(await new Promise<boolean>((ok) => modal.confirm({ title: `A saved run named "${name.trim()}" exists`, content: 'Replace it with this run?', okText: 'Replace', onOk: () => ok(true), onCancel: () => ok(false) })))) return;
                 const next = [...configs.filter((c) => c.name.toLowerCase() !== name.trim().toLowerCase()), { name: name.trim(), request: request() }];
                 if (saving) return; // a double click saves once
                 saving = true; inst.update({ okButtonProps: { loading: true } });

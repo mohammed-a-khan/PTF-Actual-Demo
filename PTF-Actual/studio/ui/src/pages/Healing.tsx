@@ -9,6 +9,7 @@ import { CheckOutlined, CodeOutlined, EyeInvisibleOutlined, PlayCircleOutlined, 
 import { api, HealGroup, HealPreview, HealStatus } from '../api';
 import { errText, loadRunTarget, useStudio } from '../state';
 import { navigate, useRoute } from '../route';
+import { useKept } from '../kept';
 import '../styles-tests.css';
 
 const STATUS: Record<HealStatus, { label: string; color: string; about: string }> = {
@@ -42,11 +43,11 @@ export function Healing() {
     const { env: disc } = useStudio();
     const route = useRoute();
     const here = route[0] === 'healing';
-    const [project, setProject] = React.useState<string | undefined>();
+    const [project, setProject] = useKept<string | undefined>('healing.project', undefined);
     const [data, setData] = React.useState<{ groups: HealGroup[]; project: string | null; projects: string[] } | null>(null);
     const [loading, setLoading] = React.useState(false);
-    const [status, setStatus] = React.useState<HealStatus | 'all'>('review');
-    const [open, setOpen] = React.useState<string | null>(null);
+    const [status, setStatus] = useKept<HealStatus | 'all'>('healing.status', 'review');
+    const [open, setOpen] = useKept<string | null>('healing.open', null);
     const [choice, setChoice] = React.useState<string | null>(null);
     const [preview, setPreview] = React.useState<HealPreview | { error: string } | null>(null);
     const [busy, setBusy] = React.useState(false);

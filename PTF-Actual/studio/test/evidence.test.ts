@@ -150,3 +150,17 @@ test('evidence: a video (no time in its name) goes with the scenario that ran wh
     assert.equal(ev.scenarios[0].files.some((f) => f.kind === 'video'), true);
     assert.equal(ev.scenarios[1].files.some((f) => f.kind === 'video'), false);
 });
+
+test("a node_modules linked outside the project (pnpm, a shared install) is used when it really is Playwright's CLI", () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-pw-'));
+    const store = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-pw-store-'));
+    fs.mkdirSync(path.join(store, 'playwright-core'), { recursive: true });
+    fs.writeFileSync(path.join(store, 'playwright-core', 'cli.js'), '');
+    fs.writeFileSync(path.join(store, 'playwright-core', 'package.json'), JSON.stringify({ name: 'playwright-core' }));
+    fs.symlinkSync(store, path.join(repo, 'node_modules'));
+    assert.equal(projectPlaywrightCli(repo), path.join(repo, 'node_modules', 'playwright-core', 'cli.js'));
+    // Something else named cli.js behind the link is not run.
+    fs.writeFileSync(path.join(store, 'playwright-core', 'package.json'), JSON.stringify({ name: 'not-playwright' }));
+    assert.equal(projectPlaywrightCli(repo), null);
+    fs.rmSync(repo, { recursive: true, force: true }); fs.rmSync(store, { recursive: true, force: true });
+});

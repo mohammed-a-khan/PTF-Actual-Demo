@@ -10,6 +10,7 @@ import { api, EvidenceFile, ScenarioEvidence } from '../api';
 import { errText } from '../state';
 import { Ansi } from './Ansi';
 import { StepsView } from './RunTree';
+import { useKept } from '../kept';
 import '../styles-tests.css';
 
 /** URL of an evidence file: a local run's report route, or `base` (pipeline results) when given. */
@@ -38,6 +39,7 @@ export function TraceButtons({ runId, reportKey, f, hasPlaywright, base }: { run
 }
 
 export function ScenarioEvidenceView({ runId, reportKey, ev, hasPlaywright, base }: { runId: string; reportKey: string; ev: ScenarioEvidence; hasPlaywright: boolean; base?: string }) {
+    const [evTab, setEvTab] = useKept<string>('evidence.tab', '');
     const traces = ev.files.filter((f) => f.kind === 'trace');
     const videos = ev.files.filter((f) => f.kind === 'video');
     const shot = ev.failedStep?.screenshot;
@@ -100,7 +102,8 @@ export function ScenarioEvidenceView({ runId, reportKey, ev, hasPlaywright, base
             No steps, error, screenshot, trace or video were recorded for this scenario.
         </Typography.Text></Tooltip>;
     }
-    return <div className="evidence"><Tabs size="small" items={items} defaultActiveKey={items[0].key} destroyInactiveTabPane={false} /></div>;
+    const active = items.some((x) => x.key === evTab) ? evTab : items[0].key;
+    return <div className="evidence"><Tabs size="small" items={items} activeKey={active} onChange={setEvTab} destroyInactiveTabPane={false} /></div>;
 }
 
 /** Everything the run saved that is not shown with a scenario (videos, console logs, other traces). */

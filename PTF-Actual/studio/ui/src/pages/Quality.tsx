@@ -11,6 +11,7 @@ import { errText, loadRunTarget, useStudio } from '../state';
 import { navigate, useRoute } from '../route';
 import { LineChart } from '../components/LineChart';
 import { TeamTrends } from '../components/TeamTrends';
+import { useKept } from '../kept';
 import '../styles-tests.css';
 
 const CLASS: Record<QualityClass, { label: string; color: string; about: string }> = {
@@ -177,14 +178,14 @@ export function Quality() {
     const route = useRoute();
     const here = route[0] === 'quality';
     const tab = (['overview', 'scenarios', 'causes', 'quarantine', 'team'].includes(route[1] ?? '') ? route[1] : 'overview') as string;
-    const [windowSize, setWindowSize] = React.useState(30);
-    const [project, setProject] = React.useState<string | undefined>();
+    const [windowSize, setWindowSize] = useKept('quality.window', 30);
+    const [project, setProject] = useKept<string | undefined>('quality.project', undefined);
     const [data, setData] = React.useState<QualityReport | null>(null);
     const [loading, setLoading] = React.useState(false);
-    const [cls, setCls] = React.useState<QualityClass | 'all'>('all');
-    const [onlyQuarantined, setOnlyQuarantined] = React.useState(false);
-    const [find, setFind] = React.useState('');
-    const [open, setOpen] = React.useState<string | null>(null);
+    const [cls, setCls] = useKept<QualityClass | 'all'>('quality.class', 'all');
+    const [onlyQuarantined, setOnlyQuarantined] = useKept('quality.quarantined', false);
+    const [find, setFind] = useKept('quality.find', '');
+    const [open, setOpen] = useKept<string | null>('quality.open', null);
     const [selected, setSelected] = React.useState<string[]>([]);
     const [gateOpen, setGateOpen] = React.useState(false);
     // The bugs of the causes: named in the triage, or carrying a cause's tag (filed by a run or here).
@@ -443,7 +444,7 @@ export function Quality() {
                 { key: 'scenarios', label: <>Scenarios <span className="q-count">{data.scenarios.length}</span></>, children: scenarios },
                 { key: 'causes', label: <>Failure causes <span className="q-count">{data.groups.length}</span></>, children: causes },
                 { key: 'quarantine', label: <>Quarantine <span className="q-count">{data.counts.quarantined}</span></>, children: quarantineTab },
-                { key: 'team', label: 'Team (Azure DevOps)', children: tab === 'team' ? <TeamTrends project={data.project ?? undefined} localScenario={(n) => { const sc = data.scenarios.find((x) => x.name === n && x.file); return sc ? { file: sc.file!, line: sc.line } : undefined; }} /> : null },
+                { key: 'team', label: 'Team (Azure DevOps)', children: tab === 'team' ? <div style={{ padding: 12 }}><TeamTrends project={data.project ?? undefined} localScenario={(n) => { const sc = data.scenarios.find((x) => x.name === n && x.file); return sc ? { file: sc.file!, line: sc.line } : undefined; }} /></div> : null },
             ]} />
 
             <TriageModal g={triaging} onClose={() => setTriaging(null)} onSaved={() => { setTriaging(null); void load(); }} />
@@ -499,18 +500,19 @@ function GateModal({ open, value, onClose, onSaved }: { open: boolean; value: Ga
     React.useEffect(() => { if (open) form.setFieldsValue({ ...value, limitFlaky: value.maxFlaky !== null, maxFlaky: value.maxFlaky ?? 0 }); }, [open, value, form]);
     const limit = Form.useWatch('limitFlaky', form);
     const [saving, setSaving] = React.useState(false);
-    return (
-        <Modal open={open} title="Quality gate" okText="Save" onCancel={onClose} destroyOnClose
-            okButtonProps={{ loading: saving }}
-            onOk={async () => {
-                let v: GateSettings & { limitFlaky: boolean };
+    const saveGate = async () => {
+        let v: GateSettings & { limitFlaky: boolean };
                 try { v = await form.validateFields(); } catch { return; }
                 if (saving) return;
                 setSaving(true);
                 try { await api.qualityGate({ minPassRate: v.minPassRate, noNewFailures: v.noNewFailures, ignoreQuarantined: v.ignoreQuarantined, maxFlaky: v.limitFlaky ? v.maxFlaky ?? 0 : null }); message.success('Gate saved.'); onSaved(); } catch (e) { message.error(errText(e)); } finally { setSaving(false); }
-            }}>
+    };
+    return (
+        <Modal open={open} title="Quality gate" okText="Save" onCancel={onClose} destroyOnClose
+            okButtonProps={{ loading: saving }}
+            onOk={() => void saveGate()}>
             <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 10 }}>Checked on the latest run. Kept on this computer for this repository.</Typography.Text>
-            <Form form={form} layout="vertical" requiredMark={false}>
+            <Form form={form} layout="vertical" requiredMark={false} onKeyDown={(e) => { if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT') { e.preventDefault(); void saveGate(); } }}>
                 <Row gutter={16}>
                     <Col span={12}><Form.Item name="minPassRate" label="Pass rate at least" rules={[{ required: true, message: 'Give a pass rate (0–100)' }]}><InputNumber min={0} max={100} precision={0} addonAfter="%" style={{ width: '100%' }} /></Form.Item></Col>
                     <Col span={12}><Form.Item name="noNewFailures" label="No new failures" valuePropName="checked"><Switch size="small" /></Form.Item></Col>

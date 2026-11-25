@@ -4,6 +4,8 @@ import { Alert, App, Button, Card, Col, Empty, Form, Row, Select, Space, Spin, T
 import { CheckCircleFilled, CloseCircleFilled, ExclamationCircleFilled, InfoCircleFilled, ReloadOutlined } from '@ant-design/icons';
 import { api, DoctorDef } from '../api';
 import { errText } from '../state';
+import { useKept } from '../kept';
+import { navigate, useRoute } from '../route';
 import '../styles-tests.css';
 
 const ICON = { ok: <CheckCircleFilled style={{ color: '#2e7d32' }} />, warning: <ExclamationCircleFilled style={{ color: '#d48806' }} />, error: <CloseCircleFilled style={{ color: '#c62828' }} />, info: <InfoCircleFilled style={{ color: '#1677ff' }} /> };
@@ -42,9 +44,12 @@ export function Health() {
     const [err, setErr] = React.useState<string | null>(null);
     const [loading, setLoading] = React.useState(false);
     const [fixing, setFixing] = React.useState<string | null>(null);
-    const [target, setTarget] = React.useState<{ project?: string; env?: string }>({});
-    const [tab, setTabRaw] = React.useState<string>(() => { try { return localStorage.getItem(TAB_KEY) ?? 'problems'; } catch { return 'problems'; } });
-    const setTab = (k: string) => { setTabRaw(k); try { localStorage.setItem(TAB_KEY, k); } catch { /* private mode */ } };
+    const [target, setTarget] = useKept<{ project?: string; env?: string }>('health.target', {});
+    // The tab is in the address (#/health/<tab>), so a link opens it; without one, the tab used last.
+    const route = useRoute();
+    const [savedTab, setTabRaw] = React.useState<string>(() => { try { return localStorage.getItem(TAB_KEY) ?? 'problems'; } catch { return 'problems'; } });
+    const tab = route[0] === 'health' && route[1] ? route[1] : savedTab;
+    const setTab = (k: string) => { setTabRaw(k); try { localStorage.setItem(TAB_KEY, k); } catch { /* private mode */ } navigate(['health', k], true); };
     const load = React.useCallback((t: { project?: string; env?: string }) => {
         setLoading(true); setErr(null);
         api.doctor(t).then((r) => { setD(r); setTarget({ project: r.project, env: r.env }); }).catch((e) => setErr(errText(e))).finally(() => setLoading(false));
@@ -72,7 +77,7 @@ export function Health() {
                 : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Everything a run needs is ready." /> },
         ...groups.map((g) => {
             const list = checks.filter((c) => c.group === g);
-            return { key: groupKey(g), label: <span>{g}{count(list)}</span>, children: list.map((c) => <CheckRow key={c.id} c={c} fixing={fixing} onFix={(a) => void fix(a)} />) };
+            return { key: groupKey(g), label: <span title={`${list.filter((c) => c.level === 'error' || c.level === 'warning').length} of ${list.length} check${list.length === 1 ? '' : 's'} need attention`}>{g}{count(list)}</span>, children: list.map((c) => <CheckRow key={c.id} c={c} fixing={fixing} onFix={(a) => void fix(a)} />) };
         }),
     ];
     const active = items.some((i) => i.key === tab) ? tab : 'problems';

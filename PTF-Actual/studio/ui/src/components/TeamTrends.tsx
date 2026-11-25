@@ -9,6 +9,7 @@ import { CodeOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api, TeamTrends as Trends, TeamTrendTest } from '../api';
 import { errText } from '../state';
 import { navigate } from '../route';
+import { AdoNotSetUp, isAdoNotSetUp } from '../datagit-common';
 import { LineChart } from './LineChart';
 
 const pct = (n: number | null | undefined) => (n === null || n === undefined ? '–' : `${Math.round(n * 1000) / 10}%`);
@@ -45,7 +46,9 @@ export function TeamTrends({ project, localScenario }: { project?: string; local
                 <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()} aria-label="Refresh team trends" />
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>From Azure DevOps Analytics: every result published by pipelines and other people.</Typography.Text>
             </Space>
-            {error && <Alert type="error" showIcon message="Could not read Azure DevOps Analytics" description={error} />}
+            {error && (isAdoNotSetUp(error)
+                ? <AdoNotSetUp what="Team results" error={error} onRetry={() => void load()} compact />
+                : <Alert type="error" showIcon message="Could not read Azure DevOps Analytics" description={error} />)}
             {loading && !data && <Spin style={{ margin: 24 }} />}
             {data && <>
                 <Alert type={STATUS[data.status]} showIcon message={<b>{data.status === 'green' ? 'Healthy' : data.status === 'amber' ? 'Needs attention' : data.status === 'red' ? 'Not healthy' : 'No results'}</b>} description={data.summary} />

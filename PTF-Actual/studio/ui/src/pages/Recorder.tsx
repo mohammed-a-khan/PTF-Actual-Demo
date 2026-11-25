@@ -150,7 +150,7 @@ export function Recorder() {
         if (data.file) api.recDataFile(data.file, data.sheet, data.path).then(setDataInfo).catch((e) => setErr(errText(e)));
     }, [data.file, data.sheet, data.path]); // eslint-disable-line react-hooks/exhaustive-deps
     React.useEffect(() => {
-        if (!request) { setPreview(null); return; }
+        if (!request || !request.name?.trim()) { setPreview(null); return; }
         const t = setTimeout(() => { api.recPreview(request).then((p) => { setPreview(p); setErr(null); }).catch((e) => { setErr(errText(e)); setPreview(null); }); }, 300);
         return () => clearTimeout(t);
     }, [request]);
@@ -222,6 +222,32 @@ export function Recorder() {
     const remove = (r: RecordingInfo) => modal.confirm({ title: 'Delete this recording?', content: 'The recorded script is removed (tests saved from it stay).', okText: 'Delete', okButtonProps: { danger: true },
         onOk: (close) => { void (async () => { try { await api.recDelete(r.id); if (cur?.id === r.id) setCur(null); close(); await refresh(); } catch (e) { message.error(errText(e)); } })(); } });
 
+    // On a narrow screen the value goes under the step (a column of its own would leave the step no room).
+    const narrowReview = window.innerWidth < 1200;
+    const valueCell = (r: RecPreview['rows'][number]) => ['click', 'dblclick', 'check', 'uncheck'].includes(r.kind)
+                                    ? <Tooltip title="For a dialog or banner that appears now and then: the test waits up to 5 s for it, and goes on without it">
+                                        <Checkbox checked={optional.includes(r.index)} onChange={(e) => setOptional(e.target.checked ? [...optional, r.index] : optional.filter((x) => x !== r.index))}>Only if shown</Checkbox></Tooltip>
+                                    : r.kind === 'remember' ? <Tag bordered={false} color="geekblue" className="mono">remembered as {r.value}</Tag>
+                                    : r.remembered ? <Tooltip title="The value remembered earlier in the scenario (read from the page in each run)"><Tag bordered={false} color="geekblue" className="mono">remembered {r.remembered}</Tag></Tooltip>
+                                    : r.testData ? <Tooltip title="Read in every run (test data sources: a database query or an API request)"><Tag bordered={false} color="cyan" className="mono">{r.testData}</Tag></Tooltip> : r.mode === undefined ? <span className="mono">{r.value}</span> : <Space size={4} wrap>
+                                    <span className="mono" style={{ maxWidth: 110, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' }} title={r.sensitive ? undefined : r.value}>{r.value}</span>
+                                    <Select size="small" style={{ width: 90 }} value={r.mode} aria-label="Value as" onChange={(m) => setValues({ ...values, [r.index]: { ...values[r.index], mode: m } })}
+                                        options={[{ value: 'data', label: 'Data' }, { value: 'fixed', label: 'Fixed' }, { value: 'secret', label: 'Secret' }, ...(r.kind === 'fill' ? [{ value: 'unique', label: 'Unique' }] : []), ...(r.dateLike || r.mode === 'date' ? [{ value: 'date', label: 'Date' }] : [])]} />
+                                    {r.date && <>
+                                        <Tooltip title='When, from the day of the run: "today", "today + 7 days", "today - 1 month", "today + 2 weeks"'>
+                                            <Typography.Text code editable={{ tooltip: 'When', onChange: (v) => { if (v.trim()) setValues({ ...values, [r.index]: { ...values[r.index], mode: 'date', when: v.trim() } }); } }}>{r.date.when}</Typography.Text>
+                                        </Tooltip>
+                                        <Select size="small" style={{ width: 110 }} aria-label="Date format" value={r.date.format} onChange={(format) => setValues({ ...values, [r.index]: { ...values[r.index], mode: 'date', format } })}
+                                            options={[...new Set([r.date.format, 'dd/MM/yyyy', 'MM/dd/yyyy', 'yyyy-MM-dd', 'dd-MMM-yyyy', 'd MMM yyyy', 'MMM d, yyyy', 'dd.MM.yyyy'])].map((f) => ({ value: f, label: f }))} />
+                                    </>}
+                                    {r.column && (dataInfo?.columns.length
+                                        // A column of the chosen data file, or a new one.
+                                        ? <AutoComplete size="small" style={{ width: 130 }} className="mono" aria-label="Data column" defaultValue={r.column} key={`${r.index}-${r.column}`}
+                                            options={dataInfo.columns.map((c) => ({ value: c }))} filterOption={(q, o) => String(o?.value ?? '').toLowerCase().includes(q.toLowerCase())}
+                                            onSelect={(v: string) => setValues({ ...values, [r.index]: { ...values[r.index], mode: r.mode, column: v } })}
+                                            onBlur={(e) => { const v = (e.target as HTMLInputElement).value.trim(); if (v && v !== r.column) setValues({ ...values, [r.index]: { ...values[r.index], mode: r.mode, column: v } }); }} />
+                                        : <Typography.Text code editable={{ tooltip: 'Data column', onChange: (v) => { if (v.trim()) setValues({ ...values, [r.index]: { ...values[r.index], mode: r.mode, column: v.trim() } }); } }}>{r.column}</Typography.Text>)}
+                                </Space>;
     const pageStarts = React.useMemo(() => {
         const out: Record<number, string> = {};
         preview?.rows.forEach((a, i) => { if (i === 0 || a.page !== preview.rows[i - 1].page) out[i] = a.page; });
@@ -320,7 +346,7 @@ export function Recorder() {
                         </Typography.Text>}
                         {!!preview?.warnings.length && <Alert type="warning" showIcon message={<ul style={{ margin: 0, paddingLeft: 18 }}>{preview.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>} />}
                         {!cur.script?.trim() && cur.state === 'recording' && <Alert type="info" showIcon message="Waiting for the first action in the recorded browser…" />}
-                        {preview && <Table size="small" pagination={false} rowKey={(r) => String(r.index)} dataSource={preview.rows} scroll={{ x: (window.innerWidth >= 1200 ? 860 : 560), y: 'calc(100vh - var(--chrome) - 330px)' }} tableLayout="fixed"
+                        {preview && <Table size="small" pagination={false} rowKey={(r) => String(r.index)} dataSource={preview.rows} scroll={{ x: (window.innerWidth >= 1200 ? 860 : 420), y: 'calc(100vh - var(--chrome) - 330px)' }} tableLayout="fixed"
                             rowSelection={{ columnWidth: 32, selectedRowKeys: picked.map(String), onChange: (keys) => setPicked(keys.map(Number).sort((a, b) => a - b)), getCheckboxProps: (r) => ({ disabled: !!r.block || !!r.signIn, 'aria-label': `Step ${r.index + 1}` }) }}
                             columns={[
                                 { title: '#', width: 86, render: (_v, r) => <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><span className="item-id">{r.index + 1}</span>
@@ -340,31 +366,8 @@ export function Recorder() {
                                         {r.elementReused && <Tag bordered={false} color="blue" style={{ marginLeft: 4 }}>existing</Tag>}</Tooltip>
                                         {!!r.locators?.length && <LocatorPick row={r} onPick={(l) => setLocators({ ...locators, [r.elementKey!]: l })} />}</>
                                     : <Typography.Text type="secondary">{KIND_LABEL[r.kind] ?? r.kind}</Typography.Text> },
-                                { title: 'Step', render: (_v, r) => <span><span className="mono" style={{ fontSize: 12 }}>{r.line}</span> {r.signIn ? <Tag bordered={false} color="purple">steps 1–{r.index + 1}</Tag> : null}{r.block ? <Tooltip title={`Part of the reusable step "${r.block}"`}><Tag bordered={false} color="geekblue">reusable</Tag></Tooltip> : null}{r.stepReused ? <Tag bordered={false} color="blue">existing step</Tag> : null}</span> },
-                                { title: 'Value', width: 250, fixed: 'right' as const, render: (_v, r) => ['click', 'dblclick', 'check', 'uncheck'].includes(r.kind)
-                                    ? <Tooltip title="For a dialog or banner that appears now and then: the test waits up to 5 s for it, and goes on without it">
-                                        <Checkbox checked={optional.includes(r.index)} onChange={(e) => setOptional(e.target.checked ? [...optional, r.index] : optional.filter((x) => x !== r.index))}>Only if shown</Checkbox></Tooltip>
-                                    : r.kind === 'remember' ? <Tag bordered={false} color="geekblue" className="mono">remembered as {r.value}</Tag>
-                                    : r.remembered ? <Tooltip title="The value remembered earlier in the scenario (read from the page in each run)"><Tag bordered={false} color="geekblue" className="mono">remembered {r.remembered}</Tag></Tooltip>
-                                    : r.testData ? <Tooltip title="Read in every run (test data sources: a database query or an API request)"><Tag bordered={false} color="cyan" className="mono">{r.testData}</Tag></Tooltip> : r.mode === undefined ? <span className="mono">{r.value}</span> : <Space size={4} wrap>
-                                    <span className="mono" style={{ maxWidth: 110, display: 'inline-block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', verticalAlign: 'bottom' }} title={r.sensitive ? undefined : r.value}>{r.value}</span>
-                                    <Select size="small" style={{ width: 90 }} value={r.mode} aria-label="Value as" onChange={(m) => setValues({ ...values, [r.index]: { ...values[r.index], mode: m } })}
-                                        options={[{ value: 'data', label: 'Data' }, { value: 'fixed', label: 'Fixed' }, { value: 'secret', label: 'Secret' }, ...(r.kind === 'fill' ? [{ value: 'unique', label: 'Unique' }] : []), ...(r.dateLike || r.mode === 'date' ? [{ value: 'date', label: 'Date' }] : [])]} />
-                                    {r.date && <>
-                                        <Tooltip title='When, from the day of the run: "today", "today + 7 days", "today - 1 month", "today + 2 weeks"'>
-                                            <Typography.Text code editable={{ tooltip: 'When', onChange: (v) => { if (v.trim()) setValues({ ...values, [r.index]: { ...values[r.index], mode: 'date', when: v.trim() } }); } }}>{r.date.when}</Typography.Text>
-                                        </Tooltip>
-                                        <Select size="small" style={{ width: 110 }} aria-label="Date format" value={r.date.format} onChange={(format) => setValues({ ...values, [r.index]: { ...values[r.index], mode: 'date', format } })}
-                                            options={[...new Set([r.date.format, 'dd/MM/yyyy', 'MM/dd/yyyy', 'yyyy-MM-dd', 'dd-MMM-yyyy', 'd MMM yyyy', 'MMM d, yyyy', 'dd.MM.yyyy'])].map((f) => ({ value: f, label: f }))} />
-                                    </>}
-                                    {r.column && (dataInfo?.columns.length
-                                        // A column of the chosen data file, or a new one.
-                                        ? <AutoComplete size="small" style={{ width: 130 }} className="mono" aria-label="Data column" defaultValue={r.column} key={`${r.index}-${r.column}`}
-                                            options={dataInfo.columns.map((c) => ({ value: c }))} filterOption={(q, o) => String(o?.value ?? '').toLowerCase().includes(q.toLowerCase())}
-                                            onSelect={(v: string) => setValues({ ...values, [r.index]: { ...values[r.index], mode: r.mode, column: v } })}
-                                            onBlur={(e) => { const v = (e.target as HTMLInputElement).value.trim(); if (v && v !== r.column) setValues({ ...values, [r.index]: { ...values[r.index], mode: r.mode, column: v } }); }} />
-                                        : <Typography.Text code editable={{ tooltip: 'Data column', onChange: (v) => { if (v.trim()) setValues({ ...values, [r.index]: { ...values[r.index], mode: r.mode, column: v.trim() } }); } }}>{r.column}</Typography.Text>)}
-                                </Space> },
+                                { title: 'Step', render: (_v, r) => <><span><span className="mono" style={{ fontSize: 12 }}>{r.line}</span> {r.signIn ? <Tag bordered={false} color="purple">steps 1–{r.index + 1}</Tag> : null}{r.block ? <Tooltip title={`Part of the reusable step "${r.block}"`}><Tag bordered={false} color="geekblue">reusable</Tag></Tooltip> : null}{r.stepReused ? <Tag bordered={false} color="blue">existing step</Tag> : null}</span>{narrowReview && <div style={{ marginTop: 4 }}>{valueCell(r)}</div>}</> },
+                                ...(narrowReview ? [] : [{ title: 'Value', width: 250, fixed: 'right' as const, render: (_v: unknown, r: RecPreview['rows'][number]) => valueCell(r) }]),
                             ]} />}
                             </Space>) },
                             { key: 'data', label: 'Test data & sign-in', children: (<Form layout="vertical" size="small" className="tests-rec-form" style={{ maxWidth: 760 }}>

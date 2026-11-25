@@ -15,6 +15,7 @@ import { useUnsaved } from '../unsaved';
 import { errText, loadRunTarget, saveRunTarget, showRun, unsavedFiles, useStudio } from '../state';
 import { CodeEditor, CodeEditorHandle } from '../editor/CodeEditor';
 import { DebugPanel, ExecLocation } from '../components/DebugPanel';
+import { useKept } from '../kept';
 import { langOf } from '../editor/highlight';
 
 /** `content` / `savedContent` always use "\n"; `eol` is the file's own line ending, restored on save. */
@@ -123,7 +124,7 @@ export function Code() {
     const [active, setActive] = React.useState<string | null>(null);
     const [diags, setDiags] = React.useState<Record<string, Diag[]>>({});
     const [reveal, setReveal] = React.useState<{ path: string; line: number; column?: number; nonce: number; soft?: boolean } | null>(null);
-    const [bottom, setBottom] = React.useState<'problems' | 'search' | 'usages' | 'debug'>('problems');
+    const [bottom, setBottom] = useKept<'problems' | 'search' | 'usages' | 'debug'>('code.bottom', 'problems');
     // Breakpoints (saved per repository; a debug run going on gets changes at once) and where a debug run is paused.
     const [breakpoints, setBreakpoints] = React.useState<Breakpoint[]>([]);
     const [exec, setExec] = React.useState<ExecLocation | null>(null);
@@ -196,7 +197,12 @@ export function Code() {
                 const f = await api.readFile(path);
                 const d = fromDisk(f.content);
                 setTabs((ts) => ts.some((t) => t.path === path) ? ts : [...ts, { path, content: d.content, savedContent: d.content, hash: f.hash, binary: f.binary, eol: d.eol }]);
-            } catch (e) { message.error(errText(e)); return; }
+            } catch (e) {
+                message.error(`${path}: ${errText(e)}`);
+                // An address to a file that is not there (an old link): the address shows the open file, not the missing one.
+                if (currentRoute()[0] === 'code' && currentRoute()[1] === path) navigate(active ? ['code', active] : ['code'], true);
+                return;
+            }
         }
         setActive(path);
         // reveal the folder in the tree
@@ -523,7 +529,12 @@ export function Code() {
 
     // ▶ Run buttons for feature files: whole feature, or one scenario (in that feature).
     const { env: disc } = useStudio();
+    const starting = React.useRef(false);
     const runFrom = async (path: string, scenario?: { name: string; outline: boolean; alsoMatches?: string[] }, debug?: boolean) => {
+        // A double click starts one run (the second would only say that a run is already in progress).
+        if (starting.current) return;
+        starting.current = true;
+        try {
         // The framework selects scenarios by name with "contains" matching (case-insensitive), so other
         // scenarios in this file with overlapping names would run too. Say so first.
         if (scenario?.alsoMatches?.length) {
@@ -566,6 +577,7 @@ export function Code() {
             saveRunTarget({ ...(saved ?? {}), project, env });
             if (debug) setBottom('debug'); else showRun(run.id);
         } catch (e) { message.error(errText(e)); }
+        } finally { starting.current = false; }
     };
     const gutterActions = React.useMemo(() => {
         if (!cur || !cur.path.endsWith('.feature')) return undefined;
@@ -697,7 +709,7 @@ export function Code() {
                                 <Space direction="vertical" style={{ width: '100%' }} size={2}>
                                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>{usages.items.length} usage{usages.items.length === 1 ? '' : 's'} of <span className="mono">{usages.title}</span> in {new Set(usages.items.map((u) => u.path)).size} file{new Set(usages.items.map((u) => u.path)).size === 1 ? '' : 's'}</Typography.Text>
                                     {usages.items.map((u, i) => (
-                                        <div key={i} className="file-row" onClick={() => open(u.path, u.line, u.column)}>
+                                        <div key={i} className="file-row" onClick={() => goFile(u.path, u.line, u.column)}>
                                             <Typography.Text className="mono" type="secondary" style={{ flex: 'none' }}>{u.path}:{u.line}</Typography.Text>
                                             <span className="name mono">{u.text.trim()}</span>
                                         </div>))}
@@ -728,7 +740,7 @@ export function Code() {
                                     {hits && (() => { const n = new Set(hits.map((h) => h.path)).size; return <Typography.Text type="secondary">{hits.length ? `${hits.length} result${hits.length === 1 ? '' : 's'} in ${n} file${n === 1 ? '' : 's'}` : 'No matches'}</Typography.Text>; })()}
                                 </Space>
                                 {hits?.map((h, i) => (
-                                    <div key={i} className="file-row" onClick={() => open(h.path, h.line, h.column)}>
+                                    <div key={i} className="file-row" onClick={() => goFile(h.path, h.line, h.column)}>
                                         <Typography.Text className="mono" type="secondary" style={{ flex: 'none' }}>{h.path}:{h.line}</Typography.Text>
                                         <span className="name mono">{h.text.trim()}</span>
                                     </div>
