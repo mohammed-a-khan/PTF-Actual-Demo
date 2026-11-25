@@ -197,15 +197,39 @@ export class KnowledgeBase {
     constructor(private readonly repoRoot: string, private readonly dir: string, private readonly f: KnowledgeFetchers = {}) {}
 
     /** The team's sources (the file), or the defaults. */
-    sources(): { sources: KnowledgeSource[]; problems: string[] } {
+    /**
+     * The team's sources (the file), or the defaults. An entry that is not right is left out by itself (the others
+     * still work) and named in `invalid`; a file that cannot be read at all is `unreadable` (the defaults are used).
+     */
+    sources(): { sources: KnowledgeSource[]; problems: string[]; invalid: InvalidSource[]; unreadable?: boolean } {
         const file = path.join(this.repoRoot, KNOWLEDGE_FILE);
-        if (!fs.existsSync(file)) return { sources: DEFAULT_SOURCES, problems: [] };
-        try {
-            const v = JSON.parse(fs.readFileSync(file, 'utf8')) as { sources?: KnowledgeSource[] };
-            return { sources: validateSources(v.sources ?? []), problems: [] };
-        } catch (e) { return { sources: DEFAULT_SOURCES, problems: [`${KNOWLEDGE_FILE}: ${(e as Error).message}`] }; }
+        if (!fs.existsSync(file)) return { sources: DEFAULT_SOURCES, problems: [], invalid: [] };
+        let raw: unknown;
+        try { raw = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) {
+            return { sources: DEFAULT_SOURCES, problems: [`${KNOWLEDGE_FILE} cannot be read (${(e as Error).message}): the default sources are used, and nothing is saved until the file is fixed.`], invalid: [], unreadable: true };
+        }
+        const list = raw && typeof raw === 'object' ? (raw as { sources?: unknown }).sources ?? [] : raw;
+        if (!Array.isArray(list)) return { sources: DEFAULT_SOURCES, problems: [`${KNOWLEDGE_FILE}: "sources" is not a list: the default sources are used, and nothing is saved until the file is fixed.`], invalid: [], unreadable: true };
+        const r = readSources(list);
+        const problems = r.invalid.length ? [`${KNOWLEDGE_FILE}: ${r.invalid.length === 1 ? '1 source is' : `${r.invalid.length} sources are`} left out until fixed (the others work): ${r.invalid.map((x) => `"${x.name}" — ${x.problem}`).join(' ')} Changes to the sources are saved once it is fixed or removed.`] : [];
+        return { sources: r.sources, problems, invalid: r.invalid };
+    }
+    /** Remove an entry that is not right (by its place in the file); the other entries stay exactly as written. */
+    removeInvalid(index: number): void {
+        const cur = this.sources();
+        if (cur.unreadable) throw new Error(cur.problems[0]);
+        if (!cur.invalid.some((x) => x.index === index)) throw new Error('That entry is not among the ones left out (the file changed meanwhile?): reload.');
+        const file = path.join(this.repoRoot, KNOWLEDGE_FILE);
+        const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { sources: unknown[] };
+        raw.sources = raw.sources.filter((_, i) => i !== index);
+        fs.writeFileSync(file, `${JSON.stringify(raw, null, 2)}\n`);
+        this.dirty = true;
     }
     saveSources(list: unknown): KnowledgeSource[] {
+        // The whole list is written: while the file has entries the Studio cannot read, saving would drop them.
+        const cur = this.sources();
+        if (cur.unreadable) throw new Error(cur.problems[0]);
+        if (cur.invalid.length) throw new Error(`Not saved: ${KNOWLEDGE_FILE} has ${cur.invalid.length === 1 ? 'an entry' : `${cur.invalid.length} entries`} the Studio leaves out (${cur.invalid.map((x) => `"${x.name}"`).join(', ')}); saving now would delete ${cur.invalid.length === 1 ? 'it' : 'them'}. Fix the file, or remove ${cur.invalid.length === 1 ? 'that entry' : 'those entries'} first.`);
         const s = validateSources(list);
         // A folder must be there (relative paths are from the repository).
         for (const x of s) if (x.kind === 'folder' && x.path) {
@@ -413,6 +437,21 @@ function snippet(text: string, q: string[]): string {
     let best = 0, bestScore = -1;
     lines.forEach((l, i) => { const w = new Set(words(l)); const s = q.filter((t) => w.has(t)).length; if (s > bestScore) { bestScore = s; best = i; } });
     return lines.slice(Math.max(0, best - 1), best + 3).join('\n').slice(0, 400);
+}
+
+/** An entry of the file that is not right: its place in the file, what it is called, why. */
+export interface InvalidSource { index: number; id: string; name: string; problem: string }
+/** The entries that are right (in order) and the ones that are not (each checked against those before it). */
+export function readSources(list: unknown[]): { sources: KnowledgeSource[]; invalid: InvalidSource[] } {
+    const ok: unknown[] = [];
+    const invalid: InvalidSource[] = [];
+    list.forEach((x, index) => {
+        try { validateSources([...ok, x]); ok.push(x); } catch (e) {
+            const o = (x && typeof x === 'object' ? x : {}) as { id?: unknown; name?: unknown };
+            invalid.push({ index, id: String(o.id ?? ''), name: String(o.name || o.id || `entry ${index + 1}`).slice(0, 80), problem: (e as Error).message });
+        }
+    });
+    return { sources: validateSources(ok), invalid };
 }
 
 export function validateSources(list: unknown): KnowledgeSource[] {

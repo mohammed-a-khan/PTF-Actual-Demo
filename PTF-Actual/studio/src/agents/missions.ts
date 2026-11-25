@@ -374,7 +374,7 @@ const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…
 
 export class MissionEngine {
     private runs: MissionRun[] = [];
-    private live = new Map<string, { template: MissionTemplate; waiters: Map<string, (answer: string) => void>; nudges: number; lastTick: number; timer?: NodeJS.Timeout; idleBusy: boolean; members?: Map<string, { task: TeamTask; last: string; done: (answer: string) => void }> }>();
+    private live = new Map<string, { template: MissionTemplate; waiters: Map<string, (answer: string) => void>; nudges: number; lastTick: number; timer?: NodeJS.Timeout; idleBusy: boolean; spent?: boolean; members?: Map<string, { task: TeamTask; last: string; done: (answer: string) => void }> }>();
     private file: string;
     private listeners = new Set<(m: MissionRun) => void>();
 
@@ -421,6 +421,7 @@ export class MissionEngine {
             const v = String(inputs[i.key] ?? '').trim();
             if (i.required && !v) throw new Error(`${i.label} is needed.`);
             if (v && i.kind === 'number' && !/^\d{1,9}$/.test(v)) throw new Error(`${i.label}: a whole number (not "${v.slice(0, 40)}").`);
+            if (v && i.key === 'url' && !/^https?:\/\/[^\s/?#]+[^\s]*$/i.test(v)) throw new Error(`${i.label}: a web address starting with http:// or https:// (not "${v.slice(0, 40)}"), or leave it empty for the environment's BASE_URL.`);
             // Names that end up in addresses and file paths (a repository, a project, an environment).
             if (v && (i.key === 'repository' || i.kind === 'project' || i.kind === 'env') && !/^[\w.\- ]{1,120}$/.test(v)) throw new Error(`${i.label}: letters, digits, spaces, dots, dashes and underscores only (not "${v.slice(0, 40)}").`);
             if (v) clean[i.key] = v.slice(0, 8000);
@@ -520,7 +521,7 @@ export class MissionEngine {
         const workflow = `${t.title}. ${PROTOCOL}${teamText}${m.copy ? `\nYour working folder is your own copy of the repository: ${this.copyDir(m)} (branch ${m.copy.branch}). Change files only there.` : '\nThis mission only reads: change nothing in the repository.'}`;
         const s = await this.d.agent.start({
             title: `Mission: ${m.title}`, workflow,
-            mission: { workdir: this.copyDir(m), isolated: !!m.copy, autoFiles: m.autonomy === 'autonomous', ...(m.unattended ? { unattended: true } : {}), ...(t.profile ? { profile: t.profile, ...(t.profile.knowledge ? { knowledgeSources: t.profile.knowledge } : {}) } : {}), tools: this.tools(m), listener: (e) => this.onEvent(m, e) },
+            mission: { workdir: this.copyDir(m), isolated: !!m.copy, autoFiles: m.autonomy === 'autonomous', ...(m.unattended ? { unattended: true } : {}), ...(t.profile ? { profile: t.profile, ...(t.profile.knowledge ? { knowledgeSources: t.profile.knowledge } : {}) } : {}), tools: this.tools(m), listener: (e) => this.onEvent(m, e), onCall: () => this.onCall(m) },
         });
         m.session = s.id;
         m.state = 'working';
@@ -565,7 +566,7 @@ export class MissionEngine {
                 try {
                     const s = await this.d.agent.start({
                         title: `${m.title}: ${a.name}`, workflow,
-                        mission: { workdir: this.copyDir(m), isolated: !!m.copy, autoFiles: m.autonomy === 'autonomous', ...(m.unattended ? { unattended: true } : {}), profile, ...(profile.knowledge ? { knowledgeSources: profile.knowledge } : {}), ...(browser ? { browser } : {}), tools: this.tools(m, { browser, who: a.name }).filter((x) => ['tests_run', 'explore_note'].includes(x.name)), listener: (e) => this.onMemberEvent(m, entry, e) },
+                        mission: { workdir: this.copyDir(m), isolated: !!m.copy, autoFiles: m.autonomy === 'autonomous', ...(m.unattended ? { unattended: true } : {}), profile, ...(profile.knowledge ? { knowledgeSources: profile.knowledge } : {}), ...(browser ? { browser } : {}), tools: this.tools(m, { browser, who: a.name }).filter((x) => ['tests_run', 'explore_note'].includes(x.name)), listener: (e) => this.onMemberEvent(m, entry, e), onCall: () => this.onCall(m) },
                     });
                     tt.session = s.id;
                     (live.members ??= new Map()).set(s.id, entry);
@@ -795,12 +796,35 @@ export class MissionEngine {
     private async overBudget(m: MissionRun, why: string) {
         await this.stopMembers(m);
         if (m.session) await this.d.agent.abort(m.session).catch(() => undefined);
-        await this.finish(m, 'over-budget', `Over budget: ${why}`);
+        // Calls made while stopping count: the reason says what the mission shows.
+        this.sample(m);
+        await this.finish(m, 'over-budget', `Over budget: ${this.overLimit(m) ?? why}`);
+    }
+    /**
+     * After every model call (the lead's or a member's): when the calls reach the budget, every session stops at once,
+     * so no call is made beyond it. A report already made is still verified; otherwise the mission ends over budget.
+     */
+    private onCall(m: MissionRun) {
+        const live = this.live.get(m.id);
+        if (!live || live.spent || FINISHED.includes(m.state) || m.state === 'verifying') return;
+        this.sample(m);
+        if (m.used.modelCalls < m.budget.modelCalls) return;
+        live.spent = true;
+        void (async () => {
+            await this.stopMembers(m);
+            if (m.session) await this.d.agent.abort(m.session).catch(() => undefined);
+            this.sample(m);
+            if (FINISHED.includes(m.state)) return;
+            if (m.report && m.report.outcome !== 'blocked' && !this.overLimit(m)) { live.idleBusy = true; try { await this.verify(m); } finally { live.idleBusy = false; } return; }
+            if (m.report?.outcome === 'blocked') return this.finish(m, 'blocked', short(m.report.summary, 500));
+            await this.finish(m, 'over-budget', `Over budget: ${this.overLimit(m) ?? `all ${m.budget.modelCalls} model calls of the budget are used (${m.used.modelCalls}).`}`);
+        })().catch((e) => this.finish(m, 'failed', `Verification failed to run: ${(e as Error).message}`));
     }
 
     private async onIdle(m: MissionRun) {
         const live = this.live.get(m.id);
-        if (!live || m.state !== 'working' || live.idleBusy) return;
+        // The budget's calls are used up: onCall ends the mission (no nudge: it would be one more call).
+        if (!live || m.state !== 'working' || live.idleBusy || live.spent) return;
         live.idleBusy = true;
         try {
             if (!m.report) {
@@ -857,6 +881,8 @@ export class MissionEngine {
         this.note(m, v.passed ? `Verified: ${plan.kind === 'tests' ? `${v.runs.length} run(s) passed` : 'report accepted'}.` : `Verification failed: ${v.failures.map((f) => `${f.name}${f.error ? ` — ${short(f.error.replace(/\s+/g, ' '), 200)}` : ''}`).join('; ')}`, 'verify');
         if (v.passed) return this.finish(m, m.report!.outcome === 'partial' ? 'partial' : 'succeeded', m.report!.outcome === 'partial' ? 'Partly done; what was done is verified.' : 'Done and verified.');
         if (m.used.attempts >= m.budget.attempts) return this.finish(m, 'failed', `The work did not pass verification after ${m.used.attempts} attempt(s).`);
+        // No model calls left to fix it with.
+        if (live.spent) return this.finish(m, 'over-budget', `Over budget: the work did not pass verification, and all ${m.budget.modelCalls} model calls of the budget are used (${m.used.modelCalls}).`);
         // Back to the agent with the failures: it continues where it was.
         m.report = undefined;
         m.state = 'working';
@@ -872,6 +898,9 @@ export class MissionEngine {
         if (live?.timer) clearInterval(live.timer);
         for (const [, w] of live?.waiters ?? []) w('The mission has ended.');
         await this.stopMembers(m);
+        // Calls that ended while stopping count too: the reason and the numbers shown agree.
+        this.sample(m);
+        if (state === 'over-budget') { const o = this.overLimit(m); if (o) reason = `Over budget: ${o}`; }
         // An exploration's bugs become the report's bugs (to file in Azure DevOps from the mission).
         const bugNotes = (m.exploration?.notes ?? []).filter((n) => n.kind === 'bug');
         if (bugNotes.length) {

@@ -169,6 +169,48 @@ test('fix a failed run: failures that do not happen again end the mission withou
     } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
+test('model-call budget: every session stops at the call that reaches it (never more); a report made by then is still verified', async () => {
+    const { tmp, dir, gitDir } = await repo();
+    try {
+        // An agent that keeps calling the model (each call reported to the engine, as the runtime does) until stopped.
+        const looping = (reportAt?: number) => {
+            let calls = 0, aborted = false, opts: MissionSessionOptions | null = null;
+            const agent: MissionAgent = {
+                async start(x) { opts = x.mission; return { id: 'sess-b' }; },
+                async send() {
+                    setImmediate(async () => {
+                        while (!aborted && calls < 100) {
+                            calls++;
+                            if (calls === reportAt) fs.writeFileSync(path.join(opts!.workdir, 'test/shop/features/b.feature'), 'Feature: B\n');
+                            if (calls === reportAt) await opts!.tools.find((t) => t.name === 'mission_report')!.handler({ outcome: 'done', summary: 'in budget' });
+                            opts!.onCall?.();
+                            await new Promise((r) => setImmediate(r));
+                        }
+                    });
+                },
+                async abort() { aborted = true; },
+                usageOf: () => ({ usage: { calls, inputTokens: 0, outputTokens: 0, cost: 0 }, busy: !aborted, pending: 0 }),
+            };
+            return { agent, calls: () => calls };
+        };
+        const a = looping();
+        const e = new MissionEngine({ repoRoot: dir, gitDir, agent: a.agent, log: () => undefined, tickMs: 5000, runInfo: () => undefined, runTests: async () => ({ id: 'r', state: 'passed', summary: summary([['Pay', 'passed']]) }) });
+        const m = await e.start('automate-story', { project: 'shop', env: 'qa', story: 'x' }, { budget: { modelCalls: 10 } });
+        await until(() => m.state === 'over-budget');
+        assert.equal(a.calls(), 10, 'no call beyond the budget');
+        assert.equal(m.used.modelCalls, 10);
+        assert.match(m.reason!, /all 10 model calls of the budget are used \(10\)/);
+        await e.discard(m.id, 'Tester');
+        // The last call of the budget made the report: verified, not over budget.
+        const b = looping(10);
+        const e2 = new MissionEngine({ repoRoot: dir, gitDir, agent: b.agent, log: () => undefined, tickMs: 5000, runInfo: () => undefined, runTests: async () => ({ id: 'r', state: 'passed', summary: summary([['Pay', 'passed']]) }) });
+        const m2 = await e2.start('automate-story', { project: 'shop', env: 'qa', story: 'x' }, { budget: { modelCalls: 10 } });
+        await until(() => m2.state === 'succeeded');
+        assert.equal(b.calls(), 10);
+        await e2.discard(m2.id, 'Tester');
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});
+
 test('cron: fields, ranges, steps, lists, day-of-month or day-of-week', () => {
     assert.equal(parseCron('daily'), null);
     assert.equal(parseCron('60 * * * *'), null);

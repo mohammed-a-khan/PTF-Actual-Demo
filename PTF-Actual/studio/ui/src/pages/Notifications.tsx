@@ -6,7 +6,7 @@ import { api, NotifyChannelDef, NotifyDef } from '../api';
 import { errText, useStudio } from '../state';
 import { markUnsaved } from '../unsaved';
 import { navigate } from '../route';
-import { useStoredTab } from '../datagit-common';
+import { usePageHeadTooltip, useStoredTab } from '../datagit-common';
 
 const KIND_HELP: Record<NotifyChannelDef['kind'], string> = {
     teams: 'In the Teams channel: ••• → Workflows → "Post to a channel when a webhook request is received". Paste the address it gives.',
@@ -15,6 +15,19 @@ const KIND_HELP: Record<NotifyChannelDef['kind'], string> = {
 };
 /** Unsaved changes, kept while the person visits another screen (and asked about when the tab closes). */
 let draft: { chans: NotifyChannelDef[]; hooks: Record<string, string> } | null = null;
+/** Why the server would refuse this webhook address (the same rules), or null. */
+export function webhookProblem(kind: NotifyChannelDef['kind'], raw: string): string | null {
+    const h = raw.trim();
+    if (!h) return null;
+    let u: URL;
+    try { u = new URL(h); } catch { return 'Not a web address: paste the whole address, starting with https://'; }
+    const local = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname);
+    if (u.protocol !== 'https:' && !(u.protocol === 'http:' && local)) return 'The address must start with https:// (http:// only for this computer: localhost or 127.0.0.1).';
+    if (kind === 'slack' && !local && u.hostname !== 'hooks.slack.com') return 'A Slack incoming webhook starts with https://hooks.slack.com/.';
+    if (kind === 'teams' && !local && !/(\.logic\.azure\.com|\.powerplatform\.com|\.webhook\.office\.com|\.azure-api\.net|\.powerautomate\.com)$/i.test(u.hostname)) return 'A Teams webhook is the address of a Teams "Workflows" webhook (…logic.azure.com or …powerplatform.com).';
+    return null;
+}
+
 const newId = () => Math.random().toString(36).slice(2, 10).padEnd(8, '0');
 
 export function Notifications() {
@@ -25,6 +38,7 @@ export function Notifications() {
     const [hooks, setHooks] = React.useState<Record<string, string>>({});
     const [err, setErr] = React.useState<string | null>(null);
     const [busy, setBusy] = React.useState<string | null>(null);
+    usePageHeadTooltip();
     const [tab, setTab] = useStoredTab<'channels' | 'log'>('notifications', ['channels', 'log'], 'channels');
     const load = React.useCallback((keepDraft = false) => {
         api.notifications().then((r) => {
@@ -45,6 +59,14 @@ export function Notifications() {
         setBusy(id);
         try { const r = await api.testNotification(id); if (r.ok) message.success(`Sent (${r.detail})`); else message.error(`Not delivered: ${r.detail}`); load(); } catch (e) { message.error(errText(e)); } finally { setBusy(null); }
     };
+    const nameProblem = (c: NotifyChannelDef): string | null => {
+        const n = c.name.trim();
+        if (!n) return 'Give the channel a name.';
+        if (chans.some((o) => o !== c && o.name.trim().toLowerCase() === n.toLowerCase())) return `Two channels are named "${n}".`;
+        return null;
+    };
+    const hookMissing = (c: NotifyChannelDef) => !c.hasWebhook && !(hooks[c.id] ?? '').trim();
+    const problems = chans.map((c) => nameProblem(c) ?? webhookProblem(c.kind, hooks[c.id] ?? '') ?? (hookMissing(c) ? `"${c.name.trim()}" needs its webhook address.` : null)).filter((x): x is string => !!x);
     const projectNames = env?.projects ?? [];
     const envNames = [...new Set(Object.values(env?.environments ?? {}).flat())];
     if (err) return <Alert type="error" showIcon message={err} />;
@@ -53,7 +75,7 @@ export function Notifications() {
         {!d.canSave && <Alert type="warning" showIcon message={<span>Set up your secrets first: webhook addresses are kept there, encrypted. <Typography.Link onClick={() => navigate(['secrets'])}>Open Secrets</Typography.Link></span>} />}
         {chans.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No channels yet. Add one to get a message when a run ends." />}
         {chans.map((c, i) => (
-            <Card key={c.id} size="small" title={<Space><Switch size="small" aria-label="Channel on" checked={c.enabled} onChange={(v) => up(i, { enabled: v })} /><Input size="small" style={{ width: 240 }} maxLength={80} aria-label="Channel name" value={c.name} placeholder="Name, e.g. QA team channel" onChange={(e) => up(i, { name: e.target.value })} /></Space>}
+            <Card key={c.id} size="small" title={<Space><Switch size="small" aria-label="Channel on" checked={c.enabled} onChange={(v) => up(i, { enabled: v })} /><Input size="small" style={{ width: 240 }} maxLength={60} aria-label="Channel name" value={c.name} placeholder="Name, e.g. QA team channel" status={nameProblem(c) ? 'error' : undefined} onChange={(e) => up(i, { name: e.target.value })} />{nameProblem(c) && <Typography.Text type="danger" style={{ fontSize: 12, fontWeight: 400 }}>{nameProblem(c)}</Typography.Text>}</Space>}
                 extra={<Space>
                     <Tooltip title={dirty ? 'Save first' : !c.hasWebhook ? 'Save a webhook address first' : undefined}><Button size="small" icon={<SendOutlined />} disabled={!c.hasWebhook || dirty} loading={busy === c.id} onClick={() => { if (!busy) void test(c.id); }}>Send a test</Button></Tooltip>
                     <Button size="small" type="text" danger icon={<DeleteOutlined />} onClick={() => setChans(chans.filter((_, j) => j !== i))} aria-label="Remove" title="Remove the channel (until you save)" />
@@ -70,9 +92,10 @@ export function Notifications() {
                             <Select aria-label="Environments" mode="tags" maxTagCount="responsive" placeholder="All" value={c.envs ?? []} onChange={(v) => up(i, { envs: v })} options={envNames.map((p) => ({ value: p }))} /></Form.Item></Col>
                     </Row>
                     <Row gutter={12} align="bottom">
-                        <Col xs={24} lg={18}><Form.Item label={<span>Webhook address {c.hasWebhook && <Tag color="green" bordered={false}>saved</Tag>}</span>} tooltip={KIND_HELP[c.kind]} style={{ marginBottom: 0 }}>
+                        <Col xs={24} lg={18}><Form.Item label={<span>Webhook address {c.hasWebhook && <Tag color="green" bordered={false}>saved</Tag>}</span>} tooltip={KIND_HELP[c.kind]} style={{ marginBottom: 0 }}
+                            validateStatus={webhookProblem(c.kind, hooks[c.id] ?? '') ? 'error' : undefined} help={webhookProblem(c.kind, hooks[c.id] ?? '') ?? (hookMissing(c) && c.name.trim() ? 'Paste the webhook address to save this channel.' : undefined)}>
                             <Input.Password aria-label="Webhook address" autoComplete="new-password" placeholder={c.hasWebhook ? 'Leave empty to keep the saved address' : 'https://…'} value={hooks[c.id] ?? ''} onChange={(e) => setHooks({ ...hooks, [c.id]: e.target.value })}
-                                status={hooks[c.id] && !/^https?:\/\/\S+$/i.test(hooks[c.id].trim()) ? 'error' : undefined} /></Form.Item></Col>
+                                /></Form.Item></Col>
                         <Col xs={24} lg={6}><Form.Item label="Also" tooltip="What waits for someone in the Inbox: agents' questions, plans, approvals." style={{ marginBottom: 0 }}>
                             <Space size={6}><Switch size="small" aria-label="Also send what waits in the Inbox" checked={!!c.inbox} onChange={(v) => up(i, { inbox: v || undefined })} /><span style={{ fontSize: 13 }}>Inbox items</span></Space></Form.Item></Col>
                     </Row>
@@ -80,12 +103,11 @@ export function Notifications() {
             </Card>
         ))}
     </div>;
-    const badHook = Object.values(hooks).some((h) => h && !/^https?:\/\/\S+$/i.test(h.trim()));
     return (
         <div>
             <div className="dg-toolbar">
-                <Button icon={<PlusOutlined />} onClick={() => { setTab('channels'); setChans([...chans, { id: newId(), name: '', kind: 'teams', when: 'failures', enabled: true }]); }}>Add a channel</Button>
-                <Tooltip title={badHook ? 'A webhook address starts with https:// (or http://)' : undefined}><Button type="primary" disabled={!dirty || !d.canSave || badHook} loading={busy === 'save'} onClick={() => { if (busy !== 'save') void save(); }}>Save</Button></Tooltip>
+                <Button icon={<PlusOutlined />} onClick={(e) => { if (e.detail > 1) return; /* one channel per double-click */ setTab('channels'); setChans([...chans, { id: newId(), name: '', kind: 'teams', when: 'failures', enabled: true }]); }}>Add a channel</Button>
+                <Tooltip title={problems[0]}><Button type="primary" disabled={!dirty || !d.canSave || problems.length > 0} loading={busy === 'save'} onClick={() => { if (busy !== 'save') void save(); }}>Save</Button></Tooltip>
                 {dirty && <Button onClick={() => load(false)}>Discard</Button>}
                 {dirty && <Typography.Text type="warning" style={{ fontSize: 12 }}>Not saved yet</Typography.Text>}
             </div>

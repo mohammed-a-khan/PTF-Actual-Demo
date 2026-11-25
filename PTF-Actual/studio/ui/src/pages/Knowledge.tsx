@@ -9,6 +9,8 @@ import { DatabaseOutlined, DeleteOutlined, PlusOutlined, QuestionCircleOutlined,
 import { api, KnowledgeHitDef, KnowledgeKind, KnowledgeSourceDef, KnowledgeStatusDef } from '../api';
 import { errText, openInEditor } from '../state';
 import { useRememberedTab } from '../agents-tabs';
+import { useKept } from '../kept';
+import { agentsApi, InvalidKnowledgeSource } from '../agents-api';
 
 const KINDS: Record<KnowledgeKind, { label: string; about: string }> = {
     repo: { label: 'This repository', about: 'Features, steps, page objects, data, configuration and documents of this repository.' },
@@ -22,13 +24,15 @@ const ago = (iso: string | null) => (!iso ? 'never' : new Date(iso).toLocaleStri
 
 export function Knowledge() {
     const { message } = App.useApp();
-    const [d, setD] = React.useState<Awaited<ReturnType<typeof api.knowledge>> | null>(null);
+    const [d, setD] = React.useState<(Awaited<ReturnType<typeof api.knowledge>> & { invalid?: InvalidKnowledgeSource[]; unreadable?: boolean }) | null>(null);
     const [err, setErr] = React.useState<string | null>(null);
     const [adding, setAdding] = React.useState<KnowledgeSourceDef | null>(null);
-    const [q, setQ] = React.useState('');
-    const [hits, setHits] = React.useState<KnowledgeHitDef[] | null>(null);
+    // The search and its results stay when the person comes back (Back to Knowledge, the browser's Back, the menu).
+    const [q, setQ] = useKept('knowledge-search-q', '');
+    const [hits, setHits] = useKept<KnowledgeHitDef[] | null>('knowledge-search-hits', null);
+    const [searchErr, setSearchErr] = React.useState<string | null>(null);
     const [open, setOpen] = React.useState<Awaited<ReturnType<typeof api.readKnowledge>> | null>(null);
-    const [tab, setTab] = useRememberedTab('knowledge', 'sources', ['sources', 'search']);
+    const [tab, setTab] = useRememberedTab('knowledge', 'sources', ['sources', 'search'], 'knowledge');
     const load = React.useCallback(() => { api.knowledge().then((r) => { setD(r); setErr(null); }).catch((e) => setErr(errText(e))); }, []);
     React.useEffect(load, [load]);
     React.useEffect(() => { if (!d?.building) return; const t = setInterval(load, 1000); return () => clearInterval(t); }, [d, load]);
@@ -36,13 +40,24 @@ export function Knowledge() {
     const save = async (list: KnowledgeSourceDef[], ok: string) => { try { await api.saveKnowledgeSources(list); message.success(ok); load(); return true; } catch (e) { message.error(errText(e)); return false; } };
     const building = React.useRef(false);
     const build = async (source?: string) => { if (building.current) return; building.current = true; setTimeout(() => { building.current = false; }, 1500); try { await api.buildKnowledge(source); message.info('Building the index…'); setTimeout(load, 300); } catch (e) { message.error(errText(e)); } };
-    const search = async () => { if (!q.trim()) { message.info('Type what to look for.'); return; } try { setHits((await api.searchKnowledge(q)).hits); } catch (e) { message.error(errText(e)); } };
+    const MAX_Q = 500;
+    const search = async () => {
+        if (!q.trim()) { message.info('Type what to look for.'); return; }
+        // Results of an earlier search would look like this one's: cleared when this one cannot run.
+        if (q.length > MAX_Q) { setHits(null); setSearchErr(`The search is too long: at most ${MAX_Q} characters (it has ${q.length}).`); return; }
+        try { setHits((await api.searchKnowledge(q)).hits); setSearchErr(null); } catch (e) { setHits(null); setSearchErr(errText(e)); }
+    };
+    const removeInvalid = async (x: InvalidKnowledgeSource) => { try { await agentsApi.removeInvalidKnowledgeSource(x.index); message.success(`Removed "${x.name}" from ${d?.file ?? 'the file'}`); load(); } catch (e) { message.error(errText(e)); } };
     if (err) return <Alert type="error" showIcon message={err} />;
     if (!d) return null;
     const total = d.sources.reduce((a, s) => a + s.chunks, 0);
     return (
         <Space direction="vertical" size={14} style={{ width: '100%' }}>
-            {d.problems.length > 0 && <Alert type="warning" showIcon message={d.problems.join(' ')} />}
+            {d.problems.length > 0 && <Alert type="warning" showIcon message={d.invalid?.length ? `${d.file}: ${d.invalid.length === 1 ? '1 source is' : `${d.invalid.length} sources are`} left out until fixed (the others below work). Changes to the sources are not saved until then, so nothing in the file is lost.` : d.problems.join(' ')}
+                description={d.invalid?.length ? <List size="small" dataSource={d.invalid} renderItem={(x) => (
+                    <List.Item actions={[<Popconfirm key="r" title={`Remove "${x.name}" from ${d.file}?`} description="Only this entry; the others stay as written." okText="Remove" okButtonProps={{ danger: true }} onConfirm={() => removeInvalid(x)}><Button size="small" danger>Remove from the file</Button></Popconfirm>]}>
+                        <Space direction="vertical" size={0}><Typography.Text strong>{x.name}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 12 }}>{x.problem}</Typography.Text></Space>
+                    </List.Item>)} /> : undefined} />}
             <Tabs size="small" activeKey={tab} onChange={setTab} items={[{ key: 'sources', icon: <DatabaseOutlined />, label: <span>Sources <Tag bordered={false} style={{ marginInlineEnd: 0 }}>{d.sources.length}</Tag></span>, children: (
             <Card size="small" title={<Space>Sources<Tooltip title={`The sources are the team's (${d.file}: commit it to share them). The index is built on this computer, with no outside service; secret values are masked. Agents search it with knowledge_search and cite what they use.`}><QuestionCircleOutlined style={{ color: 'var(--ant-color-text-tertiary, #999)', fontWeight: 400 }} /></Tooltip></Space>} extra={<Space>
                 {d.building && <Space size={6}><Typography.Text type="secondary">Indexing {d.building.source}</Typography.Text><Progress size="small" style={{ width: 120 }} percent={d.building.total ? Math.round((d.building.done / d.building.total) * 100) : 0} /></Space>}
@@ -62,7 +77,8 @@ export function Knowledge() {
                 ]} />
             </Card>) }, { key: 'search', icon: <SearchOutlined />, label: <span>Try a search</span>, children: (
             <Card size="small" title="Search the way an agent does" extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>{total} passages</Typography.Text>}>
-                <Input.Search placeholder="Ask the way an agent would, e.g. how do we sign in as a buyer" enterButton={<><SearchOutlined /> Search</>} value={q} onChange={(e) => setQ(e.target.value)} onSearch={search} />
+                <Input.Search placeholder="Ask the way an agent would, e.g. how do we sign in as a buyer" enterButton={<><SearchOutlined /> Search</>} value={q} onChange={(e) => { setQ(e.target.value); if (searchErr) setSearchErr(null); }} onSearch={search} status={q.length > MAX_Q ? 'error' : undefined} />
+                {(searchErr || q.length > MAX_Q) && <Typography.Text type="danger" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>{searchErr ?? `At most ${MAX_Q} characters (${q.length} now).`}</Typography.Text>}
                 {hits && (hits.length === 0 ? <Empty style={{ marginTop: 16 }} description="Nothing found" /> : (
                     <List style={{ marginTop: 10 }} dataSource={hits} renderItem={(h) => (
                         <List.Item actions={[<Button key="r" size="small" type="link" onClick={() => api.readKnowledge(h.id).then(setOpen).catch((e) => message.error(errText(e)))}>Read</Button>,

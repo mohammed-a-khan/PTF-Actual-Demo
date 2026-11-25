@@ -55,7 +55,19 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
     // While it runs: the results as they come.
     React.useEffect(() => { if (!d?.running) return; const t = setInterval(() => { void load(); }, 2000); return () => clearInterval(t); }, [d?.running, load]);
     const up = (i: number, c: Partial<EvalCaseDef>) => { setCases((cs) => cs.map((x, k) => (k === i ? { ...x, ...c } : x))); setDirty(true); };
-    const save = async () => { try { const r = await api.saveEvals(agent.id, { cases }); setCases(r.suite.cases); setDirty(false); message.success(`Saved ${d?.file}: commit it to share the cases`); return true; } catch (e) { message.error(errText(e)); return false; } };
+    // One save at a time (a double click saves once); a case without a name gets "Case N".
+    const saving = React.useRef<Promise<boolean> | null>(null);
+    const [savingNow, setSavingNow] = React.useState(false);
+    const save = (): Promise<boolean> => {
+        if (saving.current) return saving.current;
+        setSavingNow(true);
+        saving.current = (async () => {
+            try { const r = await api.saveEvals(agent.id, { cases: cases.map((c, i) => ({ ...c, name: c.name.trim() || `Case ${i + 1}` })) }); setCases(r.suite.cases); setDirty(false); message.success({ content: `Saved ${d?.file}: commit it to share the cases`, key: 'agent-evals-save' }); return true; }
+            catch (e) { message.error({ content: errText(e), key: 'agent-evals-save' }); return false; }
+            finally { saving.current = null; setSavingNow(false); }
+        })();
+        return saving.current;
+    };
     const start = async () => { if (dirty && !(await save())) return; try { await api.runEvals(agent.id); setTab('results'); await load(); } catch (e) { message.error(errText(e)); } };
     return (
         <Drawer open width="min(980px, calc(100vw - 32px))" title={`Evaluations: ${agent.name}`} onClose={() => (dirty ? modal.confirm({ title: 'Discard the changes to the cases?', okText: 'Discard', okButtonProps: { danger: true }, cancelText: 'Keep editing', onOk: onClose }) : onClose())}
@@ -67,7 +79,7 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
                 { key: 'cases', label: `Cases (${cases.length})`, children: (
                     <Space direction="vertical" style={{ width: '100%' }}>
                         {cases.map((c, i) => (
-                            <Card key={i} size="small" title={<Input variant="borderless" value={c.name} placeholder="Case name" onChange={(e) => up(i, { name: e.target.value })} style={{ fontWeight: 600 }} />}
+                            <Card key={i} size="small" title={<Input variant="borderless" value={c.name} placeholder={`Case ${i + 1} (name it)`} onChange={(e) => up(i, { name: e.target.value })} style={{ fontWeight: 600 }} />}
                                 extra={<Space><Tooltip title="Runs of this case (a pass rate, for answers that vary)"><InputNumber size="small" min={1} max={10} value={c.repeat ?? 1} addonAfter="×" style={{ width: 90 }} onChange={(v) => up(i, { repeat: v && v > 1 ? v : undefined })} /></Tooltip>
                                     <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label="Remove the case" onClick={() => { setCases((cs) => cs.filter((_, k) => k !== i)); setDirty(true); }} /></Space>}>
                                 <Input.TextArea autoSize={{ minRows: 2 }} value={c.prompt} placeholder="What the person asks the agent" onChange={(e) => up(i, { prompt: e.target.value })} style={{ marginBottom: 8 }} />
@@ -80,7 +92,7 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
                         ))}
                         <Space>
                             <Button icon={<PlusOutlined />} onClick={() => { setCases((cs) => [...cs, { id: `case-${Date.now().toString(36)}`, name: '', prompt: '', checks: [fresh('contains')] }]); setDirty(true); }}>Add a case</Button>
-                            <Button type="primary" disabled={!dirty} onClick={() => void save()}>Save cases</Button>
+                            <Button type="primary" disabled={!dirty} loading={savingNow} onClick={() => void save()}>Save cases</Button>
                             <Typography.Text type="secondary" style={{ fontSize: 12 }}>{d?.file}</Typography.Text>
                         </Space>
                     </Space>

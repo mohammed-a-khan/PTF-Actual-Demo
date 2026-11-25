@@ -9,10 +9,11 @@ import { Alert, App, Button, Col, Empty, Form, Input, InputNumber, Modal, Popcon
 import { CaretRightOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, SaveOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
 import { api, ApiCollectionInfo, MockDef, MockFaultKind, MockInfo, MockLogEntryDef, MockRouteDef } from '../api';
 import { useUnsaved } from '../unsaved';
+import { useKept } from '../kept';
 import { errText } from '../state';
-import { useRoute } from '../route';
+import { navigate, useRoute } from '../route';
 import { Split } from '../components/Split';
-import { SectionTitle, shownTab, useRememberedTab } from '../apiperf-ui';
+import { httpUrlProblem, SectionTitle, shownTab, useEscapeCloses, useRememberedTab } from '../apiperf-ui';
 
 const FAULTS: Array<{ value: MockFaultKind; label: string; help: string }> = [
     { value: 'none', label: 'None', help: 'Answers as set' },
@@ -27,12 +28,18 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 export function ApiMocks() {
     const { message, modal } = App.useApp();
     const [tab, setTab] = useRememberedTab('api-mocks', 'routes');
-    const here = useRoute()[0] === 'api-mocks';
+    const rt = useRoute();
+    const here = rt[0] === 'api-mocks';
+    // The open mock in the address: #/api-mocks/<file> (a reload, Back and links return to it).
+    const fileInRoute = here && rt.length > 1 ? rt.slice(1).join('/') : null;
+    const projectInRoute = fileInRoute?.split('/')[1];
+    // The mock open when the screen was left (opened again from the menu).
+    const [lastFile, setLastFile] = useKept<string | null>('api-mocks.file', null);
     const [projects, setProjects] = React.useState<string[]>([]);
     const [project, setProject] = React.useState('');
     const [list, setList] = React.useState<MockInfo[] | null>(null);
     const [cur, setCur] = React.useState<{ file: string; mock: MockDef; dirty: boolean } | null>(null);
-    useUnsaved('api-mock', !!cur?.dirty, 'a mock', { lostOnLeave: true });
+    useUnsaved('api-mock', !!cur?.dirty, 'a mock', { lostOnLeave: true, save: async () => !!(await save()) });
     const [url, setUrl] = React.useState<string | null>(null);
     const [log, setLog] = React.useState<MockLogEntryDef[]>([]);
     const [port, setPort] = React.useState<number | null>(null);
@@ -52,7 +59,7 @@ export function ApiMocks() {
     const [err, setErr] = React.useState<string | null>(null);
     const [createErr, setCreateErr] = React.useState<string | null>(null);
 
-    React.useEffect(() => { if (here) api.apiCollections().then((r) => { setProjects(r.projects); setProject((p) => p || r.projects[0] || ''); }).catch((e) => setErr(errText(e))); }, [here]);
+    React.useEffect(() => { if (here) api.apiCollections().then((r) => { setProjects(r.projects); setProject((p) => p || (projectInRoute && r.projects.includes(projectInRoute) ? projectInRoute : r.projects[0]) || ''); }).catch((e) => setErr(errText(e))); }, [here]); // eslint-disable-line react-hooks/exhaustive-deps
     const refresh = React.useCallback(() => { if (project) api.mocks(project).then((r) => setList(r.mocks)).catch((e) => setErr(errText(e))); }, [project]);
     React.useEffect(() => { setCur(null); setList(null); refresh(); }, [project, refresh]);
     // The running mock's requests, live.
@@ -64,11 +71,22 @@ export function ApiMocks() {
         return () => { stop = true; };
     }, [cur?.file, url, project]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    const load = (p: string, file: string) => api.mockGet(p, file).then((r) => { setLastFile(r.file); setCur({ file: r.file, mock: r.mock, dirty: false }); setUrl(r.url ?? null); setLog([]); setPort(r.mock.port ? r.mock.port : null); setErr(null); }).catch((e) => { setErr(errText(e)); setLastFile(null); });
+    /** A mock chosen in the list: its address (the address then opens it, below). */
     const open = (m: MockInfo) => {
-        const go = () => api.mockGet(project, m.file).then((r) => { setCur({ file: r.file, mock: r.mock, dirty: false }); setUrl(r.url ?? null); setLog([]); setPort(r.mock.port ? r.mock.port : null); setErr(null); }).catch((e) => setErr(errText(e)));
         if (cur?.file === m.file) return;
-        leave(() => void go());
+        leave(() => navigate(['api-mocks', ...m.file.split('/')]));
     };
+    // The address → the open mock (also its project). With unsaved changes: Save, Discard or Stay (Stay puts the address back).
+    React.useEffect(() => {
+        if (!fileInRoute || !projects.length || !projectInRoute || !projects.includes(projectInRoute)) return;
+        if (projectInRoute !== project) { setProject(projectInRoute); return; }
+        if (cur?.file === fileInRoute) return;
+        const back = cur?.file;
+        leave(() => void load(projectInRoute, fileInRoute), () => navigate(back ? ['api-mocks', ...back.split('/')] : ['api-mocks'], true));
+    }, [fileInRoute, project, projects.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Back on the screen from the menu (#/api-mocks): the open mock's address again.
+    React.useEffect(() => { const f = cur?.file ?? lastFile; if (here && !fileInRoute && f) navigate(['api-mocks', ...f.split('/')], true); }, [here, fileInRoute, cur?.file]); // eslint-disable-line react-hooks/exhaustive-deps
     const route = (i: number, patch: Partial<MockRouteDef>) => cur && setCur({ ...cur, dirty: true, mock: { ...cur.mock, routes: cur.mock.routes.map((r, j) => (j === i ? { ...r, ...patch } : r)) } });
     const fault = (i: number, patch: Partial<NonNullable<MockRouteDef['fault']>>) => cur && route(i, { fault: { kind: 'none', ...(cur.mock.routes[i].fault ?? {}), ...patch } });
     const saving = React.useRef(false);
@@ -119,15 +137,25 @@ export function ApiMocks() {
             for (const w of r.warnings) message.warning(w);
             setCreating(null); refresh();
             setCur({ file, mock: r.mock, dirty: false }); setUrl(null); setLog([]); setPort(r.mock.port ? r.mock.port : null);
+            setLastFile(file); navigate(['api-mocks', ...file.split('/')]);
         } catch (e) { setCreateErr(errText(e)); } finally { setBusy(false); }
     };
 
     /** Save, Discard or Stay before the open mock is left (Escape and the close button stay). */
-    function leave(then: () => void) {
+    function leave(then: () => void, stay?: () => void) {
         if (!cur?.dirty) { then(); return; }
-        const inst = modal.confirm({ title: `Save the changes to "${cur.mock.name || 'the mock'}"?`, okText: 'Save', closable: true, onOk: async () => { if (await save()) then(); },
-            footer: (_: React.ReactNode, { OkBtn }: { OkBtn: React.FC }) => <><Button onClick={() => inst.destroy()}>Stay</Button><Button danger onClick={() => { inst.destroy(); setCur(null); setUrl(null); setLog([]); then(); }}>Discard</Button><OkBtn /></> });
+        const inst = modal.confirm({ title: `Save the changes to "${cur.mock.name || 'the mock'}"?`, okText: 'Save', closable: true, onOk: async () => { if (await save()) then(); else stay?.(); },
+            onCancel: () => stay?.(),
+            footer: (_: React.ReactNode, { OkBtn }: { OkBtn: React.FC }) => <><Button onClick={() => { inst.destroy(); stay?.(); }}>Stay</Button><Button danger onClick={() => { inst.destroy(); setCur(null); setUrl(null); setLog([]); then(); }}>Discard</Button><OkBtn /></> });
     }
+    const cancelCreate = () => { setCreateErr(null); if (recording) void api.mockRecordStop().catch(() => undefined); setRecording(null); setCreating(null); };
+    useEscapeCloses(!!creating, cancelCreate);
+    useEscapeCloses(!!editAnswers, () => setEditAnswers(null));
+    useEscapeCloses(!!editBody, () => setEditBody(null));
+    // The New mock dialog: a name of only spaces is refused (empty: the document's title); a recording needs a host.
+    const createFrom = creating?.from ?? 'openapi';
+    const newNameProblem = creating && creating.name !== '' && !creating.name.trim() ? 'A name of only spaces: type a name, or leave it empty to use the default.' : null;
+    const targetProblem = creating && createFrom === 'record' && !recording ? httpUrlProblem(creating.target ?? '') : null;
     const m = cur?.mock;
     const fileBase = cur ? cur.file.split('/').pop()!.replace(/\.mock\.json$/, '') : '';
     const routeLabel = (r: MockRouteDef) => <span><Tag bordered={false} color={METHOD_COLOR[r.method] ?? 'default'} style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{r.method}</Tag><span className="mono" style={{ fontSize: 12, wordBreak: 'break-word' }}>{r.path}</span></span>;
@@ -135,7 +163,7 @@ export function ApiMocks() {
         <Split id="api-mocks" initial={300} min={240} max={460} style={{ height: 'calc(100vh - var(--chrome))' }}>
             <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                 <div className="toolbar">
-                    <Select size="small" style={{ flex: 1 }} value={project || undefined} onChange={(p) => leave(() => setProject(p))} options={projects.map((p) => ({ value: p, label: p }))} placeholder="Project" aria-label="Project" />
+                    <Select size="small" style={{ flex: 1 }} value={project || undefined} onChange={(p) => leave(() => { setCur(null); setLastFile(null); setUrl(null); setLog([]); setProject(p); navigate(['api-mocks'], true); })} options={projects.map((p) => ({ value: p, label: p }))} placeholder="Project" aria-label="Project" />
                     <Button size="small" type="primary" icon={<PlusOutlined />} disabled={!project} onClick={() => leave(() => setCreating({ text: '', name: '' }))}>New</Button>
                 </div>
                 <div style={{ flex: 1, overflow: 'auto' }}>
@@ -158,7 +186,7 @@ export function ApiMocks() {
                             : <Button size="small" type="primary" icon={<CaretRightOutlined />} loading={busy} onClick={() => void start()}>Start</Button>}
                         {url && <Space size={4}><Tag color="green" bordered={false} className="mono">{url}</Tag><Button size="small" type="text" icon={<CopyOutlined />} aria-label="Copy the URL" onClick={() => void navigator.clipboard?.writeText(url).then(() => message.success('Copied'))} /></Space>}
                         <span style={{ flex: 1 }} />
-                        <Popconfirm title={`Delete ${cur.file}?`} okText="Delete" okButtonProps={{ danger: true }} onConfirm={async () => { try { await api.mockDelete(project, cur.file); setCur(null); setUrl(null); refresh(); } catch (e) { setErr(errText(e)); } }}>
+                        <Popconfirm title={`Delete ${cur.file}?`} okText="Delete" okButtonProps={{ danger: true }} onConfirm={async () => { try { await api.mockDelete(project, cur.file); setCur(null); setLastFile(null); setUrl(null); refresh(); navigate(['api-mocks'], true); } catch (e) { setErr(errText(e)); } }}>
                             <Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Delete the mock" /></Popconfirm>
                     </div>
                     <div style={{ flex: 1, overflow: 'auto', padding: '0 12px 10px' }}>
@@ -217,18 +245,20 @@ And the API base URL is "{{mockUrl}}"`}</pre>
             </div>
         </Split>
             <Modal open={!!creating} title="New mock" width={720} confirmLoading={busy}
-                onCancel={() => { setCreateErr(null); if (recording) void api.mockRecordStop().catch(() => undefined); setRecording(null); setCreating(null); }} onOk={() => void create()}
+                onCancel={cancelCreate} onOk={() => void create()}
                 okText={creating?.from === 'record' ? (recording ? 'Stop and make the mock' : 'Start recording') : 'Make the mock'}
-                okButtonProps={{ disabled: !creating || ((creating.from ?? 'openapi') === 'openapi' ? !creating.text.trim() : creating.from === 'collection' ? !creating.collection : !recording && !/^https?:\/\//.test(creating.target ?? '')) }}>
+                okButtonProps={{ disabled: !creating || !!newNameProblem || (createFrom === 'openapi' ? !creating.text.trim() : createFrom === 'collection' ? !creating.collection : !!targetProblem) }}>
                 {creating && <Space direction="vertical" style={{ width: '100%' }}>
                     {createErr && <Alert type="error" showIcon message={createErr} closable onClose={() => setCreateErr(null)} />}
                     <Segmented value={creating.from ?? 'openapi'} onChange={(v) => !recording && setCreating({ ...creating, from: v as 'openapi' })} options={[{ value: 'openapi', label: 'From an OpenAPI document' }, { value: 'collection', label: "From a collection's examples" }, { value: 'record', label: 'Record the real service' }]} />
-                    <Input value={creating.name} onChange={(e) => setCreating({ ...creating, name: e.target.value })} placeholder="Name (default: the document's title)" aria-label="New mock name" />
+                    <Input value={creating.name} status={newNameProblem ? 'error' : undefined} onChange={(e) => setCreating({ ...creating, name: e.target.value })} placeholder="Name (default: the document's title)" aria-label="New mock name" />
+                    {newNameProblem && <Typography.Text type="danger" style={{ fontSize: 12 }}>{newNameProblem}</Typography.Text>}
                     {creating.from === 'collection' ? <>
                         <Select style={{ width: '100%' }} value={creating.collection} onChange={(v) => setCreating({ ...creating, collection: v })} placeholder="Collection" aria-label="Collection" options={collections.map((c) => ({ value: c.file, label: `${c.name} (${c.file})` }))} />
                         <Typography.Text type="secondary" style={{ fontSize: 12 }}>Each request with saved examples becomes a route; its examples answer the requests they were saved for (by query or body). Save examples under API → Requests ("Save as example" on a response).</Typography.Text>
                     </> : creating.from === 'record' ? <>
-                        <Input className="mono" disabled={!!recording} value={creating.target ?? ''} onChange={(e) => setCreating({ ...creating, target: e.target.value })} placeholder="https://api.example.com/v2" aria-label="Service to record" />
+                        <Input className="mono" disabled={!!recording} status={targetProblem && creating.target ? 'error' : undefined} value={creating.target ?? ''} onChange={(e) => setCreating({ ...creating, target: e.target.value })} placeholder="https://api.example.com/v2" aria-label="Service to record" />
+                        {targetProblem && creating.target ? <Typography.Text type="danger" style={{ fontSize: 12 }}>{targetProblem}</Typography.Text> : null}
                         {recording ? <Alert type="info" showIcon message={<span>Recording: send requests to <Typography.Text code copyable>{recording.url}</Typography.Text> (instead of {recording.target}).</span>} description={`${recording.count} answer${recording.count === 1 ? '' : 's'} kept. Run your tests or the app against that address, then stop.`} />
                             : <Typography.Text type="secondary" style={{ fontSize: 12 }}>A recording address forwards to the service (through the network settings) and keeps each answer. Stopped, every method and path becomes a route; answers that differ by query or body are kept apart.</Typography.Text>}
                     </> : <>

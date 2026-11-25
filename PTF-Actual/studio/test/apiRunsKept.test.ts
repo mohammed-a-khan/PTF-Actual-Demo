@@ -51,3 +51,30 @@ test('two runs compared, and the run as JUnit XML (suites per iteration, a failu
         assert.match(failB.textContent!, /Status is 200 \(got 500\)|status/i);
     } finally { s.close(); }
 });
+
+test('a run keeps each step\'s exchange: the request as sent and the response, secrets masked, bodies cut', async () => {
+    const s = http.createServer((q, r) => {
+        let b = ''; q.on('data', (c) => { b += c; }); q.on('end', () => {
+            r.writeHead(201, { 'Content-Type': 'application/json', 'X-Echo': String(q.headers['x-key'] ?? '') });
+            r.end(q.url === '/big' ? 'x'.repeat(10_000) : JSON.stringify({ got: b }));
+        });
+    });
+    const port = await new Promise<number>((res) => s.listen(0, '127.0.0.1', () => res((s.address() as { port: number }).port)));
+    try {
+        const c = { ...newCollection('Echo'), baseUrl: `http://127.0.0.1:${port}` };
+        const post: ApiRequest = { ...newRequest('Post'), id: 'p', method: 'POST', url: '/echo', headers: [{ key: 'X-Key', value: 'TOPSECRET' }], body: { mode: 'json', text: '{"pw":"TOPSECRET"}' }, checks: [] };
+        const big: ApiRequest = { ...newRequest('Big'), id: 'b', url: '/big', checks: [] };
+        const runner = new CollectionRunner();
+        const j = runner.start({ collection: c, file: 'f', project: 'p', env: 'dev', requests: [post, big], values: { vars: {}, config: {}, env: {} }, rows: [], iterations: 1, delayMs: 0, stopOnFailure: false, timeoutMs: 5000, mask: (t) => t.split('TOPSECRET').join('••••') });
+        for (let i = 0; i < 100 && runner.get(j.id)!.state === 'running'; i++) await new Promise((r) => setTimeout(r, 30));
+        const [a, b] = runner.get(j.id)!.steps;
+        assert.equal(a.detail?.request.headers['X-Key'], '••••');
+        assert.match(a.detail!.request.body!, /"pw":"••••"/);
+        assert.equal(a.detail?.response?.statusText, 'Created');
+        assert.equal(a.detail?.response?.headers['x-echo'], '••••');
+        assert.match(a.detail!.response!.body, /"got"/);
+        assert.doesNotMatch(JSON.stringify(a), /TOPSECRET/);
+        assert.equal(b.detail?.response?.cut, true);
+        assert.ok(b.detail!.response!.body.length < 4100, 'body cut');
+    } finally { s.close(); }
+});

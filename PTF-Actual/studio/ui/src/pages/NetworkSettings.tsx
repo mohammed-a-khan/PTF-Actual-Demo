@@ -48,6 +48,43 @@ function ClientCerts({ value, onChange }: { value: ClientCert[]; onChange: (v: C
     );
 }
 
+/** Why the server would refuse this proxy address (manual mode), or null. Same rules as the server. */
+export function proxyUrlProblem(raw: string): string | null {
+    const url = raw.trim();
+    if (!url) return 'Give the proxy address, e.g. http://proxy.company.com:8080';
+    if (url.length > 2048) return 'The proxy address is too long (at most 2,048 characters).';
+    let u: URL;
+    try { u = new URL(url); } catch { return 'Proxy address must look like http://proxy.company.com:8080'; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return 'Proxy address must start with http:// or https://';
+    if (u.username || u.password) return 'Put the proxy user name and password in their own fields, not in the address.';
+    if (u.pathname !== '/' || u.search || u.hash) return 'Proxy address is just the server and port, e.g. http://proxy.company.com:8080';
+    return null;
+}
+
+/** Why the server would refuse this PAC file address (PAC mode), or null. */
+export function pacUrlProblem(raw: string): string | null {
+    const pac = raw.trim();
+    if (!pac) return 'Give the PAC file address (http://wpad.company.local/proxy.pac) or its path.';
+    if (pac.length > 2048) return 'The PAC file address is too long (at most 2,048 characters).';
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(pac) && !/^(https?|file):\/\//i.test(pac)) return 'A PAC file address starts with http://, https:// or file://, or is a file path.';
+    return null;
+}
+
+/**
+ * What to send: the fields the chosen mode does not use (hidden on the screen) go back as saved when the
+ * typed value would be refused, so they never block the save.
+ */
+export function networkToSave(n: NetworkSettings, saved: NetworkSettings): NetworkSettings {
+    const out = { ...n };
+    if (n.proxyMode !== 'manual' && n.proxyUrl.trim() && proxyUrlProblem(n.proxyUrl)) out.proxyUrl = saved.proxyUrl;
+    if (n.proxyMode !== 'pac' && (n.pacUrl ?? '').trim() && pacUrlProblem(n.pacUrl ?? '')) out.pacUrl = saved.pacUrl;
+    if (n.proxyMode === 'off' || n.proxyMode === 'environment') {
+        if (/[\s:]/.test(n.proxyUser) || n.proxyUser.length > 200) out.proxyUser = saved.proxyUser;
+        if ((n.proxyDomain ?? '').length > 100 || /[\s\\/@:]/.test(n.proxyDomain ?? '')) out.proxyDomain = saved.proxyDomain;
+    }
+    return out;
+}
+
 export function StudioNetworkCard({ s, onChange }: { s: StudioSettings; onChange: (s: StudioSettings) => void }) {
     const { message } = App.useApp();
     const [n, setN] = React.useState<NetworkSettings>(s.network);
@@ -61,9 +98,16 @@ export function StudioNetworkCard({ s, onChange }: { s: StudioSettings; onChange
     const dirty = JSON.stringify(n) !== JSON.stringify(s.network);
     const info = s.networkInfo ?? { systemCertsSupported: false, nodeVersion: '', hasProxyPassword: false, environmentProxy: '', environmentNoProxy: '' };
 
+    const urlProblem = n.proxyMode === 'manual' ? proxyUrlProblem(n.proxyUrl) : null;
+    const pacProblem = n.proxyMode === 'pac' ? pacUrlProblem(n.pacUrl ?? '') : null;
+    const loginShown = n.proxyMode !== 'off' && n.proxyMode !== 'environment';
+    const userProblem = loginShown && (/[\s:]/.test(n.proxyUser) || n.proxyUser.length > 200) ? 'The user name cannot contain spaces or ":" (at most 200 characters).' : null;
+    const domainProblem = loginShown && n.proxyAuth === 'ntlm' && ((n.proxyDomain ?? '').length > 100 || /[\s\\/@:]/.test(n.proxyDomain ?? '')) ? 'The Windows domain is a name such as CORP (no spaces, \\ / @ or :).' : null;
+    const problem = urlProblem ?? pacProblem ?? userProblem ?? domainProblem;
     const save = async () => {
+        if (problem) return;
         setBusy('save');
-        try { onChange(await api.saveNetwork(n)); message.success('Network settings saved'); setCheck(null); }
+        try { onChange(await api.saveNetwork(networkToSave(n, s.network))); message.success('Network settings saved'); setCheck(null); }
         catch (e) { message.error(errText(e)); }
         finally { setBusy(null); }
     };
@@ -83,24 +127,24 @@ export function StudioNetworkCard({ s, onChange }: { s: StudioSettings; onChange
                     </Radio.Group>
                 </Form.Item>
                 {n.proxyMode === 'pac' && <div style={{ paddingLeft: 24 }}>
-                    <Form.Item label="PAC file address" htmlFor="cs-networksettings-pac" tooltip="http://wpad.company.local/wpad.dat, or a file path">
+                    <Form.Item label="PAC file address" htmlFor="cs-networksettings-pac" validateStatus={pacProblem ? 'error' : undefined} help={pacProblem ?? undefined} tooltip="http://wpad.company.local/wpad.dat, or a file path">
                         <Input id="cs-networksettings-pac" value={n.pacUrl} onChange={(e) => setN({ ...n, pacUrl: e.target.value })} placeholder="http://wpad.company.local/proxy.pac" style={{ maxWidth: 420 }} className="mono" />
                     </Form.Item>
                 </div>}
                 {(n.proxyMode === 'pac' || n.proxyMode === 'system') && sysInfo && (sysInfo.error ? <Alert type="warning" showIcon message={sysInfo.error} style={{ marginBottom: 12 }} />
                     : sysInfo.pacFrom ? <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>{sysInfo.pacLoaded ? 'PAC file loaded from' : 'PAC file not loaded yet:'} {sysInfo.pacFrom}</Typography.Paragraph> : null)}
                 {n.proxyMode !== 'off' && n.proxyMode !== 'environment' && <div style={{ paddingLeft: 24 }}>
-                    {n.proxyMode === 'manual' && <Form.Item label="Address" htmlFor="cs-networksettings-address" tooltip="Server and port, e.g. http://proxy.company.com:8080">
+                    {n.proxyMode === 'manual' && <Form.Item label="Address" htmlFor="cs-networksettings-address" validateStatus={urlProblem ? 'error' : undefined} help={urlProblem ?? undefined} tooltip="Server and port, e.g. http://proxy.company.com:8080">
                         <Input id="cs-networksettings-address" value={n.proxyUrl} onChange={(e) => setN({ ...n, proxyUrl: e.target.value })} placeholder="http://proxy.company.com:8080" style={{ maxWidth: 420 }} className="mono" />
                     </Form.Item>}
-                    <Form.Item label="How the proxy signs you in">
+                    <Form.Item label="How the proxy signs you in" validateStatus={domainProblem ? 'error' : undefined} help={domainProblem ?? undefined}>
                         <Space wrap>
                             <Select value={n.proxyAuth ?? 'basic'} onChange={(v) => setN({ ...n, proxyAuth: v })} style={{ width: 240 }} aria-label="Proxy sign-in"
                                 options={[{ value: 'basic', label: 'Basic (or no sign-in)' }, { value: 'ntlm', label: 'NTLM (Windows)' }, { value: 'digest', label: 'Digest' }]} />
                             {n.proxyAuth === 'ntlm' && <Input value={n.proxyDomain} onChange={(e) => setN({ ...n, proxyDomain: e.target.value })} placeholder="Windows domain, e.g. CORP" style={{ width: 200 }} aria-label="Windows domain" />}
                         </Space>
                     </Form.Item>
-                    <Form.Item label="Login (only if the proxy asks for one)" tooltip="The password is kept in your secret store (encrypted), never in a settings file, and is not given to test runs.">
+                    <Form.Item label="Login (only if the proxy asks for one)" validateStatus={userProblem ? 'error' : undefined} help={userProblem ?? undefined} tooltip="The password is kept in your secret store (encrypted), never in a settings file, and is not given to test runs.">
                         <Space wrap>
                             <Input value={n.proxyUser} onChange={(e) => setN({ ...n, proxyUser: e.target.value })} placeholder="User name" style={{ width: 200 }} />
                             <Input.Password value={pw} onChange={(e) => setPw(e.target.value)} placeholder={info.hasProxyPassword ? 'Password saved; type to replace' : 'Password'} style={{ width: 220 }} autoComplete="new-password" />
@@ -137,7 +181,7 @@ export function StudioNetworkCard({ s, onChange }: { s: StudioSettings; onChange
                 </Form.Item>
                     </> }]} />
                 <Space>
-                    <Button type="primary" disabled={!dirty} loading={busy === 'save'} onClick={save}>Save network settings</Button>
+                    <Button type="primary" disabled={!dirty || !!problem} title={problem ?? undefined} loading={busy === 'save'} onClick={save}>Save network settings</Button>
                     <Button loading={busy === 'test'} disabled={dirty} title={dirty ? 'Save first' : undefined}
                         onClick={async () => { setBusy('test'); setCheck(null); try { setCheck(await api.testNetwork()); } catch (e) { message.error(errText(e)); } finally { setBusy(null); } }}>Test connection</Button>
                     {check && !check.tokenChecked && check.ok && <Typography.Text type="secondary" style={{ fontSize: 12 }}>(network only: no Azure DevOps token or project config to check)</Typography.Text>}

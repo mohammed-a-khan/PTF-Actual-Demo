@@ -60,7 +60,7 @@ function Item({ it, onDone, openConversation }: { it: InboxItemDef; onDone: (ite
 
 export function Inbox({ openConversation, onCount }: { openConversation: (id: string) => void; onCount?: (n: number) => void }) {
     const [items, setItems] = React.useState<InboxItemDef[] | null>(null);
-    const [filter, setFilter] = useRememberedTab('inbox', 'all', ['all', 'answer', 'review']);
+    const [filter, setFilter] = useRememberedTab('inbox', 'all', ['all', 'answer', 'review'], 'inbox');
     const set = React.useCallback((x: InboxItemDef[]) => { setItems(x); onCount?.(x.length); }, [onCount]);
     React.useEffect(() => {
         let live = true;

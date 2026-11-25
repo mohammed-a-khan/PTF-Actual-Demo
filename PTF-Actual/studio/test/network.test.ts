@@ -46,6 +46,23 @@ test('settings: off by default, validated, bypass rules', () => {
     assert.deepEqual(runEnvFor(net0(), {}), {});
 });
 
+test('a hidden proxy address never blocks saving "Off" or "PAC" (QA3 M3)', () => {
+    const long = 'http://' + 'a'.repeat(3000) + ':8080';
+    // Off: the address is not used, so an invalid one is dropped, a valid one kept for later.
+    assert.equal(validateNetwork(net0({ proxyMode: 'off', proxyUrl: long })).proxyUrl, '');
+    assert.equal(validateNetwork(net0({ proxyMode: 'off', proxyUrl: 'not a url' })).proxyUrl, '');
+    assert.equal(validateNetwork(net0({ proxyMode: 'off', proxyUrl: 'http://u:p@proxy:8080' })).proxyUrl, '');
+    assert.equal(validateNetwork(net0({ proxyMode: 'off', proxyUrl: 'http://proxy.corp:8080' })).proxyUrl, 'http://proxy.corp:8080');
+    assert.equal(validateNetwork(net0({ proxyMode: 'off', proxyUser: 'bad user', bypass: ['ok.corp', 'bad host!'] })).proxyUser, '');
+    // PAC: only the PAC address is checked.
+    assert.equal(validateNetwork(net0({ proxyMode: 'pac', pacUrl: 'http://wpad/proxy.pac', proxyUrl: 'nope' })).pacUrl, 'http://wpad/proxy.pac');
+    assert.throws(() => validateNetwork(net0({ proxyMode: 'pac', pacUrl: '' })), /PAC file address/);
+    // Manual still checks the address.
+    assert.throws(() => validateNetwork(net0({ proxyMode: 'manual', proxyUrl: long })), /too long/);
+    assert.throws(() => validateNetwork(net0({ proxyMode: 'manual', proxyUrl: '' })), /Give the proxy address/);
+    assert.equal(validateNetwork(net0({ proxyMode: 'manual', proxyUrl: 'http://proxy.corp:8080', pacUrl: 'ftp://x' })).pacUrl, '');
+});
+
 test('a certificate file is read and shown; test runs get it', { skip: !hasOpenssl }, () => {
     const d = tmp();
     const c = makeCerts(d);

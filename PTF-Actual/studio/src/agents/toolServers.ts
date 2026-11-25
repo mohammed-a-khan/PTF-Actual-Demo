@@ -42,6 +42,8 @@ export interface ToolServer {
     from?: string;
     /** false: kept, but not given to agents. */
     enabled?: boolean;
+    /** The Studio secrets made from a pasted configuration (offered for removal with the server). */
+    pastedSecrets?: string[];
 }
 export type Scope = 'team' | 'personal';
 export interface ListedServer { name: string; scope: Scope; server: ToolServer; missing: string[] }
@@ -110,6 +112,12 @@ export function serverProblem(name: string, s: ToolServer): string | null {
         try { const u = new URL(s.url ?? ''); if (!/^https?:$/.test(u.protocol)) throw new Error(); if (u.protocol === 'http:' && !['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname)) return 'A remote server must use https:// (plain http only on this computer).'; }
         catch { return 'The address: https://…'; }
     } else return 'Kind: stdio (a program) or http (an address).';
+    // What an HTTP request can carry (the check would fail later with "Invalid character in header content").
+    for (const [k, v] of Object.entries(s.headers ?? {})) {
+        if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}$/.test(k)) return `Header "${k}": a header name is letters, digits and - (no spaces).`;
+        if (typeof v === 'string' && /[^\t\x20-\x7e]/.test(v)) return `Header ${k}: plain characters only (no emoji, accented letters or line breaks).`;
+    }
+    if (s.pastedSecrets !== undefined && (!Array.isArray(s.pastedSecrets) || s.pastedSecrets.some((n) => typeof n !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/.test(n)))) return 'pastedSecrets: names of Studio secrets.';
     for (const [k, v] of Object.entries({ ...(s.env ?? {}), ...(s.headers ?? {}) })) {
         if (typeof v !== 'string' || v.length > 2000) return `${k}: text.`;
         const plain = v.replace(SECRET_REF, '').replace(DB_REF, '');
@@ -137,11 +145,39 @@ export function saveServer(repoRoot: string, home: string, scope: Scope, name: s
     if (s) {
         const problem = serverProblem(name, s);
         if (problem) throw new Error(problem);
-        all[name] = Object.fromEntries(Object.entries(s).filter(([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && !v.length))) as unknown as ToolServer;
+        all[name] = s;
     } else if (!(name in all)) throw new Error(`No ${scope} server ${name}.`);
     else delete all[name];
+    writeList(f, scope, all);
+}
+
+/**
+ * Add a server (editing null) or change one (editing: its name before; a new name renames it), in one write. A name
+ * another server of the list has already is refused: a rename never replaces another server.
+ */
+export function putServer(repoRoot: string, home: string, scope: Scope, name: string, s: ToolServer, editing: string | null) {
+    const all = serversIn(repoRoot, home, scope);
+    const label = scope === 'team' ? 'team' : 'personal';
+    if (editing !== null && !(editing in all)) throw new Error(`No ${label} tool server ${editing}: it was removed or renamed meanwhile.`);
+    if (name !== editing && name in all) throw new Error(`There is a ${label} tool server ${name} already: edit it, or choose another name.`);
+    const problem = serverProblem(name, s);
+    if (problem) throw new Error(problem);
+    const f = scope === 'team' ? path.join(repoRoot, TEAM_FILE) : personalFile(home, repoRoot);
+    const next = { ...all };
+    if (editing !== null && editing !== name) delete next[editing];
+    next[name] = s;
+    writeList(f, scope, next);
+}
+
+function writeList(f: string, scope: Scope, all: Record<string, ToolServer>) {
+    const clean = (s: ToolServer) => Object.fromEntries(Object.entries(s).filter(([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && !v.length))) as unknown as ToolServer;
     fs.mkdirSync(path.dirname(f), { recursive: true, mode: scope === 'personal' ? 0o700 : undefined });
-    fs.writeFileSync(f, `${JSON.stringify({ servers: Object.fromEntries(Object.keys(all).sort().map((k) => [k, all[k]])) }, null, 2)}\n`, scope === 'personal' ? { mode: 0o600 } : undefined);
+    fs.writeFileSync(f, `${JSON.stringify({ servers: Object.fromEntries(Object.keys(all).sort().map((k) => [k, clean(all[k])])) }, null, 2)}\n`, scope === 'personal' ? { mode: 0o600 } : undefined);
+}
+
+/** The Studio secrets a server refers to ({secret:NAME}). */
+export function secretsOf(s: ToolServer): string[] {
+    return [...new Set([...JSON.stringify([s.env, s.headers, s.args, s.url]).matchAll(SECRET_REF)].map((m) => m[1]))];
 }
 
 /** The secrets and connections a server needs that are not there. */

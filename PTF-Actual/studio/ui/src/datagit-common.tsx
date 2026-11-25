@@ -9,13 +9,61 @@ import { CloudServerOutlined, LockOutlined, ReloadOutlined, SettingOutlined } fr
 import { navigate } from './route';
 import './styles-datagit.css';
 
+const STORED_TAB_EVENT = 'cs-stored-tab';
+
 /** The selected inner tab of a screen, kept in localStorage (private mode: just not remembered). */
 export function useStoredTab<T extends string>(key: string, tabs: readonly T[], fallback: T): [T, (t: T) => void] {
     const [tab, setRaw] = React.useState<T>(() => {
         try { const v = localStorage.getItem(`cs-studio-tab:${key}`) as T | null; return v && tabs.includes(v) ? v : fallback; } catch { return fallback; }
     });
     const set = React.useCallback((t: T) => { setRaw(t); try { localStorage.setItem(`cs-studio-tab:${key}`, t); } catch { /* private mode */ } }, [key]);
+    // Another part of the Studio chose the tab (a deep link such as #/git/tags).
+    React.useEffect(() => {
+        const h = (e: Event) => { const d = (e as CustomEvent<{ key: string; tab: string }>).detail; if (d?.key === key && tabs.includes(d.tab as T)) setRaw(d.tab as T); };
+        window.addEventListener(STORED_TAB_EVENT, h);
+        return () => window.removeEventListener(STORED_TAB_EVENT, h);
+    }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
     return [tab, set];
+}
+
+/** Choose the inner tab a screen shows (now, if it is open, and when it opens). */
+export function setStoredTab(key: string, tab: string): void {
+    try { localStorage.setItem(`cs-studio-tab:${key}`, tab); } catch { /* private mode */ }
+    window.dispatchEvent(new CustomEvent(STORED_TAB_EVENT, { detail: { key, tab } }));
+}
+
+/**
+ * The screen's subtitle (in the page head) is cut with "…" on a narrow window: its full text as a tooltip while
+ * this screen is shown.
+ */
+export function usePageHeadTooltip(): void {
+    React.useEffect(() => {
+        const el = document.querySelector<HTMLElement>('.page-head > span:last-child');
+        if (!el) return;
+        el.title = el.textContent ?? '';
+        return () => el.removeAttribute('title');
+    }, []);
+}
+
+/** "1 day ago", "3 days ago": the right word for one. */
+export function plural(n: number, one: string, many = one + 's'): string {
+    return `${n} ${n === 1 ? one : many}`;
+}
+
+/** The zero of each decimal digit set people type (Arabic-Indic, Persian, Devanagari, Bengali, Thai, full-width …). */
+const DIGIT_ZEROS = [0x30, 0x660, 0x6f0, 0x7c0, 0x966, 0x9e6, 0xa66, 0xae6, 0xb66, 0xbe6, 0xc66, 0xce6, 0xd66, 0xde6, 0xe50, 0xed0, 0xf20, 0x1040, 0x1090, 0x17e0, 0x1810, 0xff10];
+/** Digits of any of those sets as 0-9 ("١٢٣٤" → "1234"); other characters stay as they are. */
+export function asciiDigits(s: string): string {
+    return s.replace(/\p{Nd}/gu, (d) => {
+        const cp = d.codePointAt(0)!;
+        const z = DIGIT_ZEROS.find((x) => cp >= x && cp <= x + 9);
+        return z === undefined ? d : String(cp - z);
+    });
+}
+
+/** The number of characters a person sees (an emoji or 订 is one), not UTF-16 units. */
+export function charCount(s: string): number {
+    return Array.from(s).length;
 }
 
 /** An error that means "Azure DevOps is not set up here" (no address, project or token), not a failure. */

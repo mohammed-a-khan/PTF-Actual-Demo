@@ -18,7 +18,7 @@ import { curveFromCsv, curveProblems, policyCurve, validPolicy } from '../../../
 import { ago } from '../format';
 import { LogicEditor } from '../components/LogicEditor';
 import { RecordPathModal } from '../components/RecordPathModal';
-import { SectionTitle, shownTab, useRememberedTab } from '../apiperf-ui';
+import { nameProblem, SectionTitle, shownTab, useEscapeCloses, useRememberedTab } from '../apiperf-ui';
 
 const C = { users: '#8250df', rps: '#0969da', avg: '#1a7f37', p95: '#bf8700', errors: '#cf222e' };
 const dur = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s >= 60 ? `${Math.floor(s / 60)} min${s % 60 ? ` ${Math.round(s % 60)} s` : ''}` : `${Math.round(s)} s`);
@@ -107,7 +107,7 @@ function PolicyEditor({ p, onChange }: { p: LoadPolicyDef; onChange: (p: LoadPol
     const arrival = p.type === 'arrival';
     return (
         <Space direction="vertical" style={{ width: '100%' }} size={8}>
-            <Segmented size="small" style={{ maxWidth: '100%', overflowX: 'auto' }} value={p.type} onChange={(t) => onChange({ ...p, type: t as LoadPolicyDef['type'], ...(t === 'arrival' && !p.rate ? { rate: 10 } : {}), ...(t === 'custom' && !p.points?.length ? { points: [{ t: 0, users: 0 }, { t: Math.round(p.duration / 3), users: p.users }, { t: Math.round((2 * p.duration) / 3), users: p.users }, { t: p.duration, users: 0 }] } : {}) })} options={Object.entries(shape).map(([value, label]) => ({ value, label }))} />
+            <Segmented size="small" className="ap-seg-wrap" style={{ maxWidth: '100%' }} value={p.type} onChange={(t) => onChange({ ...p, type: t as LoadPolicyDef['type'], ...(t === 'arrival' && !p.rate ? { rate: 10 } : {}), ...(t === 'custom' && !p.points?.length ? { points: [{ t: 0, users: 0 }, { t: Math.round(p.duration / 3), users: p.users }, { t: Math.round((2 * p.duration) / 3), users: p.users }, { t: p.duration, users: 0 }] } : {}) })} options={Object.entries(shape).map(([value, label]) => ({ value, label }))} />
             <Form layout="vertical" size="small" className="field-row">
                 {p.type !== 'custom' && num('Run for', 'duration', { min: 1, suffix: 's' })}
                 {arrival && num('Rate', 'rate', { min: 0.1, max: 10000, suffix: '/ s', tip: 'Iterations started per second, however long each takes (open model)' })}
@@ -447,11 +447,11 @@ function RunSummary({ id }: { id: string }) {
     return (
         <Space direction="vertical" style={{ width: '100%' }} size={10}>
             <StatusBanner status={x.status} headline={x.headline} answer={x.answer} />
-            <Table size="small" rowKey="key" pagination={false} dataSource={x.metrics} columns={[
-                { title: 'Measure', dataIndex: 'label', width: 190 },
+            <Table size="small" rowKey="key" pagination={false} dataSource={x.metrics} scroll={{ x: 760 }} columns={[
+                { title: 'Measure', dataIndex: 'label', width: 170 },
                 { title: 'Result', dataIndex: 'value', width: 130, render: (v: string) => <b>{v}</b> },
                 { title: 'Rating', dataIndex: 'rating', width: 120, render: (r: string) => <Tag color={RATING_TAG[r].color}>{RATING_TAG[r].text}</Tag> },
-                { title: 'What it means', render: (_, m) => <>{m.meaning}{m.rating !== 'info' && <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>Judged against {m.basis}.</Typography.Text></div>}</> },
+                { title: 'What it means', width: 320, render: (_, m) => <>{m.meaning}{m.rating !== 'info' && <div><Typography.Text type="secondary" style={{ fontSize: 12 }}>Judged against {m.basis}.</Typography.Text></div>}</> },
             ]} />
             <Row gutter={16}>
                 <Col xs={24} lg={8}><Typography.Text strong>Over time: {x.behaviour.verdict}</Typography.Text><div style={{ fontSize: 13 }}>{x.behaviour.text}</div></Col>
@@ -482,9 +482,9 @@ function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[
             <Space direction="vertical" size={14} style={{ width: '100%' }}>
                 <Form layout="vertical" size="small" className="ap-form">
                     <Row gutter={12} align="bottom">
-                        <Col xs={24} lg={10}><Form.Item label="Run A (reference)"><Select value={ids.a} onChange={(v: string) => pick('a', v)} options={opts} aria-label="Run A" /></Form.Item></Col>
-                        <Col xs={24} lg={10}><Form.Item label="Run B"><Select value={ids.b} onChange={(v: string) => pick('b', v)} options={opts} aria-label="Run B" /></Form.Item></Col>
-                        <Col xs={24} lg={4}><Form.Item><Dropdown menu={{ items: [{ key: 'html', label: 'HTML report' }, { key: 'pdf', label: 'PDF report' }, { key: 'docx', label: 'Word document' }], onClick: ({ key }) => void download(key as 'html' | 'pdf' | 'docx') }}><Button size="small" icon={<DownloadOutlined />} disabled={!c}>Report</Button></Dropdown></Form.Item></Col>
+                        <Col xs={24} sm={12} xxl={10}><Form.Item label="Run A (reference)"><Select value={ids.a} onChange={(v: string) => pick('a', v)} options={opts} aria-label="Run A" /></Form.Item></Col>
+                        <Col xs={24} sm={12} xxl={10}><Form.Item label="Run B"><Select value={ids.b} onChange={(v: string) => pick('b', v)} options={opts} aria-label="Run B" /></Form.Item></Col>
+                        <Col xs={24} xxl={4}><Form.Item><Dropdown menu={{ items: [{ key: 'html', label: 'HTML report' }, { key: 'pdf', label: 'PDF report' }, { key: 'docx', label: 'Word document' }], onClick: ({ key }) => void download(key as 'html' | 'pdf' | 'docx') }}><Button size="small" icon={<DownloadOutlined />} disabled={!c}>Report</Button></Dropdown></Form.Item></Col>
                     </Row>
                 </Form>
                 {ids.a === ids.b && <Alert type="info" showIcon message="Choose two different runs." />}
@@ -492,11 +492,11 @@ function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[
                     <StatusBanner status={c.comparison.status} headline={c.comparison.headline} answer={c.comparison.answer} />
                     <Tabs size="small" className="ap-tabs" activeKey={shownTab(tab, ['overview', 'charts', 'tx'])} onChange={setTab} items={[
                         { key: 'overview', label: 'Measures', children: <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                            <Table size="small" rowKey="label" pagination={false} dataSource={c.comparison.metrics} columns={[
-                                { title: 'Measure', dataIndex: 'label', width: 190 },
+                            <Table size="small" rowKey="label" pagination={false} dataSource={c.comparison.metrics} scroll={{ x: 800 }} columns={[
+                                { title: 'Measure', dataIndex: 'label', width: 170 },
                                 { title: 'A', dataIndex: 'a', width: 110 }, { title: 'B', dataIndex: 'b', width: 110, render: (v: string) => <b>{v}</b> },
                                 { title: 'Change', width: 140, render: (_, m) => <span style={{ color: vColor(m.verdict), fontWeight: m.verdict === 'same' ? 400 : 600 }}>{m.change} {m.verdict === 'worse' ? '▲ worse' : m.verdict === 'better' ? '▼ better' : '≈ same'}</span> },
-                                { title: 'What it means', dataIndex: 'meaning' },
+                                { title: 'What it means', dataIndex: 'meaning', width: 300 },
                             ]} />
                             {c.comparison.findings.length > 0 && <Alert type={c.comparison.status === 'green' ? 'success' : 'warning'} showIcon message="What changed" description={<ul style={{ margin: 0, paddingLeft: 18 }}>{c.comparison.findings.map((f, k) => <li key={k}>{f}</li>)}</ul>} />}
                         </Space> },
@@ -1050,10 +1050,10 @@ function Trends({ file, runs, name }: { file: string; runs: LoadRunInfoDef[]; na
                     <Col xs={24} xl={12}><LineChart title="Response time per run" x={x} xMin={1} xMax={list.length} xFormat={label} series={[{ name: '95%', color: C.p95, values: list.map((r) => r.summary!.p95), unit: ' ms' }, { name: 'Average', color: C.avg, values: list.map((r) => r.summary!.avg), unit: ' ms' }]} /></Col>
                     <Col xs={24} xl={12}><LineChart title="Throughput and errors per run" x={x} xMin={1} xMax={list.length} xFormat={label} series={[{ name: 'Requests/s', color: C.rps, values: list.map((r) => r.summary!.throughput) }, { name: 'Errors %', color: C.errors, values: list.map((r) => r.summary!.errorRate), unit: '%', right: true }]} /></Col>
                 </Row>}
-                <Table<TrendRun> size="small" rowKey={(r) => r.teamFile ?? r.id} pagination={false} dataSource={[...list].reverse()}
+                <Table<TrendRun> size="small" rowKey={(r) => r.teamFile ?? r.id} pagination={false} dataSource={[...list].reverse()} scroll={{ x: 'max-content' }}
                     onRow={(r) => ({ onClick: () => void open(r), style: { cursor: 'pointer' } })}
                     columns={[
-                        { title: 'Run', dataIndex: 'startedAt', render: (v: string) => new Date(v).toLocaleString() },
+                        { title: 'Run', dataIndex: 'startedAt', width: 170, render: (v: string) => new Date(v).toLocaleString() },
                         ...(source === 'team' ? [{ title: 'By', width: 170, render: (_: unknown, r: TrendRun) => (r.by?.pipeline ? `Pipeline ${r.by.pipeline}` : `${r.by?.user ?? ''} on ${r.by?.machine ?? ''}`) }] : []),
                         { title: 'Environment', dataIndex: 'env', width: 110 },
                         { title: 'Users', dataIndex: 'maxUsers', width: 70, align: 'right' },
@@ -1084,7 +1084,7 @@ export function Performance({ mode }: { mode: PerfMode }) {
     const [project, setProjectRaw] = React.useState<string>(() => loadPref('cs-studio-perf-project', ''));
     const [env, setEnv] = React.useState<string | undefined>(() => loadPref<string | undefined>('cs-studio-perf-env', undefined));
     const [open, setOpen] = React.useState<{ file: string | null; sc: LoadScenarioDef; dirty: boolean } | null>(null);
-    useUnsaved('load-scenario', !!open?.dirty, 'a load scenario', { lostOnLeave: true });
+    useUnsaved('load-scenario', !!open?.dirty, 'a load scenario', { lostOnLeave: true, save: async () => !!(await save()) });
     useAgentContext('perf', { project, environment: env, scenario: open?.file ?? null, scenarioName: open?.sc.name, unsaved: open?.dirty });
     const [reqs, setReqs] = React.useState<Req[] | null>(null);
     const [err, setErr] = React.useState<string | null>(null);
@@ -1145,14 +1145,19 @@ export function Performance({ mode }: { mode: PerfMode }) {
     const run = async () => {
         if (starting.current) return;
         if (curveInvalid) { message.error('The custom curve has mistakes (shown under it): fix them before running.'); return; }
+        if (!open) return;
         starting.current = true;
-        const file = open?.dirty || !open?.file ? await save() : open.file;
-        if (!file || !open) { starting.current = false; return; }
+        // Unsaved changes are saved when the run is started (Start), not before: Cancel leaves the file as it was.
+        const unsaved = open.dirty || !open.file;
         const users = Math.max(...policyCurve(open.sc.policy).map((c) => c.users));
         modal.confirm({
-            title: `Start "${open.sc.name}"?`, okText: 'Start',
-            content: <Space direction="vertical"><span>Up to <b>{users}</b> virtual user{users === 1 ? '' : 's'} for <b>{dur(open.sc.policy.duration)}</b> against the servers of <b>{env ?? envs[0] ?? 'the default environment'}</b>.</span><Typography.Text type="warning">Only load-test systems you are allowed to put under load (usually a test environment, never production without agreement).</Typography.Text></Space>,
-            onOk: async () => { try { const r = await api.loadStart(file, env); await refresh(); navigate(['perf-runs', r.id]); } catch (e) { message.error(errText(e)); } },
+            title: `Start "${open.sc.name}"?`, okText: unsaved ? 'Save and start' : 'Start',
+            content: <Space direction="vertical"><span>Up to <b>{users}</b> virtual user{users === 1 ? '' : 's'} for <b>{dur(open.sc.policy.duration)}</b> against the servers of <b>{env ?? envs[0] ?? 'the default environment'}</b>.</span>{unsaved && <span>{open.file ? 'Your changes to the scenario are saved first.' : 'The scenario is saved first.'}</span>}<Typography.Text type="warning">Only load-test systems you are allowed to put under load (usually a test environment, never production without agreement).</Typography.Text></Space>,
+            onOk: async () => {
+                const file = unsaved ? await save() : open.file;
+                if (!file) return;
+                try { const r = await api.loadStart(file, env); await refresh(); navigate(['perf-runs', r.id]); } catch (e) { message.error(errText(e)); }
+            },
             afterClose: () => { starting.current = false; },
         });
     };
@@ -1172,9 +1177,17 @@ export function Performance({ mode }: { mode: PerfMode }) {
     const running = runs.find((r) => (r.state === 'running' || r.state === 'stopping') && r.scenario === open?.file);
     const paths = (meta?.browserPaths ?? []).filter((b) => b.project === project);
     const [recording, setRecording] = React.useState(false);
+    // The New scenario dialog: Create stays off while the name is empty; a name of only spaces is said under it.
+    const [formTouched, setFormTouched] = React.useState(false);
+    const formUser = form.kind === 'api' ? form.coll : form.bpath;
+    const formNameProblem = nameProblem(form.name, 'scenario');
+    const formUserProblem = formUser ? null : form.kind === 'api' ? 'Choose a collection.' : 'Choose a browser path.';
+    useEscapeCloses(creating, () => setCreating(false));
+    useEscapeCloses(importing, () => setImporting(false));
     const createScenario = () => {
-                const user = form.kind === 'api' ? form.coll : form.bpath;
-                if (!form.name.trim() || !user) { message.info(`Give it a name and choose ${form.kind === 'api' ? 'a collection' : 'a browser path'}.`); return; }
+                const user = formUser;
+                setFormTouched(true);
+                if (formNameProblem || formUserProblem || !user) return;
                 const sc = form.kind === 'api' ? newScenario(form.name.trim(), user) : { ...newScenario(form.name.trim(), ''), browserPath: user, thinkTime: { min: 2000, max: 5000 }, policy: { type: 'ramp' as const, users: 5, duration: 300, rampUp: 60, rampDown: 30 }, slas: [{ target: '*', p95: 5000, errorRate: 1 }], timeout: 45_000 };
                 setCreating(false);
                 leave(() => { setOpen({ file: null, sc, dirty: true }); navigate(['perf'], true); });
@@ -1213,7 +1226,7 @@ export function Performance({ mode }: { mode: PerfMode }) {
                     </div>}
                     {mode === 'scenarios' && <div className="filter-row">
                         <Tooltip title={collections.length || paths.length ? undefined : 'Create an API collection first (API → Requests), or import a recorded browser path.'}>
-                            <Button size="small" type="primary" icon={<PlusOutlined />} disabled={!collections.length && !paths.length} onClick={() => { setForm({ name: '', kind: collections.length ? 'api' : 'browser', coll: collections[0]?.file, bpath: paths[0]?.file }); setCreating(true); }}>New scenario</Button>
+                            <Button size="small" type="primary" icon={<PlusOutlined />} disabled={!collections.length && !paths.length} onClick={() => { setForm({ name: '', kind: collections.length ? 'api' : 'browser', coll: collections[0]?.file, bpath: paths[0]?.file }); setFormTouched(false); setCreating(true); }}>New scenario</Button>
                             <Tooltip title="Record what an app, a browser or the BDD tests send, as a user path"><Button size="small" disabled={!project} onClick={() => setRecording(true)}>Record</Button></Tooltip>
                         </Tooltip>
                         <Tooltip title="Recorded browser scenarios (for example the performance app's scenarios.json) become browser paths"><Button size="small" icon={<ImportOutlined />} disabled={!project} onClick={() => { setImportText(''); setImporting(true); }}>Import recorded</Button></Tooltip>
@@ -1261,13 +1274,15 @@ export function Performance({ mode }: { mode: PerfMode }) {
         </Split>
         <RecordPathModal open={recording} project={project} collections={collections} onClose={() => setRecording(false)} onSaved={() => void refresh()} />
         <Modal open={creating} title="New load scenario" okText="Create" onCancel={() => setCreating(false)} destroyOnClose
-            onOk={createScenario}>
+            okButtonProps={{ disabled: !form.name.trim() || !!formUserProblem }} onOk={createScenario}>
             <Space direction="vertical" style={{ width: '100%' }}>
-                <Input placeholder="Name, e.g. Checkout under peak load" value={form.name} maxLength={200} onChange={(e) => setForm({ ...form, name: e.target.value })} onPressEnter={createScenario} aria-label="Scenario name" autoFocus />
+                <Input placeholder="Name, e.g. Checkout under peak load" value={form.name} maxLength={200} status={(formTouched || form.name) && formNameProblem ? 'error' : undefined} onChange={(e) => { setForm({ ...form, name: e.target.value }); setFormTouched(true); }} onPressEnter={createScenario} aria-label="Scenario name" autoFocus />
+                {(formTouched || form.name) && formNameProblem ? <Typography.Text type="danger" style={{ fontSize: 12 }}>{formNameProblem}</Typography.Text> : null}
                 <Segmented block value={form.kind} onChange={(k) => setForm({ ...form, kind: k as 'api' | 'browser' })} options={[{ value: 'api', label: <Tooltip title={!collections.length ? 'Create an API collection in this project first (API → Requests → New)' : undefined}>API requests</Tooltip>, disabled: !collections.length }, { value: 'browser', label: <Tooltip title={!paths.length ? 'Import a recorded browser path first' : 'Real browsers running a recorded user path'}>Browser users</Tooltip>, disabled: !paths.length }]} />
                 {form.kind === 'api'
                     ? <Select style={{ width: '100%' }} value={form.coll} onChange={(v) => setForm({ ...form, coll: v })} options={collections.map((c) => ({ value: c.file, label: `${c.name} (${c.requests} request${c.requests === 1 ? '' : 's'})` }))} aria-label="Collection" />
                     : <Select style={{ width: '100%' }} value={form.bpath} onChange={(v) => setForm({ ...form, bpath: v })} options={paths.map((b) => ({ value: b.file, label: `${b.name} (${b.actions} steps)` }))} aria-label="Browser path" />}
+                {formUserProblem && <Typography.Text type="danger" style={{ fontSize: 12 }}>{formUserProblem}</Typography.Text>}
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>{form.kind === 'api' ? 'The virtual users send this collection\'s requests (light: many users per computer).' : 'Each virtual user is a real browser replaying the recorded steps (heavy: tens to a few hundred per computer).'}</Typography.Text>
             </Space>
         </Modal>

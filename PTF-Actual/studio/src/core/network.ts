@@ -58,31 +58,63 @@ export const systemCertsSupported = (): boolean => typeof (tls as { getCACertifi
 
 const HOST_RE = /^(?=.{1,253}$)[a-z0-9*.](?:[a-z0-9.-]{0,251}[a-z0-9])?$/i;
 
+/**
+ * Checks the settings, but only the fields the chosen mode uses: a value the person can no longer see
+ * (a proxy address while the proxy is off, say) never blocks a save. Such a hidden value is kept when it
+ * is fine (for when that mode is chosen again) and dropped when it is not (it would be refused when used).
+ */
 export function validateNetwork(n: NetworkSettings): NetworkSettings {
     if (!['off', 'environment', 'manual', 'system', 'pac'].includes(n.proxyMode)) throw new UserError('Unknown proxy mode.');
-    if (n.proxyMode === 'pac') {
-        const pac = (n.pacUrl ?? '').trim();
-        if (!pac) throw new UserError('Give the PAC file address (http://wpad.company.local/proxy.pac) or its path.');
-        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(pac) && !/^(https?|file):\/\//i.test(pac)) throw new UserError('A PAC file address starts with http://, https:// or file://, or is a file path.');
-    }
-    if (n.proxyAuth && !['basic', 'ntlm', 'digest'].includes(n.proxyAuth)) throw new UserError('Unknown proxy sign-in.');
-    if ((n.proxyDomain ?? '').length > 100 || /[\s\\/@:]/.test(n.proxyDomain ?? '')) throw new UserError('The Windows domain is a name such as CORP.');
-    const url = n.proxyUrl.trim();
-    // Kept for when the proxy is turned on again, so checked in every mode: never a password inside the address.
-    if (url && n.proxyMode !== 'manual') { let u: URL | null = null; try { u = new URL(url); } catch { /* checked when used */ } if (u && (u.username || u.password)) throw new UserError('Put the proxy user name and password in their own fields, not in the address.'); }
-    if (n.proxyMode === 'manual') {
-        let u: URL;
-        try { u = new URL(url); } catch { throw new UserError('Proxy address must look like http://proxy.company.com:8080'); }
-        if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new UserError('Proxy address must start with http:// or https://');
-        if (u.username || u.password) throw new UserError('Put the proxy user name and password in their own fields, not in the address.');
-        if (u.pathname !== '/' || u.search) throw new UserError('Proxy address is just the server and port, e.g. http://proxy.company.com:8080');
-    }
-    if (n.proxyUser.length > 200 || /[\s:]/.test(n.proxyUser)) throw new UserError('Proxy user name cannot contain spaces or ":".');
-    const bypass = n.bypass.map((b) => b.trim().toLowerCase()).filter(Boolean);
-    for (const b of bypass) if (!HOST_RE.test(b)) throw new UserError(`"${b}" is not a host name for the bypass list.`);
+    const mode = n.proxyMode;
+    let pacUrl = n.pacUrl === undefined ? undefined : n.pacUrl.trim();
+    if (mode === 'pac') {
+        const problem = pacUrlProblem(pacUrl ?? '');
+        if (problem) throw new UserError(problem);
+    } else if (pacUrl && pacUrlProblem(pacUrl)) pacUrl = '';
+    // Sign-in, login and bypass list are used by every mode but "off".
+    const signIn = mode !== 'off';
+    let proxyAuth = n.proxyAuth;
+    if (proxyAuth && !['basic', 'ntlm', 'digest'].includes(proxyAuth)) { if (signIn) throw new UserError('Unknown proxy sign-in.'); proxyAuth = 'basic'; }
+    let proxyDomain = n.proxyDomain;
+    if ((proxyDomain ?? '').length > 100 || /[\s\\/@:]/.test(proxyDomain ?? '')) { if (signIn) throw new UserError('The Windows domain is a name such as CORP.'); proxyDomain = ''; }
+    let proxyUser = n.proxyUser;
+    if (proxyUser.length > 200 || /[\s:]/.test(proxyUser)) { if (signIn) throw new UserError('Proxy user name cannot contain spaces or ":".'); proxyUser = ''; }
+    let bypass = n.bypass.map((b) => b.trim().toLowerCase()).filter(Boolean);
+    if (signIn) { for (const b of bypass) if (!HOST_RE.test(b)) throw new UserError(`"${b}" is not a host name for the bypass list.`); }
+    else bypass = bypass.filter((b) => HOST_RE.test(b));
+    let url = n.proxyUrl.trim();
+    if (mode === 'manual') {
+        const problem = proxyUrlProblem(url);
+        if (problem) throw new UserError(problem);
+    } else if (url && proxyUrlProblem(url)) url = ''; // never kept with a password inside, nor when it could not be used
     if (n.useSystemCerts && !systemCertsSupported()) throw new UserError(`This Node.js (${process.version}) cannot read the computer's certificate store; it needs Node.js 22.15 or later. Use a certificate file instead.`);
     if (n.caFile) readCaFile(n.caFile);
-    return { ...n, proxyUrl: url, bypass, caFile: n.caFile.trim(), ...(n.pacUrl !== undefined ? { pacUrl: n.pacUrl.trim() } : {}) };
+    return {
+        ...n, proxyUrl: url, proxyUser, bypass, caFile: n.caFile.trim(),
+        ...(proxyAuth !== undefined ? { proxyAuth } : {}), ...(proxyDomain !== undefined ? { proxyDomain } : {}), ...(pacUrl !== undefined ? { pacUrl } : {}),
+    };
+}
+
+/** Why a manual proxy address would be refused, or null. */
+export function proxyUrlProblem(raw: string): string | null {
+    const url = raw.trim();
+    if (!url) return 'Give the proxy address, e.g. http://proxy.company.com:8080';
+    if (url.length > 2048) return 'The proxy address is too long (at most 2,048 characters).';
+    let u: URL;
+    try { u = new URL(url); } catch { return 'Proxy address must look like http://proxy.company.com:8080'; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return 'Proxy address must start with http:// or https://';
+    if (u.username || u.password) return 'Put the proxy user name and password in their own fields, not in the address.';
+    if (u.pathname !== '/' || u.search || u.hash) return 'Proxy address is just the server and port, e.g. http://proxy.company.com:8080';
+    return null;
+}
+
+/** Why a PAC file address would be refused, or null. */
+export function pacUrlProblem(raw: string): string | null {
+    const pac = raw.trim();
+    if (!pac) return 'Give the PAC file address (http://wpad.company.local/proxy.pac) or its path.';
+    if (pac.length > 2048) return 'The PAC file address is too long (at most 2,048 characters).';
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(pac) && !/^(https?|file):\/\//i.test(pac)) return 'A PAC file address starts with http://, https:// or file://, or is a file path.';
+    return null;
 }
 
 /** The PEM certificates in a file, with their names (to show what is trusted). Throws a UserError. */

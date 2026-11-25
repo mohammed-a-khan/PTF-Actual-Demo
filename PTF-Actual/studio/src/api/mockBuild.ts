@@ -59,8 +59,10 @@ export interface MockRecorder { url: string; port: number; count: () => number; 
  * or body as answers for those requests.
  */
 export function recordMock(target: string, o: { name?: string; agentFor?: (url: string) => http.Agent | undefined; ca?: string | string[] } = {}): Promise<MockRecorder> {
-    const base = new URL(target);
+    let base: URL;
+    try { base = new URL(target); } catch { return Promise.reject(new Error('The address needs a host after http:// or https://, e.g. https://api.example.com.')); }
     if (base.protocol !== 'http:' && base.protocol !== 'https:') return Promise.reject(new Error('Record from an http:// or https:// address.'));
+    if (!base.hostname) return Promise.reject(new Error('The address needs a host after http:// or https://, e.g. https://api.example.com.'));
     const seen: Array<{ method: string; path: string; query: Record<string, string>; reqBody: string; status: number; headers: Record<string, string>; body: string }> = [];
     const server = http.createServer((req, res) => {
         const chunks: Buffer[] = [];

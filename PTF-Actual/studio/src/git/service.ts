@@ -1095,7 +1095,7 @@ export class GitService {
     // ---------------------------------------------------------------- tags
 
     async tags(): Promise<TagInfo[]> {
-        const r = await this.git(['for-each-ref', '--sort=-creatordate', '--format=%(refname:short)%1f%(objectname)%1f%(*objectname)%1f%(creatordate:iso-strict)%1f%(contents:subject)%1f%(objecttype)', 'refs/tags']);
+        const r = await this.git(['for-each-ref', '--sort=-creatordate', '--format=%(refname:lstrip=2)%1f%(objectname)%1f%(*objectname)%1f%(creatordate:iso-strict)%1f%(contents:subject)%1f%(objecttype)', 'refs/tags']);
         const out: TagInfo[] = [];
         for (const l of r.stdout.split('\n').filter(Boolean)) {
             const [name, obj, target, date, subject, type] = l.split('\x1f');
@@ -1115,20 +1115,37 @@ export class GitService {
 
     async createTag(name: string, rev: string, message?: string): Promise<void> {
         if (!name.trim()) throw new UserError('Give the tag a name.');
+        const RULES = 'A tag name must not start with "-" or ".", end with "/", "." or ".lock", or contain spaces, ~ ^ : ? * [ \\, "..", "@{" or "//".';
+        if (name.startsWith('-')) throw new UserError(`"${name}" is not a valid tag name: it must not start with "-".`);
         const r = await this.git(['check-ref-format', `refs/tags/${name}`], { allowFailure: true });
-        if (r.code !== 0 || name.startsWith('-')) throw new UserError(`"${name}" is not a valid tag name: no spaces, ~ ^ : ? * [ \\ or "..".`);
+        if (r.code !== 0) throw new UserError(`"${name}" is not a valid tag name. ${RULES}`);
         const exists = await this.git(['show-ref', '--verify', '--quiet', `refs/tags/${name}`], { allowFailure: true });
         if (exists.code === 0) throw new UserError(`A tag named "${name}" exists already: choose another name (a tag is not moved).`);
+        // A tag with the name of a branch makes the name ambiguous: git then warns on every use and
+        // "tags/<name>" shows up where "<name>" was meant. Refuse it.
+        const branch = await this.git(['show-ref', '--verify', '--quiet', `refs/heads/${name}`], { allowFailure: true });
+        if (branch.code === 0) throw new UserError(`A branch named "${name}" exists: a tag with the same name would make "${name}" ambiguous. Choose another name.`);
         assertRev(rev);
+        const target = await this.git(['rev-parse', '--verify', '-q', `${rev}^{commit}`], { allowFailure: true });
+        if (target.code !== 0) throw new UserError(`"${rev}" is not a branch, tag or commit in this repository: check the "At" field.`);
         await this.git(message?.trim() ? ['tag', '-a', name, '-m', message.trim(), rev] : ['tag', name, rev]);
     }
 
     async deleteTag(name: string, alsoRemote: boolean): Promise<void> {
         assertRev(name);
-        await this.git(['tag', '-d', name]);
+        // Work on the full ref, so a tag that shares its name with a branch is still found (and an
+        // older list that showed it as "tags/<name>" still deletes it).
+        const has = async (n: string) => (await this.git(['show-ref', '--verify', '--quiet', `refs/tags/${n}`], { allowFailure: true })).code === 0;
+        let tag = name;
+        if (!(await has(tag))) {
+            const short = name.replace(/^(refs\/)?tags\//, '');
+            if (short !== name && await has(short)) tag = short;
+            else throw new UserError(`There is no tag named "${name}" (it may have been deleted already).`);
+        }
+        await this.git(['update-ref', '-d', `refs/tags/${tag}`]);
         if (alsoRemote) {
             const remote = await this.defaultRemote();
-            if (remote) await this.git(['push', remote, '--delete', `refs/tags/${name}`], { allowFailure: true, timeoutMs: 600_000 });
+            if (remote) await this.git(['push', remote, '--delete', `refs/tags/${tag}`], { allowFailure: true, timeoutMs: 600_000 });
         }
     }
 

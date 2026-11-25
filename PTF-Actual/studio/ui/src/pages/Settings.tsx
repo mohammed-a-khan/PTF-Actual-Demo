@@ -9,7 +9,7 @@ import { api, McpSettings, StudioSettings } from '../api';
 import { errText } from '../state';
 import { GitNetworkCard, StudioNetworkCard } from './NetworkSettings';
 import { navigate, useRoute } from '../route';
-import { useStoredTab } from '../datagit-common';
+import { asciiDigits, useStoredTab } from '../datagit-common';
 
 const SETTINGS_TABS = ['general', 'ado', 'network', 'assistants'] as const;
 type SettingsTab = typeof SETTINGS_TABS[number];
@@ -95,10 +95,13 @@ export function Settings() {
                             <Col xs={24} md={12}>
                                 <Form.Item label="Port" htmlFor="cs-settings-port" tooltip="A fixed port keeps your bookmark working. If it is busy, the next free one is used. Takes effect the next time you start the Studio.">
                                     <InputNumber id="cs-settings-port" precision={0} style={{ width: '100%' }} defaultValue={s.port} key={`${s.port}-${rev}`} addonAfter={s.port === 0 ? 'any free port' : undefined}
+                                        parser={(t) => Number(asciiDigits(t ?? '').replace(/[\s,]/g, ''))}
                                         onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
                                         onBlur={(e) => {
-                                            const raw = String(e.target.value).trim(), v = Number(raw);
+                                            // Digits of other scripts (١٢٣٤) count as 0-9; anything else is said, never dropped silently.
+                                            const raw = asciiDigits(String(e.target.value)).replace(/[\s,]/g, ''), v = Number(raw);
                                             if (raw === '') { reset(); return; }
+                                            if (!/^\d+$/.test(raw)) { message.error(`Port: digits only, 0 (any free port) or 1024–65535: still ${s.port}.`); reset(); return; }
                                             if (v === s.port) return;
                                             // 0: any free port; otherwise 1024–65535 (lower ports need administrator rights).
                                             if (!Number.isInteger(v) || (v !== 0 && (v < 1024 || v > 65535))) { message.error(`Port: 0 (any free port) or 1024–65535: still ${s.port}.`); reset(); return; }

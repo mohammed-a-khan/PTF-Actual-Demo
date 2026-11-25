@@ -1,4 +1,4 @@
-/** API → History: every request sent from the Studio on this computer (secrets masked). */
+/** API → History: every request sent with Send under API → Requests on this computer (secrets masked); Runner runs and monitors are under API → Runner → Past runs. */
 import React from 'react';
 import { App, Button, Drawer, Empty, Input, Popconfirm, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import { DeleteOutlined, ReloadOutlined, RollbackOutlined } from '@ant-design/icons';
@@ -6,6 +6,14 @@ import { api, ApiHistoryEntry, ApiHistoryItem } from '../api';
 import { ResponseView } from '../components/ResponseView';
 import { errText } from '../state';
 import { navigate, useRoute } from '../route';
+
+/** Ignore clicks (and double clicks) anywhere for a moment. */
+export function swallowClicks(ms: number) {
+    const stop = (e: Event) => { e.stopPropagation(); e.preventDefault(); };
+    const kinds = ['click', 'dblclick', 'mousedown', 'mouseup', 'pointerdown', 'pointerup'];
+    for (const k of kinds) window.addEventListener(k, stop, true);
+    setTimeout(() => { for (const k of kinds) window.removeEventListener(k, stop, true); }, ms);
+}
 
 export function ApiHistory() {
     const { message } = App.useApp();
@@ -20,26 +28,32 @@ export function ApiHistory() {
         setDetail({ item: h, entry: null });
         api.apiHistoryEntry(h.id).then((entry) => setDetail({ item: h, entry })).catch((e) => setDetail({ item: h, entry: null, error: errText(e) }));
     };
+    // Once per click: the drawer closes as the request opens, so a second click of a double click must not land on what
+    // is under the button (the top bar's Copilot); clicks are ignored for a moment.
+    const restoring = React.useRef(false);
     const restore = () => {
-        if (!detail?.entry || !detail.item.file) return;
+        if (!detail?.entry || !detail.item.file || restoring.current) return;
+        restoring.current = true;
+        swallowClicks(600);
         sessionStorage.setItem('cs-api-restore', JSON.stringify({ file: detail.item.file, def: detail.entry.def, at: detail.item.at }));
         navigate(['api', ...detail.item.file.split('/')]);
     };
     const load = React.useCallback(() => api.apiHistory().then((r) => setItems(r.items)).catch((e) => message.error(errText(e))), [message]);
     React.useEffect(() => { if (here) void load(); }, [here, load]);
     const ok = (h: ApiHistoryItem) => !h.error && h.status < 400 && h.passed === h.checks;
-    const shown = (items ?? []).filter((h) => (result === 'all' || (result === 'passed') === ok(h)) && (!find || `${h.collection} ${h.request} ${h.method} ${h.url} ${h.status}`.toLowerCase().includes(find.toLowerCase())));
+    const q = find.trim().toLowerCase();
+    const shown = (items ?? []).filter((h) => (result === 'all' || (result === 'passed') === ok(h)) && (!q || `${h.collection} ${h.request} ${h.method} ${h.url} ${h.status}`.toLowerCase().includes(q)));
     return (
         <div className="panel" style={{ height: 'calc(100vh - var(--chrome))', display: 'flex', flexDirection: 'column' }}>
             <div className="toolbar">
                 <Input size="small" allowClear style={{ width: 280 }} placeholder="Find (request, URL, status)" value={find} onChange={(e) => setFind(e.target.value)} aria-label="Find" />
                 <Select size="small" value={result} onChange={setResult} style={{ width: 130 }} options={[{ value: 'all', label: 'All results' }, { value: 'failed', label: 'Failed' }, { value: 'passed', label: 'Passed' }]} aria-label="Result" />
-                <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>{items ? `${shown.length} of ${items.length} (the last 200 kept on this computer)` : ''}</Typography.Text>
+                <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>{items ? <Tooltip title="Runs of the Runner and of monitors are not listed here: see API → Runner → Past runs.">{`${shown.length} of ${items.length} sent from API → Requests (the last 200 on this computer)`}</Tooltip> : ''}</Typography.Text>
                 <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()} aria-label="Refresh" />
                 <Popconfirm title="Clear the history?" okText="Clear" okButtonProps={{ danger: true }} onConfirm={async () => { try { await api.apiClearHistory(); void load(); } catch (e) { message.error(errText(e)); } }}><Button size="small" icon={<DeleteOutlined />}>Clear</Button></Popconfirm>
             </div>
             <div style={{ flex: 1, overflow: 'auto' }}>
-                {items && !items.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 60 }} description="Requests you send under API → Requests appear here." /> : (
+                {items && !items.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 60 }} description={<>Requests you send with Send under API → Requests appear here.<br />Runs of the Runner and of monitors are under API → Runner → Past runs.</>} /> : (
                     <Table<ApiHistoryItem> size="small" rowKey={(h) => `${h.at}-${h.requestId ?? h.url}`} dataSource={shown} loading={items === null} pagination={false} sticky
                         onRow={(h) => ({ onClick: () => openDetail(h), style: { cursor: h.id || h.file ? 'pointer' : undefined } })}
                         columns={[
@@ -56,7 +70,7 @@ export function ApiHistory() {
                 title={detail ? <Space><b style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{detail.item.method}</b>{detail.item.request}<Typography.Text type="secondary" style={{ fontSize: 12 }}>{new Date(detail.item.at).toLocaleString()} · {detail.item.collection} · {detail.item.env}</Typography.Text></Space> : ''}
                 extra={detail?.item.file ? <Space>
                     <Button size="small" onClick={() => navigate(['api', ...detail.item.file!.split('/')])}>Open the collection</Button>
-                    <Button size="small" type="primary" icon={<RollbackOutlined />} disabled={!detail.entry} onClick={restore} title="Adds this request, as it was sent, to its collection; send it again from there">Restore and send again</Button>
+                    <Button size="small" type="primary" icon={<RollbackOutlined />} disabled={!detail.entry} onClick={restore} title="Adds this request, as it was sent, to its collection (not saved) and sends it again">Restore and send again</Button>
                 </Space> : null}
                 styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column' } }}>
                 {detail?.error ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 40 }} description={detail.error} />

@@ -15,6 +15,35 @@ import { Split } from '../components/Split';
 import { ago } from '../format';
 import { shownTab, useRememberedTab } from '../apiperf-ui';
 
+/** A step with its exchange (kept by the Studio for the first steps of a run). */
+type StepDetail = { request: { headers: Record<string, string>; body?: string }; response?: { statusText: string; headers: Record<string, string>; body: string; cut: boolean } };
+type Step = ApiRunStep & { detail?: StepDetail };
+const headerText = (h: Record<string, string>) => Object.entries(h).map(([k, v]) => `${k}: ${v}`).join('\n');
+const pretty = (t: string) => { try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return t; } };
+
+/** An expanded row: the error, the checks, the request as sent and the response, and a link to the request. */
+function StepView({ s, file }: { s: Step; file: string }) {
+    const d = s.detail;
+    return (
+        <Space direction="vertical" size={8} style={{ width: '100%', minWidth: 0 }}>
+            <Space wrap size={8}>
+                <span className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}><b>{s.method}</b> {s.url || '(not sent)'}</span>
+                {s.status !== undefined && <Tag bordered={false} color={s.status < 300 ? 'success' : s.status < 400 ? 'processing' : 'error'}>{s.status}{d?.response?.statusText ? ` ${d.response.statusText}` : ''}</Tag>}
+                {s.timeMs !== undefined && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{s.timeMs} ms{s.size !== undefined ? ` · ${s.size.toLocaleString()} bytes` : ''}</Typography.Text>}
+                {file && s.requestId && <Typography.Link style={{ fontSize: 12 }} onClick={() => navigate(['api', ...file.split('/'), s.requestId])}>Open the request in API requests</Typography.Link>}
+            </Space>
+            {s.error && <Typography.Text type="danger">{s.error}</Typography.Text>}
+            {s.checks.map((c, i) => <span key={i}>{c.pass ? <CheckCircleFilled style={{ color: '#389e0d' }} /> : <CloseCircleFilled style={{ color: '#cf1322' }} />} {c.message}{!c.pass && c.actual !== undefined ? <Typography.Text type="secondary"> (got {c.actual})</Typography.Text> : null}</span>)}
+            {s.logs?.length ? <pre className="code-box" style={{ margin: 0 }}>{s.logs.join('\n')}</pre> : null}
+            {d ? <Tabs size="small" className="ap-tabs" items={[
+                ...(d.response ? [{ key: 'res', label: 'Response', children: <pre className="code-box" style={{ margin: 0, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{pretty(d.response.body) || '(empty body)'}{d.response.cut ? '\n… (cut)' : ''}</pre> },
+                    { key: 'resh', label: 'Response headers', children: <pre className="code-box" style={{ margin: 0, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{headerText(d.response.headers) || '(none)'}</pre> }] : []),
+                { key: 'req', label: 'Request sent', children: <pre className="code-box" style={{ margin: 0, maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{`${s.method} ${s.url}\n${headerText(d.request.headers)}${d.request.body ? `\n\n${pretty(d.request.body)}` : ''}`}</pre> },
+            ]} /> : <Typography.Text type="secondary" style={{ fontSize: 12 }}>The request and response are not kept for this step (runs before this version, or after the first 200 steps of a run).</Typography.Text>}
+        </Space>
+    );
+}
+
 const flat = (c: ApiCollectionDef) => { const out: Array<{ id: string; name: string; method: string }> = []; const w = (xs: ApiCollectionDef['items']) => { for (const x of xs) { if (x.kind === 'folder') w(x.items); else out.push({ id: x.id, name: x.name, method: x.method }); } }; w(c.items); return out; };
 
 export function ApiRunner() {
@@ -143,8 +172,8 @@ export function ApiRunner() {
                             <div className="kpi"><b>{job.iterations}</b><span>Iterations</span></div>
                         </div>
                         <Checkbox checked={onlyFailed} onChange={(e) => setOnlyFailed(e.target.checked)}>Only failures</Checkbox>
-                        <Table<ApiRunStep> size="small" scroll={{ x: 620 }} rowKey={(s) => `${s.iteration}-${s.requestId}`} dataSource={steps} pagination={steps.length > 100 ? { pageSize: 100, showSizeChanger: false } : false}
-                            expandable={{ rowExpandable: (s) => s.checks.length > 0 || !!s.error || !!s.logs?.length, expandedRowRender: (s) => <Space direction="vertical">{s.error && <Typography.Text type="danger">{s.error}</Typography.Text>}{s.checks.map((c, i) => <span key={i}>{c.pass ? <CheckCircleFilled style={{ color: '#389e0d' }} /> : <CloseCircleFilled style={{ color: '#cf1322' }} />} {c.message}{!c.pass && c.actual !== undefined ? <Typography.Text type="secondary"> (got {c.actual})</Typography.Text> : null}</span>)}{s.logs?.length ? <pre className="code-box" style={{ margin: 0 }}>{s.logs.join('\n')}</pre> : null}</Space> }}
+                        <Table<Step> size="small" scroll={{ x: 620 }} rowKey={(s) => `${s.iteration}-${s.requestId}`} dataSource={steps} pagination={steps.length > 100 ? { pageSize: 100, showSizeChanger: false } : false}
+                            expandable={{ rowExpandable: (s) => !!s.requestId || s.checks.length > 0 || !!s.error || !!s.logs?.length, expandedRowRender: (s) => <StepView s={s} file={job.collection} /> }}
                             columns={[
                                 { title: '#', dataIndex: 'iteration', width: 50 },
                                 { title: 'Request', dataIndex: 'name', ellipsis: true, width: 220, render: (n: string, s) => <><b style={{ fontSize: 11, fontFamily: 'var(--mono)' }}>{s.method}</b> {n}</> },

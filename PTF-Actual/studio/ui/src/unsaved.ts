@@ -19,12 +19,23 @@ function install() {
 /** Unsaved work a screen does not keep when another screen is opened (asked about in the menu). */
 const lost = new Set<string>();
 /** While isDirty is true, leaving the page asks first; with lostOnLeave, opening another screen asks too. */
-export function useUnsaved(key: string, isDirty: boolean, what: string, o: { lostOnLeave?: boolean } = {}) {
+export function useUnsaved(key: string, isDirty: boolean, what: string, o: { lostOnLeave?: boolean; save?: () => Promise<boolean> } = {}) {
+    // The screen's own Save, so "Leave without saving?" can offer to save first (kept current every render).
+    const saveRef = React.useRef(o.save);
+    saveRef.current = o.save;
     React.useEffect(() => {
         install();
-        if (isDirty) { dirty.set(key, what); if (o.lostOnLeave) lost.add(key); } else { dirty.delete(key); lost.delete(key); }
-        return () => { dirty.delete(key); lost.delete(key); };
-    }, [key, isDirty, what, o.lostOnLeave]);
+        if (isDirty) { dirty.set(key, what); if (o.lostOnLeave) lost.add(key); if (saveRef.current) savers.set(key, () => saveRef.current!()); }
+        else { dirty.delete(key); lost.delete(key); savers.delete(key); }
+        return () => { dirty.delete(key); lost.delete(key); savers.delete(key); };
+    }, [key, isDirty, what, o.lostOnLeave, !!o.save]); // eslint-disable-line react-hooks/exhaustive-deps
+}
+const savers = new Map<string, () => Promise<boolean>>();
+/** Save everything another screen would throw away, when each of those screens can save; true when all saved. */
+export const canSaveLost = () => lost.size > 0 && [...lost].every((k) => savers.has(k));
+export async function saveLost(): Promise<boolean> {
+    for (const k of [...lost]) { const s = savers.get(k); if (!s || !(await s())) return false; }
+    return true;
 }
 /** What another screen would throw away (its edits are not kept). */
 export const lostOnLeave = () => [...lost].map((k) => dirty.get(k)).filter((x): x is string => !!x);

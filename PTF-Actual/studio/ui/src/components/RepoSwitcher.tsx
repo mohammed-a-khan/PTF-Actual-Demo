@@ -3,7 +3,7 @@
  * from Azure DevOps. Another repository opens as its own Studio in a new tab; this one stays as it is.
  */
 import React from 'react';
-import { App, Button, Dropdown, Form, Input, List, Modal, Space, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Dropdown, Form, Input, List, Modal, Space, Tooltip, Typography } from 'antd';
 import { CloudDownloadOutlined, DownOutlined, FolderOpenOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { errText } from '../state';
@@ -20,7 +20,8 @@ export function RepoSwitcher({ repoRoot }: { repoRoot: string }) {
     const load = () => { void api.workspaces().then((w) => { setRecent(w.recent.filter((r) => r.path !== w.current)); setParent(w.parent); }).catch(() => undefined); };
     React.useEffect(load, []);
 
-    const open = async (path: string, trustRepoConfig = false): Promise<void> => {
+    /** Open a repository; with `quiet`, a failure is returned (for the dialog to show) instead of a toast. */
+    const open = async (path: string, trustRepoConfig = false, quiet = false): Promise<string | null> => {
         const hide = message.loading('Starting a Studio for that repository…', 0);
         try {
             const r = await api.workspaceOpen({ path, trustRepoConfig });
@@ -29,14 +30,15 @@ export function RepoSwitcher({ repoRoot }: { repoRoot: string }) {
                 modal.confirm({
                     title: 'This repository\'s Git settings run programs',
                     content: <><Typography.Paragraph>Git will run these when the Studio works with it. Open it only if you trust where it came from.</Typography.Paragraph><ul>{r.needsTrust.map((x) => <li key={x}><Typography.Text code>{x}</Typography.Text></li>)}</ul></>,
-                    okText: 'Trust and open', onOk: () => open(r.path ?? path, true),
+                    okText: 'Trust and open', onOk: async () => { await open(r.path ?? path, true); },
                 });
-                return;
+                return null;
             }
-            if (r.same) { message.info('That is the repository open here.'); return; }
+            if (r.same) { message.info('That is the repository open here.'); return null; }
             if (r.url) { window.open(r.url, '_blank', 'noopener'); message.success('Opened in a new tab.'); }
             load();
-        } catch (e) { message.error(errText(e)); } finally { hide(); }
+            return null;
+        } catch (e) { if (quiet) return errText(e); message.error(errText(e)); return null; } finally { hide(); }
     };
 
     return (
@@ -53,19 +55,29 @@ export function RepoSwitcher({ repoRoot }: { repoRoot: string }) {
             }}>
                 <Button type="text" style={{ fontWeight: 600, paddingInline: 6 }} aria-label={`Repository ${name}: switch or clone`}>{name} <DownOutlined style={{ fontSize: 10 }} /></Button>
             </Dropdown>
-            {openFolder && <OpenFolder parent={parent} onClose={() => setOpenFolder(false)} onOpen={(p) => { setOpenFolder(false); void open(p); }} />}
-            {clone && <CloneRepo parent={parent} onClose={() => setClone(false)} onCloned={(p) => { setClone(false); load(); modal.confirm({ title: 'Cloned', content: <Typography.Text code>{p}</Typography.Text>, okText: 'Open it', cancelText: 'Later', onOk: () => open(p) }); }} />}
+            {openFolder && <OpenFolder parent={parent} onClose={() => setOpenFolder(false)} onOpen={(p) => open(p, false, true)} />}
+            {clone && <CloneRepo parent={parent} onClose={() => setClone(false)} onCloned={(p) => { setClone(false); load(); modal.confirm({ title: 'Cloned', content: <Typography.Text code>{p}</Typography.Text>, okText: 'Open it', cancelText: 'Later', onOk: async () => { await open(p); } }); }} />}
         </>
     );
 }
 
-function OpenFolder({ parent, onClose, onOpen }: { parent: string; onClose: () => void; onOpen: (p: string) => void }) {
+function OpenFolder({ parent, onClose, onOpen }: { parent: string; onClose: () => void; onOpen: (p: string) => Promise<string | null> }) {
     const [path, setPath] = React.useState(parent ? parent.replace(/[\\/]?$/, '/') : '');
+    const [busy, setBusy] = React.useState(false);
+    const [error, setError] = React.useState<string | null>(null);
+    // A path that cannot be opened: the dialog stays, with the reason and the typed path, to correct it.
+    const go = async () => {
+        const p = path.trim();
+        if (!p || busy) return;
+        setBusy(true);
+        try { const err = await onOpen(p); if (err) setError(err); else onClose(); } finally { setBusy(false); }
+    };
     return (
-        <Modal open title="Open another repository" okText="Open" okButtonProps={{ disabled: !path.trim() }} onOk={() => onOpen(path.trim())} onCancel={onClose}>
+        <Modal open title="Open another repository" okText="Open" confirmLoading={busy} okButtonProps={{ disabled: !path.trim() }} onOk={() => void go()} onCancel={onClose}>
             <Form layout="vertical">
-                <Form.Item label="Folder of the repository on this computer" htmlFor="cs-ws-path" extra="It opens as its own Studio in a new tab; this one stays as it is.">
-                    <Input id="cs-ws-path" value={path} onChange={(e) => setPath(e.target.value)} onPressEnter={() => path.trim() && onOpen(path.trim())} autoFocus />
+                {error && <Alert type="error" showIcon style={{ marginBottom: 12 }} message={error} />}
+                <Form.Item label="Folder of the repository on this computer" htmlFor="cs-ws-path" extra="It opens as its own Studio in a new tab; this one stays as it is." validateStatus={error ? 'error' : undefined}>
+                    <Input id="cs-ws-path" value={path} onChange={(e) => { setPath(e.target.value); setError(null); }} onPressEnter={() => void go()} autoFocus />
                 </Form.Item>
             </Form>
         </Modal>

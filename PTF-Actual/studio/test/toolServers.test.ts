@@ -3,7 +3,7 @@ import * as assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { CATALOG, diffTools, listServers, markReviewed, missingFor, parseImport, recordCheck, resolveServer, saveServer, sdkConfig, serverProblem, testServer, TEAM_FILE, ToolServer } from '../src/agents/toolServers';
+import { CATALOG, diffTools, listServers, markReviewed, missingFor, parseImport, putServer, recordCheck, resolveServer, saveServer, sdkConfig, serverProblem, testServer, TEAM_FILE, ToolServer } from '../src/agents/toolServers';
 
 /** A tiny MCP server over stdio (newline-delimited JSON-RPC): two tools. */
 function fakeServer(dir: string, o: { crash?: boolean } = {}): string {
@@ -45,6 +45,34 @@ test('tool servers: what can be saved (secrets only as references, no shell, htt
     // The ready entries all make servers that can be saved.
     const v: Record<string, Record<string, string>> = { postgres: { connection: 'shop/dev/MAIN' }, 'azure-devops': { organization: 'contoso' }, github: { token: 'GH_TOKEN' } };
     for (const c of CATALOG) assert.equal(serverProblem(c.id, c.make(v[c.id] ?? {})), null, c.id);
+});
+
+test('tool servers: a header an HTTP request cannot carry is refused when saved, not when checked', () => {
+    const h = (headers: Record<string, string>) => serverProblem('web', { kind: 'http', url: 'https://x.example.com/mcp', headers });
+    assert.match(h({ 'X-Test': '1 \u{1F600}' })!, /X-Test: plain characters only/);
+    assert.match(h({ 'X-Test': 'a\nb' })!, /plain characters only/);
+    assert.match(h({ 'X Test': '1' })!, /header name/);
+    assert.equal(h({ 'X-Test': '1', Authorization: 'Bearer {secret:GH_TOKEN}' }), null);
+});
+
+test('tool servers: add and edit in one write; a new name that another server has is refused (never replaced)', () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-ts-put-'));
+    const dir = path.join(tmp, 'repo'), home = path.join(tmp, 'home');
+    try {
+        const stdio: ToolServer = { kind: 'stdio', command: 'node' };
+        const web: ToolServer = { kind: 'http', url: 'http://127.0.0.1:9/mcp' };
+        putServer(dir, home, 'personal', 'qa3-keep', stdio, null);
+        putServer(dir, home, 'personal', 'qa3-srv', web, null);
+        assert.throws(() => putServer(dir, home, 'personal', 'qa3-keep', web, null), /There is a personal tool server qa3-keep already/);
+        assert.throws(() => putServer(dir, home, 'personal', 'qa3-keep', web, 'qa3-srv'), /There is a personal tool server qa3-keep already/);
+        const names = () => listServers(dir, home).map((x) => `${x.name}:${x.server.kind}`);
+        assert.deepEqual(names(), ['qa3-keep:stdio', 'qa3-srv:http'], 'nothing lost');
+        putServer(dir, home, 'personal', 'qa3-srv', { ...web, description: 'same name' }, 'qa3-srv');
+        putServer(dir, home, 'personal', 'qa3-web', web, 'qa3-srv');
+        assert.deepEqual(names(), ['qa3-keep:stdio', 'qa3-web:http']);
+        assert.throws(() => putServer(dir, home, 'personal', 'qa3-new', web, 'qa3-srv'), /No personal tool server qa3-srv/);
+        assert.deepEqual(names(), ['qa3-keep:stdio', 'qa3-web:http']);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
 test('tool servers: team file in the repository, personal file in the Studio home (same name: the personal one), secrets and connections filled in only in memory', () => {
@@ -336,6 +364,25 @@ test('tool servers managed in the Studio: paste, turn off, choose tools, list ch
         // Check all.
         const all = (await call('POST', '/api/agents/tool-servers/check')).body;
         assert.equal(all.servers[0].state.known.length, 4);
+
+        // A rename to the name of another server is refused: neither is lost.
+        assert.equal((await call('PUT', '/api/agents/tool-servers', { scope: 'team', name: 'keep', server: { kind: 'stdio', command: 'node' } })).status, 200);
+        const clash = await call('PUT', '/api/agents/tool-servers', { scope: 'team', name: 'keep', editing: 'shop-orders', server: { ...cur, kind: 'http', url: 'http://127.0.0.1:9/mcp' } });
+        assert.equal(clash.status, 400);
+        assert.match(clash.body.error, /There is a team tool server keep already/);
+        const both = JSON.parse(fs.readFileSync(path.join(dir, TEAM_FILE), 'utf8')).servers;
+        assert.deepEqual(Object.keys(both).sort(), ['keep', 'shop-orders']);
+        assert.equal(both.keep.command, 'node');
+        assert.equal(both['shop-orders'].kind, 'stdio');
+        // Editing a server that is no longer there is refused too (not added again under the new name).
+        assert.equal((await call('PUT', '/api/agents/tool-servers', { scope: 'team', name: 'gone-too', editing: 'gone', server: { kind: 'stdio', command: 'node' } })).status, 400);
+        // The pasted key stayed the server's through the edit; removed with it only when asked.
+        assert.deepEqual(both['shop-orders'].pastedSecrets, ['SHOP_API_KEY']);
+        const rm = (await call('DELETE', '/api/agents/tool-servers/shop-orders?scope=team&secrets=remove')).body;
+        assert.deepEqual(rm.removedSecrets, ['SHOP_API_KEY']);
+        assert.equal(store.getStudio('SHOP_API_KEY'), undefined);
+        assert.equal(store.getStudio('UNUSED'), 'x', 'other secrets kept');
+        assert.deepEqual((await call('DELETE', '/api/agents/tool-servers/keep?scope=team')).body.removedSecrets, []);
     } finally {
         delete process.env.FAKE_TOOLS;
         await srv.app.close();

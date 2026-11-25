@@ -10,7 +10,8 @@ import { api, ExploreNoteDef, MissionDef, MissionsDef, MissionStateDef, MissionS
 import { errText, useStudio } from '../state';
 import { navigate, useRoute } from '../route';
 import { DiffView } from '../components/DiffView';
-import { useRememberedTab } from '../agents-tabs';
+import { isTab, useRememberedTab } from '../agents-tabs';
+import { useUnsaved } from '../unsaved';
 import { Markdown } from '../components/Markdown';
 import { Replay } from '../components/Replay';
 
@@ -18,6 +19,12 @@ const STATE: Record<MissionStateDef, { label: string; color: string }> = {
     queued: { label: 'Queued', color: 'default' }, preparing: { label: 'Preparing', color: 'processing' }, working: { label: 'Working', color: 'processing' }, waiting: { label: 'Waiting for you', color: 'warning' },
     verifying: { label: 'Verifying', color: 'processing' }, succeeded: { label: 'Done', color: 'success' }, partial: { label: 'Partly done', color: 'gold' },
     failed: { label: 'Failed', color: 'error' }, blocked: { label: 'Blocked', color: 'orange' }, 'over-budget': { label: 'Over budget', color: 'error' }, stopped: { label: 'Stopped', color: 'default' },
+};
+const MISSION_TABS = ['start', 'running', 'finished', 'triggers'];
+/** A budget bar: amber when nearly used, red when used up or over. */
+const budgetBar = (used: number, budget: number, label: string) => {
+    const r = budget > 0 ? used / budget : 0;
+    return <Progress size="small" percent={Math.min(100, Math.round(r * 100))} status={r >= 1 ? 'exception' : 'normal'} strokeColor={r >= 1 ? undefined : r >= 0.8 ? '#faad14' : undefined} format={() => label} />;
 };
 const LIVE: MissionStateDef[] = ['queued', 'preparing', 'working', 'waiting', 'verifying'];
 const mins = (ms: number) => (ms < 60000 ? `${Math.round(ms / 1000)} s` : `${Math.round(ms / 60000)} min`);
@@ -30,12 +37,13 @@ export function startMissionFor(key: string): void { startNext = key; }
 export function Missions({ openConversation }: { openConversation: (session: string) => void }) {
     const { message } = App.useApp();
     const route = useRoute();
-    const open = route[1];
+    // #/missions/<tab> is a tab (start, running, finished, triggers); anything else, a mission.
+    const open = isTab(route[1], MISSION_TABS) ? undefined : route[1];
     const [d, setD] = React.useState<MissionsDef | null>(null);
     const [err, setErr] = React.useState<string | null>(null);
     const [starting, setStarting] = React.useState<MissionTemplateDef | null>(null);
     const [notesOpen, setNotesOpen] = React.useState(false);
-    const [tab, setTab] = useRememberedTab('missions', 'start', ['start', 'running', 'finished', 'triggers']);
+    const [tab, setTab] = useRememberedTab('missions', 'start', MISSION_TABS, 'missions');
     const load = React.useCallback(() => { api.missions().then((r) => { setD(r); setErr(null); }).catch((e) => { startNext = null; setErr(errText(e)); }); }, []);
     React.useEffect(load, [load]);
     React.useEffect(() => {
@@ -59,7 +67,7 @@ export function Missions({ openConversation }: { openConversation: (session: str
         <Table<MissionSummaryDef> size="small" rowKey="id" dataSource={rows} pagination={{ pageSize: 15, hideOnSinglePage: true }} onRow={(r) => ({ onClick: () => navigate(['missions', r.id]), style: { cursor: 'pointer' } })} columns={[
             { title: 'Mission', dataIndex: 'title', render: (v: string, r) => <Space direction="vertical" size={0}><Typography.Text strong>{v}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.trigger.kind === 'manual' ? `by ${r.trigger.by}` : r.trigger.kind === 'run-failed' ? `after failed run ${r.trigger.ref ?? ''}` : r.trigger.kind === 'pipeline' ? 'from a pipeline' : `on schedule ${r.trigger.ref ?? ''}`} · {ago(r.createdAt)}</Typography.Text></Space> },
             { title: 'State', width: 190, render: (_: unknown, r) => <Space size={4} wrap><Tag color={STATE[r.state].color}>{STATE[r.state].label}</Tag>{r.verified && <Tooltip title="The Studio ran the proof itself and it passed"><Tag icon={<SafetyCertificateOutlined />} color="green">verified</Tag></Tooltip>}</Space> },
-            { title: 'Work', width: 220, render: (_: unknown, r) => <Space direction="vertical" size={0} style={{ width: '100%' }}><Progress size="small" percent={Math.min(100, Math.round((r.used.activeMs / (r.budget.minutes * 60000)) * 100))} format={() => mins(r.used.activeMs)} /><Typography.Text type="secondary" style={{ fontSize: 11 }}>{r.used.modelCalls}/{r.budget.modelCalls} model calls</Typography.Text></Space> },
+            { title: 'Work', width: 220, render: (_: unknown, r) => <Space direction="vertical" size={0} style={{ width: '100%' }}>{budgetBar(r.used.activeMs, r.budget.minutes * 60000, mins(r.used.activeMs))}<Typography.Text type={r.used.modelCalls >= r.budget.modelCalls ? 'danger' : 'secondary'} style={{ fontSize: 11 }}>{r.used.modelCalls}/{r.budget.modelCalls} model calls</Typography.Text></Space> },
             { title: 'Changes', dataIndex: 'changes', width: 140, render: (n: number, r) => (n ? `${n} file${n === 1 ? '' : 's'}` : '—') + (r.result ? ` · ${r.result}` : '') },
         ]} />
     );
@@ -117,6 +125,8 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
         if (busy) return;
         const missing = t.inputs.filter((i) => i.required && !(v[i.key] ?? '').trim()).map((i) => i.label);
         if (missing.length) { message.warning(`Fill in: ${missing.join(', ')}`); return; }
+        const badUrl = t.inputs.find((i) => i.key === 'url' && (v[i.key] ?? '').trim() && !/^https?:\/\/[^\s/?#]+\S*$/i.test((v[i.key] ?? '').trim()));
+        if (badUrl) { message.warning(`${badUrl.label}: a web address starting with http:// or https://, or leave it empty for the environment's BASE_URL.`); return; }
         if (t.oneOf?.length && !t.oneOf.some((k) => (v[k] ?? '').trim())) { message.warning(`Fill in one of: ${t.oneOf.map((k) => t.inputs.find((i) => i.key === k)?.label ?? k).join(' or ')}`); return; }
         setBusy(true);
         try { const m = await api.missionStart(t.key, v, autonomy, budget, queue); message.success(queue ? 'Mission queued: it starts when the one working ends' : 'Mission started'); onStarted(m.id); }
@@ -186,7 +196,7 @@ function MissionDrawer({ id, onClose, onChanged, openConversation }: { id: strin
             {err && <Alert type="error" showIcon message={err} />}
             {m && (
                 <Space direction="vertical" size={14} style={{ width: '100%' }}>
-                    {m.reason && <Alert type={m.state === 'succeeded' ? 'success' : m.state === 'partial' || m.state === 'waiting' ? 'warning' : finished ? 'error' : 'info'} showIcon message={m.reason} />}
+                    {m.reason && <Alert type={m.state === 'succeeded' ? 'success' : m.state === 'partial' || m.state === 'waiting' ? 'warning' : finished ? 'error' : 'info'} showIcon message={m.state === 'over-budget' && /model calls/.test(m.reason) ? `Over budget: ${m.used.modelCalls} model calls used (the budget is ${m.budget.modelCalls}).` : m.reason} />}
                     {m.approvals?.map((ap) => (
                         <Card key={ap.id} size="small" style={{ borderColor: '#d48806' }} title={<Space><PauseCircleOutlined />The agent waits for your approval</Space>}>
                             <Typography.Paragraph strong>{ap.title}</Typography.Paragraph>
@@ -216,8 +226,8 @@ function MissionDrawer({ id, onClose, onChanged, openConversation }: { id: strin
                         { key: 't', label: 'Started', children: `${new Date(m.createdAt).toLocaleString()} (${m.trigger.kind === 'manual' ? m.trigger.by : m.trigger.kind})` },
                         { key: 'a', label: 'Autonomy', children: !m.copy ? 'reads only' : m.autonomy === 'autonomous' ? 'alone in its own copy' : 'asks for every change' },
                         { key: 'b', label: 'Branch', children: m.copy ? <Typography.Text code>{m.copy.branch}</Typography.Text> : 'reads only' },
-                        { key: 'w', label: 'Work time', children: <Progress size="small" percent={Math.min(100, Math.round((m.used.activeMs / (m.budget.minutes * 60000)) * 100))} format={() => `${mins(m.used.activeMs)} / ${m.budget.minutes}`} /> },
-                        { key: 'c', label: 'Model calls', children: <Progress size="small" percent={Math.min(100, Math.round((m.used.modelCalls / m.budget.modelCalls) * 100))} format={() => `${m.used.modelCalls} / ${m.budget.modelCalls}`} /> },
+                        { key: 'w', label: 'Work time', children: budgetBar(m.used.activeMs, m.budget.minutes * 60000, `${mins(m.used.activeMs)} / ${m.budget.minutes} min`) },
+                        { key: 'c', label: 'Model calls', children: budgetBar(m.used.modelCalls, m.budget.modelCalls, `${m.used.modelCalls} / ${m.budget.modelCalls}`) },
                         { key: 'v', label: 'Verification', children: `${m.used.attempts} / ${m.budget.attempts} attempt(s)` },
                     ]} />
                     <Tabs items={[
@@ -318,11 +328,16 @@ function PublishMission({ m, onClose, onDone }: { m: MissionDef; onClose: () => 
 }
 
 function TeamNotes({ onClose }: { onClose: () => void }) {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const [t, setT] = React.useState<{ file: string; text: string } | null>(null);
-    React.useEffect(() => { api.teamNotes().then(setT).catch((e) => message.error(errText(e))); }, [message]);
+    const [saved, setSaved] = React.useState<string | null>(null);
+    React.useEffect(() => { api.teamNotes().then((x) => { setT(x); setSaved(x.text); }).catch((e) => message.error(errText(e))); }, [message]);
+    const dirty = !!t && saved !== null && t.text !== saved;
+    useUnsaved('team-notes', dirty, 'team notes for agents', { lostOnLeave: true });
+    // Esc, the close button and Cancel ask first when the notes were changed.
+    const cancel = () => { if (!dirty) { onClose(); return; } modal.confirm({ title: 'Leave without saving?', content: 'Your changes to the team notes are lost.', okText: 'Leave', okButtonProps: { danger: true }, cancelText: 'Stay', onOk: onClose }); };
     return (
-        <Modal open width={760} title="Team notes for agents" onCancel={onClose} okText="Save" onOk={async () => { if (!t) return; try { await api.saveTeamNotes(t.text); message.success(`Saved ${t.file}: commit it to share it`); onClose(); } catch (e) { message.error(errText(e)); } }}>
+        <Modal open width={760} title="Team notes for agents" onCancel={cancel} maskClosable={!dirty} okText="Save" onOk={async () => { if (!t) return; try { await api.saveTeamNotes(t.text); message.success(`Saved ${t.file}: commit it to share it`); onClose(); } catch (e) { message.error(errText(e)); } }}>
             <Typography.Paragraph type="secondary">Every agent and mission reads these notes first: how to sign in, the application's quirks, the team's conventions. Missions propose notes; you accept them. Kept in {t?.file ?? '.cs-studio/agent-memory.md'} (commit it so the team shares it).</Typography.Paragraph>
             <Input.TextArea rows={16} value={t?.text ?? ''} onChange={(e) => t && setT({ ...t, text: e.target.value })} placeholder={'# Notes for agents\n- Sign in as the "qa-buyer" account; it has orders.\n- Close the cookie banner before anything else.'} style={{ fontFamily: 'var(--mono, monospace)', fontSize: 12 }} />
         </Modal>

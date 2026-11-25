@@ -72,7 +72,7 @@ export function validateSuite(v: unknown, agent: string): EvalSuite {
             if (k.kind === 'judge' && String(k.criteria ?? '').trim().length < 10) err(`${where}: write the grader's criteria.`);
             return k;
         });
-        return { id, name: String(c.name || id).slice(0, 120), prompt: String(c.prompt).slice(0, 8000), ...(c.inputs && Object.keys(c.inputs).length ? { inputs: c.inputs } : {}), checks, ...(c.repeat && c.repeat > 1 ? { repeat: Math.min(Math.floor(c.repeat), 10) } : {}) };
+        return { id, name: String(String(c.name ?? '').trim() || `Case ${i + 1}`).slice(0, 120), prompt: String(c.prompt).slice(0, 8000), ...(c.inputs && Object.keys(c.inputs).length ? { inputs: c.inputs } : {}), checks, ...(c.repeat && c.repeat > 1 ? { repeat: Math.min(Math.floor(c.repeat), 10) } : {}) };
     });
     return { agent, cases };
 }

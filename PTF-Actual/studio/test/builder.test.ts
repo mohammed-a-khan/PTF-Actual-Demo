@@ -142,8 +142,12 @@ test('builder routes: list with templates and tool groups; save (policy models),
         assert.deepEqual((await call('GET', '/api/missions')).json.templates.find((t: { key: string }) => t.key === 'story-bot').team, [{ id: 'explorer', name: 'Application explorer' }, { id: 'test-reviewer', name: 'Test reviewer' }]);
         assert.equal((await call('POST', '/api/agents/sessions', { agent: 'story-bot' })).status, 400, 'a mission agent is not a chat');
         assert.equal((await call('POST', '/api/agents/sessions', { agent: 'nope' })).status, 400);
+        // Its evaluation cases go with it (a new agent with the same id does not inherit them).
+        fs.mkdirSync(path.join(dir, '.cs-studio/evals'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.cs-studio/evals/test-reviewer.json'), JSON.stringify({ agent: 'test-reviewer', cases: [] }));
         assert.equal((await call('DELETE', '/api/agent-builder/test-reviewer', {})).status, 400, 'needs confirmation');
         assert.deepEqual((await call('DELETE', '/api/agent-builder/test-reviewer', { confirm: true })).json.agents.map((a: { id: string }) => a.id), ['story-bot']);
+        assert.equal(fs.existsSync(path.join(dir, '.cs-studio/evals/test-reviewer.json')), false, 'its evaluation cases deleted too');
         await srv.app.close();
     } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });

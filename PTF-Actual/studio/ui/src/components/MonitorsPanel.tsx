@@ -10,6 +10,7 @@ import { api, ApiCollectionInfo, ApiMonitorDef } from '../api';
 import { errText } from '../state';
 import { navigate } from '../route';
 import { ago } from '../format';
+import { useEscapeCloses } from '../apiperf-ui';
 
 type Edit = Omit<ApiMonitorDef, 'id' | 'last'> & { id?: string };
 
@@ -29,6 +30,7 @@ export function MonitorsPanel({ collections, environments, file }: { collections
         catch (e) { message.error(errText(e)); }
         finally { savingRef.current = false; setSaving(false); }
     };
+    useEscapeCloses(!!edit, () => setEdit(null));
     const every = (m: number) => (m % 1440 === 0 ? `every ${m / 1440 === 1 ? 'day' : `${m / 1440} days`}` : m % 60 === 0 ? `every ${m / 60 === 1 ? 'hour' : `${m / 60} hours`}` : `every ${m} min`);
     return (
         <>
@@ -41,14 +43,14 @@ export function MonitorsPanel({ collections, environments, file }: { collections
                 <div key={m.id} className="item-row" onClick={() => m.last?.runId && navigate(['api-runner', 'run', m.last.runId])}>
                     <div className="item-title">
                         {!m.last ? <Tag bordered={false}>not run</Tag> : m.last.passed ? <CheckCircleFilled style={{ color: '#389e0d' }} /> : <CloseCircleFilled style={{ color: '#cf222e' }} />}
-                        <span className="t">{m.name}</span>
-                        <Switch size="small" checked={m.enabled} onClick={(_c, e) => e.stopPropagation()} onChange={(on) => void api.apiSaveMonitor({ ...m, enabled: on }).then(load).catch((e) => message.error(errText(e)))} aria-label={`Monitor ${m.name} on`} />
+                        <span className="t">{m.name.trim() || <Typography.Text type="secondary" italic>(no name)</Typography.Text>}</span>
+                        <Switch size="small" checked={m.enabled} onClick={(_c, e) => e.stopPropagation()} onChange={(on) => void api.apiSaveMonitor({ ...m, enabled: on }).then(load).catch((e) => message.error(errText(e)))} aria-label={`Monitor ${m.name.trim() || '(no name)'} on`} />
                     </div>
                     <div className="item-meta">{m.env} · {every(m.everyMinutes)}{m.last ? ` · ${ago(m.last.at)} ${m.last.passed ? 'passed' : `${m.last.failed} failed`}` : ''}{m.last?.alert ? ` · ${m.last.alert}` : ''}</div>
                     <div style={{ display: 'flex', gap: 4, marginTop: 2 }} onClick={(e) => e.stopPropagation()}>
                         <Button size="small" icon={<CaretRightOutlined />} onClick={() => void api.apiRunMonitor(m.id).then((j) => { load(); navigate(['api-runner', 'run', j.id]); }).catch((e) => message.error(errText(e)))}>Run now</Button>
                         <Button size="small" onClick={() => setEdit({ ...m })}>Edit</Button>
-                        <Popconfirm title={`Delete the monitor "${m.name}"?`} okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => void api.apiDeleteMonitor(m.id).then(load).catch((e) => message.error(errText(e)))}><Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Delete the monitor" /></Popconfirm>
+                        <Popconfirm title={`Delete the monitor "${m.name.trim() || '(no name)'}"?`} okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => void api.apiDeleteMonitor(m.id).then(load).catch((e) => message.error(errText(e)))}><Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Delete the monitor" /></Popconfirm>
                     </div>
                 </div>))}
             <Modal open={!!edit} title={edit?.id ? 'Monitor' : 'New monitor'} okText="Save" okButtonProps={{ disabled: !edit?.name.trim(), loading: saving }} onOk={() => void save()} onCancel={() => setEdit(null)}>

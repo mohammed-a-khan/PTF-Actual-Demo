@@ -11,6 +11,20 @@ import { DiffView, useDiffPrefs } from '../components/DiffView';
 import { DiffToolbar } from '../components/DiffToolbar';
 import { useStoredTab } from '../datagit-common';
 
+/** Why git would refuse this tag name (the same rules the server checks), or null. */
+export function tagNameProblem(name: string, branchNames: string[], tagNames: string[]): string | null {
+    if (!name) return null;
+    if (name.startsWith('-')) return 'A tag name must not start with "-".';
+    if (name.startsWith('.') || name.includes('/.')) return 'A tag name (or a part after "/") must not start with ".".';
+    if (/[\s~^:?*[\\\x00-\x1f\x7f]/.test(name)) return 'A tag name must not contain spaces or any of ~ ^ : ? * [ \\.';
+    if (name.includes('..') || name.includes('@{') || name.includes('//') || name === '@') return 'A tag name must not contain "..", "@{" or "//" (or be just "@").';
+    if (/(\/|\.|\.lock)$/.test(name) || /\.lock\//.test(name)) return 'A tag name must not end with "/", "." or ".lock".';
+    if (name.length > 200) return 'A tag name can have at most 200 characters.';
+    if (tagNames.includes(name)) return `A tag named "${name}" exists already: choose another name.`;
+    if (branchNames.includes(name)) return `A branch is named "${name}": a tag with the same name would be ambiguous. Choose another name.`;
+    return null;
+}
+
 type BranchPart = 'local' | 'remote' | 'tags' | 'remotes';
 
 export function Branches() {
@@ -34,8 +48,9 @@ export function Branches() {
     };
     // Create tag (button or Enter), once even when clicked twice.
     const tagBusy = React.useRef(false);
+    const tagProblem = newTag ? tagNameProblem(newTag.name.trim(), branches.filter((b) => !b.remote).map((b) => b.name), tags.map((t) => t.name)) : null;
     const createTag = () => {
-        if (!newTag || !newTag.name.trim() || tagBusy.current) return;
+        if (!newTag || !newTag.name.trim() || tagProblem || tagBusy.current) return;
         tagBusy.current = true;
         void run(`Created tag ${newTag.name}`, () => api.createTag(newTag.name.trim(), newTag.rev, newTag.message)).then((ok) => { tagBusy.current = false; if (ok) setNewTag(null); });
     };
@@ -201,10 +216,10 @@ export function Branches() {
                     <Input id="cs-branches-rename" autoFocus value={rename?.to} maxLength={250} onPressEnter={doRename} onChange={(e) => rename && setRename({ ...rename, to: e.target.value.replace(/^\s+/, '').replace(/\s+/g, '-') })} />
                 </Form.Item></Form>
             </Modal>
-            <Modal open={!!newTag} title="New tag" okText="Create tag" onCancel={() => setNewTag(null)} okButtonProps={{ disabled: !newTag?.name.trim() }}
+            <Modal open={!!newTag} title="New tag" okText="Create tag" onCancel={() => setNewTag(null)} okButtonProps={{ disabled: !newTag?.name.trim() || !!tagProblem }}
                 onOk={createTag}>
                 {newTag && <Form layout="vertical">
-                    <Form.Item label="Tag name" help="For example v1.4.0 or regression-2026-11" htmlFor="cs-branches-tag-name"><Input id="cs-branches-tag-name" value={newTag.name} onChange={(e) => setNewTag({ ...newTag, name: e.target.value.replace(/^\s+/, '').replace(/\s+/g, '-') })} onPressEnter={createTag} autoFocus /></Form.Item>
+                    <Form.Item label="Tag name" help={tagProblem ?? 'For example v1.4.0 or regression-2026-11'} validateStatus={tagProblem ? 'error' : undefined} htmlFor="cs-branches-tag-name"><Input id="cs-branches-tag-name" value={newTag.name} onChange={(e) => setNewTag({ ...newTag, name: e.target.value.replace(/^\s+/, '').replace(/\s+/g, '-') })} onPressEnter={createTag} autoFocus /></Form.Item>
                     <Form.Item label="At" htmlFor="cs-branches-at"><Input id="cs-branches-at" value={newTag.rev} onChange={(e) => setNewTag({ ...newTag, rev: e.target.value })} className="mono" /></Form.Item>
                     <Form.Item label="Description (optional — makes an annotated tag)" htmlFor="cs-branches-description-optional-makes-an-"><Input.TextArea id="cs-branches-description-optional-makes-an-" value={newTag.message} onChange={(e) => setNewTag({ ...newTag, message: e.target.value })} /></Form.Item>
                 </Form>}

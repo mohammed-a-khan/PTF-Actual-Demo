@@ -102,7 +102,7 @@ import { applyCandidates, CorrelationCandidate, findCandidates, replayOnce } fro
 import { MockDefinition, mockFromOpenApi, mockProblems, RunningMock, startMock } from '../api/mock';
 import { locatorPolicy, locatorSupport } from '../framework/locators';
 import { selectSql } from '../db/schema';
-import { CATALOG, listServers, loadStates, markReviewed, missingFor, parseImport, recordCheck, resolveServer, saveServer, Scope as ToolScope, sdkConfig, serversIn, stateKey, TEAM_FILE, testServer, ToolServer, updateState } from '../agents/toolServers';
+import { CATALOG, listServers, loadStates, markReviewed, missingFor, parseImport, putServer, recordCheck, resolveServer, saveServer, Scope as ToolScope, sdkConfig, secretsOf, serversIn, stateKey, TEAM_FILE, testServer, ToolServer, updateState } from '../agents/toolServers';
 import { applyChanges, formatGherkin, planRename, renameProblem, stepUsages } from '../lang/stepRefactor';
 import { mcpToken, registerMcp } from '../mcp/http';
 import { alignRows, cellValue, DATE_PRECISIONS, ignoreRule, compareRows, CompareOptions, CompareResult, compareVitals, describeComparison } from '../db/compare';
@@ -794,7 +794,15 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
 
     // ---- Secrets (write-only values)
-    app.get('/api/secrets', async () => opts.store.list({ project: projectId }));
+    app.get('/api/secrets', async () => {
+        const list = opts.store.list({ project: projectId });
+        // The length shown is in characters as a person counts them (an emoji is one), not UTF-16 units.
+        // knownSecrets() decrypts all in one batch (cached), so each resolve() below is a lookup.
+        try {
+            opts.store.knownSecrets();
+            return list.map((m) => { const v = opts.store.resolve(m.name, { project: m.project, env: m.env }); return v === undefined ? m : { ...m, length: Array.from(v).length }; });
+        } catch { return list; }
+    });
     // Where each secret is used (configuration, features, API collections, load scenarios, tool servers) and its age.
     app.get('/api/secrets/usage', async () => ({ ...secretUsage(opts.repoRoot, opts.store.exists ? opts.store.list({ project: projectId }) : []), rotateDays: ROTATE_DAYS }));
     app.put('/api/secrets', async (req) => {
@@ -827,10 +835,16 @@ export function createServer(opts: ServerOptions): StudioServer {
         const b = envParam(q.b, 'b');
         return { project, a, b, differences: compareEnvironments(resolveFor(project, a), resolveFor(project, b)) };
     });
+    // A setting name the framework reads: said in full when it is not one (the same rule as env/edit.ts).
+    const envKey = (v: unknown): string => {
+        const k = typeof v === 'string' ? v.trim() : '';
+        if (!/^[A-Za-z_][A-Za-z0-9_.-]{0,199}$/.test(k)) throw new BadRequest(`${k ? `"${k.length > 60 ? k.slice(0, 60) + '…' : k}"` : 'An empty name'} is not a valid setting name: use Latin letters, digits, _ . and -, starting with a letter or _ (at most 200 characters), for example BASE_URL.`);
+        return k;
+    };
     app.put('/api/env/value', async (req) => {
         const b = body(req);
         const file = str(b.file, 'file', { max: 1024 });
-        const key = str(b.key, 'key', { max: 200 });
+        const key = envKey(b.key);
         const line = setValue(opts.repoRoot, file, key, typeof b.value === 'string' ? b.value : str(b.value, 'value'), { allowLiteralSecret: b.allowLiteralSecret === true });
         log('env.set', `Set ${key} in ${file}`, { file, key, literalSecretConfirmed: b.allowLiteralSecret === true });
         return { file, key, line };
@@ -846,7 +860,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.post('/api/env/secret', async (req) => {
         const b = body(req);
         const file = str(b.file, 'file', { max: 1024 });
-        const key = str(b.key, 'key', { max: 200 });
+        const key = envKey(b.key);
         const secretName = str(b.secretName, 'secretName', { max: 64 });
         const env = str(b.env, 'env', { optional: true, max: 32 }) || undefined;
         const line = storeSecret(opts.repoRoot, opts.store, {
@@ -1277,7 +1291,11 @@ export function createServer(opts: ServerOptions): StudioServer {
         const project = configProjectParam(q.project);
         const env = envParam(q.env);
         const reqs = requirements(opts.repoRoot, opts.store, projectId, project, env);
-        if (q.check !== 'true') return { ...reqs, adoChecked: false };
+        if (q.check !== 'true') {
+            // Not set up (no address, no token): said right away, like the other Azure DevOps screens (no network used here).
+            try { adoSettingsFor(opts.repoRoot, opts.store, projectId, project, env, process.env, personal()); return { ...reqs, adoChecked: false }; }
+            catch (e) { return { ...reqs, adoChecked: false, adoError: e instanceof Error ? e.message : String(e) }; }
+        }
         try {
             const target = new URL(adoSettingsFor(opts.repoRoot, opts.store, projectId, project, env, process.env, personal()).orgUrl).hostname;
             return { ...(await checkInAdo(reqs, adoClient(project, env))), adoChecked: true, adoHost: target };
@@ -2867,14 +2885,19 @@ export function createServer(opts: ServerOptions): StudioServer {
         const cur = personal().network;
         // Empty is a valid value here (no proxy address, no certificate file).
         const s2 = (v: unknown, f: string, d: string) => (v === undefined ? d : str(v, f, { optional: true, max: 2048 }) ?? '');
+        const proxyMode = (['off', 'environment', 'manual', 'system', 'pac'] as const).find((m) => m === b.proxyMode) ?? cur.proxyMode;
+        // A field the chosen mode does not use (hidden on the screen) never blocks the save: when it is
+        // not acceptable, the saved value stays.
+        const unused = (v: unknown, f: string, d: string) => { try { return s2(v, f, d); } catch { return d; } };
+        const signIn = proxyMode !== 'off';
         const next = settings.update({ network: {
-            proxyMode: (['off', 'environment', 'manual', 'system', 'pac'] as const).find((m) => m === b.proxyMode) ?? cur.proxyMode,
-            pacUrl: s2(b.pacUrl, 'pacUrl', cur.pacUrl ?? ''),
+            proxyMode,
+            pacUrl: (proxyMode === 'pac' ? s2 : unused)(b.pacUrl, 'pacUrl', cur.pacUrl ?? ''),
             proxyAuth: (['basic', 'ntlm', 'digest'] as const).find((m) => m === b.proxyAuth) ?? cur.proxyAuth ?? 'basic',
-            proxyDomain: s2(b.proxyDomain, 'proxyDomain', cur.proxyDomain ?? ''),
+            proxyDomain: (signIn ? s2 : unused)(b.proxyDomain, 'proxyDomain', cur.proxyDomain ?? ''),
             clientCerts: b.clientCerts === undefined ? cur.clientCerts ?? [] : clientCertList(b.clientCerts),
-            proxyUrl: s2(b.proxyUrl, 'proxyUrl', cur.proxyUrl),
-            proxyUser: s2(b.proxyUser, 'proxyUser', cur.proxyUser),
+            proxyUrl: (proxyMode === 'manual' ? s2 : unused)(b.proxyUrl, 'proxyUrl', cur.proxyUrl),
+            proxyUser: (signIn ? s2 : unused)(b.proxyUser, 'proxyUser', cur.proxyUser),
             bypass: b.bypass === undefined ? cur.bypass : strList(b.bypass, 'bypass'),
             useSystemCerts: typeof b.useSystemCerts === 'boolean' ? b.useSystemCerts : cur.useSystemCerts,
             caFile: s2(b.caFile, 'caFile', cur.caFile),
@@ -3097,6 +3120,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         const b = body(req);
         const target = str(b.target, 'target', { max: 2000 }).trim();
         if (!/^https?:\/\//i.test(target)) throw new BadRequest('Record from an http:// or https:// address.');
+        try { if (!new URL(target).hostname) throw new Error('no host'); } catch { throw new BadRequest('The address needs a host after http:// or https://, e.g. https://api.example.com.'); }
         if (mockRecorder) await mockRecorder.rec.stop();
         const conn = netConnection();
         try { mockRecorder = { target, rec: await recordMock(target, { agentFor: (u) => conn.agentFor(u) as never, ...(conn.ca ? { ca: conn.ca } : {}) }) }; }
@@ -4517,7 +4541,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     // framework's "user executes query from file" step runs them).
     const queryFileOk = (f: string) => /^test\/[A-Za-z0-9][\w.-]*\/queries\/[\p{L}\p{M}\p{N}_ .-]+\.sql$/u.test(f) && !f.includes('..');
     /** A query's file name from its name: letters of any language kept, the rest becomes "-" (up to 120 characters). */
-    const queryFileName = (name: string) => { const n = name.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 120).replace(/-+$/, ''); if (!n) throw new BadRequest('Use letters or digits in the name (it becomes the file name).'); return n; };
+    const queryFileName = (name: string) => { if (/[\\/]|\.\./.test(name)) throw new BadRequest(`"${name.slice(0, 60)}" cannot be a query name: no "/", "\\" or ".." (the query is saved as one file in test/<project>/queries). Use letters, digits and spaces.`); const n = name.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 120).replace(/-+$/, ''); if (!n) throw new BadRequest('Use letters or digits in the name (it becomes the file name).'); return n; };
     app.get('/api/db/queries', async (req) => {
         const project = apiProject((req.query as Record<string, unknown>).project);
         const dir = path.join(opts.repoRoot, 'test', project, 'queries');
@@ -4673,7 +4697,8 @@ export function createServer(opts: ServerOptions): StudioServer {
         // The file's own name (letters of any language kept); characters that are not safe in a file name become "_".
         const name = path.basename(str(b.name, 'name', { max: 200 })).normalize('NFC').replace(/[^\p{L}\p{M}\p{N}\p{Extended_Pictographic}\u200d\ufe0f._\- ]+/gu, '_').replace(/^[.\s]+/, '');
         if (!/\.pdf$/i.test(name) || name.length < 5) throw new BadRequest('Choose a .pdf file.');
-        const data = Buffer.from(str(b.data, 'data', { max: 16 * 1024 * 1024 }), 'base64');
+        const data = Buffer.from(str(b.data, 'data', { optional: true, max: 16 * 1024 * 1024 }) ?? '', 'base64');
+        if (!data.length) throw new BadRequest(`${name} is empty (0 bytes): choose a PDF file with content.`);
         if (data.subarray(0, 1024).indexOf('%PDF-') < 0) throw new BadRequest('That file is not a PDF.');
         // A file whose name differs only in capitals is the same file on Windows and macOS: it is that file.
         const pdfDir = path.join(opts.repoRoot, `test/${project}/data/pdf`);
@@ -5418,12 +5443,12 @@ export function createServer(opts: ServerOptions): StudioServer {
             };
         }
         const editing = typeof b.editing === 'string' ? b.editing : null;
-        if (!editing && serversIn(opts.repoRoot, agentHome, scope)[name]) throw new BadRequest(`There is a ${scope === 'team' ? 'team' : 'personal'} tool server ${name} already: edit it, or choose another name.`);
-        try {
-            saveServer(opts.repoRoot, agentHome, scope, name, server);
-            // Renamed while editing: the old entry goes.
-            if (editing && editing !== name) { saveServer(opts.repoRoot, agentHome, scope, editing, null); updateState(opts.repoRoot, agentHome, stateKey(scope, editing), () => null); }
-        } catch (e) { throw new BadRequest((e as Error).message); }
+        // The secrets a pasted configuration made stay the server's when it is edited.
+        const before = editing ? serversIn(opts.repoRoot, agentHome, scope)[editing] : undefined;
+        if (before?.pastedSecrets?.length) server.pastedSecrets = before.pastedSecrets;
+        // One write: a new name that another server has is refused (a rename never replaces another server).
+        try { putServer(opts.repoRoot, agentHome, scope, name, server, editing); } catch (e) { throw new BadRequest((e as Error).message); }
+        if (editing && editing !== name) updateState(opts.repoRoot, agentHome, stateKey(scope, editing), () => null);
         log('agent.tool-server', `${editing ? 'Changed' : 'Added'} the tool server ${name} (${scope === 'team' ? `for the team, in ${TEAM_FILE}` : 'for you'})`, {});
         return serverView();
     });
@@ -5442,11 +5467,19 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     app.delete('/api/agents/tool-servers/:name', async (req) => {
         const name = str((req.params as { name: string }).name, 'name', { max: 40 });
-        const scope = (req.query as Record<string, string>).scope === 'team' ? 'team' : 'personal';
+        const q = req.query as Record<string, string>;
+        const scope = q.scope === 'team' ? 'team' : 'personal';
+        const gone = serversIn(opts.repoRoot, agentHome, scope)[name];
         try { saveServer(opts.repoRoot, agentHome, scope, name, null); } catch (e) { throw new BadRequest((e as Error).message); }
         updateState(opts.repoRoot, agentHome, stateKey(scope, name), () => null);
-        log('agent.tool-server', `Removed the tool server ${name} (${scope})`, {});
-        return serverView();
+        // ?secrets=remove: the Studio secrets its pasted configuration made go too (unless another server uses them).
+        const removed: string[] = [];
+        if (q.secrets === 'remove' && gone?.pastedSecrets?.length && opts.store.exists) {
+            const used = new Set(listServers(opts.repoRoot, agentHome).flatMap((x) => secretsOf(x.server)));
+            for (const n of gone.pastedSecrets) if (!used.has(n) && opts.store.deleteStudio(n)) removed.push(n);
+        }
+        log('agent.tool-server', `Removed the tool server ${name} (${scope})${removed.length ? `, and its secrets ${removed.join(', ')}` : ''}`, {});
+        return { ...serverView(), removedSecrets: removed };
     });
     app.post('/api/agents/tool-servers/:name/test', async (req) => {
         const name = str((req.params as { name: string }).name, 'name', { max: 40 });
@@ -5481,7 +5514,10 @@ export function createServer(opts: ServerOptions): StudioServer {
         if (b.replace !== true) { const dup = view.find((v) => v.exists); if (dup) throw new BadRequest(`There is a ${scope} tool server ${dup.name} already.`); }
         const keys = items.flatMap((i) => i.secrets.filter((s) => s.value !== undefined));
         for (const k of keys) opts.store.setStudio(k.secret, k.value!);
-        for (const i of items) saveServer(opts.repoRoot, agentHome, scope, i.name, i.server);
+        for (const i of items) {
+            const pasted = i.secrets.filter((x) => x.value !== undefined).map((x) => x.secret);
+            saveServer(opts.repoRoot, agentHome, scope, i.name, pasted.length ? { ...i.server, pastedSecrets: [...new Set(pasted)] } : i.server);
+        }
         log('agent.tool-server', `Added tool servers from a configuration: ${items.map((i) => i.name).join(', ')} (${scope}${keys.length ? `, ${keys.length} keys saved as Studio secrets` : ''})`, {});
         return { ...serverView(), added: items.map((i) => i.name) };
     });
@@ -5614,7 +5650,15 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     const missionsRef: { current?: MissionEngine } = {};
     knowledgeRef.current = knowledge;
-    app.get('/api/knowledge', async () => ({ sources: knowledge.status(), building: knowledge.building, file: KNOWLEDGE_FILE, problems: knowledge.sources().problems }));
+    app.get('/api/knowledge', async () => { const cur = knowledge.sources(); return { sources: knowledge.status(), building: knowledge.building, file: KNOWLEDGE_FILE, problems: cur.problems, invalid: cur.invalid, unreadable: cur.unreadable === true }; });
+    /** Remove an entry of the file that is not right (the others stay as written). */
+    app.post('/api/knowledge/sources/remove-invalid', async (req) => {
+        const index = Number(body(req).index);
+        if (!Number.isInteger(index) || index < 0) throw new BadRequest('index: the entry\'s place in the file.');
+        try { knowledge.removeInvalid(index); } catch (e) { throw new BadRequest((e as Error).message); }
+        log('knowledge.sources', 'Removed an entry of the knowledge sources that was not right', { file: KNOWLEDGE_FILE });
+        return { sources: knowledge.status() };
+    });
     app.put('/api/knowledge/sources', async (req) => {
         try { knowledge.saveSources(body(req).sources); } catch (e) { throw new BadRequest((e as Error).message); }
         log('knowledge.sources', 'Changed the knowledge sources', { file: KNOWLEDGE_FILE });
@@ -5631,7 +5675,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.get('/api/knowledge/search', async (req) => {
         const q = req.query as Record<string, string>;
         const list = (v?: string) => (v ? v.split(',').map((x) => x.trim()).filter(Boolean) : undefined);
-        return { hits: knowledge.search(str(q.q, 'q', { max: 500 }), { k: Number(q.k) || 10, sources: list(q.sources), types: list(q.types) as never }) };
+        return { hits: knowledge.search(str(q.q, 'the search', { max: 500 }), { k: Number(q.k) || 10, sources: list(q.sources), types: list(q.types) as never }) };
     });
     app.get('/api/knowledge/read', async (req) => {
         const r = knowledge.read(str((req.query as Record<string, string>).id, 'id', { max: 80 }));
@@ -5879,7 +5923,11 @@ export function createServer(opts: ServerOptions): StudioServer {
         confirmed(body(req), 'deleting the agent');
         const id = str((req.params as { id: string }).id, 'id', { max: 40 });
         try { deleteAgent(opts.repoRoot, id); } catch (e) { throw new BadRequest((e as Error).message); }
-        log('agent.builder', `Deleted the team agent ${id}`, { file: `${AGENTS_DIR}/${id}.json` });
+        // Its evaluation cases go with it: a new agent with the same id starts with none.
+        const evalFile = path.join(opts.repoRoot, EVALS_DIR, `${id}.json`);
+        const hadEvals = fs.existsSync(evalFile);
+        if (hadEvals) fs.rmSync(evalFile, { force: true });
+        log('agent.builder', `Deleted the team agent ${id}${hadEvals ? ' and its evaluation cases' : ''}`, { file: `${AGENTS_DIR}/${id}.json` });
         return builderView();
     });
     // Work-item and pull-request triggers of mission agents: Azure DevOps is asked every 5 minutes (only while one is on).

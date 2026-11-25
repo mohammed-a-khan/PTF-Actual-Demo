@@ -112,6 +112,44 @@ test('sources: the team file (validated), folders, web pages; an agent limited t
     } finally { for (const d of [dir, idx, app]) fs.rmSync(d, { recursive: true, force: true }); }
 });
 
+test('sources: one entry that is not right leaves out only itself, is named, and no save drops it; it can be removed alone', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'know-bad-'));
+    const idx = fs.mkdtempSync(path.join(os.tmpdir(), 'know-idx-'));
+    try {
+        const file = path.join(dir, '.cs-studio/knowledge.json');
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        const entries = [
+            { id: 'repo', name: 'This repository', kind: 'repo' }, { id: 'history', name: 'Learned', kind: 'history' },
+            { id: 'etc', name: 'Etc docs', kind: 'url', urls: ['https://docs.example.test/etc'] }, { id: 'b-x-b', name: 'BxB', kind: 'url', urls: ['https://docs.example.test/bxb'] },
+            { id: 'repo-again', name: 'Repo again', kind: 'repo' },
+        ];
+        fs.writeFileSync(file, JSON.stringify({ sources: entries }, null, 2));
+        const kb = new KnowledgeBase(dir, idx);
+        const cur = kb.sources();
+        assert.deepEqual(cur.sources.map((x) => x.id), ['repo', 'history', 'etc', 'b-x-b'], 'the valid ones still listed');
+        assert.deepEqual(cur.invalid.map((x) => [x.index, x.id]), [[4, 'repo-again']]);
+        assert.match(cur.problems[0], /1 source is left out until fixed \(the others work\): "Repo again" — "Repo again" is the same as "This repository"/);
+        assert.deepEqual(kb.status().map((x) => x.id), ['repo', 'history', 'etc', 'b-x-b']);
+        // A save (add, turn off, remove) would write the list without the entry: refused, the file unchanged.
+        const before = fs.readFileSync(file, 'utf8');
+        assert.throws(() => kb.saveSources([...cur.sources, { id: 'qa3', kind: 'url', urls: ['https://x.example.test'] }]), /Not saved: .*"Repo again".* would delete it/);
+        assert.equal(fs.readFileSync(file, 'utf8'), before);
+        // Removing that entry keeps every other entry as written; then saves work.
+        assert.throws(() => kb.removeInvalid(2), /not among the ones left out/);
+        kb.removeInvalid(4);
+        assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')).sources, entries.slice(0, 4));
+        assert.deepEqual(kb.sources().invalid, []);
+        kb.saveSources([...kb.sources().sources, { id: 'qa3', kind: 'url', urls: ['https://x.example.test'] }]);
+        assert.deepEqual(kb.sources().sources.map((x) => x.id), ['repo', 'history', 'etc', 'b-x-b', 'qa3']);
+        // A file that is not JSON: the defaults are shown, and nothing overwrites it.
+        fs.writeFileSync(file, '{ "sources": [ oops');
+        assert.equal(kb.sources().unreadable, true);
+        assert.deepEqual(kb.sources().sources.map((x) => x.id), ['repo', 'history']);
+        assert.throws(() => kb.saveSources([{ id: 'repo', kind: 'repo' }]), /cannot be read/);
+        assert.equal(fs.readFileSync(file, 'utf8'), '{ "sources": [ oops');
+    } finally { for (const d of [dir, idx]) fs.rmSync(d, { recursive: true, force: true }); }
+});
+
 test('knowledge routes: work items (query) and wiki pages from Azure DevOps, built in the background, searched with links back', async () => {
     const { createServer } = await import('../src/server/server');
     const { runGit } = await import('../src/git/run');

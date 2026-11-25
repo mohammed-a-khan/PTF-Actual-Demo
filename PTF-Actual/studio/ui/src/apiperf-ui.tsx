@@ -31,3 +31,44 @@ export function SectionTitle({ children, help, extra }: { children: React.ReactN
         </div>
     );
 }
+
+/**
+ * Escape closes an open dialog also when the focus has left it (a click on its backdrop-free area, Tab past its last
+ * field): antd only sees Escape pressed inside the dialog. Escape inside a dialog is left to the dialog.
+ */
+export function useEscapeCloses(open: boolean, close: () => void) {
+    const ref = React.useRef(close);
+    ref.current = close;
+    React.useEffect(() => {
+        if (!open) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' || e.defaultPrevented) return;
+            const a = document.activeElement;
+            if (a && a !== document.body && a.closest('.ant-modal-wrap, .ant-modal-root, .ant-drawer, .ant-select-dropdown, .ant-dropdown, .ant-picker-dropdown')) return;
+            ref.current();
+        };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+    }, [open]);
+}
+
+/** A name typed in a create dialog: the reason it cannot be used (empty, only spaces), or null. */
+export const nameProblem = (name: string, what: string): string | null => (name.trim() ? null : `Give the ${what} a name.`);
+
+/** An http(s) address with a host ("http://" alone is not one): the reason it cannot be used, or null. */
+export function httpUrlProblem(u: string): string | null {
+    const t = u.trim();
+    if (!t) return 'Type the address of the service, e.g. https://api.example.com/v2.';
+    if (!/^https?:\/\//i.test(t)) return 'The address starts with http:// or https://.';
+    try { const x = new URL(t); if (!x.hostname) throw new Error(); } catch { return 'The address needs a host after http:// or https://, e.g. https://api.example.com.'; }
+    return null;
+}
+
+/** #/api/<collection file>[/<request id>]: the file is the segments up to the one ending in .json. */
+export function apiRoute(route: string[]): { file: string | null; request: string | null } {
+    if (route[0] !== 'api' || route.length < 2) return { file: null, request: null };
+    const parts = route.slice(1);
+    const j = parts.findIndex((s) => s.endsWith('.json'));
+    if (j < 0) return { file: parts.join('/'), request: null };
+    return { file: parts.slice(0, j + 1).join('/'), request: parts[j + 1] ?? null };
+}

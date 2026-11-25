@@ -10,6 +10,46 @@ import React from 'react';
 
 const EVENT = 'cs-route';
 
+/**
+ * Back/Forward to another screen while the current one has work it would lose: the step is undone and
+ * the guard asks; `leave()` then goes on to where the person was going.
+ */
+type PopGuard = (to: string[], from: string[], leave: () => void) => boolean;
+let popGuard: PopGuard | null = null;
+export function setPopGuard(g: PopGuard | null): void { popGuard = g; }
+let shownHash = typeof window !== 'undefined' ? window.location.hash : '';
+let passThrough = false;
+if (typeof window !== 'undefined') {
+    // Registered before any screen listens, so a refused step never reaches them.
+    window.addEventListener('popstate', (e) => {
+        const toHash = window.location.hash;
+        if (passThrough) { passThrough = false; shownHash = toHash; return; }
+        const from = routeOf(shownHash), to = currentRoute();
+        if (popGuard && from[0] && to[0] !== from[0]) {
+            const target = { hash: toHash, state: history.state as unknown };
+            const asked = popGuard(to, from, () => {
+                history.replaceState(target.state, '', window.location.pathname + window.location.search + target.hash);
+                shownHash = target.hash;
+                window.dispatchEvent(new Event(EVENT));
+            });
+            if (asked) {
+                e.stopImmediatePropagation();
+                // Undo the step: the address shows the screen the person is still on.
+                history.pushState(history.state, '', window.location.pathname + window.location.search + shownHash);
+                return;
+            }
+        }
+        shownHash = toHash;
+    });
+    window.addEventListener(EVENT, () => { shownHash = window.location.hash; });
+    window.addEventListener('hashchange', () => { shownHash = window.location.hash; });
+}
+function routeOf(hash: string): string[] {
+    const h = hash.replace(/^#\/?/, '');
+    if (!h || /^token=/.test(h)) return [];
+    return h.split('/').filter((x) => x !== '').map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
+}
+
 export function currentRoute(): string[] {
     const h = window.location.hash.replace(/^#\/?/, '');
     if (!h || /^token=/.test(h)) return [];

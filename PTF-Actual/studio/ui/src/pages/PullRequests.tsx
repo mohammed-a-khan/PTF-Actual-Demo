@@ -35,7 +35,7 @@ const voteTag = (v?: number) => {
 };
 const ago = (d: string) => {
     const s = (Date.now() - Date.parse(d)) / 1000;
-    return s < 3600 ? `${Math.max(1, Math.floor(s / 60))} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : s < 86400 * 30 ? `${Math.floor(s / 86400)} days ago` : new Date(d).toLocaleDateString();
+    return s < 3600 ? `${Math.max(1, Math.floor(s / 60))} min ago` : s < 86400 ? `${Math.floor(s / 3600)} h ago` : s < 86400 * 30 ? (Math.floor(s / 86400) === 1 ? '1 day ago' : `${Math.floor(s / 86400)} days ago`) : new Date(d).toLocaleDateString();
 };
 const STATUS_LABEL: Record<string, string> = { succeeded: 'passed', failed: 'failed', error: 'error', pending: 'running', notApplicable: 'not needed', notSet: 'waiting' };
 /** A branch policy's evaluation in words (a build policy: passed/failed; others: approved/rejected). */

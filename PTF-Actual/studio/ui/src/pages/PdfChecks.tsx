@@ -11,7 +11,7 @@ import { findingsSummary, PlanReview } from '../components/PlanReview';
 import { Split } from '../components/Split';
 import { errText, openInEditor, showRun } from '../state';
 import { ago } from '../format';
-import { useStoredTab } from '../datagit-common';
+import { usePageHeadTooltip, useStoredTab } from '../datagit-common';
 
 const pref = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : d; } catch { return d; } };
 const keep = (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
@@ -96,6 +96,7 @@ export function PdfChecks() {
     const [running, setRunning] = React.useState(false);
     const [saveOpen, setSaveOpen] = React.useState(false);
     const [showMatched, setShowMatched] = React.useState(false);
+    usePageHeadTooltip();
     const [detailTab, setDetailTab] = useStoredTab<'compare' | 'read' | 'view'>('pdf-detail', ['compare', 'read', 'view'], 'compare');
 
     const refresh = React.useCallback(() => { api.pdfList().then((r) => { setFiles(r.files); setEngine(r.engine); }).catch((e) => message.error(errText(e))); }, [message]);
@@ -128,12 +129,13 @@ export function PdfChecks() {
     const saveBody = React.useMemo(() => (saveOpen ? body() : null), [saveOpen]); // eslint-disable-line react-hooks/exhaustive-deps
     const run = async () => {
         const b = body();
-        if (!b) { message.warning('Choose what to compare the PDF with.'); return; }
+        if (!b) { message.warning({ key: 'pdf-compare-what', content: 'Choose what to compare the PDF with.' }); return; }
         setRunning(true); setResErr(null);
         try { setRes(await api.pdfCompare(b)); } catch (e) { setRes(null); setResErr(errText(e)); } finally { setRunning(false); }
     };
     const upload = async (f: File) => {
         if (!project) { message.warning('Choose a project first.'); return false; }
+        if (f.size === 0) { message.error(`${f.name} is empty (0 bytes): choose a PDF file with content.`); return false; }
         const buf = new Uint8Array(await f.arrayBuffer());
         let bin = '';
         for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
@@ -148,7 +150,8 @@ export function PdfChecks() {
     };
     const useValue = (label: string, value: string) => { setKind('values'); setValues((v) => [...v.filter((r, i) => i === 0 || r.some((c) => c.trim())), [label, value]]); };
 
-    const shown = (files ?? []).filter((f) => !filter || f.path.toLowerCase().includes(filter.toLowerCase()));
+    const q = filter.trim().toLowerCase();
+    const shown = (files ?? []).filter((f) => !q || f.path.toLowerCase().includes(q));
     const conns = (meta?.connections ?? []).filter((c) => !c.problems?.length).map((c) => ({ value: c.alias, label: `${c.alias} (${c.type})` }));
 
     return (
@@ -236,7 +239,7 @@ export function PdfChecks() {
                                         </> }]} />
                                 </Form>
                                 <Space>
-                                    <Button type="primary" icon={<CaretRightOutlined />} loading={running} onClick={() => { if (!running) void run(); }}>Compare</Button>
+                                    <Button type="primary" icon={<CaretRightOutlined />} loading={running} onClick={(e) => { if (!running && e.detail < 2) void run(); }}>Compare</Button>
                                     <Button icon={<ExperimentOutlined />} disabled={!body()} onClick={() => setSaveOpen(true)}>Save as test…</Button>
                                 </Space>
                                 {resErr && <Alert type="error" showIcon message={resErr} />}

@@ -39,7 +39,7 @@ export function AgentBuilder({ openConversation }: { openConversation: (session:
     const [editing, setEditing] = React.useState<{ agent: TeamAgentDef; isNew: boolean } | null>(null);
     const [evaluating, setEvaluating] = React.useState<TeamAgentDef | null>(null);
     const [showProblems, setShowProblems] = React.useState(false);
-    const [kind, setKind] = useRememberedTab('agent-builder', 'all', ['all', 'assistant', 'mission']);
+    const [kind, setKind] = useRememberedTab('agent-builder', 'all', ['all', 'assistant', 'mission'], 'agent-builder');
     const load = React.useCallback(() => { api.agentBuilder().then((r) => { setD(r); setErr(null); }).catch((e) => setErr(errText(e))); }, []);
     React.useEffect(load, [load]);
     const chatting = React.useRef(false);
@@ -92,6 +92,18 @@ export function AgentBuilder({ openConversation }: { openConversation: (session:
 const idTyping = (s: string) => s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-{2,}/g, '-').replace(/^-+/, '').slice(0, 40);
 const INPUT_KINDS = [{ value: 'text', label: 'Text' }, { value: 'project', label: 'Project' }, { value: 'env', label: 'Environment' }, { value: 'run', label: 'Failed run' }, { value: 'number', label: 'Number' }];
 
+/** The editor tab where a problem the server found is fixed (its message says what it is about). */
+function tabOfError(t: string, mission: boolean): string | null {
+    if (/agent id|an agent "|built-in mission|give the agent a name|mode:/i.test(t)) return 'basics';
+    if (/the goal|goal uses|instructions|starter/i.test(t)) return 'instructions';
+    if (!mission) return /tool group|knowledge source|tools/i.test(t) ? 'tools' : null;
+    if (/^(two inputs|input ")/i.test(t)) return 'inputs';
+    if (/team|tool group|knowledge source|"change files" tools/i.test(t)) return 'tools';
+    if (/trigger|schedule|start by themselves/i.test(t)) return 'triggers';
+    if (/proof|budget|minutes|model calls|attempts/i.test(t)) return 'limits';
+    return null;
+}
+
 function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat }: { d: AgentBuilderDef; agent: TeamAgentDef; isNew: boolean; onClose: () => void; onSaved: (r: AgentBuilderDef) => void; onChat: (a: TeamAgentDef) => void }) {
     const { message, modal } = App.useApp();
     const { env } = useStudio();
@@ -119,11 +131,11 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat }: { d: AgentBu
         try {
             const out: TeamAgentDef = { ...a, name: a.name.trim(), id: finalId, ...(mission ? {} : { goal: undefined, inputs: undefined, writes: undefined, budget: undefined, verify: undefined, triggers: undefined, team: undefined }) };
             const r = await api.saveTeamAgent(out, isNew);
-            message.success(`Saved ${r.agent.name}`);
+            message.success({ content: `Saved ${r.agent.name}`, key: 'agent-editor-check' });
             onSaved(r);
-        } catch (e) { message.error(errText(e)); } finally { setBusy(false); }
+        } catch (e) { const t = errText(e); fail(tabOfError(t, mission) ?? tab, t); } finally { setBusy(false); }
     };
-    const del = () => modal.confirm({ title: `Delete ${a.name}?`, content: `Its file ${d.dir}/${a.id}.json is deleted (commit to share that).`, okText: 'Delete', okButtonProps: { danger: true },
+    const del = () => modal.confirm({ title: `Delete ${a.name}?`, content: `Its file ${d.dir}/${a.id}.json and its evaluation cases (.cs-studio/evals/${a.id}.json, if any) are deleted (commit to share that).`, okText: 'Delete', okButtonProps: { danger: true },
         onOk: async () => { try { onSaved(await api.deleteTeamAgent(a.id)); message.success('Deleted'); } catch (e) { message.error(errText(e)); } } });
     const inputs = a.inputs ?? [];
     const setInput = (i: number, p: Partial<MissionInputDef>) => up({ inputs: inputs.map((x, j) => (j === i ? { ...x, ...p } : x)) });

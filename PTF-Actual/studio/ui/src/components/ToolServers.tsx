@@ -14,6 +14,7 @@ import { Alert, App, Button, Checkbox, Col, Dropdown, Empty, Form, Input, Modal,
 import { CheckCircleFilled, CloseCircleFilled, DeleteOutlined, DownOutlined, EditOutlined, PlusOutlined, ReloadOutlined, SyncOutlined, WarningFilled } from '@ant-design/icons';
 import { api, ToolServerDef, ToolServerImport, ToolServerRow, ToolServersView } from '../api';
 import { errText } from '../state';
+import { agentsApi } from '../agents-api';
 import { ago } from '../format';
 
 type Scope = 'team' | 'personal';
@@ -224,6 +225,18 @@ export function ToolServers() {
     const [pasting, setPasting] = React.useState(false);
     const [busy, setBusy] = React.useState<string | null>(null);
     const [open, setOpen] = React.useState<Record<string, boolean>>({});
+    // Removing a server added by paste: its secrets go too unless unticked.
+    const [keepSecrets, setKeepSecrets] = React.useState<Record<string, boolean>>({});
+    const remove = async (x: ToolServerRow) => {
+        const pasted = (x.server as { pastedSecrets?: string[] }).pastedSecrets ?? [];
+        const withSecrets = pasted.length > 0 && !keepSecrets[`${x.scope}:${x.name}`];
+        try {
+            const r = await agentsApi.removeToolServer(x.name, x.scope, withSecrets);
+            setView(r);
+            const kept = pasted.filter((n) => !r.removedSecrets.includes(n));
+            message.success(`Removed ${x.name}${r.removedSecrets.length ? `, and its secret${r.removedSecrets.length === 1 ? '' : 's'} ${r.removedSecrets.join(', ')}` : ''}${kept.length ? ` (kept the secret${kept.length === 1 ? '' : 's'} ${kept.join(', ')}${withSecrets ? ': another server uses it' : ''}; Settings › Secrets)` : ''}`);
+        } catch (e) { message.error(errText(e)); }
+    };
     const load = React.useCallback(() => { api.toolServers().then((v) => { setView(v); setError(null); }).catch((e) => setError(errText(e))); }, []);
     React.useEffect(load, [load]);
     // A check started by a session (its tool count changed) finishes in the background: follow it.
@@ -276,7 +289,11 @@ export function ToolServers() {
                             <span style={{ flex: 1 }} />
                             <Button size="small" icon={<ReloadOutlined />} loading={busy === x.name} disabled={!!x.missing.length} onClick={() => void check(x.name)}>Check</Button>
                             <Button size="small" type="text" icon={<EditOutlined />} aria-label={`Edit ${x.name}`} onClick={() => setForm({ editing: x })} />
-                            <Popconfirm title={`Remove ${x.name}?`} description={x.scope === 'team' ? `From ${view.teamFile}` : undefined} onConfirm={() => void api.removeToolServer(x.name, x.scope).then(setView).catch((e) => message.error(errText(e)))}>
+                            <Popconfirm title={`Remove ${x.name}?`} okText="Remove" okButtonProps={{ danger: true }} onConfirm={() => void remove(x)} description={<Space direction="vertical" size={4}>
+                                {x.scope === 'team' && <span>From {view.teamFile}</span>}
+                                {!!(x.server as { pastedSecrets?: string[] }).pastedSecrets?.length && <Checkbox checked={!keepSecrets[key(x)]} onChange={(e) => setKeepSecrets({ ...keepSecrets, [key(x)]: !e.target.checked })}>
+                                    Also remove its secret{(x.server as { pastedSecrets?: string[] }).pastedSecrets!.length === 1 ? '' : 's'} {(x.server as { pastedSecrets?: string[] }).pastedSecrets!.join(', ')} (saved from the pasted configuration)</Checkbox>}
+                            </Space>}>
                                 <Button size="small" type="text" icon={<DeleteOutlined />} aria-label={`Remove ${x.name}`} />
                             </Popconfirm>
                         </div>

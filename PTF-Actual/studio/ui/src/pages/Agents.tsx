@@ -13,6 +13,7 @@ import { ToolServers } from '../components/ToolServers';
 import { errText } from '../state';
 import { ago } from '../format';
 import { useRememberedTab } from '../agents-tabs';
+import { useUnsaved } from '../unsaved';
 
 interface Field { key: string; label: string; placeholder?: string; required?: boolean; multiline?: boolean; kind?: 'project' | 'env' | 'seed' }
 interface Workflow { key: string; title: string; icon: React.ReactNode; about: string; fields: Field[]; task: (v: Record<string, string>) => string; prompt: (v: Record<string, string>) => string }
@@ -114,8 +115,15 @@ function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved
     const [s, setS] = React.useState<AgentSettingsDef | null>(status?.settings ?? null);
     const [keys, setKeys] = React.useState({ providerKey: '', copilotToken: '' });
     const [saving, setSaving] = React.useState(false);
+    const [saveErr, setSaveErr] = React.useState<string | null>(null);
     React.useEffect(() => { if (status?.settings) setS(status.settings); }, [status?.settings]);
+    const dirty = !!s && !!status?.settings && (JSON.stringify(s) !== JSON.stringify(status.settings) || !!keys.providerKey || !!keys.copilotToken);
+    // Opening another screen (or another tab of the browser) asks first, like the agent editor.
+    useUnsaved('agent-settings', dirty, 'agent settings', { lostOnLeave: true });
     if (!s) return null;
+    // A model or deployment name: one word (the server says the same).
+    const modelText = s.model === 'auto' ? '' : s.model;
+    const modelProblem = s.provider !== 'custom' ? null : !modelText.trim() ? 'The model or deployment name is needed.' : !/^[\w.:/@-]{1,120}$/.test(modelText.trim()) ? 'Up to 120 letters, digits and . _ : / @ - (no spaces or emoji).' : null;
     const pol = status?.policy;
     const rank = { auto: 0, ask: 1, deny: 2 } as const;
     const ap = (k: keyof AgentSettingsDef['approvals'], label: string, deny = false) => {
@@ -126,9 +134,10 @@ function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved
     };
     const save = async () => {
         if (saving) return;
+        if (modelProblem) { setSaveErr(`Not saved: ${modelProblem}`); return; }
         setSaving(true);
-        try { onSaved(await api.agentSaveSettings(s, { ...(keys.providerKey ? { providerKey: keys.providerKey } : {}), ...(keys.copilotToken ? { copilotToken: keys.copilotToken } : {}) })); setKeys({ providerKey: '', copilotToken: '' }); message.success('Saved.'); }
-        catch (e) { message.error(errText(e)); } finally { setSaving(false); }
+        try { onSaved(await api.agentSaveSettings({ ...s, model: s.model.trim() || s.model }, { ...(keys.providerKey ? { providerKey: keys.providerKey } : {}), ...(keys.copilotToken ? { copilotToken: keys.copilotToken } : {}) })); setKeys({ providerKey: '', copilotToken: '' }); setSaveErr(null); message.success('Saved.'); }
+        catch (e) { setSaveErr(`Not saved: ${errText(e)}`); } finally { setSaving(false); }
     };
     return (
         <Form layout="vertical" size="small">
@@ -146,7 +155,7 @@ function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved
             </Row> : <Row gutter={12}>
                 <Col xs={24} md={12}><Form.Item label="Type"><Select size="small" style={{ width: '100%' }} value={s.custom?.type} aria-label="Endpoint type" onChange={(t) => setS({ ...s, custom: { ...(s.custom ?? { baseUrl: '' }), type: t } })}
                     options={[{ value: 'azure', label: 'Azure OpenAI' }, { value: 'openai', label: 'OpenAI-compatible' }, { value: 'anthropic', label: 'Anthropic' }]} /></Form.Item></Col>
-                <Col xs={24} md={12}><Form.Item label="Model / deployment"><Input size="small" value={s.model === 'auto' ? '' : s.model} onChange={(e) => setS({ ...s, model: e.target.value })} aria-label="Model or deployment" /></Form.Item></Col>
+                <Col xs={24} md={12}><Form.Item label="Model / deployment" validateStatus={modelProblem ? 'error' : undefined} help={modelProblem ?? undefined}><Input size="small" maxLength={120} value={modelText} onChange={(e) => setS({ ...s, model: e.target.value })} aria-label="Model or deployment" /></Form.Item></Col>
                 <Col xs={24} md={12}><Form.Item label="Endpoint"><Input size="small" placeholder="https://my-resource.openai.azure.com/openai/v1" value={s.custom?.baseUrl} onChange={(e) => setS({ ...s, custom: { ...(s.custom ?? { type: 'azure' }), baseUrl: e.target.value } })} aria-label="Endpoint" /></Form.Item></Col>
                 <Col xs={24} md={12}><Form.Item label="API key"><Input.Password size="small" placeholder={status?.providerKeySet ? '(saved)' : 'Kept in the Studio\'s secret store'} value={keys.providerKey} onChange={(e) => setKeys({ ...keys, providerKey: e.target.value })} aria-label="API key" autoComplete="new-password" /></Form.Item></Col>
             </Row>}
@@ -154,7 +163,9 @@ function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved
             <Row gutter={12} style={{ marginTop: 6 }}>
                 {ap('files', 'changes files')}{ap('studio', 'changes in the Studio')}{ap('shell', 'runs commands', true)}{ap('mcp', 'uses MCP tools (your Copilot settings)')}{ap('urls', 'fetches web pages')}
             </Row>
-            <Button type="primary" size="small" loading={saving} onClick={() => void save()}>Save</Button>
+            {saveErr && <Alert type="error" showIcon style={{ marginBottom: 8 }} message={saveErr} closable onClose={() => setSaveErr(null)} />}
+            <Space><Button type="primary" size="small" loading={saving} disabled={!!modelProblem} onClick={() => void save()}>Save</Button>
+                {dirty && <><Tag color="gold" bordered={false}>unsaved</Tag><Button size="small" type="link" onClick={() => { setS(status!.settings); setKeys({ providerKey: '', copilotToken: '' }); setSaveErr(null); }}>Discard changes</Button></>}</Space>
         </Form>
     );
 }
@@ -167,7 +178,7 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
     const [open, setOpen] = React.useState<string | null>(null);
     const [values, setValues] = React.useState<Record<string, string>>({});
     const [starting, setStarting] = React.useState(false);
-    const [tab, setTab] = useRememberedTab('agents', 'workflows', ['workflows', 'conversations', 'tools', 'setup']);
+    const [tab, setTab] = useRememberedTab('agents', 'workflows', ['workflows', 'conversations', 'tools', 'setup'], 'agents');
     const refresh = React.useCallback(() => { api.agentSessions().then((r) => setSessions(r.sessions)).catch(() => {}); }, []);
     const reload = React.useCallback(() => { api.agentStatus().then(setStatus).catch((e) => setStatus({ error: errText(e) } as AgentStatus)); }, []);
     React.useEffect(() => {
@@ -227,7 +238,7 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
                     {WORKFLOWS.map((w) => (
                         <div key={w.key} role="button" tabIndex={0} className={`item-row${open === w.key ? ' selected' : ''}`} onClick={() => pick(w.key)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(w.key); } }}>
                             <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}><span style={{ color: '#93186C' }}>{w.icon}</span><span style={{ flex: 1, minWidth: 0 }}><Typography.Text strong>{w.title}</Typography.Text>
-                                <Typography.Text type="secondary" ellipsis={{ tooltip: w.about }} style={{ fontSize: 12, display: 'block' }}>{w.about}</Typography.Text></span></div>
+                                <Typography.Text type="secondary" ellipsis={{ tooltip: { title: w.about, placement: 'right', mouseEnterDelay: 0.4, styles: { root: { pointerEvents: 'none' } } } }} style={{ fontSize: 12, display: 'block' }}>{w.about}</Typography.Text></span></div>
                         </div>))}
                 </Card>
             </Col>

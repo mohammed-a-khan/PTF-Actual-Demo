@@ -14,6 +14,19 @@ function defaultTarget(e: EffectiveEntry | null, project: string, env: string) {
     return `config/${project}/environments/${env}.env`;
 }
 
+/** Why the server would refuse this setting name (the framework's rule), or null. */
+export function settingNameProblem(raw: string): string | null {
+    const k = raw.trim();
+    if (!raw) return null;
+    if (!k) return 'Give the setting a name, for example BASE_URL.';
+    if (k.length > 200) return `At most 200 characters (this one has ${k.length}).`;
+    if (/\s/.test(k)) return 'No spaces: use _ (for example BASE_URL).';
+    if (!/^[A-Za-z_]/.test(k)) return 'Start with a Latin letter or _ (for example BASE_URL).';
+    if (!/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(k)) return 'Only Latin letters, digits, _ . and - (for example BASE_URL).';
+    return null;
+}
+const secretNameProblem = (n: string): string | null => (!n ? null : /^[A-Z][A-Z0-9_]{0,63}$/.test(n) ? null : 'Capital letters, digits and _, starting with a letter (at most 64).');
+
 function EditModal({ project, env, entry, keyName, existing = [], onClose, onSaved }: { project: string; env: string; entry: EffectiveEntry | null; keyName?: string; existing?: EffectiveEntry[]; onClose: () => void; onSaved: () => void }) {
     const { message, modal } = App.useApp();
     const [key, setKey] = React.useState(entry?.key ?? keyName ?? '');
@@ -33,7 +46,11 @@ function EditModal({ project, env, entry, keyName, existing = [], onClose, onSav
         return [...s].map((f) => ({ value: f, label: f }));
     }, [entry, project, env]);
 
+    const keyProblem = entry ? null : settingNameProblem(key);
+    const nameProblem = mode === 'secret' ? secretNameProblem(secretName) : null;
+    const canSave = !!key.trim() && !!file && !keyProblem && !(mode === 'secret' && (!secretName || !value || nameProblem));
     const save = async (confirmed = false) => {
+        if (!canSave || busy) return;
         // A new setting whose name is set already: say where, and replace or override only when asked.
         const there = !entry && existing.find((x) => x.key === key.trim());
         const caseTwin = !entry && !there && existing.find((x) => x.key.toLowerCase() === key.trim().toLowerCase());
@@ -51,12 +68,13 @@ function EditModal({ project, env, entry, keyName, existing = [], onClose, onSav
             return;
         }
         setBusy(true);
+        const key2 = key.trim();
         try {
             if (mode === 'secret') {
-                const r = await api.envSecret({ file, key, secretName, value, env });
+                const r = await api.envSecret({ file, key: key2, secretName, value, env });
                 message.success(`${key} now uses ${r.reference}; the value is in your secret store`);
             } else {
-                await api.envSet(file, key, value);
+                await api.envSet(file, key2, value);
                 message.success(`${key} saved in ${file}`);
             }
             onSaved();
@@ -74,9 +92,9 @@ function EditModal({ project, env, entry, keyName, existing = [], onClose, onSav
                 })}>Delete</Button>}
                 <CancelBtn /><OkBtn />
             </>}
-            okButtonProps={{ disabled: !key || !file || (mode === 'secret' && (!secretName || !value)) }} width={620}>
+            okButtonProps={{ disabled: !canSave }} width={620}>
             <Form layout="vertical">
-                {!entry && <Form.Item label="Setting name" htmlFor="cs-environments-setting-name"><Input id="cs-environments-setting-name" value={key} onChange={(e) => setKey(e.target.value)} onPressEnter={() => { if (key && file && !(mode === 'secret' && (!secretName || !value))) void save(); }} placeholder="BASE_URL" /></Form.Item>}
+                {!entry && <Form.Item label="Setting name" htmlFor="cs-environments-setting-name" validateStatus={keyProblem ? 'error' : undefined} help={keyProblem ?? 'Latin letters, digits, _ . and -, for example BASE_URL'}><Input id="cs-environments-setting-name" value={key} onChange={(e) => setKey(e.target.value)} onPressEnter={() => void save()} placeholder="BASE_URL" /></Form.Item>}
                 <Form.Item label="Save in file" htmlFor="cs-environments-file" help="Files lower in the list are overridden by files above them for this environment.">
                     <Select id="cs-environments-file" value={file} onChange={setFile} options={files} showSearch />
                 </Form.Item>
@@ -93,7 +111,7 @@ function EditModal({ project, env, entry, keyName, existing = [], onClose, onSav
                         <Form.Item label="Secret value" htmlFor="cs-environments-secret-value" help="Encrypted on this computer. It is never written to the file.">
                             <Input.Password id="cs-environments-secret-value" value={value} onChange={(e) => setValue(e.target.value)} autoComplete="new-password" />
                         </Form.Item>
-                        <Form.Item label="Secret name" htmlFor="cs-environments-secret-name" help={<>The file will contain <Typography.Text code>{`${key || 'KEY'}={env:${secretName || 'NAME'}}`}</Typography.Text>. In ADO pipelines the same name comes from the environment&apos;s secret variables.</>}>
+                        <Form.Item label="Secret name" htmlFor="cs-environments-secret-name" validateStatus={nameProblem ? 'error' : undefined} help={nameProblem ?? <>The file will contain <Typography.Text code>{`${key || 'KEY'}={env:${secretName || 'NAME'}}`}</Typography.Text>. In ADO pipelines the same name comes from the environment&apos;s secret variables.</>}>
                             <Input id="cs-environments-secret-name" value={secretName} onChange={(e) => setSecretName(e.target.value.toUpperCase())} className="mono" />
                         </Form.Item>
                     </>
@@ -165,8 +183,9 @@ export function Environments() {
     }
 
     const projectPrefix = `config/${project}/`;
+    const q = filter.trim().toLowerCase();
     const rows = (data?.entries ?? []).filter((e) =>
-        (!filter || e.key.toLowerCase().includes(filter.toLowerCase()) || e.value.toLowerCase().includes(filter.toLowerCase()))
+        (!q || e.key.toLowerCase().includes(q) || e.value.toLowerCase().includes(q))
         && (!onlyProject || e.from.source.startsWith(projectPrefix) || !e.from.source.startsWith('config/')));
     const problems = data?.problems.filter((p) => p.severity !== 'info') ?? [];
 
@@ -226,7 +245,7 @@ export function Environments() {
                         </div>) },
                     { title: 'Comes from', width: '32%', render: (_: unknown, e) => (
                         <Popover content={<Provenance e={e} />} placement="left">
-                            <Typography.Text className="mono" style={{ cursor: 'help' }}>{e.from.source}{e.from.line ? `:${e.from.line}` : ''}</Typography.Text>
+                            <Typography.Text className="mono" style={{ cursor: 'help', overflowWrap: 'break-word', wordBreak: 'normal' }}>{(() => { const parts = e.from.source.split('/'); const last = parts.pop(); return <>{parts.map((part, i) => <React.Fragment key={i}>{part}/<wbr /></React.Fragment>)}<span style={{ whiteSpace: 'nowrap' }}>{last}{e.from.line ? `:${e.from.line}` : ''}</span></>; })()}</Typography.Text>
                             {e.overrides.length > 0 && <Tag style={{ marginLeft: 6 }}>overrides {e.overrides.length}</Tag>}
                         </Popover>) },
                     { title: '', width: 48, render: (_: unknown, e) => <Tooltip title="Change"><Button aria-label="Change" size="small" type="text" icon={<EditOutlined />} onClick={() => setEditing({ entry: e })} /></Tooltip> },

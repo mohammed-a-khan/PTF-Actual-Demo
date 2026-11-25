@@ -12,6 +12,7 @@ import { ConflictView } from '../components/ConflictView';
 import { VirtualRows } from '../components/VirtualRows';
 import { navigate, useRoute } from '../route';
 import { ScanGate } from '../components/ScanGate';
+import { setStoredTab } from '../datagit-common';
 
 type Sel = { path: string; area: 'staged' | 'changes' | 'conflict' } | null;
 
@@ -48,10 +49,35 @@ function Section({ title, count, extra, children }: { title: string; count: numb
     );
 }
 
+const AREAS = ['staged', 'changes', 'conflict'] as const;
+/** The file chosen in Changes, from the address (#/git/changes/<area>/<path>). */
+function selFromRoute(route: string[]): Sel {
+    const area = AREAS.find((a) => a === route[2]);
+    return area && route[3] ? { path: route[3], area } : null;
+}
+const sameSel = (a: Sel, b: Sel) => (a?.path ?? '') === (b?.path ?? '') && (a?.area ?? '') === (b?.area ?? '');
+
 function Changes() {
     const { message } = App.useApp();
     const { status, refresh } = useStudio();
-    const [sel, setSel] = React.useState<Sel>(null);
+    // The selected file is part of the address, so a reload or Back keeps it.
+    const route = useRoute();
+    const onTab = route[0] === 'git' && (!route[1] || route[1] === 'changes');
+    const [sel, setSelState] = React.useState<Sel>(() => (onTab ? selFromRoute(route) : null));
+    const wasOnTab = React.useRef(onTab);
+    React.useEffect(() => {
+        const arrived = onTab && !wasOnTab.current;
+        wasOnTab.current = onTab;
+        if (!onTab) return;
+        const r = selFromRoute(route);
+        // Back on this tab from another one (no file in the address): show the file chosen before.
+        if (arrived && !r && sel) { navigate(['git', 'changes', sel.area, sel.path], true); return; }
+        if (!sameSel(r, sel)) setSelState(r);
+    }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
+    const setSel = React.useCallback((x: Sel) => {
+        setSelState(x);
+        if (onTab) navigate(x ? ['git', 'changes', x.area, x.path] : ['git', 'changes'], !x);
+    }, [onTab]);
     const [diff, setDiff] = React.useState('');
     const [loadingDiff, setLoadingDiff] = React.useState(false);
     const [msg, setMsg] = React.useState('');
@@ -250,8 +276,8 @@ function Changes() {
                 </div>
             </div>
             <div className="panel" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-                <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--panel-border)', display: 'flex', alignItems: 'center', gap: 8 }}>
-                    {sel ? <Typography.Text strong className="mono" style={{ flex: 1, minWidth: 0 }} ellipsis={{ tooltip: sel.path }}>{sel.path}</Typography.Text> : <Typography.Text type="secondary" style={{ flex: 1 }}>What changed</Typography.Text>}
+                <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--panel-border)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    {sel ? <Typography.Text strong className="mono" style={{ flex: '1 1 220px', minWidth: 0 }} ellipsis={{ tooltip: sel.path }}>{sel.path}</Typography.Text> : <Typography.Text type="secondary" style={{ flex: 1 }}>What changed</Typography.Text>}
                     {sel && sel.area !== 'conflict' && <DiffToolbar prefs={prefs} onChange={setPrefs} />}
                     {sel && sel.area !== 'conflict' && <Tag>{sel.area === 'staged' ? 'Staged version' : 'Not staged yet'}</Tag>}
                 </div>
@@ -292,7 +318,13 @@ export function SourceControl() {
     // Spellings people type for a tab (#/git/stashes, #/git/tags …) open it instead of falling back to Changes.
     React.useEffect(() => {
         const alias: Record<string, string> = { stashes: 'stash', branch: 'branches', tags: 'branches', log: 'history', commits: 'history' };
-        if (route[0] === 'git' && route[1] && alias[route[1]]) navigate(['git', alias[route[1]], ...route.slice(2)], true);
+        if (route[0] !== 'git' || !route[1]) return;
+        if (route[1] === 'tags') {
+            // Branches & tags, on its Tags view.
+            setStoredTab('git-branches', 'tags');
+        }
+        if (alias[route[1]]) navigate(['git', alias[route[1]], ...route.slice(2)], true);
+        else if (!TABS.includes(route[1])) navigate(['git', 'changes'], true); // an unknown tab: the address says what is shown
     }, [route]);
     return (
         <Tabs style={{ height: '100%' }} className="fill-tabs" activeKey={tab} onChange={(k) => navigate(['git', k])} destroyInactiveTabPane={false} items={[

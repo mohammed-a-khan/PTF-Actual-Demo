@@ -26,6 +26,28 @@ export interface RunnerStep {
     checks: Array<Pick<CheckResult, 'pass' | 'message' | 'actual'>>;
     /** console.log of the request's scripts. */
     logs?: string[];
+    /** What was sent and what came back (secrets masked, bodies cut), for the first steps of a run (see DETAIL_STEPS). */
+    detail?: StepDetail;
+}
+/** The exchange of a step: the request as sent and the response, secrets masked, bodies cut at DETAIL_BODY characters. */
+export interface StepDetail {
+    request: { headers: Record<string, string>; body?: string };
+    response?: { statusText: string; headers: Record<string, string>; body: string; cut: boolean };
+}
+/** Steps of a run that keep their exchange (a run is kept on disk: the size stays small). */
+export const DETAIL_STEPS = 200;
+export const DETAIL_BODY = 4000;
+const cutBody = (t: string) => (t.length > DETAIL_BODY ? { text: `${t.slice(0, DETAIL_BODY)}\n… (cut)`, cut: true } : { text: t, cut: false });
+const maskHeaders = (h: Record<string, string>, mask: (t: string) => string) => Object.fromEntries(Object.entries(h).map(([k, v]) => [k, mask(String(v))]));
+/** The exchange of a step, masked and cut. */
+export function stepDetail(p: { headers: Record<string, string>; body?: string | Buffer }, res: { statusText: string; headers: Record<string, string>; body: string; truncated?: boolean; bodyBase64?: string } | undefined, mask: (t: string) => string): StepDetail {
+    const reqBody = p.body === undefined ? undefined : Buffer.isBuffer(p.body) ? `(binary, ${p.body.length} bytes)` : cutBody(mask(p.body)).text;
+    const out: StepDetail = { request: { headers: maskHeaders(p.headers, mask), ...(reqBody !== undefined && reqBody !== '' ? { body: reqBody } : {}) } };
+    if (res) {
+        const b = res.bodyBase64 ? { text: '(binary body)', cut: false } : cutBody(mask(res.body ?? ''));
+        out.response = { statusText: res.statusText ?? '', headers: maskHeaders(res.headers ?? {}, mask), body: b.text, cut: b.cut || !!res.truncated };
+    }
+    return out;
 }
 export interface RunnerJob {
     id: string;
@@ -125,8 +147,11 @@ export class CollectionRunner {
                             step.passed = !w.error;
                             if (w.error) step.error = i.mask(w.error);
                         } else {
+                        const keepDetail = job.steps.length < DETAIL_STEPS;
+                        if (keepDetail) step.detail = stepDetail(p, undefined, i.mask);
                         const res = await sendWith(p, r.settings, i.connection, i.timeoutMs, jar);
                         step.status = res.status; step.timeMs = res.timeMs; step.size = res.size;
+                        if (keepDetail) step.detail = stepDetail(p, res, i.mask);
                         for (const x of extract(r.extract, res)) if (x.found && x.value !== undefined) { saved[x.variable] = x.value; v.vars[x.variable] = x.value; }
                         const own = await evaluateAll(r.checks, res, v, i.queryRows);
                         const t = await runTestScripts(i.collection, r, p, res, v, globals, sender, it);

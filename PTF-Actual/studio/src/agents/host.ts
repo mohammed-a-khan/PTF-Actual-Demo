@@ -159,6 +159,8 @@ export interface MissionSessionOptions {
     autoFiles: boolean;
     /** Every event of the session (the mission engine watches them). */
     listener?: (e: AgentEvent) => void;
+    /** After every model call (its usage counted): the mission engine stops the session when its budget is used up. */
+    onCall?: () => void;
     /** No one answers (a pipeline): what would ask the person is refused at once, and the agent is told why. */
     unattended?: boolean;
     /** The knowledge sources this session may search (none: all). */
@@ -490,6 +492,8 @@ export class AgentHost {
             if (!s.model || s.model === 'auto') throw new Error('Custom model: the model or deployment name.');
         }
         if (s.provider === 'copilot') s.model = String(s.model ?? '').trim() || 'auto';
+        // A model or deployment name: one word of letters, digits and . _ : / @ - (no spaces or emoji).
+        if (!/^[\w.:/@-]{1,120}$/.test(s.model)) throw new Error(`Model: a model or deployment name, up to 120 letters, digits and . _ : / @ - (no spaces), not "${s.model.slice(0, 40)}${s.model.length > 40 ? '…' : ''}".`);
         for (const [k, v] of Object.entries(s.approvals ?? {})) if (!['ask', 'auto', 'deny'].includes(String(v))) throw new Error(`Approval for ${k}: ask or auto.`);
         fs.mkdirSync(this.d.home, { recursive: true });
         fs.writeFileSync(this.settingsFile, JSON.stringify(s, null, 2));
@@ -879,6 +883,7 @@ How to work:
             case 'session.idle': s.busy = false; this.push(s, { type: 'idle' }); this.saveList(); break;
             case 'assistant.usage':
                 s.usage.calls++; s.usage.inputTokens += Number(d.inputTokens) || 0; s.usage.outputTokens += Number(d.outputTokens) || 0; s.usage.cost += Number(d.cost) || 0; s.usage.model = d.model ?? s.usage.model;
+                try { s.mission?.onCall?.(); } catch { /* the watcher's problem */ }
                 break;
             default: break;
         }

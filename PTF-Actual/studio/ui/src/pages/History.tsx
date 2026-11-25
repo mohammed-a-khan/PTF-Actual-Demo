@@ -17,13 +17,14 @@ import { Split } from '../components/Split';
 import { VirtualRows } from '../components/VirtualRows';
 import { TidyCommits } from '../components/TidyCommits';
 import { navigate, useRoute } from '../route';
+import { plural } from '../datagit-common';
 
 const REF_COLOR: Record<string, string> = { head: 'magenta', branch: 'green', remote: 'orange', tag: 'gold', stash: 'default' };
 const STATUS: Record<string, { t: string; c: string }> = { A: { t: 'Added', c: 'green' }, M: { t: 'Modified', c: 'blue' }, D: { t: 'Deleted', c: 'red' }, R: { t: 'Renamed', c: 'purple' }, C: { t: 'Copied', c: 'purple' }, T: { t: 'Type', c: 'default' } };
 const ago = (d: string) => {
     const s = (Date.now() - new Date(d).getTime()) / 1000;
     if (s < 60) return 'just now'; if (s < 3600) return `${Math.floor(s / 60)} min ago`; if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-    if (s < 86400 * 30) return `${Math.floor(s / 86400)} days ago`; return new Date(d).toLocaleDateString();
+    if (s < 86400 * 30) return `${plural(Math.floor(s / 86400), 'day')} ago`; return new Date(d).toLocaleDateString();
 };
 
 function FileList({ files, selected, onSelect }: { files: NameStatus[]; selected?: string; onSelect: (f: NameStatus) => void }) {
@@ -115,6 +116,16 @@ export function History() {
 
     const commits = data?.commits ?? [];
     const width = Math.max(1, ...(data?.graph.map((g) => g.width) ?? [1]));
+    // A narrow commit list (a 1024px window): one badge per row, author and SHA left to the details, so the message stays readable.
+    const listRef = React.useRef<HTMLDivElement>(null);
+    const [narrow, setNarrow] = React.useState(false);
+    React.useEffect(() => {
+        const el = listRef.current;
+        if (!el || typeof ResizeObserver === 'undefined') return;
+        const ro = new ResizeObserver(() => setNarrow(el.clientWidth < 600));
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, [file, sel]);
     const short = (s: string) => s.slice(0, 7);
 
     const op = async (label: string, fn: () => Promise<{ status: string; message?: string; conflicts?: string[] } | void>) => {
@@ -183,7 +194,7 @@ export function History() {
 
     const head = commits.find((c) => c.refs.some((r) => r.kind === 'head'));
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: 8 }}>
+        <div className="dg-history" style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0, gap: 8 }}>
             <Space wrap>
                 <Space.Compact>
                     <Select value={query.field} onChange={(v) => setQuery({ ...query, field: v })} style={{ width: 120 }}
@@ -235,8 +246,8 @@ export function History() {
                     </Split>
                 </div>
             ) : (
-            <Split id="history-list" initial={560} min={320} max={1400} style={{ gap: 0 }}>
-                <div className="panel" style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
+            <Split id="history-detail" sizeOf="second" initial={420} min={320} max={1000} style={{ gap: 0 }}>
+                <div ref={listRef} className={`panel${narrow ? ' dg-narrow' : ''}`} style={{ flex: 1, minWidth: 0, overflow: 'auto' }}>
                     {loading && !data && <Spin style={{ margin: 40 }} />}
                     {data && commits.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 60 }} description="No commits match." />}
                     {commits.map((c, i) => {
@@ -251,12 +262,13 @@ export function History() {
                                         {(() => {
                                             // At most two badges (shortened), the rest as "+N": the message stays readable.
                                             const refs = c.refs.filter((r) => r.kind !== 'head');
-                                            return <>{refs.slice(0, 2).map((r) => <Tag key={r.kind + r.name} color={REF_COLOR[r.kind]} title={r.name} style={{ marginInlineEnd: 4, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', verticalAlign: 'middle' }}>{r.kind === 'tag' ? '🏷 ' : ''}{r.name}</Tag>)}
-                                                {refs.length > 2 && <Tooltip title={refs.slice(2).map((r) => r.name).join(', ')}><Tag style={{ marginInlineEnd: 4 }}>+{refs.length - 2}</Tag></Tooltip>}</>;
+                                            const max = narrow ? 1 : 2;
+                                            return <>{refs.slice(0, max).map((r) => <Tag key={r.kind + r.name} color={REF_COLOR[r.kind]} title={r.kind === 'tag' ? `Tag ${r.name}` : r.name} style={{ marginInlineEnd: 4, verticalAlign: 'middle' }}>{r.kind === 'tag' ? '🏷 ' : ''}{r.name}</Tag>)}
+                                                {refs.length > max && <Tooltip title={refs.slice(max).map((r) => r.name).join(', ')}><Tag className="dg-more" style={{ marginInlineEnd: 4 }}>+{refs.length - max}</Tag></Tooltip>}</>;
                                         })()}
                                         <span className="log-message" title={c.subject}>{c.subject}</span>
                                     </span>
-                                    <span className="log-meta">{c.authorName}</span>
+                                    <span className="log-meta log-author" title={c.authorName}>{c.authorName}</span>
                                     <span className="log-meta" title={new Date(c.date).toLocaleString()}>{ago(c.date)}</span>
                                     <Typography.Text code className="log-sha">{short(c.sha)}</Typography.Text>
                                     <Dropdown menu={menu(c)} trigger={['click']}><Button size="small" type="text" icon={<MoreOutlined />} onClick={(e) => e.stopPropagation()} /></Dropdown>
@@ -278,10 +290,10 @@ export function History() {
                                 ) : details ? (
                                     <>
                                         <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 8, fontWeight: 500 }}>{details.message}</Typography.Paragraph>
-                                        <Descriptions size="small" column={1} items={[
+                                        <Descriptions size="small" column={1} className="dg-commit-desc" items={[
                                             { key: 'a', label: 'Author', children: `${details.authorName} <${details.authorEmail}>` },
                                             { key: 'd', label: 'Date', children: new Date(details.date).toLocaleString() },
-                                            { key: 's', label: 'Commit', children: <Typography.Text code copyable={{ text: details.sha, icon: <CopyOutlined /> }}>{details.sha}</Typography.Text> },
+                                            { key: 's', label: 'Commit', children: <Typography.Text code copyable={{ text: details.sha, icon: <CopyOutlined /> }} title={details.sha} style={{ wordBreak: 'break-all' }}>{details.sha}</Typography.Text> },
                                             { key: 'p', label: details.parents.length > 1 ? 'Parents (merge)' : 'Parent', children: details.parents.map((p) => <Typography.Link key={p} code onClick={() => setSel(p)} style={{ marginRight: 6 }}>{short(p)}</Typography.Link>) },
                                             { key: 'b', label: 'On branches', children: details.branches.slice(0, 8).map((b) => <Tag key={b}>{b}</Tag>) },
                                             { key: 'u', label: 'Pushed', children: details.pushed ? <Tag color="green">yes — shared with others</Tag> : <Tag>not yet</Tag> },
@@ -289,8 +301,8 @@ export function History() {
                                     </>
                                 ) : <Spin />}
                             </div>
-                            <div style={{ padding: '6px 10px 2px', display: 'flex', alignItems: 'center' }}>
-                                <Typography.Text strong style={{ flex: 1 }}>Changed files ({files.length})</Typography.Text>
+                            <div style={{ padding: '6px 10px 2px', display: 'flex', alignItems: 'center', flexWrap: 'wrap', columnGap: 8 }}>
+                                <Typography.Text strong style={{ flex: 1, whiteSpace: 'nowrap' }}>Changed files ({files.length})</Typography.Text>
                                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>Click a file to see its changes</Typography.Text>
                             </div>
                             <div style={{ flex: 1, overflow: 'auto', padding: 4 }}>

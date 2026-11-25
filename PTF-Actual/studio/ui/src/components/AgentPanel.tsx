@@ -20,7 +20,7 @@ export { toItems };
 
 const ctxLabel = (c: Record<string, unknown>) => [c.page, c.project, c.file ?? c.collection ?? c.scenario ?? c.connection ?? c.run].filter(Boolean).map(String).join(' · ');
 
-export function AgentPanel({ open, initialSession }: { open: boolean; initialSession?: string | null }) {
+export function AgentPanel({ open, initialSession, onClose }: { open: boolean; initialSession?: string | null; onClose?: () => void }) {
     const { message, modal } = App.useApp();
     const [status, setStatus] = React.useState<AgentStatus | null>(null);
     const [sessions, setSessions] = React.useState<AgentSessionInfo[]>([]);
@@ -36,6 +36,22 @@ export function AgentPanel({ open, initialSession }: { open: boolean; initialSes
     const [changes, setChanges] = React.useState(0);
     const seq = React.useRef(0);
     const bottom = React.useRef<HTMLDivElement>(null);
+    const rootRef = React.useRef<HTMLDivElement>(null);
+    // Esc closes the panel when it is the top layer (also over a mission's drawer), not while a dialog or a list is open.
+    React.useEffect(() => {
+        if (!open || !onClose) return;
+        const f = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape' || e.defaultPrevented) return;
+            if (document.querySelector('.ant-modal-wrap:not([style*="display: none"]) .ant-modal, .ant-select-dropdown:not(.ant-select-dropdown-hidden), .ant-dropdown:not(.ant-dropdown-hidden), .ant-popover:not(.ant-popover-hidden), .ant-image-preview-wrap')) return;
+            const mine = rootRef.current?.closest('.ant-drawer');
+            const drawers = [...document.querySelectorAll('.ant-drawer.ant-drawer-open')];
+            if (!mine || drawers[drawers.length - 1] !== mine) return;
+            e.stopPropagation();
+            onClose();
+        };
+        window.addEventListener('keydown', f, true);
+        return () => window.removeEventListener('keydown', f, true);
+    }, [open, onClose]);
 
     React.useEffect(() => subscribeAgentContext(() => setCtx(agentContext())), []);
     React.useEffect(() => { if (initialSession) setCurrent(initialSession); }, [initialSession]);
@@ -85,8 +101,13 @@ export function AgentPanel({ open, initialSession }: { open: boolean; initialSes
     const notReady = !status ? 'Checking the agents…' : status.policyProblems?.length ? 'Agents are not allowed by this repository\'s policy (see above)' : status.runtime?.install.running ? 'Wait for the agents runtime to finish installing…'
         : !status.sdk?.installed ? (status.runtime?.problem ? 'The agents runtime cannot start (see above)' : 'Install the agents runtime above to start') : status.auth?.isAuthenticated === false ? 'Sign in to GitHub Copilot above to start (or choose another model provider in Agents → Settings)' : status.error ? 'The agents could not start (see above)' : '';
 
+    // One conversation per click: a double click (or a click while one is being made) makes no second one.
+    const creating = React.useRef(false);
+    const [makingChat, setMakingChat] = React.useState(false);
     const newChat = async () => {
-        try { const s = await api.agentCreate(); setCurrent(s.id); await refresh(); } catch (e) { message.error(errText(e)); }
+        if (creating.current) return;
+        creating.current = true; setMakingChat(true);
+        try { const s = await api.agentCreate(); setCurrent(s.id); await refresh(); } catch (e) { message.error(errText(e)); } finally { creating.current = false; setMakingChat(false); }
     };
     // A question handed over by a screen ("Explain with Copilot"): in the box, ready to send.
     React.useEffect(() => {
@@ -105,7 +126,7 @@ export function AgentPanel({ open, initialSession }: { open: boolean; initialSes
         if (!t) return;
         try {
             let id = current;
-            if (!id) { const s = await api.agentCreate(); id = s.id; setCurrent(id); }
+            if (!id) { if (creating.current) return; creating.current = true; try { const s = await api.agentCreate(); id = s.id; setCurrent(id); } finally { creating.current = false; } }
             setText('');
             setBusy(true);
             await api.agentSend(id, t, agentContext());
@@ -118,7 +139,7 @@ export function AgentPanel({ open, initialSession }: { open: boolean; initialSes
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <Select size="small" style={{ flex: 1, minWidth: 0 }} value={current ?? undefined} placeholder="Conversations" aria-label="Conversation" showSearch optionFilterProp="label"
                 onChange={setCurrent} options={chats.map((s) => ({ value: s.id, label: `${s.busy ? '● ' : ''}${s.title}${chats.filter((x) => x.title === s.title).length > 1 ? ` · ${new Date(s.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}` : ''}` }))} />
-            <Tooltip title="New conversation"><Button size="small" icon={<PlusOutlined />} aria-label="New conversation" disabled={!ready} onClick={() => void newChat()} /></Tooltip>
+            <Tooltip title="New conversation"><Button size="small" icon={<PlusOutlined />} aria-label="New conversation" disabled={!ready} loading={makingChat} onClick={() => void newChat()} /></Tooltip>
             <Tooltip title="Delete this conversation"><Button size="small" icon={<DeleteOutlined />} aria-label="Delete conversation" disabled={!current}
                 onClick={() => modal.confirm({ title: 'Delete this conversation?', okText: 'Delete', okButtonProps: { danger: true }, onOk: async () => { try { await api.agentDelete(current!); setCurrent(null); await refresh(); } catch (e) { message.error(errText(e)); } } })} /></Tooltip>
             <Tooltip title="Export the conversation (Markdown: messages, tools, approvals, changed files, usage)"><Button size="small" icon={<DownloadOutlined />} aria-label="Export conversation" disabled={!current} onClick={() => void exportTranscript()} /></Tooltip>
@@ -135,7 +156,7 @@ export function AgentPanel({ open, initialSession }: { open: boolean; initialSes
             : <AccountSetup status={status} onChange={reload} compact />;
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 8, minHeight: 0 }}>
+        <div ref={rootRef} style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 8, minHeight: 0 }}>
             {head}
             {replaying && current && <Replay session={current} title={sessions.find((x) => x.id === current)?.title ?? current} onClose={() => setReplaying(false)} />}
             {loading && !status ? <Spin /> : setup}

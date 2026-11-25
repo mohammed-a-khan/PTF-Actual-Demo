@@ -76,6 +76,7 @@ test('a mock recorded from real traffic answers as the service did (answers by q
     });
     const port = await new Promise<number>((res) => real.listen(0, '127.0.0.1', () => res((real.address() as { port: number }).port)));
     try {
+        await assert.rejects(recordMock('http://'), /needs a host/, '"http://" alone is not a service');
         const rec = await recordMock(`http://127.0.0.1:${port}/api`);
         const live = [await get(`${rec.url}/orders`), await get(`${rec.url}/orders?status=open`), await get(`${rec.url}/orders`, { method: 'POST', body: '{"a":1}' }), await get(`${rec.url}/missing`)];
         assert.equal(rec.count(), 4);

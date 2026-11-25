@@ -5,6 +5,7 @@ import '../styles-datagit.css';
 import { api, SecretMeta, SecretUsageDef } from '../api';
 import { errText, openInEditor, useStudio } from '../state';
 import { navigate, useRoute } from '../route';
+import { plural } from '../datagit-common';
 
 export function Secrets() {
     const { message, modal } = App.useApp();
@@ -29,10 +30,12 @@ export function Secrets() {
     // #/secrets/add/<NAME>: another screen asked for this secret (e.g. ADO_PAT for Azure DevOps).
     const route = useRoute();
     React.useEffect(() => {
-        if (route[0] === 'secrets' && route[1] === 'add' && /^[A-Z][A-Z0-9_]{0,63}$/.test(route[2] ?? '')) {
-            setAdding({ name: route[2], value: '', env: '', scope: 'project' });
+        if (route[0] === 'secrets' && route[1] === 'add') {
+            // Names are capital letters: "lower_bad" opens as LOWER_BAD; a name that is still not valid opens
+            // with the reason under the field, never silently nothing.
+            setAdding({ name: (route[2] ?? '').toUpperCase().slice(0, 64), value: '', env: '', scope: 'project' });
             navigate(['secrets'], true);
-        }
+        } else if (route[0] === 'secrets' && route[1]) navigate(['secrets'], true);
     }, [route]);
 
     const envOptions = React.useMemo(() => {
@@ -78,20 +81,20 @@ export function Secrets() {
             {usage && usage.missing.length > 0 && (
                 <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={<Space wrap size={[6, 6]}><span>{usage.missing.length} name{usage.missing.length === 1 ? ' is' : 's are'} read by the tests but not stored here (click to add):</span>{usage.missing.map((m) => <Popover key={m.name} content={usesList(m.uses)} title={`Where ${m.name} is read`}><Tag style={{ cursor: 'pointer' }} className="mono" onClick={() => setAdding({ name: m.name, value: '', env: '', scope: 'project' })}>{m.name} +</Tag></Popover>)}</Space>} />
             )}
-            <Table<SecretMeta> size="small" loading={loading} dataSource={shown} rowKey={(r) => `${r.name}|${r.project ?? ''}|${r.env ?? ''}`} pagination={false} scroll={{ x: 'max-content' }}
+            <Table<SecretMeta> size="small" loading={loading} dataSource={shown} rowKey={(r) => `${r.name}|${r.project ?? ''}|${r.env ?? ''}`} pagination={false} className="dg-secrets-table"
                 locale={{ emptyText: find && rows.length ? 'No secret matches.' : 'No secrets yet.' }}
                 columns={[
-                    { title: 'Name', dataIndex: 'name', render: (n: string) => <Typography.Text className="mono" strong style={{ whiteSpace: 'nowrap' }} ellipsis={{ tooltip: n }}>{n}</Typography.Text> },
+                    { title: 'Name', dataIndex: 'name', render: (n: string) => <Typography.Text className="mono" strong style={{ overflowWrap: 'break-word' }}>{n.split('_').map((part, i) => <React.Fragment key={i}>{i > 0 && <>_<wbr /></>}{part}</React.Fragment>)}</Typography.Text> },
                     { title: 'Used in', render: (_: unknown, r) => <Space size={[4, 4]} wrap><Tag>{r.project ? `this project (${r.project})` : 'all projects'}</Tag><Tag color={r.env ? 'blue' : undefined}>{r.env ?? 'every environment'}</Tag></Space> },
-                    { title: 'Value', render: (_: unknown, r) => <Typography.Text type="secondary" style={{ whiteSpace: 'nowrap' }}>{'•'.repeat(Math.min(12, Math.max(6, r.length)))} ({r.length} character{r.length === 1 ? '' : 's'})</Typography.Text> },
-                    { title: 'Read by', width: 130, render: (_: unknown, r) => {
+                    { title: 'Value', render: (_: unknown, r) => <Typography.Text type="secondary"><span style={{ whiteSpace: 'nowrap' }}>{'•'.repeat(Math.min(12, Math.max(6, r.length)))}</span> <span style={{ whiteSpace: 'nowrap' }}>({plural(r.length, 'character')})</span></Typography.Text> },
+                    { title: 'Read by', render: (_: unknown, r) => {
                         const u = usesOf(r);
                         if (!u) return null;
                         return u.uses.length ? <Popover content={usesList(u.uses)} title={`Where ${r.name} is read`}><Typography.Link>{u.uses.length} place{u.uses.length === 1 ? '' : 's'}</Typography.Link></Popover>
                             : <Tooltip title="Nothing in this repository reads it (configuration, features, API collections, load scenarios, tool servers). Other repositories may."><Tag>not used here</Tag></Tooltip>;
                     } },
-                    { title: 'Last changed', dataIndex: 'updatedAt', render: (d: string, r) => { const u = usesOf(r); return <Space size={6}>{new Date(d).toLocaleDateString()}{u?.rotate && <Tooltip title={`Changed ${u.ageDays} days ago: time to rotate it (every ${usage?.rotateDays ?? 90} days).`}><Tag color="orange">rotate</Tag></Tooltip>}</Space>; } },
-                    { title: '', width: 130, fixed: 'right' as const, render: (_: unknown, r) => (
+                    { title: 'Last changed', dataIndex: 'updatedAt', render: (d: string, r) => { const u = usesOf(r); return <Space size={6} wrap><span style={{ whiteSpace: 'nowrap' }}>{new Date(d).toLocaleDateString()}</span>{u?.rotate && <Tooltip title={`Changed ${plural(u.ageDays, 'day')} ago: time to rotate it (every ${usage?.rotateDays ?? 90} days).`}><Tag color="orange">rotate</Tag></Tooltip>}</Space>; } },
+                    { title: '', width: 120, render: (_: unknown, r) => (
                         <Space size={4} style={{ whiteSpace: 'nowrap' }}>
                             <Button size="small" onClick={() => setAdding({ name: r.name, value: '', env: r.env ?? '', scope: r.project ? 'project' : 'all-projects', replace: true })}>Replace</Button>
                             <Popconfirm title={`Delete ${r.name}${r.env ? ` (${r.env})` : ''}?`} description={(() => { const u = usesOf(r); return u?.uses.length ? `${u.uses.length} place${u.uses.length === 1 ? '' : 's'} read it: they will get an empty value.` : 'Nothing in this repository reads it.'; })()} okText="Delete" okButtonProps={{ danger: true }}

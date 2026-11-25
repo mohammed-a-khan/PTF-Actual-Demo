@@ -8,8 +8,8 @@ import {
 } from '@ant-design/icons';
 import { api, GateResult, hasToken, setProtectedRunConfirm } from './api';
 import { errText, StudioProvider, useStudio } from './state';
-import { lostOnLeave } from './unsaved';
-import { cameFrom, goBack, navigate, useRoute } from './route';
+import { canSaveLost, lostOnLeave, saveLost } from './unsaved';
+import { cameFrom, goBack, navigate, setPopGuard, useRoute } from './route';
 import { SourceControl } from './pages/SourceControl';
 import { RepoSwitcher } from './components/RepoSwitcher';
 import { Environments } from './pages/Environments';
@@ -62,7 +62,7 @@ const PAGE_INFO: Record<Page, { title: string; about: string }> = {
     recorder: { title: 'Recorder', about: 'Record a browser session and save it as a framework test: feature, page objects and steps.' },
     api: { title: 'API requests', about: 'Build and send requests, check the responses, and turn them into framework tests.' },
     'api-runner': { title: 'Collection runner', about: 'Run a collection\'s requests in order, with their checks, and get a report.' },
-    'api-history': { title: 'Request history', about: 'Every request sent from the Studio on this computer.' },
+    'api-history': { title: 'Request history', about: 'Requests sent from API → Requests on this computer.' },
     'api-mocks': { title: 'API mocks', about: 'Services that answer like the real API, with faults to test how the application copes.' },
     perf: { title: 'Load scenarios', about: 'What virtual users do, how many, for how long, and when the result is good enough.' },
     'perf-runs': { title: 'Load test runs', about: 'Live progress, results per step, service levels, comparison with an earlier run.' },
@@ -125,6 +125,13 @@ function BranchMenu() {
     const [name, setName] = React.useState('');
     const local = branches.filter((b) => !b.remote);
     const remoteOnly = branches.filter((b) => b.remote && !local.some((l) => b.name.endsWith('/' + l.name)));
+    // Missions' own branches (cs-studio/mission-…) are kept for review: listed apart, folded, so the list stays short.
+    const isMission = (n: string) => /^(?:[^/]+\/)?cs-studio\/mission-/.test(n);
+    const missionLocal = local.filter((b) => isMission(b.name) && !b.current);
+    const shownLocal = local.filter((b) => !missionLocal.includes(b));
+    const shownRemote = remoteOnly.filter((b) => !isMission(b.name));
+    // The name Git gets: spaces become -, characters Git refuses are dropped (shown before it is created).
+    const finalName = name.trim().replace(/\s+/g, '-').replace(/[~^:?*[\\\x00-\x1f\x7f]+/g, '').replace(/\.{2,}/g, '.').replace(/\/{2,}/g, '/').replace(/@\{/g, '@').replace(/^[-./]+/, '').replace(/(\.lock|[./])+$/, '');
 
     const switchTo = async (b: string) => {
         try { await api.switchBranch(b); message.success(`Switched to ${b}`); await refresh(); }
@@ -132,15 +139,17 @@ function BranchMenu() {
     };
 
     const createBranch = async () => {
-        try { await api.createBranch(name.trim()); message.success(`Created ${name.trim()}`); setDialog(null); await refresh(); } catch (e) { message.error(errText(e)); }
+        if (!finalName) return;
+        try { await api.createBranch(finalName); message.success(`Created ${finalName} and switched to it`); setDialog(null); await refresh(); } catch (e) { message.error(errText(e)); }
     };
     return (
         <>
             {/* Re-read branches on open: they may have been created in a terminal meanwhile. */}
             <Dropdown trigger={['click']} onOpenChange={(o) => { if (o) void refresh(); }} menu={{
                 items: [
-                    { type: 'group', label: 'Switch to branch', children: local.map((b) => ({ key: 'b:' + b.name, label: <Space>{b.name}{b.current && <Typography.Text type="secondary">(current)</Typography.Text>}</Space>, disabled: b.current })) },
-                    ...(remoteOnly.length ? [{ type: 'group' as const, label: 'From the remote', children: remoteOnly.map((b) => ({ key: 'b:' + b.name.replace(/^[^/]+\//, ''), label: b.name })) }] : []),
+                    { type: 'group', label: 'Switch to branch', children: shownLocal.map((b) => ({ key: 'b:' + b.name, label: <Space>{b.name}{b.current && <Typography.Text type="secondary">(current)</Typography.Text>}</Space>, disabled: b.current })) },
+                    ...(missionLocal.length ? [{ key: 'missions', label: `Mission branches (${missionLocal.length})`, children: missionLocal.map((b) => ({ key: 'b:' + b.name, label: b.name })) }] : []),
+                    ...(shownRemote.length ? [{ type: 'group' as const, label: 'From the remote', children: shownRemote.map((b) => ({ key: 'b:' + b.name.replace(/^[^/]+\//, ''), label: b.name })) }] : []),
                     { type: 'divider' },
                     { key: 'new', icon: <PlusOutlined />, label: 'New branch…' },
                     { key: 'merge', icon: <MergeCellsOutlined />, label: `Merge a branch into ${status?.branch ?? 'this branch'}…`, disabled: !status?.branch },
@@ -153,11 +162,11 @@ function BranchMenu() {
             }}>
                 <Button icon={<BranchesOutlined />}>{status?.branch ?? (status?.head ? `detached at ${status.head.slice(0, 7)}` : 'no commits yet')} <DownOutlined /></Button>
             </Dropdown>
-            <Modal open={dialog === 'new'} title="New branch" okText="Create and switch" onCancel={() => setDialog(null)} okButtonProps={{ disabled: !name.trim() }} destroyOnClose
+            <Modal open={dialog === 'new'} title="New branch" okText={finalName ? `Create ${finalName} and switch` : 'Create and switch'} onCancel={() => setDialog(null)} okButtonProps={{ disabled: !finalName }} destroyOnClose
                 afterOpenChange={(o) => { if (o) document.getElementById('cs-new-branch')?.focus(); }}
                 onOk={createBranch}>
-                <Form layout="vertical"><Form.Item label="Branch name" htmlFor="cs-new-branch" help={`Starts from ${status?.branch ?? 'the current commit'}. Example: feature/login-tests`}>
-                    <Input id="cs-new-branch" value={name} onChange={(e) => setName(e.target.value.replace(/^\s+/, '').replace(/\s+/g, '-'))} onPressEnter={() => { if (name.trim()) void createBranch(); }} /></Form.Item></Form>
+                <Form layout="vertical"><Form.Item label="Branch name" htmlFor="cs-new-branch" help={<>{finalName && finalName !== name.trim() ? <><Typography.Text type="warning">It will be created as <Typography.Text code>{finalName}</Typography.Text> (branch names have no spaces or {'~ ^ : ? * [ \\'}).</Typography.Text><br /></> : null}Starts from {status?.branch ?? 'the current commit'}. Example: feature/login-tests</>}>
+                    <Input id="cs-new-branch" value={name} onChange={(e) => setName(e.target.value)} onPressEnter={() => { if (finalName) void createBranch(); }} /></Form.Item></Form>
             </Modal>
             <MergeDialog open={dialog === 'merge'} onClose={() => setDialog(null)} />
         </>
@@ -184,11 +193,26 @@ function SyncButtons() {
         else modal.warning({ title: 'Pull did not go through', content: r.message });
     });
     const noUpstream = status && status.branch && (!status.upstream || status.upstreamGone);
+    // Remotes of the repository (none: Fetch and Pull say so instead of "up to date").
+    const [remotes, setRemotes] = React.useState<number | null>(null);
+    React.useEffect(() => { api.remotes().then((r) => setRemotes(r.length)).catch(() => setRemotes(null)); }, [status?.branch, status?.upstream]);
+    const NO_REMOTE = 'This repository has no remote (nothing to fetch from or pull). Add one in Source control › Branches & tags › Remotes.';
+    const fetchNow = () => run('fetch', async () => {
+        const rs = await api.remotes();
+        setRemotes(rs.length);
+        if (!rs.length) { message.info(NO_REMOTE); return; }
+        await api.fetch();
+        message.success(rs.length === 1 ? `Fetched from ${rs[0].name}: up to date with the remote` : `Fetched from ${rs.length} remotes`);
+    });
+    // Why Pull is off, in its tooltip.
+    const pullOff = remotes === 0 ? NO_REMOTE : !status?.branch ? 'Pull needs a branch (this is a detached commit): switch to a branch first.' : status.upstreamGone ? `${status.upstream ?? 'The remote branch'} was deleted on the remote: nothing to pull.` : !status.upstream ? `${status.branch} is not on the remote yet (Publish branch first), so there is nothing to pull.` : null;
     return (
         <Space>
-            <Tooltip title="Check the remote for new commits (changes nothing here)"><Button icon={<CloudSyncOutlined />} loading={busy === 'fetch'} onClick={() => run('fetch', async () => { await api.fetch(); message.success('Up to date with the remote'); })}>Fetch</Button></Tooltip>
-            <Tooltip title={status?.behind ? `${status.behind} new commit(s) on the remote` : 'Get the latest commits from the remote'}>
-                <Badge count={status?.behind ?? 0} size="small"><Button icon={<ArrowDownOutlined />} loading={busy === 'pull'} disabled={!status?.upstream || !!status?.upstreamGone} onClick={pull}>Pull</Button></Badge>
+            <Tooltip title={remotes === 0 ? NO_REMOTE : 'Check the remote for new commits (changes nothing here)'}><Button icon={<CloudSyncOutlined />} loading={busy === 'fetch'} onClick={fetchNow}>Fetch</Button></Tooltip>
+            <Tooltip title={pullOff ?? (status?.behind ? `${status.behind} new commit(s) on the remote` : 'Get the latest commits from the remote')}>
+                <Badge count={status?.behind ?? 0} size="small"><Button icon={<ArrowDownOutlined />} loading={busy === 'pull'} disabled={!status?.upstream || !!status?.upstreamGone} onClick={pull}
+                    // A disabled button gets no hover: the badge around it shows why it is off.
+                    style={!status?.upstream || status?.upstreamGone ? { pointerEvents: 'none' } : undefined}>Pull</Button></Badge>
             </Tooltip>
             <Tooltip title={noUpstream ? 'First push: publishes this branch to the remote' : status?.ahead ? `${status.ahead} commit(s) to send` : 'Nothing to push'}>
                 <Badge count={status?.ahead ?? 0} size="small" color="#93186C">
@@ -261,6 +285,28 @@ function OperationBanner() {
 
 function Shell({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => void }) {
     const { message: shellMessage, modal: shellModal } = App.useApp();
+    // "Leave without saving?": Save (when the screen can save), Discard, or Stay.
+    const askLeave = (lose: string[], leave: () => void) => {
+        const canSave = canSaveLost();
+        const inst = shellModal.confirm({
+            title: 'Leave without saving?', content: `Not saved: ${lose.join(', ')}. Its changes are lost if you leave without saving.`,
+            footer: () => <Space style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+                <Button onClick={() => inst.destroy()}>Stay</Button>
+                <Button danger onClick={() => { inst.destroy(); leave(); }}>{canSave ? 'Discard' : 'Leave'}</Button>
+                {canSave && <Button type="primary" onClick={() => { void saveLost().then((ok) => { if (ok) { inst.destroy(); leave(); } }); }}>Save and leave</Button>}
+            </Space>,
+        });
+    };
+    // The browser's Back/Forward to another screen asks too, like the menu, when that screen's work would be lost.
+    React.useEffect(() => {
+        setPopGuard((_to, _from, leave) => {
+            const lose = lostOnLeave();
+            if (!lose.length) return false;
+            askLeave(lose, leave);
+            return true;
+        });
+        return () => setPopGuard(null);
+    }, [shellModal]);
     const { repoRoot, status, error } = useStudio();
     // The screen comes from the address (#/runs/…), so Back/Forward work; the last screen is
     // remembered for the next start.
@@ -278,7 +324,7 @@ function Shell({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => vo
         if (!(p !== page || route.length > 1)) return;
         // A screen that does not keep unsaved edits (a load scenario, a mock): asked before they are thrown away.
         const lose = lostOnLeave();
-        if (lose.length && p !== page) shellModal.confirm({ title: 'Leave without saving?', content: `Not saved: ${lose.join(', ')}. Its changes are lost if you leave.`, okText: 'Leave', okButtonProps: { danger: true }, cancelText: 'Stay', onOk: () => navigate([p]) });
+        if (lose.length && p !== page) askLeave(lose, () => navigate([p]));
         else navigate([p], false, { menu: true });
     };
     const [collapsed, setCollapsed] = React.useState(() => { try { return localStorage.getItem('cs-studio-menu') === 'collapsed'; } catch { return false; } });
@@ -314,6 +360,7 @@ function Shell({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => vo
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
     // Copilot panel (every screen) and the screen it is told about.
     const [agentOpen, setAgentOpen] = React.useState(false);
+    const closeAgent = React.useCallback(() => setAgentOpen(false), []);
     const [agentSession, setAgentSession] = React.useState<string | null>(null);
     // What waits for the person: the menu shows how many (the Inbox page keeps it current while open).
     const [inboxCount, setInboxCount] = React.useState(0);
@@ -462,7 +509,7 @@ function Shell({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => vo
                 </Layout.Content>
             </Layout>
             <Drawer open={agentOpen} onClose={() => setAgentOpen(false)} mask={false} placement="right" width={560} title={<Space><RobotOutlined />Copilot</Space>} styles={{ body: { padding: 12, display: 'flex', flexDirection: 'column' } }} destroyOnClose={false}>
-                <AgentPanel open={agentOpen} initialSession={agentSession} />
+                <AgentPanel open={agentOpen} initialSession={agentSession} onClose={closeAgent} />
             </Drawer>
         </Layout>
     );

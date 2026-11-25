@@ -26,7 +26,7 @@ import { errText, openInEditor, showRun } from '../state';
 import { navigate, useRoute } from '../route';
 import { askCopilot, useAgentContext } from '../agentContext';
 import { Split } from '../components/Split';
-import { SectionTitle, shownTab, useRememberedTab } from '../apiperf-ui';
+import { apiRoute, SectionTitle, shownTab, useRememberedTab } from '../apiperf-ui';
 
 const METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 /** Other methods (PURGE, PROPFIND…) in grey. */
@@ -652,16 +652,35 @@ export function ApiWorkspace() {
     React.useEffect(() => { if (envs.length && (!env || !envs.includes(env))) setEnv(envs[0]); }, [envs.join(','), env]); // eslint-disable-line react-hooks/exhaustive-deps
     React.useEffect(() => { if (env && envs.length && !envs.includes(env)) setEnv(undefined); }, [envs, env]);
 
-    // The collection in the address: #/api/<file>
-    const fileInRoute = here && route[1] ? decodeURIComponent(route.slice(1).join('/')) : null;
+    // The collection and the selected request in the address: #/api/<file>[/<request id>] (a reload or Back returns to them).
+    const { file: fileInRoute, request: reqInRoute } = apiRoute(here ? route : []);
     React.useEffect(() => {
         if (!fileInRoute || open?.file === fileInRoute) return;
-        api.apiCollection(fileInRoute).then((r) => { setOpen({ file: r.file, project: r.file.split('/')[1], collection: r.collection, dirty: false }); setSel(null); setResult({}); }).catch((e) => setErr(errText(e)));
+        const load = () => api.apiCollection(fileInRoute).then((r) => {
+            setOpen({ file: r.file, project: r.file.split('/')[1], collection: r.collection, dirty: false });
+            setSel(reqInRoute && findItem(r.collection.items, reqInRoute)?.kind === 'request' ? reqInRoute : null); setResult({});
+        }).catch((e) => setErr(errText(e)));
+        // Another collection in the address (Back, a link from another screen) while this one has unsaved changes:
+        // Save, Discard or Stay (Stay puts the address back on this collection).
+        const keep = open;
+        if (keep?.dirty) leave(() => void load(), () => navigate(keep.file ? ['api', ...keep.file.split('/'), sel ?? undefined] : ['api'], true));
+        else void load();
     }, [fileInRoute]); // eslint-disable-line react-hooks/exhaustive-deps
-
-    // A request restored from History: a copy of it as it was sent, added to its collection (nothing replaced).
+    // Address → selection (Back / Forward within the collection).
     React.useEffect(() => {
-        if (!open?.file) return;
+        if (!open?.file || fileInRoute !== open.file || reqInRoute === sel) return;
+        if (reqInRoute === null || findItem(open.collection.items, reqInRoute)?.kind === 'request') setSel(reqInRoute);
+    }, [reqInRoute]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Selection → address (in place: choosing requests does not fill the browser's history).
+    React.useEffect(() => {
+        if (!here || !open?.file || (fileInRoute && fileInRoute !== open.file)) return;
+        if (fileInRoute !== open.file || reqInRoute !== sel) navigate(['api', ...open.file.split('/'), sel ?? undefined], true);
+    }, [here, sel, open?.file, fileInRoute]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // A request restored from History: a copy of it as it was sent, added to its collection (nothing replaced), and sent.
+    const [sendWhenShown, setSendWhenShown] = React.useState<string | null>(null);
+    React.useEffect(() => {
+        if (!open?.file || fileInRoute !== open.file) return;
         let x: { file: string; def: ApiRequestDef; at: string } | null = null;
         try { x = JSON.parse(sessionStorage.getItem('cs-api-restore') ?? 'null'); } catch { /* none */ }
         if (!x || x.file !== open.file) return;
@@ -669,8 +688,9 @@ export function ApiWorkspace() {
         const copy: ApiRequestDef = { ...x.def, id: `r${Date.now().toString(36)}`, name: `${x.def.name} (from ${new Date(x.at).toLocaleString()})` };
         setOpen((o) => (o ? { ...o, collection: { ...o.collection, items: [...o.collection.items, copy] }, dirty: true } : o));
         setSel(copy.id);
-        message.info('Restored from History as a copy at the end of the collection: Send it again, or Save to keep it.');
-    }, [open?.file]); // eslint-disable-line react-hooks/exhaustive-deps
+        setSendWhenShown(copy.id);
+        message.info('Restored from History as a copy at the end of the collection, and sent again. Save to keep it.');
+    }, [open?.file, fileInRoute, route.join('/')]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const update = (c: ApiCollectionDef) => setOpen((o) => (o ? { ...o, collection: c, dirty: true } : o));
     const req = open && sel ? findItem(open.collection.items, sel) : null;
@@ -696,14 +716,15 @@ export function ApiWorkspace() {
             return true;
         } catch (e) { message.error(errText(e)); return false; }
     };
-    const leave = (then: () => void) => {
+    function leave(then: () => void, stay?: () => void) {
         if (!open?.dirty) { then(); return; }
         (() => {
             // Save, Discard or Stay (Escape and the close button stay: unsaved changes are never dropped by accident).
-            const inst = modal.confirm({ title: `Save the changes to "${open.collection.name}"?`, okText: 'Save', closable: true, onOk: async () => { if (await save()) then(); },
-                footer: (_: React.ReactNode, { OkBtn }: { OkBtn: React.FC }) => <><Button onClick={() => inst.destroy()}>Stay</Button><Button danger onClick={() => { inst.destroy(); then(); }}>Discard</Button><OkBtn /></> });
+            const inst = modal.confirm({ title: `Save the changes to "${open.collection.name}"?`, okText: 'Save', closable: true, onOk: async () => { if (await save()) then(); else stay?.(); },
+                onCancel: () => stay?.(),
+                footer: (_: React.ReactNode, { OkBtn }: { OkBtn: React.FC }) => <><Button onClick={() => { inst.destroy(); stay?.(); }}>Stay</Button><Button danger onClick={() => { inst.destroy(); then(); }}>Discard</Button><OkBtn /></> });
         })();
-    };
+    }
     const openFile = (file: string) => leave(() => { setOpen(null); navigate(['api', ...file.split('/')]); });
     /** Open a collection that is not saved yet; an imported one opens on its settings (base URL, variables). */
     const startNew = (c0: ApiCollectionDef, settings = false) => leave(() => {
@@ -733,6 +754,12 @@ export function ApiWorkspace() {
         } catch (e) { message.error(errText(e)); }
         finally { setSending(false); inFlight.current = false; }
     };
+    // Sent once it is the request on screen (a request restored from History).
+    React.useEffect(() => {
+        if (!sendWhenShown || req?.id !== sendWhenShown) return;
+        setSendWhenShown(null);
+        void sendNow();
+    }, [sendWhenShown, req?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const addItem = (kind: 'request' | 'folder', inFolder?: string) => {
         if (!open) return;
@@ -872,7 +899,7 @@ export function ApiWorkspace() {
                     </div>
                 </div>
                 {err && <Alert type="error" showIcon closable onClose={() => setErr(null)} style={{ margin: 8 }} message={err} />}
-                <div style={{ overflow: 'auto', maxHeight: '34%', borderBottom: '1px solid var(--panel-border)' }}>
+                <div style={open ? { overflow: 'auto', maxHeight: '34%', borderBottom: '1px solid var(--panel-border)' } : { overflow: 'auto', flex: 1, minHeight: 0 }}>
                     {meta === null ? <Spin style={{ margin: 16 }} /> : collections.length === 0 && !open ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<>No API collections in {project || 'this project'} yet.<br />New → New collection, or import a collection file.</>} />
                         : collections.map((c) => (
                             <div key={c.file} className={`item-row${open?.file === c.file ? ' selected' : ''}`} onClick={() => openFile(c.file)}>
@@ -886,7 +913,7 @@ export function ApiWorkspace() {
                         <Typography.Text strong ellipsis style={{ flex: 1, minWidth: 0 }} title="Click to rename"
                             editable={{ tooltip: 'Rename the collection', triggerType: ['text', 'icon'], onChange: (v) => { const p = nameProblem(v); if (p) { message.error(p); return; } if (v.trim() !== open.collection.name) update({ ...open.collection, name: v.trim() }); },
                                 onEnd: () => { if (open.file) message.info(`Renamed. The file stays ${open.file}; Save to keep the new name.`, 4); } }}>{open.collection.name}</Typography.Text>
-                        {open.dirty && <span className="dirty-dot" title="Not saved" />}
+                        {open.dirty && <Tooltip title="Not saved. The changes are kept while the Studio is open in this tab, also when you use other screens; Save writes them to the project. Reloading or closing the tab asks first."><Tag bordered={false} color="warning" style={{ marginInline: 0 }} aria-label="Not saved, kept while the Studio is open">not saved · kept</Tag></Tooltip>}
                         <Tooltip title="Collection settings: base URL, variables, authentication"><Button aria-label="Collection settings: base URL, variables, authentication" size="small" icon={<SettingOutlined />} type={sel === null ? 'primary' : 'default'} ghost={sel === null} onClick={() => setSel(null)} /></Tooltip>
                         <Tooltip title="New request"><Button aria-label="New request" size="small" icon={<FileAddOutlined />} onClick={() => addItem('request')} /></Tooltip>
                         <Tooltip title="New folder"><Button aria-label="New folder" size="small" icon={<FolderAddOutlined />} onClick={() => addItem('folder')} /></Tooltip>
