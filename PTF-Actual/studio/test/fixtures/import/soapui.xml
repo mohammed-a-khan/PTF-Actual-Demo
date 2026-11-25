@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<con:soapui-project id="p1" name="Order services" soapui-version="5.7.2" xmlns:con="http://eviware.com/soapui/config">
+  <con:properties><con:property><con:name>tenant</con:name><con:value>eu</con:value></con:property></con:properties>
+  <con:interface xsi:type="con:WsdlInterface" name="OrderBinding" soapVersion="1_1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <con:operation name="GetStatus" action="http://shop.example/orders/GetStatus">
+      <con:call name="Request 1"><con:endpoint>http://127.0.0.1:PORT/orders</con:endpoint><con:request><![CDATA[<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ord="http://shop.example/orders"><soapenv:Body><ord:GetStatusRequest><ord:orderId>${#Project#orderId}</ord:orderId></ord:GetStatusRequest></soapenv:Body></soapenv:Envelope>]]></con:request>
+        <con:credentials><con:username>svc</con:username><con:password>pw</con:password><con:authType>Global HTTP Settings</con:authType></con:credentials></con:call>
+    </con:operation>
+  </con:interface>
+  <con:interface xsi:type="con:RestService" name="Orders REST" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <con:resource name="Orders" path="/orders">
+      <con:method name="List" method="GET"><con:request name="All"><con:endpoint>http://127.0.0.1:PORT</con:endpoint><con:parameters><entry key="status" value="open" xmlns="http://eviware.com/soapui/config"/></con:parameters></con:request></con:method>
+      <con:resource name="One" path="/{id}"><con:method name="Get" method="GET"><con:request name="One"><con:endpoint>http://127.0.0.1:PORT</con:endpoint></con:request></con:method></con:resource>
+    </con:resource>
+  </con:interface>
+  <con:testSuite name="Regression"><con:testCase name="Status">
+    <con:testStep type="request" name="Get status"><con:config xsi:type="con:RequestStep" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><con:interface>OrderBinding</con:interface><con:operation>GetStatus</con:operation>
+      <con:request name="Get status"><con:endpoint>http://127.0.0.1:PORT/orders</con:endpoint><con:request><![CDATA[<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"><soapenv:Body><GetStatusRequest><orderId>7</orderId></GetStatusRequest></soapenv:Body></soapenv:Envelope>]]></con:request>
+        <con:assertion type="Simple Contains" name="Contains"><con:configuration><token>OPEN</token></con:configuration></con:assertion>
+        <con:assertion type="XPath Match" name="XPath"/></con:request></con:config></con:testStep>
+    <con:testStep type="groovy" name="Script"/>
+  </con:testCase></con:testSuite>
+</con:soapui-project>

@@ -1,0 +1,11 @@
+{"_type":"export","__export_format":4,"__export_date":"2026-01-10T10:00:00.000Z","__export_source":"insomnia.desktop.app:v2023.5.8","resources":[
+{"_id":"wrk_1","parentId":null,"_type":"workspace","name":"Shop API","scope":"collection"},
+{"_id":"env_base","parentId":"wrk_1","_type":"environment","name":"Base Environment","data":{"baseUrl":"http://127.0.0.1:PORT","nested":{"a":1}}},
+{"_id":"env_qa","parentId":"env_base","_type":"environment","name":"QA","data":{"token":"qa-token","sku":"A-1"}},
+{"_id":"fld_1","parentId":"wrk_1","_type":"request_group","name":"Orders"},
+{"_id":"req_1","parentId":"fld_1","_type":"request","name":"Create order","method":"POST","url":"{{ _.baseUrl }}/orders","headers":[{"name":"Content-Type","value":"application/json"},{"name":"X-Off","value":"1","disabled":true}],"parameters":[{"name":"dry","value":"false"}],"body":{"mimeType":"application/json","text":"{\"sku\": \"{{ _.sku }}\", \"qty\": 2}"},"authentication":{"type":"bearer","token":"{{ _.token }}"}},
+{"_id":"req_2","parentId":"fld_1","_type":"request","name":"Search","method":"GET","url":"{{ _.baseUrl }}/orders","parameters":[{"name":"q","value":"{% faker 'randomWord' %}"}],"body":{},"authentication":{}},
+{"_id":"req_3","parentId":"wrk_1","_type":"request","name":"Login","method":"POST","url":"{{ _.baseUrl }}/login","body":{"mimeType":"application/x-www-form-urlencoded","params":[{"name":"user","value":"qa"},{"name":"pass","value":"pw"}]},"authentication":{"type":"basic","username":"svc","password":"{{ _.token }}"}},
+{"_id":"req_4","parentId":"wrk_1","_type":"request","name":"Graph","method":"POST","url":"{{ _.baseUrl }}/graphql","body":{"mimeType":"application/graphql","text":"{\"query\":\"{ order(id: 1) { id } }\",\"variables\":{\"x\":1}}"}},
+{"_id":"greq_1","parentId":"wrk_1","_type":"grpc_request","name":"Stream"}
+]}

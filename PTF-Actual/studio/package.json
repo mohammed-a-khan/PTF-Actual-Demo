@@ -1,0 +1,74 @@
+{
+  "name": "cs-test-studio",
+  "version": "0.1.0",
+  "description": "CS Playwright Test Studio - local-first test studio for the CS Playwright Test Framework",
+  "license": "MIT",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/src/index.js",
+  "bin": {
+    "cs-test-studio": "dist/src/cli.js"
+  },
+  "files": [
+    "dist/src",
+    "dist/ui",
+    "!**/*.map"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build --config ui/vite.config.ts",
+    "build:server": "tsc -p tsconfig.json",
+    "build:ui": "vite build --config ui/vite.config.ts",
+    "dev:ui": "vite --config ui/vite.config.ts",
+    "test": "tsc -p tsconfig.json && node --test --test-reporter=spec dist/test/*.test.js && npm run test:ui",
+    "start": "node dist/src/cli.js start",
+    "test:ui": "esbuild ui/test/*.test.tsx --bundle --platform=node --format=cjs --jsx=automatic --outdir=dist/ui-test --log-level=warning && node --test --test-reporter=spec dist/ui-test/*.test.js"
+  },
+  "dependencies": {
+    "@apidevtools/swagger-parser": "10.1.1",
+    "@fastify/static": "10.1.8",
+    "@grpc/grpc-js": "1.12.5",
+    "@grpc/proto-loader": "0.7.13",
+    "@types/chai": "4.3.20",
+    "@types/lodash": "4.17.13",
+    "@types/ws": "8.5.13",
+    "@xmldom/xmldom": "0.8.11",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "chai": "4.5.0",
+    "dotenv": "16.6.1",
+    "fastify": "5.12.7",
+    "graphql": "16.9.0",
+    "handlebars": "4.7.8",
+    "https-proxy-agent": "7.0.6",
+    "js-yaml": "4.1.0",
+    "kafkajs": "2.2.4",
+    "lodash": "4.17.21",
+    "mqtt": "5.10.3",
+    "rhea": "3.0.4",
+    "socket.io-client": "4.8.1",
+    "socks-proxy-agent": "8.0.5",
+    "typescript": "5.9.3",
+    "ws": "8.18.0",
+    "yaml": "2.6.1"
+  },
+  "devDependencies": {
+    "@ant-design/icons": "5.6.1",
+    "@grpc/reflection": "1.0.4",
+    "@types/js-yaml": "4.0.9",
+    "@types/node": "22.20.5",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "@vitejs/plugin-react": "4.7.0",
+    "aedes": "0.51.3",
+    "pg": "8.13.1",
+    "antd": "5.29.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "soap": "1.1.6",
+    "socket.io": "4.8.1",
+    "vite": "5.4.21"
+  }
+}

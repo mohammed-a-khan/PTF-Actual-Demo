@@ -571,7 +571,28 @@ export class CSAPIRequestBodySteps {
             '.svg': 'image/svg+xml',
             '.zip': 'application/zip',
             '.tar': 'application/x-tar',
-            '.gz': 'application/gzip'
+            '.gz': 'application/gzip',
+            '.csv': 'text/csv',
+            '.tsv': 'text/tab-separated-values',
+            '.md': 'text/markdown',
+            '.yaml': 'application/yaml',
+            '.yml': 'application/yaml',
+            '.xls': 'application/vnd.ms-excel',
+            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            '.doc': 'application/msword',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.ppt': 'application/vnd.ms-powerpoint',
+            '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            '.rtf': 'application/rtf',
+            '.7z': 'application/x-7z-compressed',
+            '.webp': 'image/webp',
+            '.bmp': 'image/bmp',
+            '.tif': 'image/tiff',
+            '.tiff': 'image/tiff',
+            '.mp3': 'audio/mpeg',
+            '.wav': 'audio/wav',
+            '.mp4': 'video/mp4',
+            '.eml': 'message/rfc822'
         };
 
         return mimeTypes[ext] || 'application/octet-stream';

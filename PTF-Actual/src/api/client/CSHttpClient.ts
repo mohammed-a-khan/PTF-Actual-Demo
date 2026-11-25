@@ -1,6 +1,8 @@
 import * as http from 'http';
 import * as https from 'https';
 import * as zlib from 'zlib';
+import * as fs from 'fs';
+import * as path from 'path';
 import { URL } from 'url';
 import { pipeline } from 'stream';
 import { promisify } from 'util';
@@ -191,38 +193,70 @@ export class CSHttpClient {
         return JSON.stringify(body);
     }
 
+    /**
+     * multipart/form-data body. Accepts:
+     *  - CSMultipartField[] (name, value, filename, contentType);
+     *  - the multipart steps' object { _isMultipart, fields: {name: value}, files: {name: {path, filename, contentType}} }
+     *    (files are read when the request is sent);
+     *  - a plain object of field name → value (a Buffer, an array of values, or { path | value, filename, contentType }).
+     */
     private createMultipartBody(fields: CSMultipartField[] | Record<string, any>, headers: http.OutgoingHttpHeaders): Buffer {
-        const boundary = `----CSFormBoundary${Date.now()}${Math.random().toString(36)}`;
+        const boundary = `----CSFormBoundary${Date.now()}${Math.random().toString(36).slice(2)}`;
+        // The caller's Content-Type (often plain "multipart/form-data") gets this body's boundary.
+        for (const k of Object.keys(headers)) if (k.toLowerCase() === 'content-type') delete headers[k];
         headers['Content-Type'] = `multipart/form-data; boundary=${boundary}`;
 
         const parts: Buffer[] = [];
+        // Quotes and line breaks cannot appear in a header's quoted value.
+        const quoted = (s: string) => String(s).replace(/"/g, '%22').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 
         const appendField = (name: string, value: any, filename?: string, contentType?: string) => {
             parts.push(Buffer.from(`--${boundary}\r\n`));
 
             if (filename) {
-                parts.push(Buffer.from(`Content-Disposition: form-data; name="${name}"; filename="${filename}"\r\n`));
+                parts.push(Buffer.from(`Content-Disposition: form-data; name="${quoted(name)}"; filename="${quoted(filename)}"\r\n`));
                 parts.push(Buffer.from(`Content-Type: ${contentType || 'application/octet-stream'}\r\n\r\n`));
             } else {
-                parts.push(Buffer.from(`Content-Disposition: form-data; name="${name}"\r\n\r\n`));
+                parts.push(Buffer.from(`Content-Disposition: form-data; name="${quoted(name)}"\r\n\r\n`));
             }
 
             if (Buffer.isBuffer(value)) {
                 parts.push(value);
+            } else if (value !== null && typeof value === 'object') {
+                parts.push(Buffer.from(JSON.stringify(value)));
             } else {
-                parts.push(Buffer.from(String(value)));
+                parts.push(Buffer.from(String(value ?? '')));
             }
             parts.push(Buffer.from('\r\n'));
+        };
+
+        const appendFile = (name: string, file: { path?: string; value?: string | Buffer; filename?: string; contentType?: string }) => {
+            let data: Buffer;
+            if (file.path) {
+                if (!fs.existsSync(file.path)) throw new Error(`Multipart file for "${name}" not found: ${file.path}`);
+                data = fs.readFileSync(file.path);
+            } else {
+                data = Buffer.isBuffer(file.value) ? file.value : Buffer.from(String(file.value ?? ''));
+            }
+            appendField(name, data, file.filename || (file.path ? path.basename(file.path) : name), file.contentType);
+        };
+
+        const appendValue = (name: string, value: any) => {
+            if (Array.isArray(value)) value.forEach((v) => appendValue(name, v));
+            else if (value && typeof value === 'object' && !Buffer.isBuffer(value) && (value.path || value.filename)) appendFile(name, value);
+            else appendField(name, value);
         };
 
         if (Array.isArray(fields)) {
             fields.forEach(field => {
                 appendField(field.name, field.value, field.filename, field.contentType);
             });
+        } else if (fields && (fields as any)._isMultipart) {
+            const m = fields as { fields?: Record<string, any>; files?: Record<string, any> };
+            Object.entries(m.fields || {}).forEach(([key, value]) => appendValue(key, value));
+            Object.entries(m.files || {}).forEach(([key, file]) => appendFile(key, file));
         } else {
-            Object.keys(fields).forEach(key => {
-                appendField(key, fields[key]);
-            });
+            Object.keys(fields || {}).forEach(key => appendValue(key, (fields as Record<string, any>)[key]));
         }
 
         parts.push(Buffer.from(`--${boundary}--\r\n`));

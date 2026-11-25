@@ -121,6 +121,28 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
     }
   }
 
+  /** Servers where SET max_execution_time failed (MariaDB has max_statement_time in seconds instead). */
+  private readonly timeoutVariable = new WeakMap<object, 'mysql' | 'mariadb' | 'none'>();
+
+  /**
+   * Per-statement time limit: MySQL's max_execution_time (milliseconds, SELECT statements) or MariaDB's
+   * max_statement_time (seconds). Unknown on the server: no server-side limit (the client-side timeout
+   * still applies).
+   */
+  private async setQueryTimeout(conn: any, timeoutMs: number): Promise<void> {
+    const kind = this.timeoutVariable.get(conn) ?? 'mysql';
+    if (kind === 'none') return;
+    const sql = kind === 'mysql' ? `SET SESSION max_execution_time=${Math.round(timeoutMs)}` : `SET SESSION max_statement_time=${(timeoutMs / 1000).toFixed(3)}`;
+    try {
+      await conn.query(sql);
+    } catch (error: any) {
+      // ER_UNKNOWN_SYSTEM_VARIABLE (1193): try the other server's variable once, then remember.
+      if (error?.errno !== 1193 && error?.code !== 'ER_UNKNOWN_SYSTEM_VARIABLE') throw error;
+      if (kind === 'mysql') { this.timeoutVariable.set(conn, 'mariadb'); return this.setQueryTimeout(conn, timeoutMs); }
+      this.timeoutVariable.set(conn, 'none');
+    }
+  }
+
   async query(
     connection: DatabaseConnection, 
     sql: string, 
@@ -134,7 +156,7 @@ export class CSMySQLAdapter extends CSDatabaseAdapter {
 
     try {
       if (options?.timeout) {
-        await queryConn.query(`SET SESSION max_execution_time=${options.timeout}`);
+        await this.setQueryTimeout(queryConn, options.timeout);
       }
 
       const startTime = Date.now();

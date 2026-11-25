@@ -1,0 +1,94 @@
+/**
+ * Load tests in Azure DevOps: the generated pipeline (common start, parallel generators, merge, baseline gate,
+ * reports, summary), and its commands run here the way the pipeline's jobs run them: two parts started together,
+ * merged, compared with an earlier run's results (the regression gate fails the slower run), a Markdown summary.
+ */
+import { test } from 'node:test';
+import * as assert from 'node:assert/strict';
+import * as fs from 'fs';
+import * as http from 'http';
+import * as net from 'net';
+import * as os from 'os';
+import * as path from 'path';
+import { execFile } from 'child_process';
+import { parse } from 'yaml';
+import { loadPipeline, loadSummaryMarkdown } from '../src/load/pipeline';
+import { newScenario } from '../src/load/scenario';
+import { newCollection, newRequest } from '../src/api/model';
+import { runGit } from '../src/git/run';
+
+const COMPILED = path.join(__dirname, '..', 'src', 'cli.js');
+function cli(args: string[], cwd?: string): Promise<{ code: number; out: string }> {
+    const argv = fs.existsSync(COMPILED) ? [COMPILED, ...args] : [...process.execArgv.filter((a) => !a.startsWith('--test')), path.join(__dirname, '..', 'src', 'cli.ts'), ...args];
+    return new Promise((res) => execFile(process.execPath, argv, { cwd, timeout: 120_000, env: { ...process.env, BUILD_DEFINITIONNAME: 'perf-nightly', BUILD_BUILDNUMBER: '2026.11.23.1' } }, (e, o, er) => res({ code: e ? Number((e as { code?: number }).code ?? 1) : 0, out: `${o}${er}` })));
+}
+
+test('the pipeline: plan, parallel generators with one start, merge with the baseline gate, reports, summary', () => {
+    const yml = loadPipeline('test/shop/load/checkout.load.json', { name: 'Checkout', envs: ['qa', 'perf'], generators: 3, schedule: '0 2 * * 1-5', variableGroup: 'shop-perf', secretNames: ['SHOP_API_KEY', 'bad name'], teamFolder: '\\\\files\\perf' });
+    const p = parse(yml) as { schedules: Array<{ cron: string }>; parameters: Array<{ name: string; default: unknown; values?: string[] }>; variables: Array<{ group?: string }>; stages: Array<{ jobs: Array<{ job: string; dependsOn?: string; strategy?: { parallel: string }; variables?: Record<string, string>; steps: Array<Record<string, unknown>> }> }> };
+    assert.equal(p.schedules[0].cron, '0 2 * * 1-5');
+    assert.deepEqual(p.parameters.map((x) => [x.name, x.default]), [['environment', 'qa'], ['generators', 3]]);
+    assert.equal(p.variables[0].group, 'shop-perf');
+    const jobs = Object.fromEntries(p.stages[0].jobs.map((j) => [j.job, j]));
+    assert.deepEqual(Object.keys(jobs), ['Plan', 'Generate', 'Report']);
+    assert.equal(jobs.Generate.strategy!.parallel, '${{ parameters.generators }}');
+    assert.equal(jobs.Generate.variables!.startAt, "$[ dependencies.Plan.outputs['when.startAt'] ]");
+    const run = jobs.Generate.steps.find((s) => String(s.script ?? '').includes('cs-test-studio load'))!;
+    assert.match(String(run.script), /--part \$\(System\.JobPositionInPhase\)\/\$\(System\.TotalJobsInPhase\)\s+--start-at \$\(startAt\)/);
+    assert.deepEqual(run.env, { SHOP_API_KEY: '$(SHOP_API_KEY)' }, 'secrets mapped; invalid names left out');
+    const merge = jobs.Report.steps.find((s) => String(s.bash ?? '').includes('load-merge'))!;
+    assert.match(String(merge.bash), /--baseline \$\(Pipeline\.Workspace\)\/baseline\/results\.json/);
+    assert.match(String(merge.bash), /--summary \$\(results\)\/summary\.md --team '\\\\files\\perf'/);
+    assert.ok(jobs.Report.steps.some((s) => (s.inputs as Record<string, string> | undefined)?.runVersion === 'latestFromBranch'), 'the baseline: the last successful run of the branch');
+    assert.ok(jobs.Report.steps.some((s) => s.artifact === 'load-results'), 'published where the Studio imports from');
+    assert.ok(jobs.Report.steps.some((s) => String(s.bash ?? '').includes('task.uploadsummary')));
+});
+
+test('the pipeline\'s commands: two parts at one start, merged, gated against the baseline, summary and team folder', { timeout: 180_000 }, async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lp-'));
+    let slow = false;
+    const app = http.createServer((_q, r) => setTimeout(() => r.end('{"ok":true}'), slow ? 60 : 3));
+    const port = await new Promise<number>((res) => app.listen(0, '127.0.0.1', () => res((app.address() as net.AddressInfo).port)));
+    try {
+        const dir = path.join(tmp, 'repo');
+        await runGit(['init', '-q', '-b', 'main', dir], { cwd: tmp });
+        const w = (rel: string, text: string) => { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), text); };
+        w('config/shop/common/common.env', 'PROJECT_NAME=shop\n');
+        w('config/shop/environments/qa.env', `ENVIRONMENT=qa\nAPI_URL=http://127.0.0.1:${port}\n`);
+        const c = { ...newCollection('Shop'), baseUrl: '{config:API_URL}' };
+        c.items = [{ ...newRequest('Home', 'home'), url: '/' }];
+        w('test/shop/api/shop.collection.json', JSON.stringify(c));
+        const sc = { ...newScenario('Checkout', 'test/shop/api/shop.collection.json'), thinkTime: { min: 0, max: 0 }, slas: [{ target: '*', errorRate: 1 }], policy: { type: 'constant', users: 2, duration: 2 }, regression: { p95Percent: 50 } };
+        w('test/shop/load/checkout.load.json', JSON.stringify(sc));
+        const out = path.join(tmp, 'out'), team = path.join(tmp, 'team');
+        fs.mkdirSync(team);
+        // The baseline: an earlier (fast) run.
+        let r = await cli(['load', 'test/shop/load/checkout.load.json', '--repo', dir, '--env', 'qa', '--json', `${out}/baseline.json`]);
+        assert.equal(r.code, 0, r.out);
+        // Tonight's run, slower: two generators at one start.
+        slow = true;
+        const at = new Date(Date.now() + 3000).toISOString();
+        const parts = await Promise.all([1, 2].map((n) => cli(['load', 'test/shop/load/checkout.load.json', '--repo', dir, '--env', 'qa', '--part', `${n}/2`, '--start-at', at, '--json', `${out}/part-${n}.json`])));
+        for (const p of parts) assert.equal(p.code, 0, p.out);
+        r = await cli(['load-merge', `${out}/part-1.json`, `${out}/part-2.json`, '--baseline', `${out}/baseline.json`, '--json', `${out}/results.json`, '--junit', `${out}/junit.xml`, '--summary', `${out}/summary.md`, '--team', team]);
+        assert.equal(r.code, 1, `the regression gate fails the slower run\n${r.out}`);
+        assert.match(r.out, /Checkout: 2 parts/);
+        assert.match(r.out, /FAIL {2}Regression against the baseline: All requests: p95 [\d.]+ → [\d.]+ ms/);
+        assert.match(r.out, /Shared with the team: shop\/checkout\//);
+        const summary = fs.readFileSync(`${out}/summary.md`, 'utf8');
+        assert.match(summary, /^## ❌ Checkout — failed/);
+        assert.match(summary, /\| Regression against the baseline of .* \| ❌ missed \|/);
+        assert.match(fs.readFileSync(`${out}/junit.xml`, 'utf8'), /Regression against the baseline/);
+        const shared = JSON.parse(fs.readFileSync(path.join(team, 'shop', 'checkout', fs.readdirSync(path.join(team, 'shop', 'checkout')).find((f) => f.endsWith('.summary.json'))!), 'utf8'));
+        assert.equal(shared.by.pipeline, 'perf-nightly #2026.11.23.1');
+        // One generator: load-report gives the same outputs from one results file (the baseline gate passes against itself).
+        r = await cli(['load-report', `${out}/baseline.json`, '--baseline', `${out}/baseline.json`, '--summary', `${out}/one.md`]);
+        assert.equal(r.code, 0, r.out);
+        assert.match(fs.readFileSync(`${out}/one.md`, 'utf8'), /^## ✅ Checkout — passed/);
+        assert.match(r.out, /PASS {2}Regression against the baseline/);
+        // A missing baseline (the first run) skips the gate.
+        r = await cli(['load-report', `${out}/baseline.json`, '--baseline', `${out}/none.json`]);
+        assert.match(r.out, /No baseline .* the regression gate is skipped/);
+        assert.equal(loadSummaryMarkdown({ name: 'X', message: 'boom' } as never), '**X**: no results (boom).');
+    } finally { app.close(); fs.rmSync(tmp, { recursive: true, force: true }); }
+});

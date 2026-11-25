@@ -57,28 +57,42 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
         ...config.additionalOptions
       };
 
+      // The framework's connection object (the pg Client or Pool is its instance): every other method
+      // of this adapter, ping and the health check read connection.instance.
+      const wrap = (instance: any): DatabaseConnection => ({
+        id: `postgresql_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        type: 'postgresql',
+        instance,
+        config,
+        connected: true,
+        lastActivity: new Date(),
+        inTransaction: false,
+        transactionLevel: 0,
+        savepoints: []
+      });
+
       if (config.additionalOptions?.['connectionString']) {
-        return new this.pg.Pool({
+        return wrap(new this.pg.Pool({
           connectionString: config.additionalOptions['connectionString'],
           ssl: connectionConfig.ssl,
           max: config.connectionPoolSize || config.additionalOptions?.['poolSize'] || 10,
           min: config.additionalOptions?.['poolMin'] || 0,
           idleTimeoutMillis: config.additionalOptions?.['poolIdleTimeout'] || 30000
-        });
+        }));
       }
 
       const poolSize = config.connectionPoolSize || config.additionalOptions?.['poolSize'];
       if (poolSize && poolSize > 1) {
-        return new this.pg.Pool({
+        return wrap(new this.pg.Pool({
           ...connectionConfig,
           max: poolSize,
           min: config.additionalOptions?.['poolMin'] || 0,
           idleTimeoutMillis: config.additionalOptions?.['poolIdleTimeout'] || 30000
-        });
+        }));
       } else {
         const client = new this.pg.Client(connectionConfig);
         await client.connect();
-        return client;
+        return wrap(client);
       }
     } catch (error) {
       throw this.parseConnectionError(error);
@@ -120,19 +134,25 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
       });
     }
 
+    // A pool: the timeout, the query and the reset must run on the same pooled client.
+    const isPool = conn && typeof conn.totalCount === 'number' && typeof conn.connect === 'function';
+    const client = isPool && options?.timeout ? await conn.connect() : conn;
     try {
       const startTime = Date.now();
 
       if (options?.timeout) {
-        await this.setStatementTimeout(conn, options.timeout);
+        await this.setStatementTimeout(client, options.timeout);
       }
 
-      const result = await conn.query(postgresSql, params || []);
+      let result: any;
+      try {
+        result = await client.query(postgresSql, params || []);
+      } finally {
+        if (options?.timeout) {
+          await this.resetStatementTimeout(client).catch(() => { /* the connection may be gone */ });
+        }
+      }
       const executionTime = Date.now() - startTime;
-
-      if (options?.timeout) {
-        await this.resetStatementTimeout(conn);
-      }
 
       return {
         rows: result.rows || [],
@@ -152,6 +172,8 @@ export class CSPostgreSQLAdapter extends CSDatabaseAdapter {
       };
     } catch (error: any) {
       throw this.parseQueryError(error, sql);
+    } finally {
+      if (client !== conn) client.release();
     }
   }
 

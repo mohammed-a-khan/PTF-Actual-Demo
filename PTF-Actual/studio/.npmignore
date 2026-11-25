@@ -1,0 +1,2 @@
+# Intentionally blank: stops npm from applying studio/.gitignore ("dist/"), which would drop
+# the built Studio from the package. "files" in the root package.json decides what is shipped.
