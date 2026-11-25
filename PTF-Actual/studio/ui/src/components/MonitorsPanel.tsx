@@ -52,6 +52,14 @@ export function MonitorsPanel({ collections, environments, file }: { collections
         finally { savingRef.current = false; setSaving(false); }
     };
     useEscapeCloses(!!edit, () => setEdit(null));
+    // Enter in any field of the dialog saves (when it can be saved), as in the other New dialogs; not in a list that is
+    // choosing an option (Enter picks the option there).
+    const submitOnEnter = (e: React.KeyboardEvent) => {
+        const t = e.target as HTMLElement;
+        if (e.key !== 'Enter' || e.defaultPrevented || e.nativeEvent.isComposing || t.tagName !== 'INPUT' || t.closest('.ant-select')) return;
+        e.preventDefault();
+        void save();
+    };
     const every = (m: number) => (m % 1440 === 0 ? `every ${m / 1440 === 1 ? 'day' : `${m / 1440} days`}` : m % 60 === 0 ? `every ${m / 60 === 1 ? 'hour' : `${m / 60} hours`}` : `every ${m} min`);
     return (
         <>
@@ -75,8 +83,8 @@ export function MonitorsPanel({ collections, environments, file }: { collections
                     </div>
                 </div>))}
             <Modal open={!!edit} title={edit?.id ? 'Monitor' : 'New monitor'} okText="Save" okButtonProps={{ disabled: !edit?.name.trim() || !!fields.problem, loading: saving, title: edit && !edit.name.trim() ? 'Give the monitor a name first.' : fields.problem ?? undefined }} onOk={() => void save()} onCancel={() => setEdit(null)}>
-                {edit && <FieldProblems value={fields.report}><Form layout="vertical" size="small">
-                    <Form.Item label="Name" required validateStatus={nameTouched && !edit.name.trim() ? 'error' : undefined} help={!edit.name.trim() ? (nameTouched ? 'Give the monitor a name.' : 'Required: the monitor is saved (and starts) once it has a name.') : undefined}><Input value={edit.name} maxLength={120} autoFocus placeholder={`e.g. ${collections.find((c) => c.file === edit.file)?.name ?? 'Shop'} health`} onChange={(e) => { setNameTouched(true); setEdit({ ...edit, name: e.target.value }); }} onBlur={() => setNameTouched(true)} onPressEnter={() => void save()} aria-label="Monitor name" /></Form.Item>
+                {edit && <FieldProblems value={fields.report}><Form layout="vertical" size="small" onKeyDown={submitOnEnter}>
+                    <Form.Item label="Name" required validateStatus={nameTouched && !edit.name.trim() ? 'error' : undefined} help={!edit.name.trim() ? (nameTouched ? 'Give the monitor a name.' : 'Required: the monitor is saved (and starts) once it has a name.') : undefined}><Input value={edit.name} maxLength={120} autoFocus placeholder={`e.g. ${collections.find((c) => c.file === edit.file)?.name ?? 'Shop'} health`} onChange={(e) => { setNameTouched(true); setEdit({ ...edit, name: e.target.value }); }} onBlur={() => setNameTouched(true)} aria-label="Monitor name" /></Form.Item>
                     <Form.Item label="Collection"><Select showSearch optionFilterProp="label" value={edit.file} onChange={(f) => setEdit({ ...edit, file: f, env: environments[project(f)]?.[0] ?? 'dev' })} options={collections.map((c) => ({ value: c.file, label: `${c.name} · ${c.project}` }))} aria-label="Collection" /></Form.Item>
                     <Row gutter={12}>
                         <Col span={12}><Form.Item label="Environment"><Select style={{ width: '100%' }} value={edit.env} onChange={(v) => setEdit({ ...edit, env: v })} options={(environments[project(edit.file)] ?? ['dev']).map((e) => ({ value: e, label: e }))} aria-label="Environment" /></Form.Item></Col>

@@ -6,6 +6,7 @@ import { api, ApiHistoryEntry, ApiHistoryItem } from '../api';
 import { ResponseView } from '../components/ResponseView';
 import { errText } from '../state';
 import { navigate, useRoute } from '../route';
+import { apiRequestRoute } from '../apiperf-ui';
 
 /** Ignore clicks (and double clicks) anywhere for a moment. */
 export function swallowClicks(ms: number) {
@@ -26,7 +27,7 @@ export function ApiHistory() {
     // The open entry is in the address (#/api-history/<id>): a link, a reload, Back and "Back to Request history" reopen it.
     const idInRoute = here && route[1] ? route[1] : null;
     const openDetail = (h: ApiHistoryItem) => {
-        if (!h.id) { if (h.file) navigate(['api', ...h.file.split('/')]); return; }
+        if (!h.id) { if (h.file) navigate(apiRequestRoute(h.file, h.requestId)); return; }
         navigate(['api-history', h.id]);
     };
     const closeDetail = () => { setDetail(null); if (idInRoute) navigate(['api-history'], true); };
@@ -81,7 +82,7 @@ export function ApiHistory() {
             <Drawer open={!!detail} onClose={closeDetail} width={900} destroyOnClose
                 title={detail ? <Space><b style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{detail.item.method}</b>{detail.item.request}<Typography.Text type="secondary" style={{ fontSize: 12 }}>{new Date(detail.item.at).toLocaleString()} · {detail.item.collection} · {detail.item.env}</Typography.Text></Space> : ''}
                 extra={detail?.item.file ? <Space>
-                    <Button size="small" onClick={() => navigate(['api', ...detail.item.file!.split('/')])}>Open the collection</Button>
+                    <Button size="small" onClick={() => navigate(apiRequestRoute(detail.item.file!, detail.item.requestId))}>{detail.item.requestId ? 'Open the request' : 'Open the collection'}</Button>
                     <Button size="small" type="primary" icon={<RollbackOutlined />} disabled={!detail.entry} onClick={restore} title="Adds this request, as it was sent, to its collection (not saved) and sends it again">Restore and send again</Button>
                 </Space> : null}
                 styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column' } }}>

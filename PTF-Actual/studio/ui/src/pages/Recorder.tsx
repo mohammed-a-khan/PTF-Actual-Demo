@@ -198,17 +198,26 @@ export function Recorder() {
      * Make the review into a test. True once saved. `leaving`: from "Leave without saving?" (the App's dialog), so
      * the saved feature is not opened in the editor (the person is going to another screen).
      */
-    const save = async (run: boolean, confirmed = false, force = false, leaving = false): Promise<boolean> => {
+    const saving = React.useRef<Promise<boolean> | null>(null);
+    const save = (run: boolean, confirmed = false, force = false, leaving = false): Promise<boolean> => {
+        // A second click (a double click on Save in "Leave without saving?") while a save is on its way: the same
+        // save, not another one (that one would be refused as "changed since the review" by the first one's files).
+        if (saving.current) return saving.current;
+        const p = saveNow(run, confirmed, force, leaving).finally(() => { saving.current = null; });
+        saving.current = p;
+        return p;
+    };
+    const saveNow = async (run: boolean, confirmed = false, force = false, leaving = false): Promise<boolean> => {
         if (!request || !preview) return false;
         const review = preview.review;
         if (review?.blocked && !force) {
-            return new Promise<boolean>((resolve) => modal.confirm({ title: 'Save although the framework check found problems?', width: 560, content: findingsSummary(review), okText: 'Save anyway', okButtonProps: { danger: true }, onOk: async () => resolve(await save(run, confirmed, true, leaving)), onCancel: () => resolve(false) }));
+            return new Promise<boolean>((resolve) => modal.confirm({ title: 'Save although the framework check found problems?', width: 560, content: findingsSummary(review), okText: 'Save anyway', okButtonProps: { danger: true }, onOk: async () => resolve(await saveNow(run, confirmed, true, leaving)), onCancel: () => resolve(false) }));
         }
         const updates = preview.files.filter((f) => f.change === 'update');
         if (updates.length && !confirmed) {
             return new Promise<boolean>((resolve) => modal.confirm({ title: 'Update existing files?', width: 560, okText: 'Save',
                 content: <div>These files of the project are updated (see each file's tab):<ul>{updates.map((f) => <li key={f.path}><Typography.Text code>{f.path}</Typography.Text> {f.kind === 'feature' ? 'replaced by this recording' : f.kind === 'data' ? 'rows kept, new columns added' : f.kind === 'config' ? 'keys added' : f.kind === 'other' ? 'shared helpers added' : 'new members added at the end of the class'}</li>)}</ul></div>,
-                onOk: async () => resolve(await save(run, true, force, leaving)), onCancel: () => resolve(false) }));
+                onOk: async () => resolve(await saveNow(run, true, force, leaving)), onCancel: () => resolve(false) }));
         }
         setBusy(true);
         try {
@@ -220,7 +229,10 @@ export function Recorder() {
             if (run && r.feature) { const x = await api.startRun({ project: r.project, env: r.env, features: [r.feature], workers: 1 }); showRun(x.id); }
             else if (r.feature && !leaving) openInEditor(r.feature);
             api.dbConnections().then((m) => setMeta({ projects: m.projects, environments: m.environments })).catch(() => {});
-            api.recPreview(request).then(setPreview).catch(() => undefined);
+            // The review is read again (its files' versions are now the saved ones), before Save can be pressed again:
+            // saving again with the versions read before this save would be refused as changed since the review.
+            const again = api.recPreview(request).then(setPreview).catch(() => undefined);
+            if (!leaving) await again;
             return true;
         } catch (e) { setErr(errText(e)); if (leaving) message.error(errText(e)); return false; } finally { setBusy(false); }
     };

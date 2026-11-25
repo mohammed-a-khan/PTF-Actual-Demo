@@ -16,6 +16,30 @@ const nice = (max: number) => {
 const fmt = (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k` : v >= 100 ? String(Math.round(v)) : v < 10 ? String(Math.round(v * 100) / 100) : String(Math.round(v * 10) / 10));
 const mmss = (s: number) => (s >= 60 ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}` : `${Math.round(s)}s`);
 
+const anchorOf = (t: number, x0: number, x1: number): 'start' | 'end' | 'middle' => (t <= x0 ? 'start' : t >= x1 ? 'end' : 'middle');
+/** Width of an axis label (10 px monospace-ish text): a little generous, so near misses do not touch. */
+const labelWidth = (text: string) => text.length * 6.4 + 4;
+/**
+ * The x-axis ticks: the most (up to 6, about one per 70 px) whose labels, at their anchors, leave a gap between them;
+ * fewer when the labels are long (run numbers with a time), never fewer than the first and last.
+ */
+export function fittedTicks(x0: number, x1: number, iw: number, px: (t: number) => number, fx: (t: number) => string): number[] {
+    const fits = (ticks: number[]) => {
+        const boxes = ticks.map((t) => {
+            const w = labelWidth(fx(t)), a = anchorOf(t, x0, x1), x = px(t);
+            return a === 'start' ? [x, x + w] : a === 'end' ? [x - w, x] : [x - w / 2, x + w / 2];
+        });
+        return boxes.every((b, i) => i === 0 || b[0] >= boxes[i - 1][1] + 6);
+    };
+    for (let n = Math.max(2, Math.min(6, Math.floor(iw / 70))); n >= 2; n--) {
+        const ticks = timeTicks(x0, x1, n).filter((t) => fx(t) !== '');
+        if (fits(ticks)) return ticks;
+    }
+    // Even two do not fit: the first one alone (the hover read-out names every point).
+    const all = timeTicks(x0, x1, 2).filter((t) => fx(t) !== '');
+    return fits(all) ? all : all.slice(0, 1);
+}
+
 export function LineChart({ x, series, height = 160, xMax, title, xFormat, xMin = 0, yMax }: { x: number[]; series: Series[]; height?: number; xMax?: number; title?: string; xFormat?: (v: number) => string; xMin?: number; /** A fixed top for the left axis (100 for a percentage), so a steady 50 % is drawn half way up. */ yMax?: number }) {
     const box = React.useRef<HTMLDivElement>(null);
     const [w, setW] = React.useState(600);
@@ -69,7 +93,8 @@ export function LineChart({ x, series, height = 160, xMax, title, xFormat, xMin 
                     {series.some((s) => s.right) && <text x={pad.l + iw + 4} y={pad.t + ih * (1 - k) + 3} className="lc-axis">{fmt(rightMax * k)}</text>}
                 </g>)}
                 {/* Whole seconds (or run numbers), each label once: no second skipped by rounding, none shown twice. */}
-                {timeTicks(xMin, x1, Math.max(2, Math.min(6, Math.floor(iw / 70)))).map((t) => <text key={t} x={px(t)} y={height - 4} textAnchor={t <= xMin ? 'start' : t >= x1 ? 'end' : 'middle'} className="lc-axis">{fx(t)}</text>)}
+                {/* As many as fit: labels never overlap ("#1 04:39 AM#3 04:43 AM"), however long they are. */}
+                {fittedTicks(xMin, x1, iw, px, fx).map((t) => <text key={t} x={px(t)} y={height - 4} textAnchor={anchorOf(t, xMin, x1)} className="lc-axis">{fx(t)}</text>)}
                 {series.map((s, i) => s.values.length > 1 && <g key={`${i}-${s.name}`}>
                     {s.area && <path d={areaPath(s)} fill={s.color} opacity={0.12} />}
                     <path d={path(s)} fill="none" stroke={s.color} strokeWidth={1.6} />

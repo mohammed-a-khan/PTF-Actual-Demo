@@ -162,7 +162,8 @@ export function loadReportXlsx(run: LoadRunDetail): Buffer {
     const d = run.definition;
     const summary: Cell[][] = [
         ['Scenario', run.name], ['Project', run.project], ['Environment', run.env],
-        ['Started', new Date(r.startedAt).toISOString()], ['Ended', new Date(r.endedAt).toISOString()], ['Duration (s)', r.elapsed],
+        // Local date and time, as in the HTML, PDF and Word reports (not UTC ISO text).
+        ['Started', new Date(r.startedAt).toLocaleString()], ['Ended', new Date(r.endedAt).toLocaleString()], ['Duration (s)', r.elapsed],
         ['Load policy', describePolicy(d.policy)], ['Test data', d.data ? `${d.data.source ? describeSource(d.data.source) : d.data.file ?? ''} (${d.data.mode})` : 'none'], ['Result', r.passed ? 'Passed' : 'Failed'], ['Stop reason', r.stopReason],
         ['Requests', r.total.count], ['Errors', r.total.errors], ['Error rate (%)', Number(r.total.errorRate.toFixed(3))],
         ['Average (ms)', r.total.avg], ['50% (ms)', r.total.p50], ['90% (ms)', r.total.p90], ['95% (ms)', r.total.p95], ['99% (ms)', r.total.p99], ['Max (ms)', r.total.max],

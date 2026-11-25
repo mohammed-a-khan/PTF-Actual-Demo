@@ -12,6 +12,14 @@ export const isChangedElsewhere = (e: unknown): boolean => e instanceof ApiError
 
 type Modal = ReturnType<typeof App.useApp>['modal'];
 
+/**
+ * What the server said beyond the title: its sentences that only repeat "changed in another tab or by someone else"
+ * are left out (the title says it already); anything else it said (who, when, which field) stays.
+ */
+export function staleDetail(text: string): string {
+    return text.split(/(?<=[.!?])\s+/).filter((x) => !/changed in another tab or by someone else/i.test(x)).join(' ').trim();
+}
+
 /** The questions open now (by title): a second refused save (a double click on Save) does not stack a second one. */
 const openQuestions = new Set<string>();
 
@@ -24,6 +32,7 @@ export function askChangedElsewhere(modal: Modal, e: unknown, what: string, o: {
     keepOverwrites?: boolean;
 }): void {
     const title = `${what} changed in another tab or by someone else`;
+    const detail = staleDetail(errText(e));
     if (openQuestions.has(title)) return;
     openQuestions.add(title);
     let busy = false;
@@ -31,7 +40,7 @@ export function askChangedElsewhere(modal: Modal, e: unknown, what: string, o: {
     const m = modal.confirm({
         afterClose: () => { openQuestions.delete(title); if (!decided) o.keepEditing?.(); },
         title,
-        content: <>{errText(e)}<br /><br /><b>Reload</b> shows the saved version (your changes here are dropped). <b>Overwrite</b> saves yours over it (the other change is lost).
+        content: <>{detail ? <>{detail}<br /><br /></> : null}<b>Reload</b> shows the saved version (your changes here are dropped). <b>Overwrite</b> saves yours over it (the other change is lost).
             {o.keepOverwrites ? <> <b>Keep editing</b> keeps your changes here: your next Save will replace the version saved elsewhere.</> : null}</>,
         closable: true, maskClosable: false,
         footer: () => (

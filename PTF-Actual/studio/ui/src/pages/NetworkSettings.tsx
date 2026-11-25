@@ -52,6 +52,9 @@ function ClientCerts({ value, onChange }: { value: ClientCert[]; onChange: (v: C
 }
 
 /** Why the server would refuse this proxy address (manual mode), or null. Same rules as the server. */
+/** Back/Forward to another tab of Settings keeps what is typed (every tab stays mounted): nothing to ask. */
+export const settingsKeeps = (to: string[]): boolean => to[0] === 'settings';
+
 export function proxyUrlProblem(raw: string): string | null {
     const url = raw.trim();
     if (!url) return 'Give the proxy address, e.g. http://proxy.company.com:8080';
@@ -127,7 +130,7 @@ export function StudioNetworkCard({ s, onChange }: { s: StudioSettings; onChange
         } finally { setBusy(null); }
     };
     // Network settings changed but not saved: leaving the screen (menu, Back, a typed address) asks first.
-    useUnsaved('settings-network', dirty, 'the network settings', { lostOnLeave: true, save: () => save(), discard: () => setN(s.network) });
+    useUnsaved('settings-network', dirty, 'the network settings', { lostOnLeave: true, save: () => save(), discard: () => setN(s.network), keeps: settingsKeeps });
     return (
         <Card size="small" title={<span>Studio connections <Typography.Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>Azure DevOps, API requests, load tests</Typography.Text>{' '}
             <Tooltip title="Off by default. Set this on a company network (VDI). Git and the framework's own test runs have their own settings (the Git view, and ADO_PROXY_* in the project's config)."><InfoCircleOutlined style={{ color: 'var(--ant-color-text-tertiary, #999)' }} /></Tooltip></span>}>
@@ -224,7 +227,7 @@ export function GitNetworkCard({ studioProxy }: { studioProxy: string }) {
     React.useEffect(() => { void load(); }, [load]);
     // A Git proxy or certificate file typed but not applied: leaving the screen asks first.
     const gitDirty = !!st && (proxy.trim() !== (st.global['http.proxy'] ?? '') || caInfo.trim() !== (st.global['http.sslCAInfo'] ?? ''));
-    useUnsaved('settings-git-network', gitDirty, 'the Git network settings (not applied)', { lostOnLeave: true, discard: () => { if (st) { setProxy(st.global['http.proxy'] ?? ''); setCaInfo(st.global['http.sslCAInfo'] ?? ''); } } });
+    useUnsaved('settings-git-network', gitDirty, 'the Git network settings (not applied)', { lostOnLeave: true, keeps: settingsKeeps, discard: () => { if (st) { setProxy(st.global['http.proxy'] ?? ''); setCaInfo(st.global['http.sslCAInfo'] ?? ''); } } });
     if (err) return <Alert type="error" showIcon message="Git network settings" description={err} />;
     if (!st) return null;
 

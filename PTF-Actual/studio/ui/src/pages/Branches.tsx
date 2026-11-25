@@ -9,7 +9,7 @@ import { MergeDialog } from '../components/MergeDialog';
 import { RemotesTable } from '../components/RemotesTable';
 import { DiffView, useDiffPrefs } from '../components/DiffView';
 import { DiffToolbar } from '../components/DiffToolbar';
-import { useStoredTab } from '../datagit-common';
+import { useReloadOnRemoteSync, useStoredTab } from '../datagit-common';
 import { navigate, useRoute } from '../route';
 
 /** Why git would refuse this tag name (the same rules the server checks), or null. */
@@ -77,6 +77,11 @@ export function Branches() {
 
     const loadTags = React.useCallback(() => { api.tags().then(setTags).catch((e) => message.error(errText(e))); }, [message]);
     React.useEffect(loadTags, [loadTags, status?.head]);
+    // The remote's state (new, moved or deleted tags) is read again after Fetch/Pull/Push, when the window gets focus
+    // and when this view is opened again; not in the background while another screen is shown.
+    useReloadOnRemoteSync(() => { if (here) { loadTags(); loadRemotes(); } });
+    const wasHere = React.useRef(here);
+    React.useEffect(() => { if (here && !wasHere.current) loadTags(); wasHere.current = here; }, [here, loadTags]);
 
     /** true when it worked (a dialog stays open on a problem, with the typed values). */
     const run = async (label: string, fn: () => Promise<unknown>): Promise<boolean> => {

@@ -199,6 +199,8 @@ export function numProblem(text: string, o: { label: string; min: number; max: n
     const t = text.trim();
     const dec = o.decimals ?? 0;
     const range = `${dec ? 'a number' : 'a whole number'} from ${o.min} to ${o.max}`;
+    // Only spaces is not "empty" (it would stay in the field, looking like a value): said, also where empty is allowed.
+    if (t === '' && text !== '' && o.optional) return `${o.label}: only spaces; leave it empty or give ${range}.`;
     if (t === '') return o.optional ? null : `${o.label}: give ${range}.`;
     if (!/^-?(\d+([.,]\d*)?|[.,]\d+)$/.test(t)) return `${o.label}: numbers only; give ${range}.`;
     const n = Number(t.replace(',', '.'));
@@ -284,16 +286,27 @@ export function restoredName(name: string, at: string): string {
     return `${base} (from ${at})`;
 }
 
-/** #/api-runner addresses: the inner tab they show (a run is shown with Past runs, a collection with Run). */
+/**
+ * #/api-runner addresses: the inner tab they show (a run is shown with Past runs, a collection with Run), and the run
+ * a past run is compared with (#/api-runner/run/<id>/~compare.<other id>: a reload or a link opens the comparison).
+ */
 export type RunnerTab = 'run' | 'monitors' | 'runs';
-export function runnerRoute(route: string[]): { tab: RunnerTab | null; file: string | null; runId: string | null } {
-    if (route[0] !== 'api-runner') return { tab: null, file: null, runId: null };
-    if (route[1] === 'run' && route[2]) return { tab: 'runs', file: null, runId: route[2] };
-    if (route[1] === 'runs') return { tab: 'runs', file: null, runId: null };
-    if (route[1] === 'monitors') return { tab: 'monitors', file: null, runId: null };
-    if (route.length > 1) return { tab: 'run', file: route.slice(1).join('/'), runId: null };
-    return { tab: null, file: null, runId: null };
+export const RUNNER_COMPARE = 'compare.';
+export function runnerRoute(route0: string[]): { tab: RunnerTab | null; file: string | null; runId: string | null; compareWith: string | null } {
+    const { rest: route, tab } = splitTab(route0);
+    const none = { compareWith: null };
+    if (route[0] !== 'api-runner') return { tab: null, file: null, runId: null, ...none };
+    if (route[1] === 'run' && route[2]) return { tab: 'runs', file: null, runId: route[2], compareWith: tab?.startsWith(RUNNER_COMPARE) && tab.length > RUNNER_COMPARE.length ? tab.slice(RUNNER_COMPARE.length) : null };
+    if (route[1] === 'runs') return { tab: 'runs', file: null, runId: null, ...none };
+    if (route[1] === 'monitors') return { tab: 'monitors', file: null, runId: null, ...none };
+    if (route.length > 1) return { tab: 'run', file: route.slice(1).join('/'), runId: null, ...none };
+    return { tab: null, file: null, runId: null, ...none };
 }
+/** The address of a past run, compared with another run (or not). */
+export const runnerRunRoute = (runId: string, compareWith?: string | null): string[] => ['api-runner', 'run', runId, ...(compareWith ? [TAB_MARK + RUNNER_COMPARE + compareWith] : [])];
+
+/** A request's address in API requests: #/api/<collection file>/<request id>. */
+export const apiRequestRoute = (file: string, requestId?: string | null): string[] => ['api', ...file.split('/'), ...(requestId ? [requestId] : [])];
 
 /** "▲ better": the arrow follows the number (went up / down), the word says whether that is good. */
 export function verdictWords(verdict: string, change: string): string {

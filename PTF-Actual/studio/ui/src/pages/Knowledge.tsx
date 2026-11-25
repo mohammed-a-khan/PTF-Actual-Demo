@@ -58,11 +58,13 @@ export function Knowledge() {
     const building = React.useRef(false);
     const build = async (source?: string) => { if (building.current) return; building.current = true; setTimeout(() => { building.current = false; }, 1500); try { await api.buildKnowledge(source); message.info('Building the index…'); setTimeout(load, 300); } catch (e) { message.error(errText(e)); } };
     const MAX_Q = 500;
+    /** Characters as people count them: an emoji is one (not two UTF-16 units). */
+    const chars = (t: string) => Array.from(t).length;
     const search = async () => {
         // Nothing to look for (empty, or only spaces): earlier results would look like this search's, so they go.
         if (!q.trim()) { setHits(null); setSearchErr(q.length ? 'Only spaces: type what to look for.' : 'Type what to look for.'); return; }
         // Results of an earlier search would look like this one's: cleared when this one cannot run.
-        if (q.length > MAX_Q) { setHits(null); setSearchErr(`The search is too long: at most ${MAX_Q} characters (it has ${q.length}).`); return; }
+        if (chars(q) > MAX_Q) { setHits(null); setSearchErr(`The search is too long: at most ${MAX_Q} characters (it has ${chars(q)}).`); return; }
         try { setHits((await api.searchKnowledge(q)).hits); setSearchErr(null); } catch (e) { setHits(null); setSearchErr(errText(e)); }
     };
     const removeInvalid = async (x: InvalidKnowledgeSource) => { try { await agentsApi.removeInvalidKnowledgeSource(x.index); message.success(`Removed "${x.name}" from ${d?.file ?? 'the file'}`); load(); } catch (e) { message.error(errText(e)); } };
@@ -98,8 +100,8 @@ export function Knowledge() {
                 ]} />
             </Card>) }, { key: 'search', icon: <SearchOutlined />, label: <span>Try a search</span>, children: (
             <Card size="small" title="Search the way an agent does" extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>{count(total, 'passage')}</Typography.Text>}>
-                <Input.Search placeholder="Ask the way an agent would, e.g. how do we sign in as a buyer" enterButton={<><SearchOutlined /> Search</>} value={q} onChange={(e) => { setQ(e.target.value); if (searchErr) setSearchErr(null); }} onSearch={search} status={q.length > MAX_Q ? 'error' : undefined} />
-                {(searchErr || q.length > MAX_Q) && <Typography.Text type="danger" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>{searchErr ?? `At most ${MAX_Q} characters (${q.length} now).`}</Typography.Text>}
+                <Input.Search placeholder="Ask the way an agent would, e.g. how do we sign in as a buyer" enterButton={<><SearchOutlined /> Search</>} value={q} onChange={(e) => { setQ(e.target.value); if (searchErr) setSearchErr(null); }} onSearch={search} status={chars(q) > MAX_Q ? 'error' : undefined} aria-label="Search the knowledge" />
+                {(searchErr || chars(q) > MAX_Q) && <Typography.Text type="danger" role="alert" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>{searchErr ?? `At most ${MAX_Q} characters (${chars(q)} now).`}</Typography.Text>}
                 {hits && (hits.length === 0 ? <Empty style={{ marginTop: 16 }} description="Nothing found" /> : (
                     <List style={{ marginTop: 10 }} dataSource={hits} renderItem={(h) => (
                         <List.Item actions={[<Button key="r" size="small" type="link" onClick={() => api.readKnowledge(h.id).then(setOpen).catch((e) => message.error(errText(e)))}>Read</Button>,

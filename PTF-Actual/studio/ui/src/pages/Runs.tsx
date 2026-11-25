@@ -19,7 +19,9 @@ import { MakePipeline } from '../components/MakePipeline';
 import { StepTimeline, parseTimeline } from '../components/StepTimeline';
 import { PublishToAdo } from '../components/PublishToAdo';
 import { BisectPanel, BisectStart } from '../components/Bisect';
-import { navigate, useRoute } from '../route';
+import { currentRoute, navigate, useRoute } from '../route';
+import { TAB_MARK } from '../apiperf-ui';
+import { onRunsChanged, runsChanged, saveEditorFiles } from '../runSignals';
 import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
 import { StrictWholeNumber } from '../components/StrictWholeNumber';
 import '../styles-tests.css';
@@ -29,6 +31,11 @@ const STATE_TAG: Record<RunInfo['state'], { color: string; label: string }> = {
     stopped: { color: 'default', label: 'Stopped' }, error: { color: 'warning', label: 'Could not run' },
 };
 const fmtMs = (ms: number) => fmtDur(ms);
+/** The inner tabs (also in the address: ~<tab>). */
+const RES_TABS = ['scenarios', 'steps', 'output', 'files'] as const;
+type ResTab = typeof RES_TABS[number];
+const SETUP_TABS = ['what', 'options', 'saved'] as const;
+type SetupTab = typeof SETUP_TABS[number];
 
 /**
  * Run only the failed scenarios. The framework selects --scenarios by name in every feature it
@@ -44,6 +51,15 @@ export function rerunFailed(run: RunInfo, ev: RunEvidence | null): RunRequest {
         features: all ? files : run.request.features,
         scenarios: [...new Set(failed.map((x) => x.name))],
     };
+}
+
+/**
+ * Items shown in a row, separated by " · ": each item stays whole, and the separator stays at the end of the item
+ * before it (a no-break space ties it there), so a line never starts with "·" when the row wraps.
+ */
+export function joinFacts(items: Array<React.ReactNode | false | null | undefined>): React.ReactNode[] {
+    const shown = items.filter((x): x is React.ReactNode => x !== false && x !== null && x !== undefined && x !== '');
+    return shown.map((x, i) => <React.Fragment key={i}><span style={{ whiteSpace: 'nowrap' }}>{x}{i < shown.length - 1 ? '\u00a0·' : ''}</span>{i < shown.length - 1 ? ' ' : null}</React.Fragment>);
 }
 
 /** Common Playwright device names (any other Playwright name can be typed in). */
@@ -124,6 +140,12 @@ export function Runs() {
         document.addEventListener('visibilitychange', onShown);
         return () => { window.removeEventListener('focus', onShown); document.removeEventListener('visibilitychange', onShown); };
     }, [pollRuns]);
+    // Another tab started or finished a run: read the runs at once. And this tab tells the others when it sees one
+    // start or end (whichever tab or screen started it), so Run is disabled in every tab before a click.
+    React.useEffect(() => onRunsChanged(pollRuns), [pollRuns]);
+    const runningKey = runs.filter((r) => r.state === 'running').map((r) => r.id).sort().join(',');
+    const lastRunningKey = React.useRef(runningKey);
+    React.useEffect(() => { if (runningKey !== lastRunningKey.current) { lastRunningKey.current = runningKey; runsChanged(); } }, [runningKey]);
     const anyRunning = runs.some((r) => r.state === 'running');
     React.useEffect(() => {
         const t = setInterval(() => { if (document.visibilityState === 'visible') pollRuns(); }, anyRunning ? 3000 : 15000);
@@ -175,13 +197,41 @@ export function Runs() {
     React.useEffect(() => () => follow.current?.abort(), []);
 
     // The shown run comes from the address (#/runs/<id>), so Back/Forward move between runs.
+    // The inner tabs are in the address too (#/runs/<id>/~output/~options: the results' tab, then the form's), so a
+    // link opens them and Back returns to the tab before. Also remembered on this computer, for a bare address.
     const route = useRoute();
     const onPage = route[0] === 'runs';
-    const routeId = onPage ? route[1] : undefined;
+    const routeId = onPage && route[1] && !route[1].startsWith(TAB_MARK) ? route[1] : undefined;
+    const marks = onPage ? route.slice(1).filter((x) => x.startsWith(TAB_MARK) && x.length > 1).map((x) => x.slice(1)) : [];
+    const routeRes = marks.find((x): x is ResTab => (RES_TABS as readonly string[]).includes(x)) ?? null;
+    const routeSetup = marks.find((x): x is SetupTab => (SETUP_TABS as readonly string[]).includes(x)) ?? null;
+    // The form's concerns, one per tab.
+    const [setupTabKept, setSetupTabKept] = React.useState<SetupTab>(() => { try { const v = localStorage.getItem('cs-studio-runs-setup-tab'); return (v === 'options' || v === 'saved' ? v : 'what'); } catch { return 'what'; } });
+    const setupTab: SetupTab = routeSetup ?? setupTabKept;
+    // Results of the shown run, one concern per tab: scenarios (with their evidence), live steps, raw output, run-wide files.
+    const [resTabKept, setResTabKept] = React.useState<ResTab>(() => { try { const v = localStorage.getItem('cs-studio-run-results-tab'); return ((RES_TABS as readonly string[]).includes(v ?? '') ? v : 'scenarios') as ResTab; } catch { return 'scenarios'; } });
+    const resTabRaw: ResTab = routeRes ?? resTabKept;
+    const tabsRef = React.useRef({ res: resTabRaw, setup: setupTab });
+    tabsRef.current = { res: resTabRaw, setup: setupTab };
+    /** The address of a run (or of the screen with no run), with the tabs shown now. */
+    const runsAddr = (id: string | null | undefined, t: { res?: ResTab; setup?: SetupTab } = {}): string[] =>
+        ['runs', ...(id ? [id, TAB_MARK + (t.res ?? tabsRef.current.res)] : []), TAB_MARK + (t.setup ?? tabsRef.current.setup)];
+    const keepRes = (v: ResTab) => { setResTabKept(v); if (v === 'steps' || v === 'output') setOutView(v); try { localStorage.setItem('cs-studio-run-results-tab', v); } catch { /* ignore */ } };
+    const keepSetup = (v: SetupTab) => { setSetupTabKept(v); try { localStorage.setItem('cs-studio-runs-setup-tab', v); } catch { /* ignore */ } if (v === 'saved') loadConfigs(); };
+    /** `push`: a click on the tab (a new step in the history); otherwise the address is changed in place. */
+    const setResTab = (v: ResTab, push = false) => { keepRes(v); tabsRef.current.res = v; if (currentRoute()[0] === 'runs') navigate(runsAddr(routeId, { res: v }), !push); };
+    const setSetupTab = (v: SetupTab, push = false) => { keepSetup(v); tabsRef.current.setup = v; if (currentRoute()[0] === 'runs') navigate(runsAddr(routeId, { setup: v }), !push); };
+    // A link or Back to a tab: it becomes the remembered one.
+    React.useEffect(() => { if (routeRes && routeRes !== resTabKept) keepRes(routeRes); }, [routeRes]); // eslint-disable-line react-hooks/exhaustive-deps
+    React.useEffect(() => { if (routeSetup && routeSetup !== setupTabKept) keepSetup(routeSetup); }, [routeSetup]); // eslint-disable-line react-hooks/exhaustive-deps
     React.useEffect(() => { if (routeId && routeId !== sel) void open(routeId); }, [routeId]); // eslint-disable-line react-hooks/exhaustive-deps
     // A run started elsewhere (a pull request, the editor): not in the list yet, so read it again.
     React.useEffect(() => { if (routeId && !runs.some((r) => r.id === routeId)) void loadRuns(); }, [routeId]); // eslint-disable-line react-hooks/exhaustive-deps
-    React.useEffect(() => { if (onPage && !routeId && runs.length) navigate(['runs', sel ?? runs[0].id], true); }, [onPage, routeId, runs.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    React.useEffect(() => { if (onPage && !routeId && runs.length) navigate(runsAddr(sel ?? runs[0].id), true); }, [onPage, routeId, runs.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    // An address without the tabs (a link from another screen, an old bookmark): the tabs shown are written into it, in place.
+    React.useEffect(() => {
+        if (onPage && ((routeId && !routeRes) || !routeSetup)) navigate(runsAddr(routeId), true);
+    }, [onPage, routeId, routeRes, routeSetup]); // eslint-disable-line react-hooks/exhaustive-deps
     // Runs started elsewhere (editor ▶ buttons): the list needs them (the shell navigates here).
     React.useEffect(() => {
         // The form shows what that run runs (pressing Run again runs the same, not the form's older choice).
@@ -204,19 +254,32 @@ export function Runs() {
         // The framework runs the files on disk: unsaved edits in the editor would not be tested.
         const unsaved = [...unsavedFiles].filter((f) => /\.(feature|ts|js|env|json|ya?ml)$/.test(f));
         if (unsaved.length) {
-            const go = await new Promise<boolean>((resolve) => modal.confirm({
-                title: `${unsaved.length} file${unsaved.length === 1 ? ' has' : 's have'} unsaved changes in the editor`,
-                content: <>The run uses the saved versions of: <ul style={{ margin: '6px 0 0 16px', padding: 0 }}>{unsaved.slice(0, 8).map((f) => <li key={f}><Typography.Text code>{f}</Typography.Text></li>)}</ul>Save them in the editor first to test your latest changes.</>,
-                okText: 'Run anyway', cancelText: 'Cancel', onOk: () => resolve(true), onCancel: () => resolve(false),
-            }));
-            if (!go) return;
+            const choice = await new Promise<'cancel' | 'run' | 'save'>((resolve) => {
+                let picked = false;
+                const pick = (c: 'cancel' | 'run' | 'save') => { if (picked) return; picked = true; inst.destroy(); resolve(c); };
+                const inst = modal.confirm({
+                    title: `${unsaved.length} file${unsaved.length === 1 ? ' has' : 's have'} unsaved changes in the editor`,
+                    content: <>The run uses the saved versions of: <ul style={{ margin: '6px 0 0 16px', padding: 0 }}>{unsaved.slice(0, 8).map((f) => <li key={f}><Typography.Text code>{f}</Typography.Text></li>)}</ul>{unsaved.length > 8 && <div>and {unsaved.length - 8} more</div>}<b>Save and run</b> saves {unsaved.length === 1 ? 'it' : 'them'} first, so the run tests your latest changes.</>,
+                    closable: true, keyboard: true,
+                    // Esc or × : nothing runs.
+                    onCancel: () => { if (!picked) { picked = true; resolve('cancel'); } },
+                    afterClose: () => { if (!picked) { picked = true; resolve('cancel'); } },
+                    footer: () => <Space style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }} wrap>
+                        <Button onClick={() => pick('cancel')}>Cancel</Button>
+                        <Button onClick={() => pick('run')}>Run anyway</Button>
+                        <Button type="primary" autoFocus onClick={() => pick('save')}>Save and run</Button>
+                    </Space>,
+                });
+            });
+            if (choice === 'cancel') return;
+            if (choice === 'save' && !(await saveEditorFiles(unsaved))) { message.warning('Not every file was saved, so the run did not start.'); return; }
         }
         setStarting(true);
         try {
             const run = await api.startRun(r);
             setRuns((rs) => [run, ...rs]);
-            navigate(['runs', run.id]);
-        } catch (e) { message.error(errText(e)); }
+            navigate(runsAddr(run.id));
+        } catch (e) { message.error(errText(e)); pollRuns(); }
         finally { setStarting(false); }
     };
     /** Rerun the failed scenarios of a pull request's run, in its local copy (never the working copy). */
@@ -227,7 +290,7 @@ export function Runs() {
             const req = rerunFailed(r, ev);
             const run = await api.prRun(r.pr.repository, r.pr.id, { ...req, title: r.pr.title });
             setRuns((rs) => [run, ...rs]);
-            navigate(['runs', run.id]);
+            navigate(runsAddr(run.id));
         } catch (e) { modal.error({ title: 'Could not rerun', content: errText(e) }); }
         finally { setStarting(false); }
     };
@@ -278,15 +341,11 @@ export function Runs() {
     };
     const runConfig = async (c: RunConfigDef) => {
         setStarting(true);
-        try { const run = await api.startRun(c.request); setRuns((rs) => [run, ...rs]); navigate(['runs', run.id]); }
+        try { const run = await api.startRun(c.request); setRuns((rs) => [run, ...rs]); navigate(runsAddr(run.id)); }
         catch (e) { modal.error({ title: `Could not start "${c.name}"`, content: errText(e) }); }
         finally { setStarting(false); }
     };
     const removeConfig = async (c: RunConfigDef) => { await writeConfigs(configs.filter((x) => x !== c), `Deleted "${c.name}"`); };
-    // The form's concerns, one per tab (remembered on this computer).
-    type SetupTab = 'what' | 'options' | 'saved';
-    const [setupTab, setSetupTabRaw] = React.useState<SetupTab>(() => { try { const v = localStorage.getItem('cs-studio-runs-setup-tab'); return (v === 'options' || v === 'saved' ? v : 'what'); } catch { return 'what'; } });
-    const setSetupTab = (v: SetupTab) => { setSetupTabRaw(v); try { localStorage.setItem('cs-studio-runs-setup-tab', v); } catch { /* ignore */ } if (v === 'saved') loadConfigs(); };
     const optSummary = `${target.browser}${target.device ? ` · ${target.device}` : ''} · ${target.workers} worker${target.workers === 1 ? '' : 's'}${target.retries ? ` · ${target.retries} retr${target.retries === 1 ? 'y' : 'ies'}` : ''} · ${target.headless ? 'browser hidden' : 'browser shown'}${target.width && target.height ? ` · ${target.width}×${target.height}` : ''}${variables() ? ` · ${Object.keys(variables()!).length} value(s)` : ''}${target.ado ? ` · Azure DevOps ${target.ado === 'on' ? 'on' : 'off'}` : ''}`;
     // Lines of "Values for this run" that are not KEY=value (they are left out of the run).
     const badVars = target.vars.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^[A-Za-z][\w]*\s*=/.test(l));
@@ -334,9 +393,6 @@ export function Runs() {
     };
 
     // Results of the shown run, one concern per tab: scenarios (with their evidence), live steps, raw output, run-wide files.
-    type ResTab = 'scenarios' | 'steps' | 'output' | 'files';
-    const [resTabRaw, setResTabRaw] = React.useState<ResTab>(() => { try { const v = localStorage.getItem('cs-studio-run-results-tab'); return (['scenarios', 'steps', 'output', 'files'].includes(v ?? '') ? v : 'scenarios') as ResTab; } catch { return 'scenarios'; } });
-    const setResTab = (v: ResTab) => { setResTabRaw(v); if (v === 'steps' || v === 'output') setOutView(v); try { localStorage.setItem('cs-studio-run-results-tab', v); } catch { /* ignore */ } };
     const hasScenarios = !!s && s.scenarios.length > 0;
     const hasFiles = runFiles.length > 0 && !!ev && !!current?.reportKey;
     const resTab: ResTab = resTabRaw === 'scenarios' && hasScenarios ? 'scenarios' : resTabRaw === 'files' && hasFiles ? 'files'
@@ -344,7 +400,7 @@ export function Runs() {
     const resultsCard = current && (
         <Card size="small" className="tests-results" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
             styles={{ body: { padding: 0, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: resTab === 'scenarios' || resTab === 'files' ? 'auto' : 'hidden' } }}
-            tabProps={{ size: 'small' }} activeTabKey={resTab} onTabChange={(k) => setResTab(k as ResTab)}
+            tabProps={{ size: 'small' }} activeTabKey={resTab} onTabChange={(k) => setResTab(k as ResTab, true)}
             tabList={[
                 ...(hasScenarios ? [{ key: 'scenarios', label: <span>Scenarios <span className="q-count">{s!.scenarios.length}</span></span> }] : []),
                 { key: 'steps', label: <Tooltip title="What ran, read live from the output">Steps</Tooltip> },
@@ -379,9 +435,9 @@ export function Runs() {
                     </Space>}>
                     {fw && !fw.installed && <Alert type="warning" showIcon style={{ margin: '8px 0' }} message={fw.message} />}
                     {running && <Alert type="info" showIcon style={{ margin: '8px 0' }} message={<>A run is already in progress: Run is available again when it ends.{' '}
-                        {(() => { const r = runs.find((x) => x.state === 'running'); return r && r.id !== sel ? <a onClick={() => navigate(['runs', r.id])}>Show it</a> : null; })()}</>} />}
+                        {(() => { const r = runs.find((x) => x.state === 'running'); return r && r.id !== sel ? <a onClick={() => navigate(runsAddr(r.id))}>Show it</a> : null; })()}</>} />}
                     <Form layout="vertical" size="small">
-                        <Tabs size="small" activeKey={setupTab} onChange={(k) => setSetupTab(k as SetupTab)} className="tests-tabs" items={[
+                        <Tabs size="small" activeKey={setupTab} onChange={(k) => setSetupTab(k as SetupTab, true)} className="tests-tabs" items={[
                             { key: 'what', label: 'What to run', children: <>
                                 <Row gutter={12}>
                                     <Col span={12}><Form.Item label="Project" style={{ marginBottom: 8 }} htmlFor="cs-runs-project"><Select id="cs-runs-project" value={target.project} onChange={(v) => setTarget({ ...target, project: v })} options={projects.map((p) => ({ value: p, label: p }))} /></Form.Item></Col>
@@ -453,7 +509,7 @@ export function Runs() {
                 </Card>
                 <Card size="small" title={<Space>Recent runs <Button aria-label="Refresh the runs" size="small" type="text" icon={<ReloadOutlined />} onClick={loadRuns} /></Space>} style={{ flex: 1, minHeight: 120, display: 'flex', flexDirection: 'column' }} styles={{ body: { overflow: 'auto', flex: 1, padding: 0 } }}>
                     <List size="small" dataSource={runs} locale={{ emptyText: 'No runs yet.' }} renderItem={(r) => (
-                        <List.Item onClick={() => navigate(['runs', r.id])} style={{ cursor: 'pointer', paddingInline: 12, background: r.id === sel ? 'rgba(147,24,108,.08)' : undefined }}>
+                        <List.Item onClick={() => navigate(runsAddr(r.id))} style={{ cursor: 'pointer', paddingInline: 12, background: r.id === sel ? 'rgba(147,24,108,.08)' : undefined }}>
                             <Space direction="vertical" size={0} style={{ width: '100%', minWidth: 0 }}>
                                 <Space><Tag color={STATE_TAG[r.state].color} icon={r.state === 'running' ? <LoadingOutlined /> : undefined}>{STATE_TAG[r.state].label}</Tag><Typography.Text>{r.request.project} / {r.request.env}</Typography.Text>{r.bisect && <Tag color="geekblue">search {r.bisect.commit.slice(0, 7)}</Tag>}
                                     {r.summary && <Typography.Text type="secondary">{r.summary.passed}✓ {r.summary.failed}✗{r.summary.flaky ? <Tooltip title="Passed only after a retry"> <Typography.Text type="warning">{r.summary.flaky}↻</Typography.Text></Tooltip> : null}</Typography.Text>}</Space>
@@ -465,7 +521,7 @@ export function Runs() {
             </div>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0, minWidth: 0, flex: 1 }}>
-                {bisect && <BisectPanel value={bisect} onChange={(b) => { setBisect(b); void loadRuns(); }} onOpenRun={(id) => navigate(['runs', id])} />}
+                {bisect && <BisectPanel value={bisect} onChange={(b) => { setBisect(b); void loadRuns(); }} onOpenRun={(id) => navigate(runsAddr(id))} />}
                 {bisectOpen && current?.summary && <BisectStart project={current.request.project} env={current.request.env} browser={current.request.browser} onClose={() => setBisectOpen(false)}
                     onStarted={(b) => { setBisectOpen(false); setBisect(b); }}
                     failed={current.summary.scenarios.filter((x) => x.status === 'failed' || x.status === 'broken').filter((x, i, a) => a.findIndex((y) => y.name === x.name) === i)
@@ -486,9 +542,14 @@ export function Runs() {
                                 {current.bisect && <Tooltip title="A step of the search for the commit that broke a scenario, run on an earlier commit in a separate copy (removed when the search ended, with its report)"><Tag color="geekblue" style={{ marginInlineEnd: 0 }}>Search step · {current.bisect.commit.slice(0, 8)}</Tag></Tooltip>}
                                 {current.pr && <Tooltip title={`${current.pr.based === 'merge' ? 'Merge result' : 'Source branch'} ${current.pr.commit.slice(0, 8)} of "${current.pr.title}"`}>
                                     <Tag color="purple" style={{ cursor: 'pointer', marginInlineEnd: 0 }} onClick={() => navigate(['prs', current.pr!.repository, current.pr!.id, 'tests'])}>Pull request !{current.pr.id}</Tag></Tooltip>}
-                                {/* Two durations, named: the whole run (with the framework's start-up and the report) and the tests' own time as the report counts it. */}
-                                <Tooltip title="From pressing Run to the end, with the framework's start-up, browser launch and report writing"><Typography.Text type="secondary">Run time (with start-up) {fmtMs((current.endedAt ? Date.parse(current.endedAt) : now) - Date.parse(current.startedAt))}</Typography.Text></Tooltip>
-                                {s && s.duration > 0 && <Tooltip title="The tests' own time, as the framework's HTML report shows it (its header and Timeline)"><Typography.Text type="secondary">· Test time (report) {fmtMs(s.duration)}</Typography.Text></Tooltip>}
+                                {/* Two durations, named: the whole run (with the framework's start-up and the report) and the tests' own time as the
+                                    report counts it; then the run's Azure DevOps choice. One list joined by separators, each item kept whole
+                                    and a separator never starting a line (it stays with the item before it). */}
+                                <Typography.Text type="secondary" className="run-facts">{joinFacts([
+                                    <Tooltip key="run" title="From pressing Run to the end, with the framework's start-up, browser launch and report writing"><span>Run time (with start-up) {fmtMs((current.endedAt ? Date.parse(current.endedAt) : now) - Date.parse(current.startedAt))}</span></Tooltip>,
+                                    s && s.duration > 0 && <Tooltip key="test" title="The tests' own time, as the framework's HTML report shows it (its header and Timeline)"><span>Test time (report) {fmtMs(s.duration)}</span></Tooltip>,
+                                    current.request.ado !== undefined && <Tooltip key="ado" title={current.request.ado ? 'This run sent its results to Azure DevOps test plans' : "This run did not send its results to Azure DevOps (Don't send was chosen)"}><span>Azure DevOps {current.request.ado ? 'on' : 'off'}</span></Tooltip>,
+                                ])}</Typography.Text>
                                 {s && <Space size={6} className="run-counts">
                                     <span><b>{s.total}</b> scenario{s.total === 1 ? '' : 's'}</span>
                                     <Tag color="success" style={{ marginInlineEnd: 0 }}>{s.passed} passed</Tag>

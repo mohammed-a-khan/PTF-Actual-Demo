@@ -139,7 +139,7 @@ export type AgentEventBody = (
     | { type: 'reasoning'; text: string }
     | { type: 'tool-start'; id: string; tool: string; args: string; server?: string }
     | { type: 'tool-end'; id: string; ok: boolean; result: string }
-    | { type: 'approval'; id: string; title: string; detail: string; kind: string }
+    | { type: 'approval'; id: string; title: string; detail: string; kind: string; once?: boolean }
     | { type: 'approval-done'; id: string; decision: 'once' | 'session' | 'reject' | 'auto' }
     | { type: 'error'; text: string }
     | { type: 'idle' }
@@ -287,6 +287,50 @@ export const SHELL_TOOLS = ['bash', 'write_bash', 'read_bash', 'stop_bash', 'lis
 const SHELL_RUNS = new Set(['bash', 'write_bash', 'powershell', 'write_powershell']);
 /** Built-in tools that could run commands through another agent (sub-agents, workflows): off without the shell. */
 const SHELL_INDIRECT = ['task', 'run_dynamic_workflow', 'dynamic_workflows_manage', 'write_agent'];
+/** The runtime's built-in tools that create or change files (the "Change files" tool group). */
+export const FILE_WRITE_TOOLS = ['create', 'edit', 'write', 'str_replace_editor', 'str_replace', 'insert', 'apply_patch', 'write_file', 'edit_file', 'create_file', 'multi_edit'];
+/** The tool group a Studio or mission tool belongs to (Agent Builder), or null for tools every agent has. */
+export function groupOfTool(name: string): string | null {
+    return TOOL_GROUPS.find((g) => (g.tools ?? []).includes(name))?.id ?? null;
+}
+/**
+ * Whether a shell command may change files or the system: output redirection (> and >>, but not to /dev/null or
+ * between streams), tee, removing, moving or copying files, in-place edits, installs, Git changes and the like.
+ * Such a command is asked each time (never "for this conversation").
+ */
+export function commandWrites(command: string): boolean {
+    const c = command.replace(/\d?>&\d/g, ' ').replace(/\d?>>?\s*\/dev\/null\b/g, ' ');
+    if (/>/.test(c)) return true;
+    const words = c.split(/[;&|()\n`$]+/).map((x) => x.trim().split(/\s+/)).filter((w) => w[0]);
+    const WRITERS = /^(tee|rm|rmdir|mv|cp|mkdir|touch|ln|chmod|chown|chgrp|dd|truncate|shred|install|rsync|scp|unlink|patch|tar|unzip|zip|gzip|gunzip|curl|wget|kill|pkill|killall|sudo|su|npm|npx|yarn|pnpm|pip|pip3|apt|apt-get|brew|make|node|python|python3|bash|sh|zsh|pwsh|powershell|eval|exec|xargs|find|perl|ruby|docker|kubectl)$/;
+    for (const w of words) {
+        const cmd = w[0].replace(/^.*\//, '');
+        if (WRITERS.test(cmd)) return true;
+        if ((cmd === 'sed' || cmd === 'awk' || cmd === 'gawk') && w.some((a) => /^-i/.test(a) || /^--in-place/.test(a) || a.includes('system('))) return true;
+        if (cmd === 'git') {
+            const args = w.slice(1).filter((a) => !/^(-C|-c)$/.test(a));
+            const sub = args.find((a) => !a.startsWith('-')) ?? '';
+            const rest = args.slice(args.indexOf(sub) + 1);
+            if (/^(status|log|diff|show|rev-parse|ls-files|blame|describe|shortlog|grep|cat-file|ls-tree|reflog)$/.test(sub)) continue;
+            // Listing branches, tags, remotes or settings only reads; naming one (or -d, -m, --set…) changes it.
+            if (/^(branch|tag|remote|config)$/.test(sub) && rest.every((a) => /^(-a|-r|-v|-vv|-l|--list|--all|--remotes|--verbose|--show-current|--get|--get-all|--get-regexp)$/.test(a) || (sub === 'config' && !a.startsWith('-') && rest.some((x) => /^--get/.test(x))))) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * What an approval "for this conversation" covers, or null when it cannot be given: a shell command only that exact
+ * command (and never one that writes files), a tool server tool or Studio call only that one, a test plan never.
+ */
+export function approvalKey(kind: string, title: string, detail: string): string | null {
+    if (kind === 'plan') return null;
+    if (kind === 'shell') { const cmd = detail.trim(); return !cmd || commandWrites(cmd) ? null : `shell:${cmd}`; }
+    if (kind === 'mcp' || kind === 'studio') return `${kind}:${title}`;
+    return kind;
+}
+
 /** How long a tool server may take to start before a session leaves it out. */
 export const TOOL_SERVER_START_MS = 15_000;
 
@@ -635,11 +679,15 @@ export class AgentHost {
 
     /** Ask the person; resolves with their decision (approval card in the Studio). */
     private ask(s: SessionState, title: string, detail: string, kind: string): Promise<'once' | 'session' | 'reject'> {
-        if (s.allowed.has(kind) || s.allowed.has(`${kind}:${title}`)) { const id = randomBytes(6).toString('hex'); this.push(s, { type: 'approval-done', id, decision: 'auto' }); return Promise.resolve('once'); }
+        const key = approvalKey(kind, title, detail);
+        // After possible prompt injection nothing goes through on an earlier "for this conversation".
+        const tainted = /\(after possible prompt injection\)$/.test(title);
+        if (key && !tainted && s.allowed.has(key)) { const id = randomBytes(6).toString('hex'); this.push(s, { type: 'approval-done', id, decision: 'auto' }); return Promise.resolve('once'); }
         const id = randomBytes(6).toString('hex');
-        this.push(s, { type: 'approval', id, title, detail: detail.slice(0, 6000), kind });
-        // A test plan is approved each time it is submitted (never for the whole conversation).
-        return new Promise((resolve) => s.pending.set(id, { resolve: (d) => { if (d === 'session' && kind !== 'plan') s.allowed.add(kind === 'mcp' || kind === 'studio' ? `${kind}:${title}` : kind); resolve(d); }, title, detail, kind }));
+        this.push(s, { type: 'approval', id, title, detail: detail.slice(0, 6000), kind, ...(key ? {} : { once: true }) });
+        // A test plan is approved each time it is submitted (never for the whole conversation); a command only for
+        // that exact command, and one that writes files never.
+        return new Promise((resolve) => s.pending.set(id, { resolve: (d) => { if (d === 'session' && key) s.allowed.add(key); resolve(d === 'session' && !key ? 'once' : d); }, title, detail, kind }));
     }
 
     decide(sessionId: string, approvalId: string, decision: 'once' | 'session' | 'reject') {
@@ -832,7 +880,19 @@ How to work:
         const own = [...(this.d.knowledge?.(m0?.knowledgeSources ?? s.knowledgeSources) ?? []), ...(m0?.tools ?? [])];
         const mine = new Set(own.map((t) => t.name));
         const missionOwn = new Set((m0?.tools ?? []).map((t) => t.name));
-        const all = [...studio.filter((t) => !mine.has(t.name)), ...own].filter((t) => !allowedNames || missionOwn.has(t.name) || allowedNames.has(t.name));
+        // A tool of a group the agent does not have is not offered, a mission's own ones too (tests_run is "Run tests");
+        // only the mission's own tools of no group (report, ask, notes) are always there.
+        const all = [...studio.filter((t) => !mine.has(t.name)), ...own].filter((t) => !allowedNames || allowedNames.has(t.name) || (missionOwn.has(t.name) && !groupOfTool(t.name)))
+            // And checked again when it runs (defence in depth): a tool that is called anyway is refused with the reason.
+            .map((t) => ({ ...t, handler: async (args: unknown) => {
+                const g = groupOfTool(t.name);
+                if (prof && g && !may(g)) {
+                    const label = TOOL_GROUPS.find((x) => x.id === g)?.label ?? g;
+                    this.push(s, { type: 'info', text: `Not allowed for ${prof.name}: ${t.name} (needs "${label}")` });
+                    return { textResultForLlm: `Refused: the agent "${prof.name}" is not allowed to use ${t.name} (it needs the "${label}" tool group; its tool groups: ${prof.tools.join(', ')}).`, resultType: 'failure' };
+                }
+                return t.handler(args);
+            } }));
         const tools = guardTools(all, policy, this.d.mask ?? ((t: string) => t), (tool, text, args) => inspectExternal(tool, text, args, { policy, onFound: (src, f) => this.tainted(s, src, f) }));
         // Commands: only with the "Run commands" tool group, outside an evaluation, and when the settings do not turn them off.
         // The runtime's command tools are not even offered otherwise (it runs some commands it thinks read-only without asking).
@@ -876,8 +936,20 @@ How to work:
             return d === 'reject' ? { ok: false, feedback: 'The person did not approve this.' } : { ok: true };
         };
         const commandOf = (args: any): string => String(args?.command ?? args?.input ?? args?.text ?? (typeof args === 'string' ? args : JSON.stringify(args ?? {})));
+        // File changes: only with the "Change files" tool group and outside an evaluation (refused before the runtime
+        // touches the file system, whatever it would ask).
+        const filesOk = !m0?.readOnly && may('files');
         const onPreToolUse = async (input: { toolName: string; toolArgs: unknown }) => {
             const name = String(input?.toolName ?? '');
+            if (FILE_WRITE_TOOLS.includes(name) && !filesOk) {
+                const target = String((input?.toolArgs as { path?: string; file?: string } | undefined)?.path ?? (input?.toolArgs as { file?: string } | undefined)?.file ?? '').slice(0, 160);
+                if (m0?.readOnly) {
+                    this.push(s, { type: 'info', text: `Refused (read only): ${name}${target ? ` ${target}` : ''}` });
+                    return { permissionDecision: 'deny' as const, permissionDecisionReason: 'This session only reads (an evaluation): nothing may be changed or run. Say what you would do instead.' };
+                }
+                this.push(s, { type: 'info', text: `Not allowed for ${prof!.name}: ${name}${target ? ` ${target}` : ''}` });
+                return { permissionDecision: 'deny' as const, permissionDecisionReason: `The agent "${prof!.name}" is not allowed to change files (its tool groups: ${prof!.tools.join(', ')}).` };
+            }
             if (!SHELL_TOOLS.includes(name) && !SHELL_INDIRECT.includes(name)) return undefined;
             if (!shellOk) {
                 const r = await shellDecision(SHELL_RUNS.has(name) ? commandOf(input.toolArgs) : name);
@@ -957,7 +1029,7 @@ How to work:
             ...(st.reasoningEffort ? { reasoningEffort: st.reasoningEffort } : {}),
             systemMessage: { mode: 'append', content: this.systemMessage(s.workflow) + (prof ? `\n\nYou are the team's agent "${prof.name}" (made in the Studio's Agent Builder). Its instructions come first:\n${prof.instructions}\nYou may use only these tool groups: ${prof.tools.join(', ')}.` : '') },
             tools: tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters, skipPermission: t.skipPermission, handler: t.handler })),
-            ...(shellOk ? {} : { excludedTools: [...SHELL_TOOLS, ...SHELL_INDIRECT] }),
+            ...(shellOk && filesOk ? {} : { excludedTools: [...(shellOk ? [] : [...SHELL_TOOLS, ...SHELL_INDIRECT]), ...(filesOk ? [] : FILE_WRITE_TOOLS)] }),
             hooks: { onPreToolUse },
             onPermissionRequest,
         };

@@ -154,7 +154,7 @@ export function Healing() {
                     {current.status === 'dismissed'
                         ? <Button size="small" icon={<UndoOutlined />} onClick={() => void dismiss(current, true)}>Back to review</Button>
                         : current.status === 'review' && <Button size="small" icon={<EyeInvisibleOutlined />} onClick={() => void dismiss(current)}>Dismiss</Button>}
-                    {(current.status === 'applied' || current.status === 'confirmed') && <Button size="small" icon={<PlayCircleOutlined />} onClick={() => runToConfirm(current)}>Run to confirm</Button>}
+                    {current.status === 'applied' && <Button size="small" icon={<PlayCircleOutlined />} onClick={() => runToConfirm(current)}>Run to confirm</Button>}
                 </Space>}>
                 {current && <>
                     <Space size={6} style={{ marginBottom: 12 }} wrap>

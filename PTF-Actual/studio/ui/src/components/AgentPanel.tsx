@@ -11,7 +11,7 @@ import { AgentChanges } from './AgentChanges';
 import { Replay } from './Replay';
 import { AccountSetup, RuntimeSetup } from './AgentSetup';
 import { errText } from '../state';
-import { navigate } from '../route';
+import { currentRoute, navigate } from '../route';
 import { Markdown } from './Markdown';
 import { AgentBrowser } from './AgentBrowser';
 import { agentContext, subscribeAgentContext, takePendingAsk } from '../agentContext';
@@ -63,7 +63,13 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
     React.useEffect(() => subscribeAgentContext(() => setCtx(agentContext())), []);
     React.useEffect(() => { if (initialSession) setCurrent(initialSession); }, [initialSession]);
     React.useEffect(() => { try { if (current) localStorage.setItem('cs-studio-agent-session', current); } catch { /* private mode */ } }, [current]);
-    const refresh = React.useCallback(() => api.agentSessions().then((r) => setSessions(r.sessions)).catch(() => {}), []);
+    const refresh = React.useCallback(() => api.agentSessions().then((r) => { setSessions(r.sessions); window.dispatchEvent(new Event('cs-studio:agent-sessions-changed')); }).catch(() => {}), []);
+    // Closed while its address names the conversation (#/agents/conversations/<id>): the address goes back to the list.
+    const wasOpen = React.useRef(open);
+    React.useEffect(() => {
+        if (wasOpen.current && !open) { const r = currentRoute(); if (r[0] === 'agents' && r[1] === 'conversations' && r[2]) navigate(['agents', 'conversations'], true); }
+        wasOpen.current = open;
+    }, [open]);
     const reload = React.useCallback(() => { api.agentStatus().then(setStatus).catch((e) => setStatus({ error: errText(e) } as AgentStatus)); }, []);
     React.useEffect(() => {
         if (!open) return;
@@ -118,10 +124,26 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
     // One conversation per click: a double click (or a click while one is being made) makes no second one.
     const creating = React.useRef(false);
     const [makingChat, setMakingChat] = React.useState(false);
+    // A message sent while the new conversation is starting (a slow tool server can take 15 s): kept and sent once it is ready.
+    const queued = React.useRef(false);
+    const [queuedSend, setQueuedSend] = React.useState(false);
+    const textRef = React.useRef('');
+    textRef.current = text;
+    const sendTo = async (id: string, t: string) => {
+        setText('');
+        setBusy(true);
+        await api.agentSend(id, t, agentContext());
+        void refresh();
+    };
     const newChat = async () => {
         if (creating.current) return;
         creating.current = true; setMakingChat(true);
-        try { const s = await api.agentCreate(); setCurrent(s.id); await refresh(); } catch (e) { message.error(errText(e)); } finally { creating.current = false; setMakingChat(false); }
+        let made: string | null = null;
+        try { const s = await api.agentCreate(); made = s.id; setCurrent(s.id); await refresh(); } catch (e) { message.error(errText(e)); } finally { creating.current = false; setMakingChat(false); }
+        const t = textRef.current.trim();
+        const wanted = queued.current;
+        queued.current = false; setQueuedSend(false);
+        if (wanted && made && t) { try { await sendTo(made, t); } catch (e) { setBusy(false); message.error(errText(e)); } }
     };
     // A question handed over by a screen ("Explain with Copilot"): in the box, ready to send.
     React.useEffect(() => {
@@ -138,16 +160,28 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
     const send = async () => {
         const t = text.trim();
         if (!t) return;
+        // A conversation is being started: the message waits for it (said under the box) and goes as soon as it is ready.
+        if (creating.current) { queued.current = true; setQueuedSend(true); return; }
         try {
             let id = current;
-            if (!id) { if (creating.current) return; creating.current = true; try { const s = await api.agentCreate(); id = s.id; setCurrent(id); } finally { creating.current = false; } }
-            setText('');
-            setBusy(true);
-            await api.agentSend(id, t, agentContext());
-            void refresh();
+            if (!id) {
+                creating.current = true; setMakingChat(true);
+                try { const s = await api.agentCreate(); id = s.id; setCurrent(id); } finally { creating.current = false; setMakingChat(false); queued.current = false; setQueuedSend(false); }
+                const latest = textRef.current.trim();
+                await sendTo(id, latest || t);
+                return;
+            }
+            await sendTo(id, t);
         } catch (e) { setBusy(false); message.error(errText(e)); }
     };
-    const decide = (id: string, d: 'once' | 'session' | 'reject') => current && api.agentDecide(current, id, d).catch((e) => message.error(errText(e)));
+    // One answer per approval: a double click (or a second button) sends nothing more while the first is on its way.
+    const deciding = React.useRef(new Set<string>());
+    const [decidingIds, setDecidingIds] = React.useState<string[]>([]);
+    const decide = async (id: string, d: 'once' | 'session' | 'reject') => {
+        if (!current || deciding.current.has(id)) return;
+        deciding.current.add(id); setDecidingIds([...deciding.current]);
+        try { await api.agentDecide(current, id, d); } catch (e) { message.error(errText(e)); deciding.current.delete(id); setDecidingIds([...deciding.current]); }
+    };
 
     const head = (
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -155,7 +189,7 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
                 onChange={setCurrent} options={chats.map((s) => ({ value: s.id, label: `${s.busy ? '● ' : ''}${s.title}${chats.filter((x) => x.title === s.title).length > 1 ? ` · ${new Date(s.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}` : ''}` }))} />
             <Tooltip title="New conversation"><Button size="small" icon={<PlusOutlined />} aria-label="New conversation" disabled={!ready} loading={makingChat} onClick={() => void newChat()} /></Tooltip>
             <Tooltip title="Delete this conversation"><Button size="small" icon={<DeleteOutlined />} aria-label="Delete conversation" disabled={!current}
-                onClick={() => modal.confirm({ title: 'Delete this conversation?', okText: 'Delete', okButtonProps: { danger: true }, onOk: async () => { try { await api.agentDelete(current!); setCurrent(null); await refresh(); } catch (e) { message.error(errText(e)); } } })} /></Tooltip>
+                onClick={() => modal.confirm({ title: 'Delete this conversation?', okText: 'Delete', okButtonProps: { danger: true }, onOk: async () => { try { const gone = current!; await api.agentDelete(gone); setCurrent(null); const r = currentRoute(); if (r[0] === 'agents' && r[1] === 'conversations' && r[2] === gone) navigate(['agents', 'conversations'], true); await refresh(); } catch (e) { message.error(errText(e)); } } })} /></Tooltip>
             <Tooltip title="Export the conversation (Markdown: messages, tools, approvals, changed files, usage)"><Button size="small" icon={<DownloadOutlined />} aria-label="Export conversation" disabled={!current} onClick={() => void exportTranscript()} /></Tooltip>
             <Tooltip title="Replay the conversation step by step"><Button size="small" icon={<HistoryOutlined />} aria-label="Replay conversation" disabled={!current} onClick={() => setReplaying(true)} /></Tooltip>
             <Tooltip title="Agents: setup & settings"><Button size="small" icon={<SettingOutlined />} aria-label="Agent settings" onClick={() => navigate(['agents', 'setup'])} /></Tooltip>
@@ -188,7 +222,7 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
                             {items.map((it) => it.kind === 'user' ? <div key={it.seq} className="agent-msg agent-user">{it.text}</div>
                                 : it.kind === 'assistant' ? <div key={it.seq} className="agent-msg agent-assistant"><Markdown text={it.text} />{it.streaming && <span className="agent-caret" />}</div>
                                     : it.kind === 'tool' ? <details key={it.seq} className="agent-tool">
-                                        <summary><ToolOutlined /> <b>{it.server ? `${it.server} › ` : ''}{it.tool}</b> {!it.done ? <Spin size="small" /> : it.done.ok ? <Tag color="green" bordered={false}>done</Tag> : <Tag color="red" bordered={false}>failed</Tag>}</summary>
+                                        <summary><ToolOutlined /> <b>{it.server ? `${it.server} › ` : ''}{it.tool}</b> {!it.done ? <Spin size="small" /> : it.done.ok ? <Tag color="green" bordered={false}>done</Tag> : it.done.refused ? <Tag color="orange" bordered={false}>refused</Tag> : <Tag color="red" bordered={false}>failed</Tag>}</summary>
                                         <pre className="code-box" style={{ maxHeight: 160 }}>{it.args}</pre>{it.done && <pre className="code-box" style={{ maxHeight: 220 }}>{it.done.result}</pre>}</details>
                                         : it.kind === 'approval' ? <div key={it.seq} className="agent-approval">
                                             <Typography.Text strong>{it.title}</Typography.Text>
@@ -197,9 +231,12 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
                                                 : <Space size={4} wrap>
                                                     {/* A test plan: read (and change) it in the editor, then approve or reject this one plan. */}
                                                     {it.what === 'plan' && /: (.+\.feature)$/.test(it.title) && <Button size="small" onClick={() => navigate(['code', /: (.+\.feature)$/.exec(it.title)![1]])}>Open the plan</Button>}
-                                                    <Button size="small" type="primary" icon={<CheckOutlined />} onClick={() => void decide(it.id, 'once')}>Approve</Button>
-                                                    {it.what !== 'plan' && <Button size="small" onClick={() => void decide(it.id, 'session')}>Approve for this conversation</Button>}
-                                                    <Button size="small" danger icon={<CloseOutlined />} onClick={() => void decide(it.id, 'reject')}>{it.what === 'plan' ? 'Change it' : 'Reject'}</Button></Space>}
+                                                    <Button size="small" type="primary" icon={<CheckOutlined />} disabled={decidingIds.includes(it.id)} onClick={() => void decide(it.id, 'once')}>Approve</Button>
+                                                    {/* For the conversation: a command only this exact command (one that writes files is asked each time), a tool or call only that one. */}
+                                                    {it.what !== 'plan' && !it.once && <Tooltip title={it.what === 'shell' ? 'Runs this exact command again without asking, in this conversation only. Other commands still ask.' : it.what === 'write' ? 'File changes in this conversation go ahead without asking.' : 'This same action goes ahead without asking, in this conversation only.'}>
+                                                        <Button size="small" disabled={decidingIds.includes(it.id)} onClick={() => void decide(it.id, 'session')}>{it.what === 'shell' ? 'Approve this command for the conversation' : 'Approve for this conversation'}</Button></Tooltip>}
+                                                    <Button size="small" danger icon={<CloseOutlined />} disabled={decidingIds.includes(it.id)} onClick={() => void decide(it.id, 'reject')}>{it.what === 'plan' ? 'Change it' : 'Reject'}</Button>
+                                                    {it.once && it.what === 'shell' && <Typography.Text type="secondary" style={{ fontSize: 12 }}>This command can change files: it is asked each time.</Typography.Text>}</Space>}
                                         </div>
                                             : <div key={it.seq} className={`agent-note${it.error ? ' agent-error' : ''}`}>{it.text}</div>)}
                             {busy && <div className="agent-note"><Spin size="small" /> Working…</div>}
@@ -214,6 +251,7 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
                             {busy ? <Tooltip title="Stop"><Button danger icon={<StopOutlined />} aria-label="Stop the agent" onClick={() => current && void api.agentAbort(current)} /></Tooltip>
                                 : <Tooltip title="Send"><Button type="primary" icon={<SendOutlined />} aria-label="Send" disabled={!ready || !text.trim()} onClick={() => void send()} /></Tooltip>}
                         </div>}
+                        {makingChat && <Typography.Text type="secondary" role="status" style={{ fontSize: 12, marginTop: 4 }}><Spin size="small" /> Starting the conversation…{queuedSend ? ' Your message is sent as soon as it is ready.' : ' Enter sends your message as soon as it is ready.'}</Typography.Text>}
                     </div>) },
                 { key: 'changes', label: <span>Changes{changes ? <Tag bordered={false} color="gold" style={{ marginLeft: 6, marginInlineEnd: 0 }}>{changes}</Tag> : null}</span>, children: <AgentChanges session={current} active={open && tab === 'changes'} version={changes + events.length} /> },
                 { key: 'browser', label: 'Browser', children: <AgentBrowser active={open && tab === 'browser'} /> },

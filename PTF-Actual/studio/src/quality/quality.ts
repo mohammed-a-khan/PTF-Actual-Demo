@@ -245,22 +245,38 @@ export function buildQuality(input: QualityInput): QualityReport {
     const counts = { 'new-failure': 0, failing: 0, flaky: 0, fixed: 0, stable: 0, skipped: 0, quarantined: 0 } as QualityReport['counts'];
     for (const s of scenarios) { counts[s.cls]++; if (s.quarantined) counts.quarantined++; }
 
-    return { runs: runs.map((r) => r.run), scenarios, groups: groupList, gate: evaluateGate([...runs].reverse().find((r) => !r.run.debug) ?? null, scenarios, input.gate), counts };
+    return { runs: runs.map((r) => r.run), scenarios, groups: groupList, gate: evaluateGate([...runs].reverse().find((r) => !r.run.debug) ?? null, scenarios, input.gate, new Set(runs.filter((r) => r.run.debug).map((r) => r.run.id))), counts };
 }
 
-/** The quality gate on the latest run: pass rate, no new failures, flaky limit (quarantined scenarios left out when set). */
-export function evaluateGate(latest: { run: QualityRun; summary: RunSummary } | null, scenarios: QualityScenario[], g: GateSettings): QualityReport['gate'] {
+/**
+ * The quality gate: every scenario in scope (the runs of the window, of the project chosen) is judged by its latest
+ * result, so a run of only some scenarios (one chosen scenario, "Rerun failed") does not hide a failure another
+ * scenario still has. Debug runs are not judged. The pass rate says how many results came from the latest run and
+ * how many from earlier runs (and how many of those failed). Quarantined scenarios are left out when set.
+ */
+export function evaluateGate(latest: { run: QualityRun; summary: RunSummary } | null, scenarios: QualityScenario[], g: GateSettings, debugRuns: ReadonlySet<string> = new Set()): QualityReport['gate'] {
     if (!latest) return { ok: false, run: null, rules: [{ name: 'Results', ok: false, detail: 'No runs yet.' }] };
-    const q = new Set(scenarios.filter((s) => s.quarantined).map((s) => s.key));
-    const counted = (latest.summary.scenarios as ScenarioResult[]).filter((s) => !(g.ignoreQuarantined && q.has(`${s.feature}\u0000${s.name}`)));
-    const passed = counted.filter((s) => s.status === 'passed').length;
-    const ran = counted.filter((s) => normStatus(s.status) !== 'skipped').length;
+    const quarantined = scenarios.filter((s) => s.quarantined).length;
+    const inScope = scenarios.filter((s) => !(g.ignoreQuarantined && s.quarantined));
+    // Each scenario's latest result that counts (not skipped, not from a debug run).
+    const judged = inScope.map((s) => ({ s, r: [...s.results].reverse().find((x) => x.status !== 'skipped' && !debugRuns.has(x.run)) }))
+        .filter((x): x is { s: QualityScenario; r: QualityResult } => !!x.r);
+    const ran = judged.length;
+    const passed = judged.filter((x) => x.r.status === 'passed').length;
     const rate = ran ? Math.round((passed / ran) * 1000) / 10 : 0;
-    const inRun = new Set(counted.map((s) => `${s.feature}\u0000${s.name}`));
-    const newFails = scenarios.filter((s) => s.cls === 'new-failure' && inRun.has(s.key) && s.lastRun === latest.run.id);
-    const flaky = scenarios.filter((s) => s.cls === 'flaky' && inRun.has(s.key));
+    const inLatest = judged.filter((x) => x.r.run === latest.run.id).length;
+    const earlier = judged.filter((x) => x.r.run !== latest.run.id);
+    const earlierFailed = earlier.filter((x) => x.r.status === 'failed').length;
+    const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+    const scope = !earlier.length ? '' : `: ${inLatest} from the last run, ${earlier.length} from ${earlier.length === 1 ? 'an earlier run' : 'earlier runs'}${earlierFailed ? ` – ${earlierFailed === earlier.length ? (earlierFailed === 1 ? 'a failure' : 'all failed') : `${earlierFailed} failed`}` : ''}`;
+    const notes = [quarantined && g.ignoreQuarantined ? 'quarantined left out' : ''].filter(Boolean);
+    const judgedKeys = new Set(judged.map((x) => x.s.key));
+    // A new failure or a flaky scenario still counts until a later result says otherwise (not only when it was in the last run).
+    const newFails = judged.filter((x) => x.s.cls === 'new-failure' && x.r.status === 'failed').map((x) => x.s);
+    const flaky = inScope.filter((s) => s.cls === 'flaky' && judgedKeys.has(s.key));
     const rules: GateRule[] = [
-        { name: `Pass rate at least ${g.minPassRate}%`, ok: ran > 0 && rate >= g.minPassRate, detail: ran ? `${rate}% (${passed} of ${ran}${q.size && g.ignoreQuarantined ? ', quarantined left out' : ''})` : 'Nothing ran.' },
+        { name: `Pass rate at least ${g.minPassRate}%`, ok: ran > 0 && rate >= g.minPassRate,
+            detail: ran ? `${rate}% (${passed} of ${plural(ran, 'scenario', 'scenarios')}, each by its latest result${scope}${notes.length ? `; ${notes.join('; ')}` : ''})` : 'Nothing ran.' },
     ];
     if (g.noNewFailures) rules.push({ name: 'No new failures', ok: newFails.length === 0, detail: newFails.length ? newFails.map((s) => s.name).slice(0, 5).join(', ') + (newFails.length > 5 ? ` and ${newFails.length - 5} more` : '') : 'None.' });
     if (g.maxFlaky !== null) rules.push({ name: `At most ${g.maxFlaky} flaky`, ok: flaky.length <= g.maxFlaky, detail: `${flaky.length} flaky` });

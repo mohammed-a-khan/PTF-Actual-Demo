@@ -11,6 +11,7 @@ import { errText } from '../state';
 import { Markdown } from './Markdown';
 import { agentsApi, EvalRunSummaryView, EvalRunView, EvalsView } from '../agents-api';
 import { askChangedElsewhere, isChangedElsewhere } from './ChangedElsewhere';
+import { evalCheckProblem, evalPromptProblem, type EvalCheckLike } from '../agents-checks';
 
 /** The model a run used: as recorded (newer runs), else the agent's own model, else "not recorded" (older runs). */
 export const runModel = (r: EvalRunSummaryView): string => r.models?.length ? r.models.join(', ') : r.subject.model ?? 'not recorded';
@@ -25,18 +26,23 @@ const fresh = (k: EvalCheckDef['kind']): EvalCheckDef => (k === 'contains' || k 
 const describe = (c: EvalCheckDef) => (c.kind === 'contains' ? `contains "${c.text}"` : c.kind === 'not-contains' ? `not "${c.text}"` : c.kind === 'matches' ? `matches /${c.pattern}/` : c.kind === 'tool-called' ? `calls ${c.tool}${c.args ? ` (${c.args})` : ''}` : c.kind === 'tool-not-called' ? `never ${c.tool}` : c.kind === 'cites-knowledge' ? 'cites knowledge' : c.kind === 'max-calls' ? `≤ ${c.calls} calls` : c.kind === 'max-seconds' ? `≤ ${c.seconds} s` : 'grader');
 
 function CheckEditor({ c, onChange, onRemove }: { c: EvalCheckDef; onChange: (c: EvalCheckDef) => void; onRemove: () => void }) {
+    const problem = evalCheckProblem(c as EvalCheckLike);
+    const st = problem ? 'error' as const : undefined;
     return (
+        <div>
         <Space wrap align="start" style={{ width: '100%' }}>
             <Select style={{ width: 250 }} value={c.kind} options={CHECKS} onChange={(k) => onChange(fresh(k))} />
-            {(c.kind === 'contains' || c.kind === 'not-contains') && <Input style={{ width: 300 }} value={c.text} placeholder="Text, as written (not case-sensitive)" onChange={(e) => onChange({ ...c, text: e.target.value })} />}
-            {c.kind === 'matches' && <Input className="mono" style={{ width: 300 }} value={c.pattern} placeholder="A regular expression, e.g. catalog/v\d+" onChange={(e) => onChange({ ...c, pattern: e.target.value })} />}
-            {(c.kind === 'tool-called' || c.kind === 'tool-not-called') && <Input style={{ width: 200 }} value={c.tool} placeholder="knowledge_search" onChange={(e) => onChange({ ...c, tool: e.target.value })} />}
+            {(c.kind === 'contains' || c.kind === 'not-contains') && <Input style={{ width: 300 }} status={st} aria-label="Text to look for" value={c.text} placeholder="Text, as written (not case-sensitive)" onChange={(e) => onChange({ ...c, text: e.target.value })} />}
+            {c.kind === 'matches' && <Input className="mono" style={{ width: 300 }} status={st} aria-label="Pattern" value={c.pattern} placeholder="A regular expression, e.g. catalog/v\d+" onChange={(e) => onChange({ ...c, pattern: e.target.value })} />}
+            {(c.kind === 'tool-called' || c.kind === 'tool-not-called') && <Input style={{ width: 200 }} status={st} aria-label="Tool name" value={c.tool} placeholder="knowledge_search" onChange={(e) => onChange({ ...c, tool: e.target.value })} />}
             {c.kind === 'tool-called' && <Input style={{ width: 200 }} value={c.args ?? ''} placeholder="Arguments contain (optional)" onChange={(e) => onChange({ ...c, args: e.target.value || undefined })} />}
-            {c.kind === 'max-calls' && <InputNumber min={1} value={c.calls} onChange={(v) => onChange({ ...c, calls: v ?? 1 })} />}
-            {c.kind === 'max-seconds' && <InputNumber min={1} value={c.seconds} onChange={(v) => onChange({ ...c, seconds: v ?? 1 })} />}
-            {c.kind === 'judge' && <Input.TextArea style={{ width: 420 }} autoSize={{ minRows: 2 }} value={c.criteria} placeholder="What a good answer does, e.g. It names the cause with evidence and does not change files." onChange={(e) => onChange({ ...c, criteria: e.target.value })} />}
+            {c.kind === 'max-calls' && <InputNumber min={1} status={st} value={c.calls} onChange={(v) => onChange({ ...c, calls: v ?? 1 })} />}
+            {c.kind === 'max-seconds' && <InputNumber min={1} status={st} value={c.seconds} onChange={(v) => onChange({ ...c, seconds: v ?? 1 })} />}
+            {c.kind === 'judge' && <Input.TextArea style={{ width: 420 }} status={st} aria-label="Grader's criteria" autoSize={{ minRows: 2 }} value={c.criteria} placeholder="What a good answer does, e.g. It names the cause with evidence and does not change files." onChange={(e) => onChange({ ...c, criteria: e.target.value })} />}
             <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label="Remove the check" onClick={onRemove} />
         </Space>
+        {problem && <Typography.Text type="danger" role="alert" style={{ fontSize: 12, display: 'block' }}>{problem}</Typography.Text>}
+        </div>
     );
 }
 
@@ -44,6 +50,12 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
     const { message, modal } = App.useApp();
     const [d, setD] = React.useState<EvalsView | null>(null);
     const [cases, setCases] = React.useState<EvalCaseDef[]>([]);
+    // The first problem that keeps the cases from being saved (each is also shown next to its field).
+    const casesProblem = cases.map((c, i) => {
+        const where = c.name?.trim() ? `"${c.name.trim()}"` : `case ${i + 1}`;
+        const p = evalPromptProblem(c.prompt) ?? (!c.checks.length ? 'Add at least one check.' : c.checks.map((k) => evalCheckProblem(k as EvalCheckLike)).find(Boolean) ?? null);
+        return p ? `${where}: ${p}` : null;
+    }).find(Boolean) ?? null;
     const [dirty, setDirty] = React.useState(false);
     // The version of the cases file these cases came from: a save over a newer one (another tab) is refused.
     const version = React.useRef<string | undefined>(undefined);
@@ -74,6 +86,8 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
     };
     const save = (): Promise<boolean> => {
         if (saving.current) return saving.current;
+        // Not saved while a field needs putting right (each says what, next to it).
+        if (casesProblem) { message.warning({ content: `Put right first: ${casesProblem}`, key: 'agent-evals-save' }); return Promise.resolve(false); }
         setSavingNow(true);
         saving.current = (async () => {
             try { return await put(false); }
@@ -106,7 +120,7 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
     return (
         <Drawer open width="min(980px, calc(100vw - 32px))" title={`Evaluations: ${agent.name}`} onClose={() => (dirty ? modal.confirm({ title: 'Discard the changes to the cases?', okText: 'Discard', okButtonProps: { danger: true }, cancelText: 'Keep editing', onOk: onClose }) : onClose())}
             extra={<Space>{d?.running ? <Button icon={<StopOutlined />} onClick={() => { void api.stopEvals(agent.id).then(load).catch((e) => message.error(errText(e))); }}>Stop</Button>
-                : <Button type="primary" icon={<PlayCircleOutlined />} disabled={!cases.length} loading={startingNow} onClick={() => void start()}>Run all cases</Button>}</Space>}>
+                : <Button type="primary" icon={<PlayCircleOutlined />} disabled={!cases.length || (dirty && !!casesProblem)} loading={startingNow} onClick={() => void start()}>Run all cases</Button>}</Space>}>
             {d?.problem && <Alert type="warning" showIcon message={d.problem} style={{ marginBottom: 12 }} />}
             <Typography.Paragraph type="secondary" style={{ fontSize: 13 }}>Run the cases after changing the agent: a case that passed before and fails now is a regression. <Tooltip title="Each case is a fresh session with the agent's instructions, tools and knowledge that cannot change anything."><QuestionCircleOutlined /></Tooltip></Typography.Paragraph>
             <Tabs size="small" activeKey={tab} onChange={setTab} items={[
@@ -116,7 +130,9 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
                             <Card key={i} size="small" title={<Input variant="borderless" value={c.name} placeholder={`Case ${i + 1} (name it)`} onChange={(e) => up(i, { name: e.target.value })} style={{ fontWeight: 600 }} />}
                                 extra={<Space><Tooltip title="Runs of this case (a pass rate, for answers that vary)"><InputNumber size="small" min={1} max={10} value={c.repeat ?? 1} addonAfter="×" style={{ width: 90 }} onChange={(v) => up(i, { repeat: v && v > 1 ? v : undefined })} /></Tooltip>
                                     <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label="Remove the case" onClick={() => { setCases((cs) => cs.filter((_, k) => k !== i)); setDirty(true); }} /></Space>}>
-                                <Input.TextArea autoSize={{ minRows: 2 }} value={c.prompt} placeholder="What the person asks the agent" onChange={(e) => up(i, { prompt: e.target.value })} style={{ marginBottom: 8 }} />
+                                <Input.TextArea autoSize={{ minRows: 2 }} value={c.prompt} placeholder="What the person asks the agent" aria-label="Prompt" status={evalPromptProblem(c.prompt) ? 'error' : undefined} onChange={(e) => up(i, { prompt: e.target.value })} style={{ marginBottom: evalPromptProblem(c.prompt) ? 0 : 8 }} />
+                                {evalPromptProblem(c.prompt) && <Typography.Text type="danger" role="alert" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>{evalPromptProblem(c.prompt)}</Typography.Text>}
+                                {!c.checks.length && <Typography.Text type="danger" role="alert" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>Add at least one check.</Typography.Text>}
                                 {agent.mode === 'mission' && !!agent.inputs?.length && <Space wrap style={{ marginBottom: 8 }}>{agent.inputs.map((inp) => <Input key={inp.key} addonBefore={inp.label} style={{ width: 280 }} value={c.inputs?.[inp.key] ?? ''} onChange={(e) => up(i, { inputs: { ...c.inputs, [inp.key]: e.target.value } })} />)}</Space>}
                                 <Space direction="vertical" style={{ width: '100%' }}>
                                     {c.checks.map((k, j) => <CheckEditor key={j} c={k} onChange={(nk) => up(i, { checks: c.checks.map((x, m) => (m === j ? nk : x)) })} onRemove={() => up(i, { checks: c.checks.filter((_, m) => m !== j) })} />)}
@@ -126,7 +142,8 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
                         ))}
                         <Space>
                             <Button icon={<PlusOutlined />} onClick={() => { setCases((cs) => [...cs, { id: `case-${Date.now().toString(36)}`, name: '', prompt: '', checks: [fresh('contains')] }]); setDirty(true); }}>Add a case</Button>
-                            <Button type="primary" disabled={!dirty} loading={savingNow} onClick={() => void save()}>Save cases</Button>
+                            <Button type="primary" disabled={!dirty || !!casesProblem} loading={savingNow} onClick={() => void save()}>Save cases</Button>
+                            {dirty && casesProblem && <Typography.Text type="danger" style={{ fontSize: 12 }}>Put right first: {casesProblem}</Typography.Text>}
                             <Typography.Text type="secondary" style={{ fontSize: 12 }}>{d?.file}</Typography.Text>
                         </Space>
                     </Space>

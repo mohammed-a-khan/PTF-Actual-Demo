@@ -105,6 +105,37 @@ test('buildQuality: classes, failure groups, quarantine, outline rows, gate', ()
     assert.equal(ok.gate.rules.length, 3);
 });
 
+test('gate: a run of only some scenarios does not hide another scenario\'s failing latest result', () => {
+    const runs = [
+        run(1, summary([{ name: 'Create', status: 'passed' }, { name: 'Price for <sku>_Iteration-1', status: 'failed', error: 'expected 12 to equal 13' }])),
+        // Only "Create" was chosen for this run.
+        run(2, summary([{ name: 'Create', status: 'passed' }])),
+    ];
+    const q = buildQuality({ runs, catalog, window: 30, gate: DEFAULT_GATE });
+    assert.equal(q.gate.ok, false);
+    assert.equal(q.gate.run, 'r2');
+    assert.equal(q.gate.rules[0].ok, false);
+    assert.match(q.gate.rules[0].detail, /^50% \(1 of 2 scenarios, each by its latest result: 1 from the last run, 1 from an earlier run – a failure\)/);
+    // A new failure still counts while no later result says otherwise.
+    assert.equal(q.gate.rules[1].ok, false);
+    assert.match(q.gate.rules[1].detail, /Price for/);
+    // Fixed later (by a run of that scenario only): the gate passes, every scenario judged by its latest result.
+    const fixed = buildQuality({ runs: [...runs, run(3, summary([{ name: 'Price for <sku>_Iteration-1', status: 'passed' }]))], catalog, window: 30, gate: DEFAULT_GATE });
+    assert.equal(fixed.gate.ok, true);
+    assert.match(fixed.gate.rules[0].detail, /^100% \(2 of 2 scenarios, each by its latest result: 1 from the last run, 1 from an earlier run\)/);
+    // Several from earlier runs, one of them failing.
+    const more = buildQuality({ runs: [run(1, summary([{ name: 'Create', status: 'passed' }, { name: 'Search', status: 'passed' }, { name: 'Price for <sku>_Iteration-1', status: 'failed', error: 'x' }])), run(2, summary([{ name: 'Create', status: 'passed' }]))], catalog, window: 30, gate: DEFAULT_GATE });
+    assert.match(more.gate.rules[0].detail, /^66\.7% \(2 of 3 scenarios, each by its latest result: 1 from the last run, 2 from earlier runs – 1 failed\)$/);
+    // A debug run is not judged: the earlier failure stands.
+    const debug = buildQuality({ runs: [...runs, run(3, summary([{ name: 'Price for <sku>_Iteration-1', status: 'passed' }]), { debug: true } as never)], catalog, window: 30, gate: DEFAULT_GATE });
+    assert.equal(debug.gate.ok, false);
+    assert.equal(debug.gate.run, 'r2');
+    // Quarantined scenarios are left out when set.
+    const q2 = buildQuality({ runs: [run(1, summary([{ name: 'Cancel', status: 'failed', error: 'x' }, { name: 'Create', status: 'passed' }])), run(2, summary([{ name: 'Create', status: 'passed' }]))], catalog, window: 30, gate: DEFAULT_GATE });
+    assert.equal(q2.gate.ok, true);
+    assert.match(q2.gate.rules[0].detail, /100% \(1 of 1 scenario, each by its latest result; quarantined left out\)/);
+});
+
 test('collectRuns: Studio runs and report folders on disk, without pull request runs or duplicates', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'quality-'));
     const write = (dir: string, data: unknown) => { fs.mkdirSync(path.join(root, dir), { recursive: true }); fs.writeFileSync(path.join(root, dir, 'report-data.json'), JSON.stringify(data)); };

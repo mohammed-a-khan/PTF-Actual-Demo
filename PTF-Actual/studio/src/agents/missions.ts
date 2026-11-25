@@ -264,7 +264,7 @@ export function teamTemplate(t: TeamMission & { profile?: AgentProfile }): Missi
         goal: (c) => `Goal: ${fill(t.goal, c.inputs)}\nReport with what proves it in verify.`,
         verify: (c, r) => {
             const v = t.verify ?? (writes ? { kind: 'tests', features: 'changed' } : { kind: 'report' });
-            if (v.kind === 'report') return { kind: 'report', why: 'The team mission ends with its report.' };
+            if (v.kind === 'report') return { kind: 'report', why: t.team?.length ? 'A read-only team mission: the lead\'s report is the result.' : 'A read-only mission: the report is the result.' };
             const features = v.features === 'changed' ? c.changedFiles.filter((f) => f.endsWith('.feature')) : v.features;
             const req: RunRequest = { project: c.inputs.project, env: c.inputs.env, headless: true, ...(features?.length ? { features } : {}), ...(v.tags ? { tags: fill(v.tags, c.inputs) } : {}), ...(v.scenarios?.length ? { scenarios: v.scenarios } : {}) };
             if (!req.features && !req.tags && !req.scenarios) {
@@ -294,7 +294,9 @@ import { cronMatches, parseCron } from './cron';
 export type MissionState = 'queued' | 'preparing' | 'working' | 'waiting' | 'verifying' | 'succeeded' | 'partial' | 'failed' | 'blocked' | 'over-budget' | 'stopped';
 export const FINISHED: MissionState[] = ['succeeded', 'partial', 'failed', 'blocked', 'over-budget', 'stopped'];
 
-export interface Verification { at: string; attempt: number; passed: boolean; why: string; runs: Array<{ id: string; state: string; passed?: number; failed?: number }>; failures: Array<{ name: string; error?: string }> }
+export interface Verification { at: string; attempt: number; passed: boolean; why: string;
+    /** Accepted on the report alone (a mission that only reads): nothing was run to verify it. */
+    reportOnly?: boolean; runs: Array<{ id: string; state: string; passed?: number; failed?: number }>; failures: Array<{ name: string; error?: string }> }
 export interface Checkpoint { id: string; kind: 'question' | 'plan'; question: string; content?: string; options?: string[]; at: string; answer?: string; answeredAt?: string; by?: string }
 
 export interface MissionRun {
@@ -311,7 +313,7 @@ export interface MissionRun {
     copy?: { rel: string; branch: string; base: string; dirtyAtStart?: boolean };
     commit?: string;
     changes: Array<{ path: string; status: string }>;
-    timeline: Array<{ at: string; text: string; kind: 'phase' | 'note' | 'tool' | 'verify' | 'ask' | 'error' | 'team' }>;
+    timeline: Array<{ at: string; text: string; kind: 'phase' | 'note' | 'tool' | 'verify' | 'ask' | 'error' | 'team'; refused?: boolean }>;
     checkpoints: Checkpoint[];
     /** Approvals the agent is waiting for now (shown in the mission; answered there or in the conversation). */
     approvals?: Array<{ id: string; title: string; detail: string; kind: string; session?: string; who?: string }>;
@@ -383,6 +385,8 @@ export class MissionEngine {
         try { this.runs = JSON.parse(fs.readFileSync(this.file, 'utf8')); } catch { this.runs = []; }
         // Missions of an earlier Studio run that had not finished: their agent is gone.
         for (const m of this.runs) if (!FINISHED.includes(m.state)) { m.reason = m.state === 'queued' ? 'The Studio was closed before the mission started.' : 'The Studio was closed while the mission was working.'; m.state = 'stopped'; m.endedAt ??= now(); }
+        // A finished mission waits for nothing (older files may still list its approvals).
+        for (const m of this.runs) if (FINISHED.includes(m.state) && m.approvals?.length) m.approvals = [];
         this.save();
     }
 
@@ -594,7 +598,7 @@ export class MissionEngine {
                 try {
                     const s = await this.d.agent.start({
                         title: `${m.title}: ${a.name}`, workflow,
-                        mission: { workdir: this.copyDir(m), isolated: !!m.copy, autoFiles: m.autonomy === 'autonomous', ...(m.unattended ? { unattended: true } : {}), profile, ...(profile.knowledge ? { knowledgeSources: profile.knowledge } : {}), ...(browser ? { browser } : {}), tools: this.tools(m, { browser, who: a.name }).filter((x) => ['tests_run', 'explore_note'].includes(x.name)), listener: (e) => this.onMemberEvent(m, entry, e), onCall: () => this.onCall(m) },
+                        mission: { workdir: this.copyDir(m), isolated: !!m.copy, autoFiles: m.autonomy === 'autonomous', ...(m.unattended ? { unattended: true } : {}), profile, ...(profile.knowledge ? { knowledgeSources: profile.knowledge } : {}), ...(browser ? { browser } : {}), tools: this.tools(m, { browser, who: a.name, groups: profile.tools }).filter((x) => ['tests_run', 'explore_note'].includes(x.name)), listener: (e) => this.onMemberEvent(m, entry, e), onCall: () => this.onCall(m) },
                     });
                     tt.session = s.id;
                     (live.members ??= new Map()).set(s.id, entry);
@@ -615,14 +619,37 @@ export class MissionEngine {
         return `${a.name} (${tt.state}):\n${answer.slice(0, 30000)}`;
     }
 
-    private onMemberEvent(m: MissionRun, entry: { task: TeamTask; last: string; done: (answer: string) => void }, e: AgentEvent) {
+    private onMemberEvent(m: MissionRun, entry: { task: TeamTask; last: string; done: (answer: string) => void; lastTool?: string }, e: AgentEvent) {
+        // Several tasks of the same member (two explorers): each is named apart ("Application explorer 2").
+        const same = (m.team ?? []).filter((x) => x.member === entry.task.member);
+        const who = same.length > 1 ? `${entry.task.name} ${same.indexOf(entry.task) + 1}` : entry.task.name;
         if (e.type === 'assistant' && e.text.trim()) entry.last = e.text;
         else if (e.type === 'tool-start' && !FINISHED.includes(m.state)) {
             const last = m.timeline[m.timeline.length - 1];
-            const text = `${entry.task.name}: ${e.tool} ${short(e.args.replace(/\s+/g, ' '), 120)}`;
-            if (!(last?.kind === 'tool' && last.text.startsWith(`${entry.task.name}: ${e.tool}`))) { m.timeline.push({ at: now(), text, kind: 'tool' }); }
-        } else if (e.type === 'error' || (e.type === 'info' && (e.text.startsWith('Possible prompt injection') || e.text.startsWith('Refused (') || e.text.startsWith('Tool server ')))) this.note(m, `${entry.task.name}: ${e.text}`, e.type === 'info' && e.text.startsWith('Refused (') ? 'ask' : 'error');
+            const text = `${who}: ${e.tool} ${short(e.args.replace(/\s+/g, ' '), 120)}`;
+            // A repeat of this member's own last step is left out; another member's step never is.
+            if (!(last?.kind === 'tool' && !last.refused && entry.lastTool === e.tool && last.text.startsWith(`${who}: ${e.tool}`))) { m.timeline.push({ at: now(), text, kind: 'tool' }); }
+            entry.lastTool = e.tool;
+            this.toolEntry(m).set(e.id, m.timeline[m.timeline.length - 1]);
+        } else if (e.type === 'tool-end') this.markRefused(m, e);
+        else if (e.type === 'error' || (e.type === 'info' && (e.text.startsWith('Possible prompt injection') || e.text.startsWith('Refused (') || e.text.startsWith('Tool server ')))) this.note(m, `${who}: ${e.text}`, e.type === 'info' && e.text.startsWith('Refused (') ? 'ask' : 'error');
         else if (e.type === 'idle') entry.done(entry.last.trim() || `${entry.task.name} stopped without an answer.`);
+    }
+
+    /** The timeline entry of each tool call (by call id), to mark it when the call is refused. */
+    private toolEntries = new Map<string, Map<string, MissionRun['timeline'][number]>>();
+    private toolEntry(m: MissionRun) { let x = this.toolEntries.get(m.id); if (!x) { x = new Map(); this.toolEntries.set(m.id, x); } if (x.size > 2000) x.clear(); return x; }
+    /** A call the Studio refused (permissions, read only, unattended, the person): marked in the timeline. */
+    private markRefused(m: MissionRun, e: AgentEvent) {
+        if (e.type !== 'tool-end' || !REFUSED_RESULT.test(e.result)) return;
+        // A tool this agent is not given (its tool groups leave it out): said in the timeline.
+        const missing = /^Tool '([^']+)' does not exist/.exec(e.result);
+        if (missing) { this.note(m, `Refused: ${missing[1]} is not available to this agent (its tool groups leave it out).`, 'ask'); return; }
+        const at = this.toolEntries.get(m.id)?.get(e.id);
+        if (!at || at.refused) return;
+        at.refused = true;
+        at.text = `${at.text} — refused: ${short(e.result.replace(/^Denied by preToolUse hook:\s*/, '').replace(/\s+/g, ' '), 160)}`;
+        this.changed(m);
     }
 
     private shotsDir(id: string) { return path.join(this.d.gitDir, 'cs-studio', 'mission-shots', id); }
@@ -654,7 +681,7 @@ export class MissionEngine {
         }
         m.exploration.notes.push(n);
         this.note(m, `${who ? `${who}: ` : ''}${a.kind === 'bug' ? `Bug (${n.severity})` : a.kind === 'covered' ? 'Covered' : a.kind[0].toUpperCase() + a.kind.slice(1)}: ${short(title, 200)}`, a.kind === 'bug' ? 'error' : 'note');
-        return `Logged (${m.exploration.notes.length} notes).${extra}`;
+        return `Logged (${m.exploration.notes.length} note${m.exploration.notes.length === 1 ? '' : 's'}).${extra}`;
     }
 
     /** The mission's sessions: the lead's and its working members'. */
@@ -679,7 +706,7 @@ export class MissionEngine {
     private liveOf(id: string) { return this.live.get(id); }
 
     /** The mission's own tools. */
-    private tools(m: MissionRun, o: { browser?: Pick<StudioBrowser, 'screenshot' | 'pageNow'>; who?: string } = {}): ToolDef[] {
+    private tools(m: MissionRun, o: { browser?: Pick<StudioBrowser, 'screenshot' | 'pageNow'>; who?: string; groups?: string[] } = {}): ToolDef[] {
         const obj = (props: Record<string, unknown>, required: string[] = []) => ({ type: 'object', properties: props, required });
         const tpl = this.live.get(m.id)?.template;
         const team = this.teamOf(tpl ?? ({} as MissionTemplate));
@@ -709,7 +736,27 @@ export class MissionEngine {
                 handler: async (a: MissionReport) => {
                     if (!['done', 'partial', 'blocked'].includes(a.outcome)) return 'outcome: done, partial or blocked.';
                     if (tpl?.explore && a.outcome !== 'blocked' && !(m.exploration?.notes ?? []).some((n) => n.kind === 'covered')) return 'Not reported: log the screens and flows you covered with explore_note (kind covered) first, and each finding as you go.';
-                    m.report = { outcome: a.outcome, summary: String(a.summary ?? '').slice(0, 20000), ...(Array.isArray(a.findings) ? { findings: a.findings.slice(0, 200) } : {}), ...(a.verify ? { verify: a.verify } : {}), ...(Array.isArray(a.bugs) ? { bugs: a.bugs.slice(0, 50) } : {}) };
+                    // A mission that only reads changed nothing: its report cannot say it fixed or updated something,
+                    // nor that tests pass when its own runs failed. Asked once to correct it; then said in the report.
+                    let summary = String(a.summary ?? '').slice(0, 20000);
+                    const live0 = this.live.get(m.id) as { claimPending?: MissionReport } | undefined;
+                    const findings = Array.isArray(a.findings) ? a.findings.slice(0, 200) : undefined;
+                    if (!m.copy) {
+                        const live = this.live.get(m.id) as { claimAsked?: boolean; agentRuns?: Array<{ failed: number }> } | undefined;
+                        const lastRunFailed = (live?.agentRuns?.at(-1)?.failed ?? 0) > 0;
+                        const claims = findings?.some((f) => f && f.fixed) || /\b(fixed|updated|changed|edited|modified|corrected|rewrote|renamed|replaced)\b/i.test(summary) || (lastRunFailed && /\b(passes|passed|is green|now pass(es)?)\b/i.test(summary));
+                        if (claims && live && !live.claimAsked) {
+                            live.claimAsked = true;
+                            // Kept as it would be accepted: an agent that stops instead of reporting again ends with it.
+                            (live as { claimPending?: MissionReport }).claimPending = { outcome: a.outcome, summary: `Nothing was changed (this mission only reads)${lastRunFailed ? ' and its last test run failed' : ''}. The agent reported: ${summary}`, ...(findings ? { findings: findings.map((f) => ({ ...f, fixed: false })) } : {}), ...(Array.isArray(a.bugs) ? { bugs: a.bugs.slice(0, 50) } : {}) };
+                            this.note(m, 'The report says something was fixed or passes, but this mission only reads: asked the agent to correct it.', 'note');
+                            return `Not reported: this mission only reads, so nothing was changed${lastRunFailed ? ' and your last test run failed' : ''}. Report what you found and what should be changed (findings with fixed: false), without saying it was fixed or passes. Call mission_report again.`;
+                        }
+                        if (findings) for (const f of findings) if (f && f.fixed) f.fixed = false;
+                        if (claims) summary = `Nothing was changed (this mission only reads)${lastRunFailed ? ' and its last test run failed' : ''}. The agent reported: ${summary}`;
+                    }
+                    if (live0) live0.claimPending = undefined;
+                    m.report = { outcome: a.outcome, summary, ...(findings ? { findings } : {}), ...(a.verify ? { verify: a.verify } : {}), ...(Array.isArray(a.bugs) ? { bugs: a.bugs.slice(0, 50) } : {}) };
                     this.note(m, `Reported ${a.outcome}: ${short(m.report.summary, 300)}`, 'phase');
                     return a.outcome === 'blocked' ? 'Reported as blocked. Stop now.' : 'Reported. The Studio verifies it now in your copy: stop and wait; if it fails you will get the failures.';
                 },
@@ -751,10 +798,18 @@ export class MissionEngine {
                 description: m.copy ? 'Run tests with the framework in YOUR COPY of the repository and wait for the result: features (repository-relative paths), tags, scenario names; project and environment. Returns counts and each failure.' : 'Run tests with the framework and wait for the result.',
                 parameters: obj({ project: { type: 'string' }, env: { type: 'string' }, features: { type: 'array', items: { type: 'string' } }, tags: { type: 'string' }, scenarios: { type: 'array', items: { type: 'string' } }, scenario: { type: 'string' } }, ['project', 'env']),
                 handler: async (a: { project: string; env: string; features?: string[]; tags?: string; scenarios?: string[]; scenario?: string }) => {
+                    // Only for an agent with the "Run tests" tool group (the host does not offer it otherwise; checked again here).
+                    const groups = o.groups ?? tpl?.profile?.tools;
+                    if (groups && !groups.includes('tests')) {
+                        this.note(m, `Refused: ${o.who ?? tpl?.profile?.name ?? 'the agent'} may not run tests (no "Run tests" tool group).`, 'ask');
+                        return `Refused: this agent is not allowed to run tests (it needs the "Run tests" tool group; its tool groups: ${groups.join(', ')}).`;
+                    }
                     const req: RunRequest = { project: a.project, env: a.env, headless: true, ...(a.features?.length ? { features: a.features } : {}), ...(a.tags ? { tags: a.tags } : {}), ...(a.scenarios?.length ? { scenarios: a.scenarios } : {}), ...(a.scenario ? { scenario: a.scenario } : {}) };
                     this.note(m, `Agent runs tests: ${describe(req)}`, 'tool');
                     const r = await this.d.runTests(req, m.copy?.rel);
                     const s = r.summary;
+                    const lv = this.live.get(m.id) as { agentRuns?: Array<{ id?: string; failed: number }> } | undefined;
+                    if (lv) (lv.agentRuns ??= []).push({ id: r.id, failed: s ? s.failed : 1 });
                     return { run: r.id, state: r.state, ...(r.message ? { message: r.message } : {}), passed: s?.passed, failed: s?.failed, skipped: s?.skipped, failures: (s?.scenarios ?? []).filter((x) => x.status === 'failed').map((x) => ({ scenario: x.name, feature: x.feature, error: x.error?.slice(0, 3000) })) };
                 },
             },
@@ -766,8 +821,10 @@ export class MissionEngine {
         if (e.type === 'tool-start' && !e.tool.startsWith('mission_') && e.tool !== 'tests_run' && e.tool !== 'memory_propose') {
             // A few tool names, not every call: the timeline stays readable.
             const last = m.timeline[m.timeline.length - 1];
-            if (!(last?.kind === 'tool' && last.text.startsWith(e.tool))) { m.timeline.push({ at: now(), text: `${e.tool} ${short(e.args.replace(/\s+/g, ' '), 140)}`, kind: 'tool' }); }
-        } else if (e.type === 'error') this.note(m, `Agent error: ${e.text}`, 'error');
+            if (!(last?.kind === 'tool' && !last.refused && last.text.startsWith(e.tool))) { m.timeline.push({ at: now(), text: `${e.tool} ${short(e.args.replace(/\s+/g, ' '), 140)}`, kind: 'tool' }); }
+            this.toolEntry(m).set(e.id, m.timeline[m.timeline.length - 1]);
+        } else if (e.type === 'tool-end') this.markRefused(m, e);
+        else if (e.type === 'error') this.note(m, `Agent error: ${e.text}`, 'error');
         else if (e.type === 'info' && e.text.startsWith('Refused (')) this.note(m, e.text, 'ask');
         else if (e.type === 'info' && (e.text.startsWith('Possible prompt injection') || e.text.startsWith('Tool server '))) this.note(m, e.text, 'error');
         else if (e.type === 'idle') void this.onIdle(m).catch((err) => this.finish(m, 'failed', `Verification failed to run: ${(err as Error).message}`));
@@ -861,6 +918,9 @@ export class MissionEngine {
         if (!live || m.state !== 'working' || live.idleBusy || live.spent) return;
         live.idleBusy = true;
         try {
+            // Asked to correct a report that claimed a fix, it stopped instead: the report as corrected by the Studio.
+            const pendingClaim = (live as { claimPending?: MissionReport }).claimPending;
+            if (!m.report && pendingClaim) { m.report = pendingClaim; (live as { claimPending?: MissionReport }).claimPending = undefined; this.note(m, `Reported ${m.report.outcome} (corrected by the Studio): ${short(m.report.summary, 300)}`, 'phase'); }
             if (!m.report) {
                 if (live.nudges >= 2) return await this.finish(m, 'failed', 'The agent stopped without reporting a result.');
                 live.nudges++;
@@ -897,7 +957,7 @@ export class MissionEngine {
         const plan = live.template.verify(ctx, m.report!);
         this.note(m, `Verifying (attempt ${m.used.attempts} of ${m.budget.attempts}): ${plan.why}`, 'verify');
         const v: Verification = { at: now(), attempt: m.used.attempts, passed: false, why: plan.why, runs: [], failures: [] };
-        if (plan.kind === 'report') v.passed = true;
+        if (plan.kind === 'report') { v.passed = true; v.reportOnly = true; }
         else if (plan.kind === 'tests') {
             for (let i = 0; i < plan.repeat; i++) {
                 const r = await this.d.runTests(plan.request, m.copy?.rel);
@@ -912,7 +972,9 @@ export class MissionEngine {
             }
         } else v.failures = [{ name: 'proof', error: plan.why }];
         m.verifications.push(v);
-        this.note(m, v.passed ? `Verified: ${plan.kind === 'tests' ? `${v.runs.length} run(s) passed` : 'report accepted'}.` : `Verification failed: ${v.failures.map((f) => `${f.name}${f.error ? ` — ${short(f.error.replace(/\s+/g, ' '), 200)}` : ''}`).join('; ')}`, 'verify');
+        this.note(m, v.passed ? (plan.kind === 'tests' ? `Verified: ${v.runs.length} run(s) passed.` : 'Report accepted (nothing was run to verify it).') : `Verification failed: ${v.failures.map((f) => `${f.name}${f.error ? ` — ${short(f.error.replace(/\s+/g, ' '), 200)}` : ''}`).join('; ')}`, 'verify');
+        // Accepted on its report alone: said so (nothing was run, and a mission that only reads changed nothing).
+        if (v.passed && v.reportOnly) return this.finish(m, m.report!.outcome === 'partial' ? 'partial' : 'succeeded', `${m.report!.outcome === 'partial' ? 'Partly done' : 'Done'}: reported${m.copy ? '' : ' (the mission only reads: nothing was changed)'}; no test run verifies it.`);
         if (v.passed) return this.finish(m, m.report!.outcome === 'partial' ? 'partial' : 'succeeded', m.report!.outcome === 'partial' ? 'Partly done; what was done is verified.' : 'Done and verified.');
         if (m.used.attempts >= m.budget.attempts) return this.finish(m, 'failed', `The work did not pass verification after ${m.used.attempts} attempt(s).`);
         // No model calls left to fix it with.
@@ -948,13 +1010,16 @@ export class MissionEngine {
                 m.changes = await this.changedFiles(m);
                 if (m.changes.length) {
                     const id = await identity(this.d.repoRoot, this.d.userName);
-                    const msg = `${m.title}\n\n${m.report?.summary ? `${m.report.summary.slice(0, 3000)}\n\n` : ''}Mission ${m.id}: ${state}${m.verifications.at(-1)?.passed ? ' (verified)' : ''}.`;
+                    const msg = `${m.title}\n\n${m.report?.summary ? `${m.report.summary.slice(0, 3000)}\n\n` : ''}Mission ${m.id}: ${state}${m.verifications.at(-1)?.passed && !m.verifications.at(-1)?.reportOnly ? ' (verified)' : ''}.`;
                     const c = await runGit([...id, 'commit', '-q', '--no-verify', '-m', msg], { cwd: this.copyDir(m), allowFailure: true });
                     if (c.code === 0) m.commit = (await runGit(['rev-parse', 'HEAD'], { cwd: this.copyDir(m) })).stdout.trim();
                     else m.timeline.push({ at: now(), text: `Could not commit the work: ${c.stderr.trim().split('\n').pop()}`, kind: 'error' });
                 }
             } catch (e) { m.timeline.push({ at: now(), text: `Could not collect the changes: ${(e as Error).message}`, kind: 'error' }); }
         }
+        // What the agent waited for is closed with the mission: refused for the agent, no longer offered to the person.
+        for (const a of m.approvals ?? []) { try { this.d.agent.decide?.(a.session ?? m.session ?? '', a.id, 'reject'); } catch { /* already gone */ } }
+        m.approvals = [];
         m.state = state; m.reason = reason; m.endedAt = now();
         // The reason may already start with the state's name ("Over budget: …"): said once.
         const said = reason.toLowerCase().startsWith(`${label(state).toLowerCase()}:`) ? reason : `${label(state)}: ${reason}`;
@@ -994,6 +1059,7 @@ export class MissionEngine {
     /** Approve or reject what the agent waits for, from the mission. */
     approve(id: string, approval: string, decision: 'once' | 'session' | 'reject', by: string) {
         const m = this.get(id);
+        if (m && FINISHED.includes(m.state)) throw new Error(`The mission has ended (${label(m.state).toLowerCase()}): it waits for no approval any more.`);
         if (!m?.session || !this.d.agent.decide || !(m.approvals ?? []).some((a) => a.id === approval)) throw new Error('No such approval waiting (it may have been answered).');
         const a = m.approvals!.find((x) => x.id === approval)!;
         this.d.agent.decide(a.session ?? m.session, approval, decision);
@@ -1098,6 +1164,9 @@ export class MissionEngine {
     }
 }
 
+/** A tool result that says the call was refused, not that the tool failed. */
+const REFUSED_RESULT = /^(Denied by preToolUse hook|Refused|Not allowed|Denied|The person did not approve|The agent "[^"]*" is not allowed|This session only reads|Not done: this is an unattended run|Tool '[^']*' does not exist)/;
+
 export function label(s: MissionState): string {
     return ({ queued: 'Queued', preparing: 'Preparing', working: 'Working', waiting: 'Waiting for you', verifying: 'Verifying', succeeded: 'Done', partial: 'Partly done', failed: 'Failed', blocked: 'Blocked', 'over-budget': 'Over budget', stopped: 'Stopped' } as Record<MissionState, string>)[s];
 }
@@ -1194,12 +1263,12 @@ export function missionJUnit(m: MissionRun): string {
 /** The mission's result as Markdown (a pipeline summary, a pull request, a work item). */
 export function missionMarkdown(m: MissionRun): string {
     const v = m.verifications.at(-1);
-    const out = [`## ${m.title}`, '', `**${label(m.state)}**${m.reason ? ` — ${m.reason}` : ''}${v?.passed ? ' · verified by CS Test Studio' : ''}`, '',
+    const out = [`## ${m.title}`, '', `**${label(m.state)}**${m.reason ? ` — ${m.reason}` : ''}${v?.passed && !v.reportOnly ? ' · verified by CS Test Studio' : ''}`, '',
         `Work: ${Math.round(m.used.activeMs / 1000)} s of ${m.budget.minutes} min · ${m.used.modelCalls} of ${m.budget.modelCalls} model calls · ${m.used.attempts} of ${m.budget.attempts} verification attempt(s)${m.copy ? ` · branch \`${m.copy.branch}\`` : ''}`, ''];
     if (m.report) out.push('### Report', '', m.report.summary, '');
     if (m.report?.findings?.length) out.push('### Findings', '', '| Scenario | Cause | Finding | Fixed |', '|---|---|---|---|', ...m.report.findings.map((f) => `| ${(f.scenario ?? '—').replace(/\|/g, '\\|')} | ${f.cause ?? ''} | ${f.detail.replace(/\|/g, '\\|').replace(/\n/g, ' ')} | ${f.fixed ? 'yes' : ''} |`), '');
     if (m.report?.bugs?.length) out.push('### Application bugs found', '', ...m.report.bugs.map((b) => `- **${b.title}**${b.filed ? ` (bug ${b.filed.id})` : ''}: ${b.detail}`), '');
-    if (m.verifications.length) out.push('### Verification', '', ...m.verifications.map((x) => `- Attempt ${x.attempt}: ${x.passed ? 'passed' : 'failed'} — ${x.why}${x.runs.length ? ` (${x.runs.map((r) => `run ${r.id}: ${r.passed ?? 0} passed, ${r.failed ?? 0} failed`).join('; ')})` : ''}${x.failures.length ? `\n  ${x.failures.map((f) => `${f.name}${f.error ? `: ${f.error.split('\n')[0].slice(0, 300)}` : ''}`).join('\n  ')}` : ''}`), '');
+    if (m.verifications.length) out.push('### Verification', '', ...m.verifications.map((x) => `- Attempt ${x.attempt}: ${x.reportOnly ? 'report accepted (not run)' : x.passed ? 'passed' : 'failed'} — ${x.why}${x.runs.length ? ` (${x.runs.map((r) => `run ${r.id}: ${r.passed ?? 0} passed, ${r.failed ?? 0} failed`).join('; ')})` : ''}${x.failures.length ? `\n  ${x.failures.map((f) => `${f.name}${f.error ? `: ${f.error.split('\n')[0].slice(0, 300)}` : ''}`).join('\n  ')}` : ''}`), '');
     if (m.changes.length) out.push('### Changes', '', ...m.changes.map((c) => `- ${c.status === 'A' ? 'new' : c.status === 'D' ? 'deleted' : 'changed'}: \`${c.path}\``), '');
     return out.join('\n');
 }

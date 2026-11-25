@@ -58,6 +58,11 @@ function findItem(items: ApiItemDef[], id: string): ApiItemDef | null {
     return null;
 }
 const allRequests = (items: ApiItemDef[]): ApiRequestDef[] => items.flatMap((it) => (it.kind === 'folder' ? allRequests(it.items) : [it]));
+/** A request named in a message: "request 1 "New request"" when another request has the same name, else its name in quotes. */
+const requestRefOf = (c: ApiCollectionDef, r: ApiRequestDef): string => {
+    const all = allRequests(c.items), name = r.name.trim() || 'the request';
+    return all.filter((x) => x.name.trim() === r.name.trim()).length > 1 ? `request ${all.indexOf(r) + 1} "${name}"` : `"${name}"`;
+};
 const countRequests = (items: ApiItemDef[]): number => items.reduce((n, it) => n + (it.kind === 'folder' ? countRequests(it.items) : 1), 0);
 
 // ---------------------------------------------------------------- small editors
@@ -661,7 +666,7 @@ export function ApiWorkspace() {
     const noAddress = (r: ApiRequestDef) => !r.url.trim() && !(open?.collection.baseUrl ?? '').trim();
     const unaddressed = open ? allRequests(open.collection.items).find(noAddress) : undefined;
     const saveProblem = open ? collectionNameProblem(open.collection.name, open.project, (meta?.collections ?? []).filter((c) => c.project === open.project), open.file)
-        ?? (unnamed ? 'give every request a name.' : null) ?? (unaddressed ? `give "${unaddressed.name.trim() || 'the request'}" an address (URL), or the collection a base URL.` : null) ?? fields.problem : null;
+        ?? (unnamed ? 'give every request a name.' : null) ?? (unaddressed ? `give ${requestRefOf(open.collection, unaddressed)} an address (URL), or the collection a base URL.` : null) ?? fields.problem : null;
     // Loads answer in any order: only the last one asked for is shown (a Discard's reload never replaces the next collection).
     const loadSeq = React.useRef(0);
     const loadFile = (file: string, want: string | null, quiet = false) => {
@@ -706,7 +711,8 @@ export function ApiWorkspace() {
         void loadFile(open.file, sel, true);
     };
     // Back/Forward between requests and tabs of this collection keeps its changes (nothing to ask).
-    useUnsaved('api-collection', !!open?.dirty, `the API collection "${open?.collection.name ?? ''}"`, { lostOnLeave: true, save: saveProblem ? undefined : () => save(), discard,
+    // The leave prompt offers Save when the collection can be saved; when not, it says why.
+    useUnsaved('api-collection', !!open?.dirty, `the API collection "${open?.collection.name ?? ''}"${saveProblem ? ` (cannot be saved yet: ${saveProblem.replace(/\.$/, '')})` : ''}`, { lostOnLeave: true, save: saveProblem ? undefined : () => save(), discard,
         keeps: (to) => !!open?.file && apiRoute(to).file === open.file });
     const [find, setFind] = React.useState('');
     const [feature, setFeature] = React.useState(false);
@@ -1053,6 +1059,11 @@ export function ApiWorkspace() {
                     <div className="toolbar">
                         <Typography.Text type="secondary" style={{ flex: 1, fontSize: 12 }} ellipsis>{open.file ?? `Not saved yet — will be test/${open.project}/api/…`}</Typography.Text>
                         <Tooltip title={saveProblem ? `Cannot be saved yet: ${saveProblem}` : undefined}><Button size="small" icon={<SaveOutlined />} type={open.dirty ? 'primary' : 'default'} disabled={!!unnamed || !!unaddressed || !!fields.problem} onClick={() => void save()}>Save</Button></Tooltip>
+                        {/* Why Save is off, said next to it (not only on hover); a click shows the request to fix. */}
+                        {saveProblem && (unaddressed || unnamed) && <Typography.Link type="danger" style={{ fontSize: 12, maxWidth: 320 }} className="ap-save-why" ellipsis
+                            onClick={() => setSel((unnamed ?? unaddressed)!.id)} aria-label="Why Save is off">
+                            {unnamed ? 'To save: give every request a name' : `To save: give ${requestRefOf(open.collection, unaddressed!)} a URL`}
+                        </Typography.Link>}
                         <Tooltip title={unaddressed ? `Cannot run yet: give "${unaddressed.name}" an address (URL), or the collection a base URL.` : 'Run every request in order, with checks, and get a report'}><Button size="small" icon={<CaretRightOutlined />} disabled={countRequests(open.collection.items) === 0 || !!unaddressed} onClick={() => leave(() => navigate(['api-runner', ...(open.file ? open.file.split('/') : [])]))}>Run collection</Button></Tooltip>
                         <Tooltip title={countRequests(open.collection.items) < 2 ? 'Needs at least 2 requests: a value is correlated when a later request sends what an earlier one received' : 'Replay the requests twice and save the values that change (tokens, ids) where later requests send them fixed'}><Button size="small" disabled={countRequests(open.collection.items) < 2} onClick={() => setCorrelating(true)}>Correlate</Button></Tooltip>
                         <Tooltip title="Write a framework feature (Gherkin) that runs these requests with the framework's API steps"><Button size="small" icon={<ExperimentOutlined />} disabled={countRequests(open.collection.items) === 0} onClick={() => setFeature(true)}>Create test</Button></Tooltip>
@@ -1064,7 +1075,7 @@ export function ApiWorkspace() {
                     {req && req.kind === 'request'
                         ? <Split id="api-response" direction="column" sizeOf="second" initial={300} min={120} max={900} style={{ flex: 1, minHeight: 0 }}>
                             <RequestEditor key={req.id} saved={saved} file={open.file} req={req} routeBase={open.file ? ['api', ...open.file.split('/'), req.id] : null}
-                                sendProblem={fields.problem ?? (noAddress(req) ? 'type the address (URL) of the request, or set the collection\'s base URL.' : null)} onChange={setReq} onSend={() => void sendNow()} sending={sending} result={result[req.id] ?? null}
+                                sendProblem={(fields.problem ? 'a field below is not right yet (its message is under it).' : null) ?? (noAddress(req) ? 'type the address (URL) of the request, or set the collection\'s base URL.' : null)} onChange={setReq} onSend={() => void sendNow()} sending={sending} result={result[req.id] ?? null}
                                 project={open.project} env={env} row={dataRow[req.id]?.index ?? 0} onRow={(index, row) => setDataRow((x) => ({ ...x, [req.id]: { index, row } }))} />
                             <div style={{ height: '100%', minHeight: 0, borderTop: '1px solid var(--panel-border)' }}><ResponseView result={result[req.id] ?? null} sending={sending}
                                 onSaveExample={req.ws ? undefined : () => {

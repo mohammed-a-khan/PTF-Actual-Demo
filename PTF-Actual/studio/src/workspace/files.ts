@@ -9,6 +9,7 @@ import { createHash } from 'crypto';
 import { runGit } from '../git/run';
 import { UserError } from '../core/errors';
 import { safeRepoPath, writeFileInRepo } from '../core/safePath';
+import { nameProblem } from './newName';
 
 export const MAX_EDIT_BYTES = 5 * 1024 * 1024;
 
@@ -23,6 +24,19 @@ export class Workspace {
     /** Absolute path for a repo-relative path; refuses anything outside the repo or inside .git. */
     abs(rel: string, write = false): string {
         return safeRepoPath(this.root, rel, { write });
+    }
+
+    /**
+     * A path about to be created: each part that does not exist yet must be a name every platform can hold
+     * (see newName.ts); parts that already exist are left as they are.
+     */
+    private checkNew(rel: string): void {
+        const parts = rel.replace(/^\/+/, '').split('/');
+        for (let i = 0; i < parts.length; i++) {
+            if (fs.existsSync(path.join(this.root, ...parts.slice(0, i + 1)))) continue;
+            const why = nameProblem(parts[i]);
+            if (why) throw new UserError(why);
+        }
     }
 
     rel(abs: string): string { return path.relative(this.root, abs).split(path.sep).join('/'); }
@@ -60,7 +74,7 @@ export class Workspace {
             if (now !== expectedHash) throw new ConflictError(`${rel} was changed outside the editor since you opened it.`);
         } else if (fs.existsSync(a)) {
             throw new ConflictError(`${rel} already exists.`);
-        }
+        } else this.checkNew(rel);
         fs.mkdirSync(path.dirname(a), { recursive: true });
         writeFileInRepo(a, content);
         return { hash: hashOf(Buffer.from(content, 'utf8')) };
@@ -69,6 +83,7 @@ export class Workspace {
     createFolder(rel: string): void {
         const a = this.abs(rel, true);
         if (fs.existsSync(a)) throw new UserError(`${rel} already exists.`);
+        this.checkNew(rel);
         fs.mkdirSync(a, { recursive: true });
     }
 
@@ -76,6 +91,7 @@ export class Workspace {
         const a = this.abs(from, true), b = this.abs(to, true);
         if (!fs.existsSync(a)) throw new UserError(`${from} does not exist.`);
         if (fs.existsSync(b) && a.toLowerCase() !== b.toLowerCase()) throw new UserError(`${to} already exists.`);
+        if (a !== b) this.checkNew(to);
         fs.mkdirSync(path.dirname(b), { recursive: true });
         fs.renameSync(a, b);
     }

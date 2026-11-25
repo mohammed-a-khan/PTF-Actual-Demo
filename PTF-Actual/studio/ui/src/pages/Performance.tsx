@@ -60,7 +60,7 @@ function PopulationRow({ p, index, onChange, onRemove, collections, browserPaths
                 options={[{ value: 'api', label: 'API', disabled: !collections.length }, { value: 'browser', label: 'Browser', disabled: !browserPaths.length }]} />
             {browser
                 ? <Select size="small" style={{ width: 260 }} value={p.browserPath || undefined} onChange={(v) => onChange({ ...p, browserPath: v })} aria-label="Browser path" options={browserPaths.map((b) => ({ value: b.file, label: `${b.name} (${b.actions} steps)` }))} />
-                : <Select size="small" style={{ width: 260 }} value={p.collection || undefined} onChange={(v) => onChange({ ...p, collection: v, requests: [] })} aria-label="Collection" options={collections.map((c) => ({ value: c.file, label: `${c.name} (${c.requests})` }))} />}
+                : <Select showSearch optionFilterProp="label" size="small" style={{ width: 260 }} value={p.collection || undefined} onChange={(v) => onChange({ ...p, collection: v, requests: [] })} aria-label="Collection" options={collections.map((c) => ({ value: c.file, label: `${c.name} (${c.requests})` }))} />}
             {!browser && <Select size="small" mode="multiple" maxTagCount="responsive" style={{ width: 260 }} placeholder="All requests, in order" value={p.requests} loading={reqs === null} onChange={(v) => onChange({ ...p, requests: (reqs ?? []).map((r) => r.id).filter((id) => v.includes(id)) })} aria-label="Requests"
                 options={(reqs ?? []).map((r, i) => ({ value: r.id, label: `${i + 1}. ${r.method} ${r.name}` }))} />}
             {!p.policy && <NumField size="small" min={1} max={99} value={p.share} onChange={(v) => v !== undefined && onChange({ ...p, share: v })} addonAfter="% of users" width={150} label="Share of users" />}
@@ -489,10 +489,15 @@ function CompareView({ file, runs, a, b, routeBase }: { file: string; runs: Load
     const [c, setC] = React.useState<LoadCompareDef | null>(null);
     const once = useInFlight();
     const [tab, setTab] = useRouteTab('perf-compare', 'overview', ['overview', 'charts', 'tx'], c ? routeBase : null);
-    React.useEffect(() => { setC(null); if (ids.a && ids.b && ids.a !== ids.b) void api.loadCompare(ids.a, ids.b).then(setC, (e) => message.error(errText(e))); }, [ids.a, ids.b, message]);
+    // A run of another scenario (or none) in the address: said in words with its name, never compared.
+    const notHere = (['a', 'b'] as const).filter((k) => ids[k] && !list.some((r) => r.id === ids[k]));
+    const runName = (id: string) => { const r = runs.find((x) => x.id === id); return r ? `"${r.name}" (${new Date(r.startedAt).toLocaleString()})` : 'a run that no longer exists'; };
+    const [err, setErr] = React.useState<string | null>(null);
+    React.useEffect(() => { setC(null); setErr(null); if (ids.a && ids.b && ids.a !== ids.b && !notHere.length) void api.loadCompare(ids.a, ids.b).then(setC, (e) => setErr(errText(e))); }, [ids.a, ids.b, notHere.length]);
     if (list.length < 2) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="This scenario needs at least two finished runs to compare." />;
     const pick = (k: 'a' | 'b', v: string) => navigate(['perf-compare', ...file.split('/'), '@', k === 'a' ? v : ids.a!, k === 'b' ? v : ids.b!]);
-    const opts = list.map((r) => ({ value: r.id, label: `${new Date(r.startedAt).toLocaleString()} · ${r.env} · p95 ${ms(r.summary!.p95)}${r.baseline ? ' · baseline' : ''}` }));
+    const opts = [...list.map((r) => ({ value: r.id, label: `${new Date(r.startedAt).toLocaleString()} · ${r.env} · p95 ${ms(r.summary!.p95)}${r.baseline ? ' · baseline' : ''}` })),
+        ...notHere.map((k) => ({ value: ids[k]!, label: `${runName(ids[k]!)} · not this scenario`, disabled: true }))];
     const download = (format: 'html' | 'pdf' | 'docx') => once.run('report', async () => { try { const r = await api.loadReport(ids.a!, format, [ids.b!]); const el = document.createElement('a'); el.href = URL.createObjectURL(r.blob); el.download = r.name; el.click(); URL.revokeObjectURL(el.href); } catch (e) { message.error(errText(e)); } });
     const vColor = (v: string) => (v === 'worse' || v === 'failing' ? '#cf222e' : v === 'better' ? '#1a7f37' : undefined);
     const xs = c ? [...new Set([...c.series, ...c.throughput].flatMap((s) => s.points.map((p) => p.t)))].sort((p, q) => p - q) : [];
@@ -508,6 +513,9 @@ function CompareView({ file, runs, a, b, routeBase }: { file: string; runs: Load
                     </Row>
                 </Form>
                 {ids.a === ids.b && <Alert type="info" showIcon message="Choose two different runs." />}
+                {notHere.length > 0 && <Alert type="warning" showIcon message="Different scenarios — not comparable"
+                    description={`${notHere.map((k) => `Run ${k.toUpperCase()} is ${runName(ids[k]!)}`).join('; ')}: not a run of this scenario. Runs of different scenarios measure different things, so they are not compared. Choose two runs of this scenario above.`} />}
+                {err && <Alert type="warning" showIcon message={err} />}
                 {c && <>
                     <StatusBanner status={c.comparison.status} headline={c.comparison.headline} answer={c.comparison.answer} />
                     <Tabs size="small" className="ap-tabs" activeKey={tab} onChange={setTab} items={[
@@ -1078,6 +1086,16 @@ function Trends({ file, runs, name }: { file: string; runs: LoadRunInfoDef[]; na
     const { message } = App.useApp();
     const [source, setSource] = React.useState<'mine' | 'team'>('mine');
     const [team, setTeam] = React.useState<{ folder: string | null; runs: LoadTeamRunDef[]; error?: string } | null>(null);
+    // A narrow pane (1024 px screens): the runs table puts the environment, users and requests under the date, and
+    // both times in one column, so every column (the Verdict too) fits without a sideways scroll.
+    const [narrow, setNarrow] = React.useState(false);
+    const ro = React.useRef<ResizeObserver | null>(null);
+    const paneRef = React.useCallback((el: HTMLDivElement | null) => {
+        ro.current?.disconnect(); ro.current = null;
+        if (!el || typeof ResizeObserver === 'undefined') return;
+        ro.current = new ResizeObserver(() => setNarrow(el.clientWidth < 760));
+        ro.current.observe(el); setNarrow(el.clientWidth < 760);
+    }, []);
     const project = file.split('/')[1];
     React.useEffect(() => { if (source === 'team') void api.loadTeam(project, file).then(setTeam, (e) => message.error(errText(e))); }, [source, project, file, message]);
     const mine: TrendRun[] = runs.filter((r) => r.scenario === file && r.state === 'finished' && r.summary);
@@ -1102,7 +1120,7 @@ function Trends({ file, runs, name }: { file: string; runs: LoadRunInfoDef[]; na
     };
     const last = list[list.length - 1].summary!, prev = list.length > 1 ? list[list.length - 2].summary! : undefined;
     return (
-        <div style={{ padding: 16, overflow: 'auto', height: '100%' }}>
+        <div ref={paneRef} style={{ padding: 16, overflow: 'auto', height: '100%' }}>
             <Space direction="vertical" size={14} style={{ width: '100%' }}>
                 <Space wrap><Typography.Text strong style={{ fontSize: 15 }}>{name} <Typography.Text type="secondary" style={{ fontWeight: 400 }}>· {list.length} run{list.length === 1 ? '' : 's'}</Typography.Text></Typography.Text>{switcher}</Space>
                 <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap' }}>
@@ -1116,19 +1134,29 @@ function Trends({ file, runs, name }: { file: string; runs: LoadRunInfoDef[]; na
                     <Col xs={24} xl={12}><LineChart title="Response time per run" x={x} xMin={1} xMax={list.length} xFormat={label} series={[{ name: '95%', color: C.p95, values: list.map((r) => r.summary!.p95), unit: ' ms' }, { name: 'Average', color: C.avg, values: list.map((r) => r.summary!.avg), unit: ' ms' }]} /></Col>
                     <Col xs={24} xl={12}><LineChart title="Throughput and errors per run" x={x} xMin={1} xMax={list.length} xFormat={label} series={[{ name: 'Requests/s', color: C.rps, values: list.map((r) => r.summary!.throughput) }, { name: 'Errors %', color: C.errors, values: list.map((r) => r.summary!.errorRate), unit: '%', right: true }]} /></Col>
                 </Row>}
-                <Table<TrendRun> size="small" rowKey={(r) => r.teamFile ?? r.id} pagination={false} dataSource={[...list].reverse()} scroll={{ x: 'max-content' }}
+                {/* Fits the panel at 1024 and 1400 px (no sideways scroll, the Verdict always shown): short headings, the date over the time. */}
+                <Table<TrendRun> size="small" rowKey={(r) => r.teamFile ?? r.id} pagination={false} dataSource={[...list].reverse()} className="trend-runs"
                     onRow={(r) => ({ onClick: () => void open(r), style: { cursor: 'pointer' } })}
-                    columns={[
-                        { title: 'Run', dataIndex: 'startedAt', width: 170, render: (v: string) => new Date(v).toLocaleString() },
-                        ...(source === 'team' ? [{ title: 'By', width: 170, render: (_: unknown, r: TrendRun) => (r.by?.pipeline ? `Pipeline ${r.by.pipeline}` : `${r.by?.user ?? ''} on ${r.by?.machine ?? ''}`) }] : []),
-                        { title: 'Environment', dataIndex: 'env', width: 110 },
-                        { title: 'Users', dataIndex: 'maxUsers', width: 70, align: 'right' },
-                        { title: 'Requests', width: 100, align: 'right', render: (_, r) => r.summary!.requests.toLocaleString() },
-                        { title: '95%', width: 90, align: 'right', render: (_, r) => ms(r.summary!.p95) },
-                        { title: 'Average', width: 90, align: 'right', render: (_, r) => ms(r.summary!.avg) },
-                        { title: 'Errors', width: 80, align: 'right', render: (_, r) => `${r.summary!.errorRate.toFixed(2)}%` },
-                        { title: 'Per second', width: 95, align: 'right', render: (_, r) => r.summary!.throughput.toFixed(1) },
-                        { title: 'Verdict', width: 90, render: (_, r) => (r.passed ? <Tag color="success">Passed</Tag> : <Tag color="error">Failed</Tag>) },
+                    columns={narrow ? [
+                        { title: 'Run', dataIndex: 'startedAt', render: (v: string, r) => { const d = new Date(v); return <div style={{ whiteSpace: 'normal' }}>
+                            <div><span style={{ whiteSpace: 'nowrap' }}>{d.toLocaleDateString()}</span> <span style={{ whiteSpace: 'nowrap' }}>{d.toLocaleTimeString()}</span></div>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{source === 'team' && r.by ? `${r.by.pipeline ? `Pipeline ${r.by.pipeline}` : r.by.user ?? ''} · ` : ''}{r.env} · {r.maxUsers} user{r.maxUsers === 1 ? '' : 's'} · {r.summary!.requests.toLocaleString()} req.</Typography.Text>
+                        </div>; } },
+                        { title: '95% / avg', align: 'right', render: (_, r) => <div style={{ whiteSpace: 'nowrap' }}>{ms(r.summary!.p95)}<br /><Typography.Text type="secondary" style={{ fontSize: 12 }}>{ms(r.summary!.avg)}</Typography.Text></div> },
+                        { title: 'Errors', align: 'right', render: (_, r) => `${r.summary!.errorRate.toFixed(1)}%` },
+                        { title: <Tooltip title="Requests per second"><span>Per s</span></Tooltip>, align: 'right', render: (_, r) => r.summary!.throughput.toFixed(1) },
+                        { title: 'Verdict', render: (_, r) => (r.passed ? <Tag color="success" style={{ marginInlineEnd: 0 }}>Passed</Tag> : <Tag color="error" style={{ marginInlineEnd: 0 }}>Failed</Tag>) },
+                    ] : [
+                        { title: 'Run', dataIndex: 'startedAt', render: (v: string) => { const d = new Date(v); return <span style={{ whiteSpace: 'normal' }}><span style={{ whiteSpace: 'nowrap' }}>{d.toLocaleDateString()}</span> <span style={{ whiteSpace: 'nowrap' }}>{d.toLocaleTimeString()}</span></span>; } },
+                        ...(source === 'team' ? [{ title: 'By', render: (_: unknown, r: TrendRun) => (r.by?.pipeline ? `Pipeline ${r.by.pipeline}` : `${r.by?.user ?? ''} on ${r.by?.machine ?? ''}`) }] : []),
+                        { title: 'Env', dataIndex: 'env' },
+                        { title: 'Users', dataIndex: 'maxUsers', align: 'right' },
+                        { title: 'Requests', align: 'right', render: (_, r) => r.summary!.requests.toLocaleString() },
+                        { title: '95%', align: 'right', render: (_, r) => <span style={{ whiteSpace: 'nowrap' }}>{ms(r.summary!.p95)}</span> },
+                        { title: 'Average', align: 'right', render: (_, r) => <span style={{ whiteSpace: 'nowrap' }}>{ms(r.summary!.avg)}</span> },
+                        { title: 'Errors', align: 'right', render: (_, r) => `${r.summary!.errorRate.toFixed(2)}%` },
+                        { title: <Tooltip title="Requests per second"><span>Per s</span></Tooltip>, align: 'right', render: (_, r) => r.summary!.throughput.toFixed(1) },
+                        { title: 'Verdict', render: (_, r) => (r.passed ? <Tag color="success" style={{ marginInlineEnd: 0 }}>Passed</Tag> : <Tag color="error" style={{ marginInlineEnd: 0 }}>Failed</Tag>) },
                     ]} />
             </Space>
         </div>
@@ -1383,8 +1411,8 @@ export function Performance({ mode }: { mode: PerfMode }) {
                 {(formTouched || form.name) && formNameProblem ? <Typography.Text type="danger" style={{ fontSize: 12 }}>{formNameProblem}</Typography.Text> : null}
                 <Segmented block value={form.kind} onChange={(k) => setForm({ ...form, kind: k as 'api' | 'browser' })} options={[{ value: 'api', label: <Tooltip title={!collections.length ? 'Create an API collection in this project first (API → Requests → New)' : undefined}>API requests</Tooltip>, disabled: !collections.length }, { value: 'browser', label: <Tooltip title={!paths.length ? 'Import a recorded browser path first' : 'Real browsers running a recorded user path'}>Browser users</Tooltip>, disabled: !paths.length }]} />
                 {form.kind === 'api'
-                    ? <Select style={{ width: '100%' }} value={form.coll} onChange={(v) => setForm({ ...form, coll: v })} options={collections.map((c) => ({ value: c.file, label: `${c.name} (${c.requests} request${c.requests === 1 ? '' : 's'})` }))} aria-label="Collection" />
-                    : <Select style={{ width: '100%' }} value={form.bpath} onChange={(v) => setForm({ ...form, bpath: v })} options={paths.map((b) => ({ value: b.file, label: `${b.name} (${b.actions} steps)` }))} aria-label="Browser path" />}
+                    ? <Select showSearch optionFilterProp="label" style={{ width: '100%' }} value={form.coll} onChange={(v) => setForm({ ...form, coll: v })} options={collections.map((c) => ({ value: c.file, label: `${c.name} (${c.requests} request${c.requests === 1 ? '' : 's'})` }))} aria-label="Collection" />
+                    : <Select showSearch optionFilterProp="label" style={{ width: '100%' }} value={form.bpath} onChange={(v) => setForm({ ...form, bpath: v })} options={paths.map((b) => ({ value: b.file, label: `${b.name} (${b.actions} steps)` }))} aria-label="Browser path" />}
                 {formUserProblem && <Typography.Text type="danger" style={{ fontSize: 12 }}>{formUserProblem}</Typography.Text>}
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>{form.kind === 'api' ? 'The virtual users send this collection\'s requests (light: many users per computer).' : 'Each virtual user is a real browser replaying the recorded steps (heavy: tens to a few hundred per computer).'}</Typography.Text>
             </Space>

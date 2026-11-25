@@ -45,11 +45,23 @@ export function Secrets() {
         return [{ value: '', label: 'Every environment' }, ...[...all].sort().map((e) => ({ value: e, label: e }))];
     }, [env]);
 
+    // Save once: a second Enter (or click) while saving, or just after (before the dialog has closed), does nothing.
     const saving = React.useRef(false);
+    const [busy, setBusy] = React.useState(false);
+    const savedForm = React.useRef<object | null>(null);
+    // Secrets this tab saved a moment ago: a refusal about one of them ("exists now") is about our own save, not another tab's.
+    const justSaved = React.useRef(new Map<string, number>());
+    const keyOf = (a: { name: string; env: string; scope: string }) => `${a.name}|${a.env}|${a.scope}`;
     const save = async () => {
-        if (!adding || saving.current) return;
-        saving.current = true;
-        try { await saveNow(); } finally { saving.current = false; }
+        if (!adding || saving.current || savedForm.current === adding) return;
+        saving.current = true; setBusy(true);
+        try { await saveNow(); } finally { saving.current = false; setBusy(false); }
+    };
+    const saved = (a: NonNullable<typeof adding>, text: string) => {
+        savedForm.current = a;
+        justSaved.current.set(keyOf(a), Date.now());
+        message.success(text);
+        setAdding(null); load();
     };
     const saveNow = async () => {
         if (!adding) return;
@@ -57,7 +69,7 @@ export function Secrets() {
         const same = rows.some((r) => r.name === adding.name && (r.env ?? '') === adding.env && (adding.scope === 'all-projects' ? !r.project : !!r.project));
         if (same && !adding.replace) {
             modal.confirm({ title: `${adding.name} exists`, content: `There is already a secret ${adding.name}${adding.env ? ` for ${adding.env}` : ''}. Replace its value?`, okText: 'Replace', okButtonProps: { danger: true },
-                onOk: async () => { try { await datagitApi.setSecret(adding.name, adding.value, adding.env || undefined, adding.scope === 'all-projects' ? 'all-projects' : undefined, 'existing'); message.success(`Replaced ${adding.name}`); setAdding(null); load(); } catch (e) { message.error(errText(e)); load(); } } });
+                onOk: async () => { try { await datagitApi.setSecret(adding.name, adding.value, adding.env || undefined, adding.scope === 'all-projects' ? 'all-projects' : undefined, 'existing'); saved(adding, `Replaced ${adding.name}`); } catch (e) { message.error(errText(e)); load(); } } });
             return;
         }
         const a = adding;
@@ -65,15 +77,17 @@ export function Secrets() {
         try {
             // What the list showed: Add expects no such secret, Replace expects it still there (another tab may differ).
             await put(a.replace ? 'existing' : 'new');
-            message.success(`Saved ${a.name}`);
-            setAdding(null); load();
+            saved(a, `Saved ${a.name}`);
         } catch (e) {
             if (!isStale(e)) { message.error(errText(e)); return; }
             load();
+            // "Exists now" right after this tab saved it: it is our own save (a repeated Enter), not someone else's.
+            const t = justSaved.current.get(keyOf(a));
+            if (!a.replace && t && Date.now() - t < 30_000) { setAdding(null); return; }
             modal.confirm({
                 title: a.replace ? `${a.name} was deleted elsewhere` : `${a.name} exists now`, content: `${errText(e)} ${a.replace ? 'Add it again with this value?' : 'Replace its value?'}`,
                 okText: a.replace ? 'Add it again' : 'Replace', okButtonProps: { danger: true }, cancelText: 'Keep editing',
-                onOk: async () => { try { await put(); message.success(`${a.replace ? 'Added' : 'Replaced'} ${a.name}`); setAdding(null); load(); } catch (x) { message.error(errText(x)); } },
+                onOk: async () => { try { await put(); saved(a, `${a.replace ? 'Added' : 'Replaced'} ${a.name}`); } catch (x) { message.error(errText(x)); } },
             });
         }
     };
@@ -119,7 +133,7 @@ export function Secrets() {
                         </Space>) },
                 ]} />
             <Modal open={!!adding} title={adding?.replace ? `Replace ${adding.name}` : 'Add secret'} onCancel={() => setAdding(null)} onOk={save} okText="Save" destroyOnClose
-                okButtonProps={{ disabled: !nameOk || !valueOk }}>
+                okButtonProps={{ disabled: !nameOk || !valueOk, loading: busy }}>
                 {adding && (
                     <Form layout="vertical">
                         <Form.Item label="Name" htmlFor="cs-secrets-name" tooltip="Capital letters, digits and _ — for example QA_DB_PASSWORD"

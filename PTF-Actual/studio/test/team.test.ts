@@ -232,6 +232,6 @@ test('exploration: explorers at once, each in its own browser (closed after); no
         assert.equal(e.shot(m.id, '../x.png'), null);
         assert.deepEqual(m.report!.bugs!.map((b) => b.title), ['Quantity -1 accepted']);
         assert.match(m.report!.bugs![0].detail, /Severity: high\.\nWhere: \/cart\.\nSteps:\n1\. Open the cart\n2\. Type -1\n3\. Update/);
-        assert.equal(m.reason, 'Done and verified.');
+        assert.equal(m.reason, 'Done: reported (the mission only reads: nothing was changed); no test run verifies it.');
     } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });

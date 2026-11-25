@@ -42,10 +42,24 @@ function txRows(done: LoadRunDetail[]): Array<{ key: string; label: string; of: 
 }
 const label = (r: LoadRunDetail, i: number) => `Run ${String.fromCharCode(65 + i)} (${when(r)})`;
 
+/**
+ * Runs of different scenarios measure different things: comparing them would call the difference a regression.
+ * The reason in words (each run by its scenario's name and start time), or null when they are all of one scenario.
+ */
+export function differentScenarios(runs: Array<Pick<LoadRunDetail, 'scenario' | 'name' | 'startedAt'>>): string | null {
+    const first = runs[0];
+    const other = runs.find((r) => r.scenario !== first?.scenario);
+    if (!first || !other) return null;
+    const say = (r: Pick<LoadRunDetail, 'name' | 'startedAt'>) => `"${r.name}" (${new Date(r.startedAt).toLocaleString()})`;
+    return `Different scenarios — not comparable: the run of ${say(first)} and the run of ${say(other)} belong to different scenarios. Choose two runs of the same scenario.`;
+}
+
 /** 2–4 runs of a scenario compared: the first is the reference; each later run is judged against it in plain language. */
 export function loadComparisonHtml(runs: LoadRunDetail[]): string {
     const done = runs.filter((r) => r.result).slice(0, 4);
     if (done.length < 2) throw new Error('Compare two to four finished runs.');
+    const mixed = differentScenarios(done);
+    if (mixed) throw new Error(mixed);
     const ref = done[0];
     const parts = done.slice(1).map((r, k) => ({ r, i: k + 1, c: compareRuns(ref.result!, r.result!, { a: label(ref, 0), b: label(r, k + 1) }, { a: ref.definition, b: r.definition }) }));
     const exec = parts.map(({ c }) => `<div class="status" style="border-color:${STATUS_COLOR[c.status]}"><div class="badge" style="background:${STATUS_COLOR[c.status]}">${c.status.toUpperCase()}</div><div><b>${esc(c.headline.replace(/^\w+ — /, ''))}</b><p>${esc(c.answer)}</p></div></div>`).join('');
@@ -84,6 +98,8 @@ ${svgChart('Users', xs, series((s) => s.users))}
 export async function loadComparisonDocx(runs: LoadRunDetail[], projectRoot?: string): Promise<Buffer> {
     const done = runs.filter((r) => r.result).slice(0, 4);
     if (done.length < 2) throw new Error('Compare two to four finished runs.');
+    const mixed = differentScenarios(done);
+    if (mixed) throw new Error(mixed);
     const ref = done[0];
     const blocks: Block[] = [{ kind: 'heading', level: 1, text: `${ref.name}: ${done.length} runs compared` }, { kind: 'para', muted: true, runs: done.map((r, i) => `${label(r, i)}: ${r.env}, ${describePolicy(r.definition.policy)}`).join(' · ') }];
     for (let i = 1; i < done.length; i++) {

@@ -86,7 +86,7 @@ import { maxUsers } from '../load/policy';
 import { prepareLoad, projectFileReader, scenarioFileOk, valuesFor, withVault } from '../load/prepare';
 import { BrowserPathDef, importRecordedScenarios, readBrowserPath } from '../load/browserPath';
 import { DEFAULT_REPORT_TEMPLATE, loadReportHtml, loadReportXlsx, REPORT_SECTIONS } from '../load/report';
-import { htmlToPdf, loadComparisonDocx, loadComparisonHtml, loadReportDocx } from '../load/reportDocs';
+import { differentScenarios, htmlToPdf, loadComparisonDocx, loadComparisonHtml, loadReportDocx } from '../load/reportDocs';
 import { compareRuns as compareLoadRuns, explainRun } from '../load/explain';
 import { DbSessions } from '../db/sessions';
 import { DbType, DRIVER, listConnections, protectedEnvironment } from '../db/connections';
@@ -4182,6 +4182,9 @@ export function createServer(opts: ServerOptions): StudioServer {
         const q = req.query as Record<string, string>;
         const a = loadRuns.get(str(q.a, 'a', { max: 80 })), b = loadRuns.get(str(q.b, 'b', { max: 80 }));
         if (!a?.result || !b?.result) throw new BadRequest('Choose two finished runs.');
+        if (a.id === b.id) throw new BadRequest('Choose two different runs.');
+        const mixed = differentScenarios([a, b]);
+        if (mixed) throw new BadRequest(mixed);
         const label = (d: LoadRunDetail, k: string) => `Run ${k} (${new Date(d.startedAt).toLocaleString()})`;
         const info = (d: LoadRunDetail) => ({ id: d.id, name: d.name, scenario: d.scenario, env: d.env, startedAt: d.startedAt, passed: d.result!.passed, maxUsers: d.maxUsers, duration: d.duration });
         return { a: info(a), b: info(b), comparison: compareLoadRuns(a.result, b.result, { a: label(a, 'A'), b: label(b, 'B') }, { a: a.definition, b: b.definition }),
@@ -5816,7 +5819,11 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.get('/api/knowledge/search', async (req) => {
         const q = req.query as Record<string, string>;
         const list = (v?: string) => (v ? v.split(',').map((x) => x.trim()).filter(Boolean) : undefined);
-        return { hits: knowledge.search(str(q.q, 'the search', { max: 500 }), { k: Number(q.k) || 10, sources: list(q.sources), types: list(q.types) as never }) };
+        // At most 500 characters as people count them (an emoji is one), as the screen counts.
+        const text = str(q.q, 'the search', { max: 2000 });
+        const n = Array.from(text).length;
+        if (n > 500) throw new BadRequest(`The search is too long: at most 500 characters (it has ${n}).`);
+        return { hits: knowledge.search(text, { k: Number(q.k) || 10, sources: list(q.sources), types: list(q.types) as never }) };
     });
     app.get('/api/knowledge/read', async (req) => {
         const r = knowledge.read(str((req.query as Record<string, string>).id, 'id', { max: 80 }));
@@ -5843,7 +5850,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     triggerTimer.unref?.();
     app.addHook('onClose', async () => { clearInterval(triggerTimer); for (const m of missions.running()) await missions.stop(m.id, 'the Studio closing').catch(() => undefined); });
     const missionId = (req: FastifyRequest) => { const id = str((req.params as { id: string }).id, 'id', { max: 40 }); if (!missions.get(id)) throw new NotFound('Mission not found: it may have been deleted.'); return id; };
-    const missionSummary = (m: MissionRun) => ({ id: m.id, key: m.key, title: m.title, state: m.state, reason: m.reason, trigger: m.trigger, createdAt: m.createdAt, endedAt: m.endedAt, used: m.used, budget: m.budget, changes: m.changes.length, verified: !!m.verifications.at(-1)?.passed, waiting: m.checkpoints.some((c) => c.answer === undefined) && m.state === 'waiting', result: m.result?.kind });
+    const missionSummary = (m: MissionRun) => ({ id: m.id, key: m.key, title: m.title, state: m.state, reason: m.reason, trigger: m.trigger, createdAt: m.createdAt, endedAt: m.endedAt, used: m.used, budget: m.budget, changes: m.changes.length, verified: !!m.verifications.at(-1)?.passed && !m.verifications.at(-1)?.reportOnly, waiting: m.checkpoints.some((c) => c.answer === undefined) && m.state === 'waiting', result: m.result?.kind });
     app.get('/api/missions', async () => {
         const f = readMissionsFile(opts.repoRoot);
         return {

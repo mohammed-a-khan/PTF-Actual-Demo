@@ -13,11 +13,14 @@ import { BugOutlined, FileAddOutlined, UserOutlined, FileOutlined, FolderAddOutl
 import { api, Breakpoint, Diag, SearchHit, StepPlan, StepRename } from '../api';
 import { useUnsaved } from '../unsaved';
 import { errText, loadRunTarget, saveRunTarget, showRun, unsavedFiles, useStudio } from '../state';
+import { handlesSaveFiles, SAVE_FILES_EVENT, SaveFilesRequest } from '../runSignals';
 import { CodeEditor, CodeEditorHandle } from '../editor/CodeEditor';
 import { DebugPanel, ExecLocation } from '../components/DebugPanel';
 import { useKept } from '../kept';
 import { codeTarget } from '../codeRoute';
+import { splitTab, TAB_MARK, withTab } from '../apiperf-ui';
 import { langOf } from '../editor/highlight';
+import { newPathProblem } from '../../../src/workspace/newName';
 
 /** `content` / `savedContent` always use "\n"; `eol` is the file's own line ending, restored on save. */
 interface OpenFile { path: string; content: string; savedContent: string; hash: string | null; binary: boolean; eol: '\n' | '\r\n' }
@@ -43,6 +46,9 @@ interface TabHandlers {
     toggleBreakpoint: (path: string, line: number) => void;
 }
 const NO_DIAGS: Diag[] = [];
+/** The bottom panel's tabs (also the address's last segment, ~<tab>). */
+const BOTTOM_TABS = ['problems', 'search', 'usages', 'debug'] as const;
+type BottomTab = typeof BOTTOM_TABS[number];
 
 /** Files breakpoints can be set in: feature files (before a step) and the project's TypeScript / JavaScript. */
 const canBreak = (path: string) => /\.(feature|ts|js|mjs|cjs)$/.test(path) && !path.endsWith('.d.ts') && !path.split('/').includes('node_modules');
@@ -121,11 +127,33 @@ export function Code() {
     // The open tabs as they are now (menus built earlier read this, not the tabs of their render).
     const tabsNow = React.useRef<OpenFile[]>([]);
     tabsNow.current = tabs;
-    useUnsaved('code', tabs.some((t) => t.content !== t.savedContent), 'files in the editor');
+    useUnsaved('code', tabs.some((t) => t.content !== t.savedContent), 'files in the editor', { keeps: (to) => to[0] === 'code' });
     const [active, setActive] = React.useState<string | null>(null);
     const [diags, setDiags] = React.useState<Record<string, Diag[]>>({});
     const [reveal, setReveal] = React.useState<{ path: string; line: number; column?: number; nonce: number; soft?: boolean } | null>(null);
-    const [bottom, setBottom] = useKept<'problems' | 'search' | 'usages' | 'debug'>('code.bottom', 'problems');
+    // The bottom panel's tab: in the address too, as its last segment (#/code/<file>/<line>/~search), so a link opens
+    // that tab and Back returns to the tab before (no question about the unsaved edits: they stay in the editor).
+    const route = useRoute();
+    const onCode = route[0] === 'code';
+    const { rest: codeRest, tab: routeTabRaw } = splitTab(onCode ? route.slice(1) : []);
+    const routeTab = routeTabRaw && (BOTTOM_TABS as readonly string[]).includes(routeTabRaw) ? routeTabRaw as BottomTab : null;
+    const [bottomKept, setBottomKept] = useKept<BottomTab>('code.bottom', 'problems');
+    const bottom: BottomTab = routeTab ?? ((BOTTOM_TABS as readonly string[]).includes(bottomKept) ? bottomKept : 'problems');
+    const bottomRef = React.useRef(bottom);
+    bottomRef.current = bottom;
+    /** Show a tab of the bottom panel; `push`: a new step in the history (a click on the tab), else the address is changed in place. */
+    const setBottom = React.useCallback((t: BottomTab, push = false) => {
+        setBottomKept(t);
+        bottomRef.current = t;
+        const r = currentRoute();
+        if (r[0] === 'code') navigate(withTab(r, t), !push);
+    }, [setBottomKept]);
+    // A link or Back to a tab: it becomes the remembered one.
+    React.useEffect(() => { if (routeTab && routeTab !== bottomKept) setBottomKept(routeTab); }, [routeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+    // An address without a tab (or with one the panel does not have): the tab shown is written into it, in place.
+    React.useEffect(() => { if (onCode && !routeTab) navigate(withTab(currentRoute(), bottomRef.current), true); }, [onCode, routeTab, codeRest.join('\0')]); // eslint-disable-line react-hooks/exhaustive-deps
+    /** A Code address for a file (and line), with the bottom panel's tab shown now. */
+    const codeAddr = (path?: string | null, line?: number): Array<string | number | undefined> => ['code', path ?? undefined, line, TAB_MARK + bottomRef.current];
     // Breakpoints (saved per repository; a debug run going on gets changes at once) and where a debug run is paused.
     const [breakpoints, setBreakpoints] = React.useState<Breakpoint[]>([]);
     const [exec, setExec] = React.useState<ExecLocation | null>(null);
@@ -145,7 +173,7 @@ export function Code() {
     const [search, setSearch] = React.useState({ q: '', regex: false, case: false, word: false, glob: '' });
     const [hits, setHits] = React.useState<SearchHit[] | null>(null);
     const [quick, setQuick] = React.useState<{ open: boolean; q: string; index: number }>({ open: false, q: '', index: 0 });
-    const [dialog, setDialog] = React.useState<{ kind: 'file' | 'folder' | 'rename'; path: string; base?: string } | null>(null);
+    const [dialog, setDialog] = React.useState<{ kind: 'file' | 'folder' | 'rename'; path: string; base?: string; error?: string } | null>(null);
     const diagTimer = React.useRef<number>();
     const tabsRef = React.useRef(tabs);
     // Other screens (Run tests) warn about unsaved edits: the framework runs the files on disk.
@@ -201,7 +229,7 @@ export function Code() {
             } catch (e) {
                 message.error(`${path}: ${errText(e)}`);
                 // An address to a file that is not there (an old link): the address shows the open file, not the missing one.
-                if (currentRoute()[0] === 'code' && currentRoute()[1] === path) navigate(active ? ['code', active] : ['code'], true);
+                if (currentRoute()[0] === 'code' && currentRoute()[1] === path) navigate(codeAddr(active), true);
                 return;
             }
         }
@@ -214,17 +242,16 @@ export function Code() {
 
     // The open file (and line) is part of the address (#/code/<file>/<line>), so the browser's Back
     // returns to where you were before a jump (Ctrl+click on a step, a search hit, a problem).
-    const route = useRoute();
-    const routeKey = route[0] === 'code' ? route.slice(1).join('\0') : null;
+    const routeKey = onCode ? codeRest.join('\0') : null;
     const lastRoute = React.useRef<string | null>(null);
     React.useEffect(() => {
         if (routeKey === null || routeKey === lastRoute.current) return;
         lastRoute.current = routeKey;
         // A typed address with plain slashes (#/code/test/a/b.feature/12) is rewritten in place to its usual form.
-        const t = codeTarget(route.slice(1));
+        const t = codeTarget(codeRest);
         if (t.typed) {
             lastRoute.current = [t.path, t.line ? String(t.line) : ''].filter(Boolean).join('\0');
-            navigate(['code', t.path, t.line], true);
+            navigate(codeAddr(t.path, t.line), true);
         }
         if (t.path) void open(t.path, t.line);
     }, [routeKey]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -234,11 +261,11 @@ export function Code() {
         const curPath = activeRef.current;
         if (curPath && currentRoute()[0] === 'code') {
             const l = fromLine ?? editors.current.get(curPath)?.caretLine();
-            if (l) { const k = [curPath, String(l)].join('\0'); lastRoute.current = k; navigate(['code', curPath, l], true); }
+            if (l) { const k = [curPath, String(l)].join('\0'); lastRoute.current = k; navigate(codeAddr(curPath, l), true); }
         }
         const key = [path, line ? String(line) : ''].filter(Boolean).join('\0');
         lastRoute.current = key;
-        navigate(['code', path, line]);
+        navigate(codeAddr(path, line));
         void open(path, line, column);
     }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
     // Open requests from other screens.
@@ -254,7 +281,7 @@ export function Code() {
         const r = currentRoute();
         if (r[0] !== 'code' || !active || r[1] === active) return;
         lastRoute.current = active;
-        navigate(['code', active], true);
+        navigate(codeAddr(active), true);
     }, [active]);
 
     // Diagnostics for the active file, shortly after the user stops typing.
@@ -351,6 +378,22 @@ export function Code() {
     };
 
     /** Close a tab without asking. */
+    // "Save and run" on Run tests: the files it names are saved here first (true once all are written).
+    const saveRef = React.useRef(save);
+    saveRef.current = save;
+    React.useEffect(() => {
+        const h = (e: Event) => {
+            const d = (e as CustomEvent<SaveFilesRequest>).detail;
+            if (!d) return;
+            void (async () => {
+                for (const p of d.paths) { const t = tabsRef.current.find((x) => x.path === p); if (t && t.content !== t.savedContent && !(await saveRef.current(p))) { d.done(false); return; } }
+                d.done(true);
+            })();
+        };
+        window.addEventListener(SAVE_FILES_EVENT, h);
+        const off = handlesSaveFiles();
+        return () => { off(); window.removeEventListener(SAVE_FILES_EVENT, h); };
+    }, []);
     const forceClose = (path: string) => {
         const rest = tabsRef.current.filter((x) => x.path !== path);
         setTabs((ts) => ts.filter((x) => x.path !== path));
@@ -533,8 +576,10 @@ export function Code() {
         };
     };
 
+    // A name Windows cannot hold (teammates' checkouts would break): said under the field, Create waits.
+    const dialogProblem = dialog && dialog.path.trim() && !dialog.path.endsWith('/') ? newPathProblem(dialog.path.trim()) : null;
     const submitDialog = async () => {
-        if (!dialog) return;
+        if (!dialog || dialogProblem || !dialog.path.trim() || dialog.path.endsWith('/')) return;
         const p = dialog.path.trim().replace(/^\/+/, '');
         try {
             if (dialog.kind === 'file') { await api.saveFile(p, '', null); loadFiles(); await open(p); }
@@ -546,7 +591,10 @@ export function Code() {
                 loadFiles(); void refresh();
             }
             setDialog(null);
-        } catch (e) { message.error(errText(e)); }
+        } catch (e) {
+            // Said in the dialog, next to the name (a toast would cover the tree's toolbar and cut a long name at its start).
+            setDialog((d) => (d ? { ...d, error: errText(e) } : d));
+        }
     };
 
     // ▶ Run buttons for feature files: whole feature, or one scenario (in that feature).
@@ -713,7 +761,7 @@ export function Code() {
                     )}
                 </div>
                 <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-                    <Tabs size="small" activeKey={bottom} onChange={(k) => setBottom(k as 'problems' | 'search' | 'usages' | 'debug')} style={{ paddingInline: 8, marginBottom: 0 }}
+                    <Tabs size="small" activeKey={bottom} onChange={(k) => setBottom(k as BottomTab, true)} style={{ paddingInline: 8, marginBottom: 0 }}
                         items={[
                             { key: 'problems', label: <span>Problems {curDiags.length > 0 && <Badge count={curDiags.length} size="small" color={counts.error ? '#cf1322' : '#d48806'} />}</span> },
                             { key: 'search', label: <span><SearchOutlined /> Search</span> },
@@ -851,10 +899,12 @@ export function Code() {
                 <Typography.Paragraph>Your changes are lost if you don't save them.</Typography.Paragraph>
             </Modal>
             <Modal open={!!dialog} title={dialog?.kind === 'file' ? 'New file' : dialog?.kind === 'folder' ? 'New folder' : 'Rename'} okText={dialog?.kind === 'rename' ? 'Rename' : 'Create'}
-                onCancel={() => setDialog(null)} onOk={submitDialog} okButtonProps={{ disabled: !dialog?.path.trim() || dialog.path.endsWith('/') }}
+                onCancel={() => setDialog(null)} onOk={submitDialog} okButtonProps={{ disabled: !dialog?.path.trim() || dialog.path.endsWith('/') || !!dialogProblem }}
                 afterOpenChange={(o) => { if (o) { const el = document.getElementById('cs-code-path-input') as HTMLInputElement | null; el?.focus(); const v = el?.value ?? ''; el?.setSelectionRange(v.length, v.length); } }}>
-                <Input id="cs-code-path-input" autoFocus className="mono" value={dialog?.path} onChange={(e) => dialog && setDialog({ ...dialog, path: e.target.value })} onPressEnter={submitDialog}
+                <Input id="cs-code-path-input" autoFocus className="mono" value={dialog?.path} onChange={(e) => dialog && setDialog({ ...dialog, path: e.target.value, error: undefined })} onPressEnter={submitDialog}
+                    status={dialogProblem || dialog?.error ? 'error' : undefined} aria-invalid={!!(dialogProblem || dialog?.error)} aria-describedby="cs-code-path-problem"
                     placeholder={dialog?.kind === 'file' ? 'test/orders/features/search.feature' : 'test/orders/pages'} />
+                {(dialogProblem || dialog?.error) && <Typography.Text id="cs-code-path-problem" type="danger" role="alert" style={{ display: 'block', marginTop: 6, overflowWrap: 'anywhere' }}>{dialogProblem ?? dialog?.error}</Typography.Text>}
                 <Typography.Paragraph type="secondary" style={{ marginTop: 8 }}>Path inside the project. Folders in the path are created as needed.</Typography.Paragraph>
             </Modal>
         </>

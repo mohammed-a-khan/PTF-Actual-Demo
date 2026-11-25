@@ -321,7 +321,7 @@ export function ToolServers() {
                             <Tag bordered={false}>{x.scope === 'team' ? 'Team' : 'Only me'}</Tag>
                             {x.server.changes !== false ? <Tag bordered={false} color="orange">asks first</Tag> : <Tag bordered={false}>read-only</Tag>}
                             {!x.allowed && <Tooltip title="Not in the repository's agent policy (toolServers)"><Tag color="red" bordered={false}>not allowed</Tag></Tooltip>}
-                            {x.checking ? <Typography.Text type="secondary" style={{ fontSize: 12 }}><SyncOutlined spin /> checking</Typography.Text>
+                            {x.checking || busy === x.name || (busy === '*' && x.server.enabled !== false) ? <Typography.Text type="secondary" style={{ fontSize: 12 }}><SyncOutlined spin /> checking… (up to 15 s)</Typography.Text>
                                 : st.ok === true ? <Typography.Text type="success" style={{ fontSize: 12 }}><CheckCircleFilled /> {plural(st.known?.length ?? 0, 'tool')}{x.server.tools ? ` (${x.server.tools.filter((n) => st.known?.some((t) => t.name === n)).length} on)` : ''} · {ago(st.checkedAt!)}</Typography.Text>
                                 : st.ok === false ? <Tooltip title={st.error}><Typography.Text type="danger" style={{ fontSize: 12 }}><CloseCircleFilled /> check failed · {ago(st.checkedAt!)}</Typography.Text><Typography.Text type="danger" ellipsis style={{ fontSize: 12, display: 'block', maxWidth: 360 }}>{st.error}</Typography.Text></Tooltip>
                                 : <Typography.Text type="secondary" style={{ fontSize: 12 }}>not checked yet</Typography.Text>}

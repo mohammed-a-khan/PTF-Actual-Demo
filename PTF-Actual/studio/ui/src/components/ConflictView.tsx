@@ -60,12 +60,15 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
     // the user's own commit being replayed. Name them for what they are.
     const swapped = !!status?.sidesSwapped;
     const current = localEdits ? 'your uncommitted edit' : swapped ? `${status?.rebaseOnto ?? 'the branch you rebase onto'} (rebasing onto)` : status?.branch ?? 'your branch';
-    const incomingOverride = localEdits ? `pulled from ${status?.pullStash?.upstream ?? 'the remote'}` : swapped ? `your commit${status?.rebaseBranch ? ` from ${status.rebaseBranch}` : ''}` : null;
+    const incomingOverride = localEdits ? `from ${status?.pullStash?.upstream ?? 'the remote'}` : swapped ? `your commit${status?.rebaseBranch ? ` from ${status.rebaseBranch}` : ''}` : null;
     // The whole versions, on the sides shown.
     const mineV = localEdits ? v.theirs : v.ours;
     const theirsV = localEdits ? v.ours : v.theirs;
     const blocks = parsed?.segments.filter((s): s is Extract<Segment, { kind: 'conflict' }> => s.kind === 'conflict') ?? [];
     const decided = choices.filter((c) => c !== undefined).length;
+    // One pair of words for the two sides, the same in the alerts, the panes and the buttons.
+    const W = localEdits ? { mine: 'Yours', theirs: 'Pulled' } : { mine: 'Mine', theirs: 'Theirs' };
+    const useMine = `Use ${W.mine.toLowerCase()}`, useTheirs = `Use ${W.theirs.toLowerCase()}`;
 
     // Whole-file decision only (one side deleted the file, or no markers to work with).
     if (!parsed || parsed.conflicts === 0) {
@@ -75,8 +78,8 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
                     description={localEdits ? (mineV === null ? 'You deleted this file (not committed) but the pull changed it.' : theirsV === null ? 'You changed this file (not committed) but the pull deleted it.' : 'Your edit and the pulled version clash: choose which version of the whole file to keep.')
                         : v.ours === null ? `This file was deleted on ${swapped ? 'the branch you rebase onto' : 'your branch'} but changed in ${swapped ? 'your commit' : 'the incoming one'}.` : v.theirs === null ? `This file was changed on ${swapped ? 'the branch you rebase onto' : 'your branch'} but deleted in ${swapped ? 'your commit' : 'the incoming one'}.` : 'Choose which version of the whole file to keep.'} />
                 <Space>
-                    <Button loading={busy} onClick={() => save('ours', mineV === null ? 'File stays deleted' : 'Kept your version')}>{mineV === null ? 'Keep it deleted' : localEdits ? 'Keep mine (your edit)' : 'Keep current'}</Button>
-                    <Button loading={busy} onClick={() => save('theirs', localEdits ? 'Took the pulled version' : 'Took the incoming version')}>{theirsV === null ? 'Delete it' : localEdits ? 'Take theirs (pulled)' : 'Take incoming'}</Button>
+                    <Button loading={busy} onClick={() => save('ours', mineV === null ? 'File stays deleted' : 'Kept your version')}>{mineV === null ? 'Keep it deleted' : `${useMine} (${localEdits ? 'your edit' : current})`}</Button>
+                    <Button loading={busy} onClick={() => save('theirs', localEdits ? 'Took the pulled version' : 'Took the incoming version')}>{theirsV === null ? 'Delete it' : `${useTheirs} (${localEdits ? 'the pulled version' : 'incoming'})`}</Button>
                 </Space>
             </div>
         );
@@ -86,7 +89,7 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
     const header = (
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', borderBottom: '1px solid var(--panel-border)', flexWrap: 'wrap' }}>
             <Segmented size="small" value={view} onChange={(v) => changeView(v as 'three' | 'steps')}
-                options={[{ value: 'three', label: 'Theirs | Mine | Merged' }, { value: 'steps', label: 'Step by step' }]} />
+                options={[{ value: 'three', label: `${W.theirs} | ${W.mine} | Merged` }, { value: 'steps', label: 'Step by step' }]} />
             <Typography.Text type="secondary" style={{ flex: '1 1 280px' }}>
                 {parsed.conflicts} place{parsed.conflicts === 1 ? '' : 's'} changed on both sides; the rest of the file was combined automatically.
             </Typography.Text>
@@ -105,7 +108,7 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
             <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
                 {header}
                 <div style={{ flex: 1, minHeight: 0 }}>
-                    <ThreeWayMerge parsed={parsed} choices={choices} setChoice={setChoice} mineLabel={current} theirsLabel={incomingOverride ?? (blocks[0]?.theirsLabel || 'incoming')} />
+                    <ThreeWayMerge parsed={parsed} choices={choices} setChoice={setChoice} mineLabel={current} theirsLabel={incomingOverride ?? (blocks[0]?.theirsLabel || 'incoming')} mineWord={W.mine} theirsWord={W.theirs} />
                 </div>
             </div>
         );
@@ -119,7 +122,7 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
         <div style={{ padding: 12 }}>
             <Alert type="warning" showIcon style={{ marginBottom: 12 }}
                 message={`${parsed.conflicts} place${parsed.conflicts === 1 ? '' : 's'} in ${file} changed on both sides`}
-                description={<>Everything else in the file was combined automatically. For each place below, choose what to keep. <b>Current</b> is {current}; <b>Incoming</b> is {incomingOverride ?? (blocks[0]?.theirsLabel || 'the branch being merged')}.</>} />
+                description={<>Everything else in the file was combined automatically. For each place below, choose what to keep. <b>{W.mine}</b> is {current}; <b>{W.theirs}</b> is {incomingOverride ?? (blocks[0]?.theirsLabel || 'the branch being merged')}.</>} />
             {segs.map((s, idx) => {
                 if (s.kind !== 'conflict') return null;
                 k++;
@@ -137,15 +140,15 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
                                 const m = e.target.value as string;
                                 set(m === 'custom' ? { custom: [...s.ours, ...s.theirs].join('\n') } : (m as Choice));
                             }}>
-                                <Radio.Button value="ours">Keep current</Radio.Button>
-                                <Radio.Button value="theirs">Take incoming</Radio.Button>
+                                <Radio.Button value="ours">{useMine}</Radio.Button>
+                                <Radio.Button value="theirs">{useTheirs}</Radio.Button>
                                 <Radio.Button value="both">Keep both</Radio.Button>
                                 <Radio.Button value="custom">Edit</Radio.Button>
                             </Radio.Group>}>
                         {before.length > 0 && <Lines lines={before} tone="ctx" />}
                         <Row gutter={8} style={{ margin: '4px 0' }}>
-                            <Col span={12}><Tag color="blue">Current — {current}</Tag><Lines lines={s.ours} tone="ours" /></Col>
-                            <Col span={12}><Tag color="green">Incoming — {incomingOverride ?? s.theirsLabel}</Tag><Lines lines={s.theirs} tone="theirs" /></Col>
+                            <Col span={12}><Tag color="blue">{W.mine} — {current}</Tag><Lines lines={s.ours} tone="ours" /></Col>
+                            <Col span={12}><Tag color="green">{W.theirs} — {incomingOverride ?? s.theirsLabel}</Tag><Lines lines={s.theirs} tone="theirs" /></Col>
                         </Row>
                         {after.length > 0 && <Lines lines={after} tone="ctx" />}
                         {c !== undefined && typeof c !== 'string' && (
@@ -160,8 +163,8 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
                     Save resolution ({decided}/{parsed.conflicts} decided)
                 </Button>
                 <Typography.Text type="secondary">or for the whole file:</Typography.Text>
-                <Button size="small" loading={busy} onClick={() => save('ours', localEdits ? 'Kept your edit' : 'Kept the current version')}>{localEdits ? 'Keep mine' : 'Keep current'}</Button>
-                <Button size="small" loading={busy} onClick={() => save('theirs', localEdits ? 'Took the pulled version' : 'Took the incoming version')}>{localEdits ? 'Take theirs' : 'Take incoming'}</Button>
+                <Button size="small" loading={busy} onClick={() => save('ours', localEdits ? 'Kept your edit' : 'Kept the current version')}>{useMine}</Button>
+                <Button size="small" loading={busy} onClick={() => save('theirs', localEdits ? 'Took the pulled version' : 'Took the incoming version')}>{useTheirs}</Button>
             </Space>
         </div>
         </div>

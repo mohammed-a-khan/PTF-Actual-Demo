@@ -214,23 +214,37 @@ const toolOf = (t: { name: string; description?: string; inputSchema?: unknown }
     schema: createHash('sha256').update(JSON.stringify(t.inputSchema ?? {})).digest('hex').slice(0, 12),
 });
 
+/** How long Check waits for a server: the same short time a session gives it before leaving it out (agents/host.ts). */
+export const CHECK_TIMEOUT_MS = 15_000;
+
 /**
  * Start (or call) the server and list its tools. `s` is already resolved (secrets filled); `conn`: the company
  * network settings for a server over HTTP.
  */
-export async function testServer(s: ToolServer, cwd: string, env: Record<string, string>, timeoutMs = 90_000, conn?: { agentFor(url: string): unknown; ca?: string | Buffer | Array<string | Buffer> }): Promise<TestResult> {
+export async function testServer(s: ToolServer, cwd: string, env: Record<string, string>, timeoutMs = CHECK_TIMEOUT_MS, conn?: { agentFor(url: string): unknown; ca?: string | Buffer | Array<string | Buffer> }): Promise<TestResult> {
     const t0 = Date.now();
     let c: McpClient | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    let late = false;
     try {
-        c = await McpClient.connect(s.kind === 'http'
-            ? { kind: 'http', url: s.url!, headers: s.headers ?? {}, ...(conn ? { agent: conn.agentFor(s.url!) as http.Agent | undefined, ...(conn.ca ? { ca: conn.ca } : {}) } : {}) }
-            : { kind: 'stdio', command: s.command!, args: s.args ?? [], cwd, env: { ...env, ...(s.env ?? {}) } },
-        { timeoutMs: s.kind === 'http' ? Math.min(timeoutMs, 30_000) : timeoutMs });
-        const tools = (await c.listTools()).map(toolOf);
-        return { ok: true, server: c.serverLabel, tools, ms: Date.now() - t0 };
+        // The whole check (start, then the tool list) within timeoutMs, not each step on its own.
+        const work = (async () => {
+            c = await McpClient.connect(s.kind === 'http'
+                ? { kind: 'http', url: s.url!, headers: s.headers ?? {}, ...(conn ? { agent: conn.agentFor(s.url!) as http.Agent | undefined, ...(conn.ca ? { ca: conn.ca } : {}) } : {}) }
+                : { kind: 'stdio', command: s.command!, args: s.args ?? [], cwd, env: { ...env, ...(s.env ?? {}) } },
+            { timeoutMs: s.kind === 'http' ? Math.min(timeoutMs, 30_000) : timeoutMs });
+            // Started after the check gave up: stopped at once (no server left running).
+            if (late) { await c.close(); throw new Error('late'); }
+            return (await c.listTools()).map(toolOf);
+        })();
+        work.catch(() => undefined);
+        const tools = await Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => { late = true; reject(new Error(`No answer within ${Math.round(timeoutMs / 1000)} s.`)); }, timeoutMs + 500); timer.unref?.(); })]);
+        const cl = c as McpClient | undefined;
+        return { ok: true, server: cl?.serverLabel, tools, ms: Date.now() - t0 };
     } catch (e) {
-        return { ok: false, tools: [], ...(c?.serverLabel ? { server: c.serverLabel } : {}), error: (e as Error).message, ms: Date.now() - t0 };
-    } finally { await c?.close(); }
+        const cl = c as McpClient | undefined;
+        return { ok: false, tools: [], ...(cl?.serverLabel ? { server: cl.serverLabel } : {}), error: (e as Error).message, ms: Date.now() - t0 };
+    } finally { if (timer) clearTimeout(timer); await (c as McpClient | undefined)?.close(); }
 }
 
 // ---- Checks: what a server offered each time it was checked, and what changed.

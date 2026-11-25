@@ -62,11 +62,11 @@ test('a request restored again keeps one "(from …)" in its name', () => {
 });
 
 test('runner addresses name the inner tab: a run link opens Past runs, a collection opens Run', () => {
-    assert.deepEqual(runnerRoute(['api-runner', 'run', 'abc']), { tab: 'runs', file: null, runId: 'abc' });
-    assert.deepEqual(runnerRoute(['api-runner', 'monitors']), { tab: 'monitors', file: null, runId: null });
-    assert.deepEqual(runnerRoute(['api-runner', 'runs']), { tab: 'runs', file: null, runId: null });
-    assert.deepEqual(runnerRoute(['api-runner', 'test', 'shop', 'api', 'o.collection.json']), { tab: 'run', file: 'test/shop/api/o.collection.json', runId: null });
-    assert.deepEqual(runnerRoute(['api-runner']), { tab: null, file: null, runId: null });
+    assert.deepEqual(runnerRoute(['api-runner', 'run', 'abc']), { tab: 'runs', file: null, runId: 'abc', compareWith: null });
+    assert.deepEqual(runnerRoute(['api-runner', 'monitors']), { tab: 'monitors', file: null, runId: null, compareWith: null });
+    assert.deepEqual(runnerRoute(['api-runner', 'runs']), { tab: 'runs', file: null, runId: null, compareWith: null });
+    assert.deepEqual(runnerRoute(['api-runner', 'test', 'shop', 'api', 'o.collection.json']), { tab: 'run', file: 'test/shop/api/o.collection.json', runId: null, compareWith: null });
+    assert.deepEqual(runnerRoute(['api-runner']), { tab: null, file: null, runId: null, compareWith: null });
 });
 
 test('compare: the arrow follows the number, the word says better or worse', () => {

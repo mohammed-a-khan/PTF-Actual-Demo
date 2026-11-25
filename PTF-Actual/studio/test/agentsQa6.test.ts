@@ -102,7 +102,7 @@ test('an agent with "Run commands" asks too; "Never" turns commands off for ever
     try {
         const { id } = await host.create({ title: 'Sheller chat', profile: SHELLER });
         const cfg = lastConfig();
-        assert.equal(cfg.excludedTools, undefined);
+        assert.ok(!(cfg.excludedTools ?? []).includes('bash'), 'its commands are offered (it has no "Change files": only file tools are left out)');
         let d: { permissionDecision: string } | undefined;
         void cfg.hooks.onPreToolUse({ toolName: 'bash', toolArgs: { command: 'ls' } }, { sessionId: id }).then((x: { permissionDecision: string }) => { d = x; });
         await later(60);

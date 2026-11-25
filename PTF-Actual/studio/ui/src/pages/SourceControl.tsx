@@ -111,10 +111,14 @@ function Changes() {
     const staged = files.filter((f) => !f.conflicted && f.staged !== '.' && !f.untracked);
     const changes = files.filter((f) => !f.conflicted && (f.unstaged !== '.' || f.untracked));
 
+    // The status is read again every few seconds while this screen is shown: the diff is then read again quietly
+    // (the spinner only shows for another file or other options; an unchanged diff does not re-render).
+    const diffFor = React.useRef('');
     React.useEffect(() => {
-        if (!sel || sel.area === 'conflict') { setDiff(''); return; }
+        if (!sel || sel.area === 'conflict') { setDiff(''); diffFor.current = ''; return; }
         let cancelled = false;
-        setLoadingDiff(true);
+        const key = JSON.stringify([sel, prefs]);
+        if (diffFor.current !== key) { diffFor.current = key; setLoadingDiff(true); }
         api.diff(sel.path, sel.area === 'staged', prefs).then((r) => { if (!cancelled) setDiff(r.diff); })
             .catch((e) => { if (!cancelled) { setDiff(''); message.error(errText(e)); } })
             .finally(() => { if (!cancelled) setLoadingDiff(false); });
@@ -240,6 +244,12 @@ function Changes() {
     const selFile = sel ? files.find((f) => f.path === sel.path) : undefined;
 
     const nothing = files.length === 0;
+    // What the commit button says matches what it would do now.
+    const commitLabel = conflicts.length && !sequencing
+        ? (ps ? `Resolve ${conflicts.length} clashing file${conflicts.length === 1 ? '' : 's'} first` : `Resolve ${conflicts.length} conflict${conflicts.length === 1 ? '' : 's'} first`)
+        : sequencing ? `Continue ${op}` : amend ? 'Amend last commit'
+        : !staged.length && !status?.mergeMessage ? `Commit to ${status?.branch ?? 'HEAD'} (nothing staged)`
+        : `Commit ${staged.length ? `${staged.length} file${staged.length === 1 ? '' : 's'}` : ''} to ${status?.branch ?? 'HEAD'}`;
     return (
         <div style={{ display: 'flex', gap: 12, height: '100%', minHeight: 0 }}>
             <div className="panel" style={{ width: 360, minWidth: 300, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
@@ -262,7 +272,7 @@ function Changes() {
                     <Tooltip title={conflicts.length ? 'Resolve all conflicts first' : !staged.length && !amend ? 'Stage at least one file' : !msg.trim() ? 'Write a commit message first' : 'Ctrl+Enter'}>
                         <Button type="primary" block style={{ marginTop: 8 }} loading={busy}
                             disabled={(!sequencing && !msg.trim()) || (!staged.length && !status?.mergeMessage && !amend && !sequencing) || conflicts.length > 0} onClick={() => commit()}>
-                            {sequencing ? `Continue ${op}` : amend ? 'Amend last commit' : `Commit ${staged.length ? `${staged.length} file${staged.length === 1 ? '' : 's'}` : ''} to ${status?.branch ?? 'HEAD'}`}{pushAfter && !sequencing ? ' & push' : ''}
+                            {commitLabel}{pushAfter && !sequencing && !conflicts.length ? ' & push' : ''}
                         </Button>
                     </Tooltip>
                     <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 6 }}>Checked for passwords and keys before it is committed.</Typography.Text>
@@ -277,7 +287,7 @@ function Changes() {
                     {ps && <Alert type="warning" showIcon style={{ margin: '0 4px 8px' }} data-testid="pull-stash"
                         message={conflicts.length ? 'Your uncommitted edits clash with the pulled changes' : 'A copy of your edits from the pull is still in the stash'}
                         description={conflicts.length
-                            ? <>The pull went through, but your uncommitted edits clash with it in {conflicts.length} file{conflicts.length === 1 ? '' : 's'}. No merge is running. Resolve each file below (<b>Mine</b> is your edit, <b>Theirs</b> the pulled version), or undo the pull. Until then a copy of your edits is kept in the stash ({ps.ref}).</>
+                            ? <>The pull went through, but your uncommitted edits clash with it in {conflicts.length} file{conflicts.length === 1 ? '' : 's'}. No merge is running. Resolve each file below (<b>Yours</b> is your edit, <b>Pulled</b> the pulled version), or undo the pull. Until then a copy of your edits is kept in the stash ({ps.ref}).</>
                             : <>All clashes are resolved{ps.headMoved ? ' and committed' : ''}. The copy of your edits from before the pull is still in the stash ({ps.ref}): remove it when you no longer need it.</>}
                         action={<Space direction="vertical">
                             {!ps.headMoved && <Button size="small" danger loading={psBusy} onClick={undoPull}>Undo pull</Button>}
@@ -321,7 +331,7 @@ function Changes() {
                 </div>
                 <div style={{ flex: 1, overflow: sel?.area === 'conflict' ? 'hidden' : 'auto', minHeight: 0 }}>
                     {!sel ? (status?.hasConflicts
-                        ? (ps ? <Alert style={{ margin: 12 }} type="warning" showIcon icon={<WarningOutlined />} message="Your uncommitted edits clash with the pulled changes" description="Select a file under Conflicts to resolve it: Mine is your edit, Theirs the pulled version. When the last one is resolved your edits stay as uncommitted changes on top of the pulled commits (nothing is committed). Or press Undo pull." />
+                        ? (ps ? <Alert style={{ margin: 12 }} type="warning" showIcon icon={<WarningOutlined />} message="Your uncommitted edits clash with the pulled changes" description="Select a file under Conflicts to resolve it: Yours is your edit, Pulled the pulled version. When the last one is resolved your edits stay as uncommitted changes on top of the pulled commits (nothing is committed). Or press Undo pull." />
                             : !op ? <Alert style={{ margin: 12 }} type="warning" showIcon icon={<WarningOutlined />} message="Some files have conflicts" description="No merge is running: these conflicts come from applying stashed changes. Select a file under Conflicts to resolve it; nothing needs to be committed to finish." />
                             : <Alert style={{ margin: 12 }} type="warning" showIcon icon={<WarningOutlined />} message={`A ${op} needs your decision`} description={op === 'merge' ? 'Select a file under Merge conflicts to resolve it. When all are resolved, commit to finish the merge.' : 'Select a file under Merge conflicts to resolve it. When all are resolved, press Continue.'} />)
                         : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="Click a file on the left" />)
@@ -350,11 +360,19 @@ function Changes() {
 const TABS = ['changes', 'history', 'branches', 'stash'];
 
 export function SourceControl() {
-    const { status } = useStudio();
+    const { status, refresh } = useStudio();
     const count = status?.files.length ?? 0;
     // The tab is part of the address (#/git/history …), so Back returns to the previous tab.
     const route = useRoute();
     const tab = TABS.includes(route[1]) ? route[1] : 'changes';
+    // Another tab or a terminal may commit, stage or switch meanwhile: while Source control is shown (and the browser
+    // tab visible), read the repository again every few seconds, so buttons such as "Commit 1 file" stay true.
+    const shown = route[0] === 'git';
+    React.useEffect(() => {
+        if (!shown) return;
+        const t = window.setInterval(() => { if (document.visibilityState === 'visible') void refresh(); }, 5000);
+        return () => window.clearInterval(t);
+    }, [shown, refresh]);
     // Spellings people type for a tab (#/git/stashes, #/git/tags …) open it instead of falling back to Changes.
     React.useEffect(() => {
         const alias: Record<string, string> = { stashes: 'stash', branch: 'branches', tags: 'branches', log: 'history', commits: 'history' };

@@ -41,6 +41,14 @@ const ago = (iso: string) => { const s = (Date.now() - Date.parse(iso)) / 1000; 
 let startNext: string | null = null;
 export function startMissionFor(key: string): void { startNext = key; }
 
+/** A mission's tabs (Result, Changes, Timeline…), in the address (#/missions/<id>/<tab>): a reload or a link opens the same one. */
+function DrawerTabs({ id, items }: { id: string; items: NonNullable<React.ComponentProps<typeof Tabs>['items']> }) {
+    const route = useRoute();
+    const asked = route[0] === 'missions' && route[1] === id ? route[2] : undefined;
+    const active = items.some((x) => x.key === asked) ? asked! : String(items[0]?.key ?? '');
+    return <Tabs activeKey={active} onChange={(k) => navigate(['missions', id, k], true)} items={items} />;
+}
+
 export function Missions({ openConversation }: { openConversation: (session: string) => void }) {
     const { message } = App.useApp();
     const route = useRoute();
@@ -86,6 +94,9 @@ export function Missions({ openConversation }: { openConversation: (session: str
     // The triggers that are on: the team's (missions.json) and the mission agents' own (Agent builder).
     const agentTriggers = d.agentTriggers ?? [];
     const triggersOn = d.triggers.filter((t) => t.enabled !== false).length + agentTriggers.filter((t) => t.enabled !== false).length;
+    // An open mission (from the Inbox, a link): the list it is in is shown behind it, not the remembered tab.
+    const openRun = open ? d.runs.find((r) => r.id === open) : undefined;
+    const behind = openRun ? (LIVE.includes(openRun.state) ? 'running' : 'finished') : tab;
     const remove = async (id: string) => { try { await agentsApi.deleteMission(id); message.success('Mission deleted'); if (open === id) navigate(['missions', 'finished']); load(); } catch (e) { message.error(errText(e)); } };
     const table = (rows: MissionSummaryDef[], empty: string) => rows.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={empty} /> : (
         <Table<MissionSummaryDef> size="small" rowKey="id" dataSource={rows} pagination={{ pageSize: 15, hideOnSinglePage: true }} onRow={(r) => ({ onClick: () => navigate(['missions', r.id]), style: { cursor: 'pointer' } })} columns={[
@@ -106,7 +117,7 @@ export function Missions({ openConversation }: { openConversation: (session: str
             {d.problems.length > 0 && <Alert type="warning" showIcon message={`${d.file}: ${d.problems.join(' ')}`} />}
             {running?.state === 'waiting' && <Alert type="warning" showIcon message={<>The mission <b>{running.title}</b> is waiting for you.</>} action={<Button size="small" type="primary" onClick={() => navigate(['missions', running.id])}>Answer</Button>} />}
             {open && <MissionDrawer key={open} id={open} onClose={() => navigate(['missions'])} onChanged={load} openConversation={openConversation} onDelete={remove} />}
-            <Tabs size="small" activeKey={tab} onChange={setTab} tabBarExtraContent={<Space><Tooltip title="Every agent and mission reads these notes first"><Button size="small" icon={<FileTextOutlined />} onClick={() => setNotesOpen(true)}>Team notes for agents</Button></Tooltip><Tooltip title="Refresh"><Button size="small" icon={<ReloadOutlined />} onClick={load} aria-label="Refresh" /></Tooltip></Space>} items={[
+            <Tabs size="small" activeKey={behind} onChange={setTab} tabBarExtraContent={<Space><Tooltip title="Every agent and mission reads these notes first"><Button size="small" icon={<FileTextOutlined />} onClick={() => setNotesOpen(true)}>Team notes for agents</Button></Tooltip><Tooltip title="Refresh"><Button size="small" icon={<ReloadOutlined />} onClick={load} aria-label="Refresh" /></Tooltip></Space>} items={[
                 { key: 'start', icon: <RocketOutlined />, label: <span>Start a mission</span>, children: (
                     <Row gutter={[12, 12]}>
                         {d.templates.map((t) => (
@@ -250,7 +261,7 @@ function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: {
             extra={<Button type="primary" onClick={onClose}>Back to the missions</Button>} /></Card>
     );
     return (
-        <Drawer open width="min(980px, calc(100vw - 32px))" onClose={onClose} title={m ? <Space wrap>{back}<span>{m.title}</span><Tag color={STATE[m.state].color}>{STATE[m.state].label}</Tag>{v?.passed && <Tag icon={<SafetyCertificateOutlined />} color="green">verified by the Studio</Tag>}</Space> : 'Mission'}
+        <Drawer open width="min(980px, calc(100vw - 32px))" onClose={onClose} title={m ? <Space wrap>{back}<span>{m.title}</span><Tag color={STATE[m.state].color}>{STATE[m.state].label}</Tag>{v?.passed && !(v as { reportOnly?: boolean }).reportOnly && <Tag icon={<SafetyCertificateOutlined />} color="green">verified by the Studio</Tag>}{v?.passed && (v as { reportOnly?: boolean }).reportOnly && <Tooltip title="Accepted on the agent's report: nothing was run to verify it"><Tag bordered={false}>report only, not verified</Tag></Tooltip>}</Space> : 'Mission'}
             extra={m && <Space>
                 {!finished && <Button danger icon={<StopOutlined />} onClick={() => modal.confirm({ title: 'Stop the mission?', content: 'What it changed so far is kept on its branch.', okText: 'Stop', okButtonProps: { danger: true }, onOk: () => act(() => api.missionStop(m.id), 'Stopped') })}>Stop</Button>}
                 {m.session && <Button onClick={() => openConversation(m.session!)}>Conversation</Button>}
@@ -261,18 +272,19 @@ function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: {
             {m && (
                 <Space direction="vertical" size={14} style={{ width: '100%' }}>
                     {m.reason && <Alert type={m.state === 'succeeded' ? 'success' : m.state === 'partial' || m.state === 'waiting' ? 'warning' : finished ? 'error' : 'info'} showIcon message={m.state === 'over-budget' && /model calls/.test(m.reason) ? `Over budget: ${m.used.modelCalls} model calls used (the budget is ${m.budget.modelCalls}).` : m.reason} />}
-                    {m.approvals?.map((ap) => (
+                    {/* A finished mission waits for nothing: its approvals and questions are closed. */}
+                    {!finished && m.approvals?.map((ap) => (
                         <Card key={ap.id} size="small" style={{ borderColor: '#d48806' }} title={<Space><PauseCircleOutlined />The agent waits for your approval</Space>}>
                             <Typography.Paragraph strong>{ap.title}</Typography.Paragraph>
                             {ap.detail && <pre style={{ maxHeight: 240, overflow: 'auto', fontSize: 12, background: 'rgba(127,127,127,.08)', padding: 10, borderRadius: 6 }}>{ap.detail}</pre>}
                             <Space>
                                 <Button type="primary" onClick={() => act(() => api.missionApprove(m.id, ap.id, 'once'), 'Approved')}>Approve</Button>
-                                <Tooltip title={`Every ${ap.kind} request of this mission`}><Button onClick={() => act(() => api.missionApprove(m.id, ap.id, 'session'), 'Approved for the mission')}>Approve for this mission</Button></Tooltip>
+                                <Tooltip title={ap.kind === 'shell' ? 'This exact command again in this mission without asking (a command that changes files always asks; other commands still ask)' : ap.kind === 'plan' ? 'Plans are approved each time' : `This same ${ap.kind} request again in this mission without asking`}><Button onClick={() => act(() => api.missionApprove(m.id, ap.id, 'session'), 'Approved for the mission')}>Approve for this mission</Button></Tooltip>
                                 <Button danger onClick={() => act(() => api.missionApprove(m.id, ap.id, 'reject'), 'Rejected')}>Reject</Button>
                             </Space>
                         </Card>
                     ))}
-                    {cp && (
+                    {cp && !finished && (
                         <Card size="small" title={<Space><PauseCircleOutlined />{cp.kind === 'plan' ? 'The agent asks you to approve its plan' : 'The agent asks you'}</Space>} style={{ borderColor: '#d48806' }}>
                             <Typography.Paragraph>{cp.question}</Typography.Paragraph>
                             {cp.content && <pre style={{ maxHeight: 320, overflow: 'auto', fontSize: 12, background: 'rgba(127,127,127,.08)', padding: 10, borderRadius: 6 }}>{cp.content}</pre>}
@@ -294,7 +306,7 @@ function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: {
                         { key: 'c', label: 'Model calls', children: budgetBar(m.used.modelCalls, m.budget.modelCalls, `${m.used.modelCalls} / ${m.budget.modelCalls}`) },
                         { key: 'v', label: 'Verification', children: `${m.used.attempts} / ${m.budget.attempts} attempt(s)` },
                     ]} />
-                    <Tabs items={[
+                    <DrawerTabs id={m.id} items={[
                         ...(m.exploration?.notes.length ? [{ key: 'explore', label: `Exploration (${m.exploration.notes.length})`, children: <Exploration id={m.id} notes={m.exploration.notes} /> }] : []),
                         ...(m.team?.length ? [{ key: 'team', label: `Team (${m.team.length})`, children: (
                             <List size="small" dataSource={m.team} renderItem={(x) => (
@@ -356,7 +368,7 @@ function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: {
                             </Space>
                         ) },
                         { key: 'timeline', label: 'Timeline', children: (
-                            <Timeline items={m.timeline.map((x) => ({ color: x.kind === 'error' ? 'red' : x.kind === 'verify' ? 'green' : x.kind === 'ask' ? 'orange' : x.kind === 'tool' ? 'gray' : 'blue', children: <Space direction="vertical" size={0}><Typography.Text style={{ fontSize: x.kind === 'tool' ? 12 : 13 }} type={x.kind === 'tool' ? 'secondary' : undefined}>{x.text}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 11 }}>{new Date(x.at).toLocaleTimeString()}</Typography.Text></Space> }))} />
+                            <Timeline items={m.timeline.map((x) => ({ color: (x as { refused?: boolean }).refused ? 'orange' : x.kind === 'error' ? 'red' : x.kind === 'verify' ? 'green' : x.kind === 'ask' ? 'orange' : x.kind === 'tool' ? 'gray' : 'blue', children: <Space direction="vertical" size={0}><Typography.Text style={{ fontSize: x.kind === 'tool' ? 12 : 13 }} type={x.kind === 'tool' && !(x as { refused?: boolean }).refused ? 'secondary' : undefined}>{(x as { refused?: boolean }).refused && <Tag color="orange" bordered={false}>refused</Tag>}{x.text}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 11 }}>{new Date(x.at).toLocaleTimeString()}</Typography.Text></Space> }))} />
                         ) },
                     ]} />
                 </Space>

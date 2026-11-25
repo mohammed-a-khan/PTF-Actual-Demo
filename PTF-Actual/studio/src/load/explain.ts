@@ -224,11 +224,23 @@ export function compareRuns(a: RunResult, b: RunResult, names: { a: string; b: s
     notes.push('Changes within ±10%, or under 20 ms, are treated as normal run-to-run variation.');
     const p95 = metrics.find((x) => x.label.startsWith('95th'))!;
     const errM = metrics.find((x) => x.label === 'Error rate')!;
-    const regress = p95.verdict === 'worse' || errM.verdict === 'worse' || worse.length > 0;
-    const improve = !regress && (p95.verdict === 'better' || better.length > 0);
-    const status: Status = !b.passed && a.passed ? 'red' : regress ? (Math.abs(ch(a.total.p95, b.total.p95)) > 25 || dErr > 1 || !b.passed ? 'red' : 'amber') : 'green';
+    // The verdict follows the table: any key measure (average, median, p95, errors, throughput) worse beyond the
+    // shared threshold (labels.ts changeVerdict) is a regression, and the answer says which.
+    const KEY: Array<{ label: string; what: string }> = [
+        { label: '95th percentile (p95)', what: 'the 95th percentile' }, { label: 'Average response time', what: 'the average response time' },
+        { label: 'Median (p50)', what: 'the median response time' }, { label: 'Error rate', what: 'errors' }, { label: 'Throughput', what: 'throughput' },
+    ];
+    const keyM = KEY.map((k) => ({ ...k, m: metrics.find((x) => x.label === k.label)! }));
+    const worseM = keyM.filter((k) => k.m.verdict === 'worse'), betterM = keyM.filter((k) => k.m.verdict === 'better');
+    const regress = worseM.length > 0 || worse.length > 0;
+    const improve = !regress && (betterM.length > 0 || better.length > 0);
+    const big = (k: 'avg' | 'p50' | 'p95') => changeVerdict(a.total[k], b.total[k], 'time').verdict === 'worse' && ch(a.total[k], b.total[k]) > 25;
+    const severe = big('p95') || big('avg') || big('p50') || dErr > 1 || (thr.verdict === 'worse' && cThr < -25);
+    const status: Status = !b.passed && a.passed ? 'red' : regress ? (severe || !b.passed ? 'red' : 'amber') : 'green';
     const headline = `${status.toUpperCase()} — ${names.b} ${regress ? 'is worse than' : improve ? 'is better than' : 'performs like'} ${names.a}`;
-    const answer = regress ? `Performance regressed: ${[p95.verdict === 'worse' ? `the 95th percentile went from ${p95.a} to ${p95.b} (${p95.change})` : '', errM.verdict === 'worse' ? `errors went from ${errM.a} to ${errM.b}` : '', worse.length ? `${worse.length} transaction${worse.length === 1 ? '' : 's'} got slower` : ''].filter(Boolean).join('; ')}.${!b.passed && a.passed ? ' The new run fails its targets where the earlier one passed.' : ''}`
-        : improve ? `Performance improved: the 95th percentile went from ${p95.a} to ${p95.b} (${p95.change}) with ${errM.b} errors.` : `No meaningful change: response times, throughput and errors are within normal variation of ${names.a}.`;
+    const went = (k: { what: string; m: ComparedMetric }) => k.m.label === 'Error rate' ? `errors went from ${k.m.a} to ${k.m.b}`
+        : k.m.label === 'Throughput' ? `throughput ${k.m.verdict === 'worse' ? 'fell' : 'rose'} from ${k.m.a} to ${k.m.b} (${k.m.change})` : `${k.what} went from ${k.m.a} to ${k.m.b} (${k.m.change})`;
+    const answer = regress ? `Performance regressed: ${[...worseM.map(went), worse.length ? `${worse.length} transaction${worse.length === 1 ? '' : 's'} got slower or failed more` : ''].filter(Boolean).join('; ')}.${betterM.length ? ` Better: ${betterM.map((k) => k.what).join(', ')}.` : ''}${!b.passed && a.passed ? ' The new run fails its targets where the earlier one passed.' : ''}`
+        : improve ? `Performance improved: ${betterM.length ? betterM.map(went).join('; ') : `${better.length} transaction${better.length === 1 ? '' : 's'} got faster or failed less`}; ${errM.b} errors.` : `No meaningful change: response times, throughput and errors are within normal variation of ${names.a}.`;
     return { status, headline, answer, metrics, transactions: txs, findings, notes };
 }

@@ -59,7 +59,7 @@ test('two runs compared: what got worse, by how much, and whether it matters', (
     const c = compareRuns(a, b, { a: 'Run A', b: 'Run B' });
     assert.equal(c.status, 'red');
     assert.equal(c.headline, 'RED — Run B is worse than Run A');
-    assert.match(c.answer, /^Performance regressed: the 95th percentile went from 500 ms to 720 ms \(\+44%\); 1 transaction got slower\./);
+    assert.match(c.answer, /^Performance regressed: the 95th percentile went from 500 ms to 720 ms \(\+44%\); the average response time went from 250 ms to 360 ms \(\+44%\); the median response time went from 200 ms to 288 ms \(\+44%\); 1 transaction got slower or failed more\./);
     const p95 = c.metrics.find((m) => m.label.startsWith('95th'))!;
     assert.deepEqual([p95.change, p95.verdict, p95.meaning], ['+44%', 'worse', 'Users waited 44% longer.']);
     assert.deepEqual(c.transactions.map((t) => [t.name, t.verdict]), [['Pay', 'worse'], ['Search', 'same'], ['Old step', 'gone'], ['New step', 'new']]);

@@ -55,7 +55,7 @@ function Pane({ title, rows, other, tone, current, choices, onPick, onDouble, sc
                                 title={inBlock && onDouble ? 'Double-click to use this block' : undefined}>
                                 <span className="merge-ln">{r.line ?? ''}</span>
                                 <span className="merge-txt">
-                                    {r.unresolved && !r.filler ? <span className="m-placeholder">◆ choose Theirs or Mine for this block (or edit it)</span>
+                                    {r.unresolved && !r.filler ? <span className="m-placeholder">◆ choose a side for this block (or edit it)</span>
                                         : r.text === null ? '' : inBlock && tone !== 'merged' ? diffSpan(r.text, other?.[i]?.text) : (r.text || ' ')}
                                 </span>
                             </div>
@@ -73,9 +73,13 @@ export interface ThreeWayMergeProps {
     setChoice: (k: number, c: Choice) => void;
     mineLabel: string;
     theirsLabel: string;
+    /** The words for the two sides, used the same way everywhere (default "Mine" / "Theirs"). */
+    mineWord?: string;
+    theirsWord?: string;
 }
 
-export function ThreeWayMerge({ parsed, choices, setChoice, mineLabel, theirsLabel }: ThreeWayMergeProps) {
+export function ThreeWayMerge({ parsed, choices, setChoice, mineLabel, theirsLabel, mineWord = 'Mine', theirsWord = 'Theirs' }: ThreeWayMergeProps) {
+    const mw = mineWord.toLowerCase(), tw = theirsWord.toLowerCase();
     const panes = React.useMemo(() => alignPanes(parsed, choices), [parsed, choices]);
     const blocks = React.useMemo(() => parsed.segments.filter((s): s is Extract<Segment, { kind: 'conflict' }> => s.kind === 'conflict'), [parsed]);
     const [current, setCurrentState] = React.useState(0);
@@ -142,10 +146,10 @@ export function ThreeWayMerge({ parsed, choices, setChoice, mineLabel, theirsLab
                     <Tooltip title="Next conflict (F8)"><Button aria-label="Next conflict (F8)" size="small" icon={<ArrowDownOutlined />} onClick={() => goTo(nextOpen(currentRef.current, 1))} /></Tooltip>
                     <Typography.Text strong>Conflict {current + 1} of {blocks.length}</Typography.Text>
                     <Divider type="vertical" />
-                    <Tooltip title="Ctrl+F9"><Button size="small" onClick={() => apply('theirs')}>Use theirs</Button></Tooltip>
-                    <Tooltip title="Ctrl+F10"><Button size="small" onClick={() => apply('ours')}>Use mine</Button></Tooltip>
-                    <Tooltip title="Ctrl+Shift+F9"><Button size="small" onClick={() => apply('theirs-first')}>Theirs before mine</Button></Tooltip>
-                    <Tooltip title="Ctrl+Shift+F10"><Button size="small" onClick={() => apply('both')}>Mine before theirs</Button></Tooltip>
+                    <Tooltip title="Ctrl+F9"><Button size="small" onClick={() => apply('theirs')}>Use {tw}</Button></Tooltip>
+                    <Tooltip title="Ctrl+F10"><Button size="small" onClick={() => apply('ours')}>Use {mw}</Button></Tooltip>
+                    <Tooltip title="Ctrl+Shift+F9"><Button size="small" onClick={() => apply('theirs-first')}>{theirsWord} before {mw}</Button></Tooltip>
+                    <Tooltip title="Ctrl+Shift+F10"><Button size="small" onClick={() => apply('both')}>{mineWord} before {tw}</Button></Tooltip>
                     {b?.base && <Popover title="Common version (what both sides started from)" content={<pre className="mono" style={{ maxHeight: 320, maxWidth: 640, overflow: 'auto', margin: 0 }}>{b.base.length ? b.base.join('\n') : '(empty: both sides added lines here)'}</pre>}>
                         <Button size="small">Base</Button>
                     </Popover>}
@@ -155,9 +159,9 @@ export function ThreeWayMerge({ parsed, choices, setChoice, mineLabel, theirsLab
                 {left === 0 ? <Tag color="green" icon={<CheckOutlined />}>All conflicts decided</Tag> : <Tag color="volcano">{left} conflict{left === 1 ? '' : 's'} left</Tag>}
             </div>
             <div className="merge-top">
-                <Pane title={<><Tag color="green">Theirs</Tag>incoming — {theirsLabel}</>} rows={panes.theirs} other={panes.mine} tone="theirs" current={current} choices={choices}
+                <Pane title={<><Tag color="green">{theirsWord}</Tag>{theirsLabel}</>} rows={panes.theirs} other={panes.mine} tone="theirs" current={current} choices={choices}
                     onPick={setCurrent} onDouble={(k) => { setCurrent(k); setChoice(k, 'theirs'); }} scrollRef={refs[0]} onScroll={onScroll} />
-                <Pane title={<><Tag color="blue">Mine</Tag>current — {mineLabel}</>} rows={panes.mine} other={panes.theirs} tone="mine" current={current} choices={choices}
+                <Pane title={<><Tag color="blue">{mineWord}</Tag>{mineLabel}</>} rows={panes.mine} other={panes.theirs} tone="mine" current={current} choices={choices}
                     onPick={setCurrent} onDouble={(k) => { setCurrent(k); setChoice(k, 'ours'); }} scrollRef={refs[1]} onScroll={onScroll} />
             </div>
             <div className="merge-bottom">

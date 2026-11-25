@@ -301,6 +301,7 @@ export class GitService {
             return m;
         };
         const before = await snap('refs/remotes');
+        const tagsBefore = await snap('refs/tags');
         const r = await this.git(['fetch', '--all', '--prune'], { timeoutMs: 600_000, allowFailure: true });
         if (r.code !== 0) throw new GitError(explainGitFailure(r.stderr || r.stdout), ['fetch'], r.code, r.stderr);
         const after = await snap('refs/remotes');
@@ -316,8 +317,52 @@ export class GitService {
             const c = await this.git(['rev-list', '--count', '--stdin'], { input: [...new Set(tips)].join('\n') + '\n' + [...known].map((x) => '^' + x).join('\n') + '\n', allowFailure: true });
             newCommits = c.code === 0 ? Number(c.stdout.trim()) || 0 : 0;
         }
+        // Tags: the ones that arrived here, and what changed in the remote's tags since the last Fetch.
+        const remote = await this.defaultRemote();
+        const there = remote ? await this.remoteTags(remote) : null;
+        if (remote && there) {
+            // A tag new (or made again) on the remote since the last Fetch that git did not bring along (it is not on
+            // a fetched branch): fetched too, so the Tags list shows it. Never one that exists here (a tag that differs
+            // is shown as such, not replaced), nor one deleted here on purpose that the remote had as it is.
+            const seen = await this.seenRemoteTags(remote);
+            const local = await snap('refs/tags');
+            const get = [...there.keys()].filter((n) => !local.has(`refs/tags/${n}`) && seen?.get(n) !== there.get(n) && /^[^\s:]+$/.test(n)).slice(0, 200);
+            if (get.length) await this.git(['fetch', '--no-tags', remote, ...get.map((n) => `refs/tags/${n}:refs/tags/${n}`)], { allowFailure: true, timeoutMs: 600_000 });
+        }
+        const tagsAfter = await snap('refs/tags');
+        const tagsAdded = new Set([...tagsAfter.keys()].filter((t) => !tagsBefore.has(t)).map((t) => t.replace(/^refs\/tags\//, '')));
+        const tagsChanged: string[] = [], tagsRemoved: string[] = [];
+        if (remote && there) {
+            const seen = await this.seenRemoteTags(remote);
+            if (seen) {
+                for (const [name, sha] of there) { const was = seen.get(name); if (was === undefined) tagsAdded.add(name); else if (was !== sha) tagsChanged.push(name); }
+                for (const name of seen.keys()) if (!there.has(name)) tagsRemoved.push(name);
+            }
+            await this.rememberRemoteTags(remote, there);
+        }
         const st = await this.status();
-        return { newCommits, added, updated, removed, behind: st.upstream ? st.behind : 0, upstream: st.upstream, branch: st.branch };
+        return { newCommits, added, updated, removed, tagsAdded: [...tagsAdded].sort(), tagsChanged: tagsChanged.sort(), tagsRemoved: tagsRemoved.sort(), behind: st.upstream ? st.behind : 0, upstream: st.upstream, branch: st.branch };
+    }
+
+    /** The remote's tags as the last Fetch saw them (or the Tags list, before any Fetch), to say what changed there since. */
+    private async seenRemoteTags(remote: string): Promise<Map<string, string> | null> {
+        try {
+            const all = JSON.parse(fs.readFileSync(await this.remoteTagsFile(), 'utf8')) as Record<string, Record<string, string>>;
+            const m = all?.[remote];
+            return m && typeof m === 'object' ? new Map(Object.entries(m)) : null;
+        } catch { return null; }
+    }
+    private async rememberRemoteTags(remote: string, tags: Map<string, string>): Promise<void> {
+        const f = await this.remoteTagsFile();
+        let all: Record<string, Record<string, string>> = {};
+        try { all = JSON.parse(fs.readFileSync(f, 'utf8')) ?? {}; } catch { /* first time */ }
+        all[remote] = Object.fromEntries(tags);
+        try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, JSON.stringify(all)); } catch { /* not essential */ }
+    }
+    private remoteTagsPath?: string;
+    private async remoteTagsFile(): Promise<string> {
+        this.remoteTagsPath ??= path.resolve(this.repoRoot, (await this.git(['rev-parse', '--git-path', 'cs-studio/remote-tags.json'])).stdout.trim());
+        return this.remoteTagsPath;
     }
 
     /**
@@ -543,6 +588,7 @@ export class GitService {
         const before = await head();
         const stashBefore = await stashTop();
         const r = await this.git(['pull', ...how, '--autostash'], { allowFailure: true, timeoutMs: 600_000 });
+        const upstreamTip = async () => { const h = await this.git(['rev-parse', '--verify', '-q', '@{upstream}'], { allowFailure: true }); return h.code === 0 ? h.stdout.trim() : null; };
         if (m === 'ff-only' && r.code !== 0 && /not possible to fast-forward|diverging branches/i.test(r.stderr)) {
             return { status: 'rejected', mode: m, message: 'This repository pulls fast-forward only (pull.ff=only), and your branch has commits the remote does not: rebase onto it, or merge it, first.' };
         }
@@ -559,11 +605,19 @@ export class GitService {
                 const info: PullStashMarker = { stash: stashAfter, before, after, branch: st.branch, upstream: st.upstream, at: new Date().toISOString() };
                 fs.writeFileSync(marker, JSON.stringify(info, null, 2));
                 const conflicts = st.files.filter((f) => f.conflicted).map((f) => f.path);
-                const pulled = Number((await this.git(['rev-list', '--count', `${before}..${after}`], { allowFailure: true })).stdout.trim()) || 0;
+                // git's autostash apply stages every edit that did not clash. Put those back as plain uncommitted
+                // changes (as they were, and as they are when nothing clashes), so only the clashing files need a look.
+                const clean = st.files.filter((f) => !f.conflicted && f.staged !== '.' && f.staged !== '?' && f.staged !== 'A').map((f) => f.path);
+                if (clean.length) await this.git(['reset', '-q', '--', ...clean], { allowFailure: true });
+                // What was pulled: the commits of the remote branch that this branch did not have before. Not
+                // before..after, which in rebase mode also counts your own commits replayed on top.
+                const up = await upstreamTip();
+                const range = up ? [up, `^${before}`] : [`${before}..${after}`];
+                const pulled = Number((await this.git(['rev-list', '--count', ...range], { allowFailure: true })).stdout.trim()) || 0;
                 const ref = (await this.pullStash(after))?.ref ?? 'stash@{0}';
                 return {
                     status: 'conflicts', mode: m, localEdits: true, conflicts, pulled, stash: ref,
-                    message: `${pulled} commit${pulled === 1 ? ' was' : 's were'} pulled, but your uncommitted edits clash with the pulled changes in ${conflicts.length} file${conflicts.length === 1 ? '' : 's'} (${conflicts.slice(0, 3).join(', ')}${conflicts.length > 3 ? ', …' : ''}). No merge is running: resolve each file (Mine = your edit, Theirs = the pulled version), or Undo the pull to get back your branch and your edits as they were. A copy of your edits is kept in the stash (${ref}) until then.`,
+                    message: `${pulled} commit${pulled === 1 ? ' was' : 's were'} pulled, but your uncommitted edits clash with the pulled changes in ${conflicts.length} file${conflicts.length === 1 ? '' : 's'} (${conflicts.slice(0, 3).join(', ')}${conflicts.length > 3 ? ', …' : ''}). No merge is running: resolve each file (Yours = your edit, Pulled = the pulled version), or Undo the pull to get back your branch and your edits as they were. A copy of your edits is kept in the stash (${ref}) until then.`,
                 };
             }
         }
@@ -708,10 +762,13 @@ export class GitService {
     async resolveConflict(file: string, choice: 'ours' | 'theirs' | { content: string }): Promise<{ deleted: boolean; message?: string }> {
         const r = await this.resolveConflictOnly(file, choice);
         // The last clash of a pull whose put-aside edits clashed: finish it (no stray stash entry is left).
-        if ((await this.pullStash()) && !(await this.status()).hasConflicts) {
+        const ps = await this.pullStash();
+        if (ps && !(await this.status()).hasConflicts) {
             const f = await this.finishPullAutostash();
             return { ...r, message: r.message ? `${r.message} ${f.message}` : f.message };
         }
+        // Other files still clash: this one is an uncommitted edit again (not staged), as all of them will be at the end.
+        if (ps && !ps.headMoved) await this.git(['reset', '-q', '--', file], { allowFailure: true });
         return r;
     }
 
@@ -1251,6 +1308,8 @@ export class GitService {
         // On the remote or not (pushed already, or to push): asked of the remote; unknown when it cannot be reached.
         const remote = out.length ? await this.defaultRemote() : null;
         const there = remote ? await this.remoteTags(remote) : null;
+        // A first look at the remote's tags (no Fetch yet) is what the next Fetch compares with.
+        if (remote && there && !(await this.seenRemoteTags(remote))) await this.rememberRemoteTags(remote, there);
         for (const t of out) {
             if (there) { const o = there.get(t.name); t.onRemote = o === undefined ? 'no' : o === t.object ? 'yes' : 'different'; }
             delete t.object;
@@ -1497,6 +1556,10 @@ export interface FetchResult {
     added: string[];
     updated: string[];
     removed: string[];
+    /** Tags that arrived or are new on the remote, that point elsewhere there now, or that were deleted there (since the Studio last looked). */
+    tagsAdded: string[];
+    tagsChanged: string[];
+    tagsRemoved: string[];
     /** How many commits the current branch is behind its upstream now. */
     behind: number;
     upstream: string | null;

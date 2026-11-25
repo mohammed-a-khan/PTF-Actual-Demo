@@ -127,13 +127,17 @@ For each screen: open it in the Studio browser, read it (snapshot, forms, tables
     },
 ];
 
-/** A workflow form kept by "Save" when leaving the screen (this browser tab only; gone when started or discarded). */
-const DRAFT = 'cs-studio-agents-workflow-draft';
-function readDraft(): { workflow: string; values: Record<string, string> } | null {
-    try { const v = JSON.parse(sessionStorage.getItem(DRAFT) ?? 'null'); return v && typeof v === 'object' && v.values && typeof v.values === 'object' ? v : null; } catch { return null; }
+/** Workflow forms kept by "Save" when leaving the screen (per workflow, on this computer; gone when started or discarded). */
+const DRAFT = 'cs-studio-agents-workflow-drafts';
+function readDrafts(): Record<string, Record<string, string>> {
+    try { const v = JSON.parse(localStorage.getItem(DRAFT) ?? 'null'); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch { return {}; }
 }
-function writeDraft(d: { workflow: string; values: Record<string, string> } | null): void {
-    try { if (d) sessionStorage.setItem(DRAFT, JSON.stringify(d)); else sessionStorage.removeItem(DRAFT); } catch { /* storage off */ }
+function writeDraft(workflow: string, values: Record<string, string> | null): void {
+    try {
+        const all = readDrafts();
+        if (values) all[workflow] = values; else delete all[workflow];
+        if (Object.keys(all).length) localStorage.setItem(DRAFT, JSON.stringify(all)); else localStorage.removeItem(DRAFT);
+    } catch { /* storage off */ }
 }
 
 function SettingsCard({ status, onSaved, onReload }: { status: AgentStatusView | null; onSaved: (s: AgentStatus) => void; onReload: () => void }) {
@@ -225,7 +229,7 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
     // The workflow chosen stays chosen when the person comes back (Back, the menu, a reload of the tab).
     const [open, setOpen] = useKept<string | null>('agents-workflow', null);
     // What was typed, restored from a draft kept by "Save" in the leave question (this browser tab only).
-    const [values, setValues] = React.useState<Record<string, string>>(() => { const dr = readDraft(); return dr && dr.workflow === open ? dr.values : {}; });
+    const [values, setValues] = React.useState<Record<string, string>>(() => (open && readDrafts()[open]) || {});
     const [starting, setStarting] = React.useState(false);
     const [tab, setTab] = useRememberedTab('agents', 'workflows', ['workflows', 'conversations', 'tools', 'setup'], 'agents');
     const [sessionsRead, setSessionsRead] = React.useState(false);
@@ -234,12 +238,22 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
     // ("not found") and the address corrected in place to the list.
     const route = useRoute();
     const convId = route[0] === 'agents' && route[1] === 'conversations' && route[2] ? route[2] : null;
+    // A conversation that is there keeps its address (a reload or a copied link opens it again; closing the panel
+    // puts the address back to the list).
     React.useEffect(() => {
         if (!convId || !sessionsRead) return;
-        if (sessions.some((x) => x.id === convId)) openPanel(convId);
-        else message.warning(`Conversation "${convId.slice(0, 80)}" not found: it may have been deleted.`);
+        if (sessions.some((x) => x.id === convId)) { openPanel(convId); return; }
+        message.warning(`Conversation "${convId.slice(0, 80)}" not found: it may have been deleted.`);
         navigate(['agents', 'conversations'], true);
     }, [convId, sessionsRead]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Conversations made or deleted elsewhere (the Copilot panel, another tab): the list and its count follow.
+    React.useEffect(() => {
+        const f = () => refresh();
+        window.addEventListener('cs-studio:agent-sessions-changed', f);
+        window.addEventListener('focus', f);
+        const t = setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 5000);
+        return () => { window.removeEventListener('cs-studio:agent-sessions-changed', f); window.removeEventListener('focus', f); clearInterval(t); };
+    }, [refresh]);
     const reload = React.useCallback(() => { api.agentStatus().then(setStatus).catch((e) => setStatus({ error: errText(e) } as AgentStatus)); }, []);
     React.useEffect(() => {
         reload();
@@ -250,12 +264,28 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
     // What was typed into the workflow's form is not kept when another screen opens: leaving asks first.
     const typed = !!wf && Object.entries(values).some(([k, x]) => k !== 'project' && k !== 'env' && typeof x === 'string' && x.trim() !== '');
     // "Save" keeps what was typed as a draft (in this browser tab): the form shows it again on the way back.
-    const [draftAt, setDraftAt] = React.useState(() => JSON.stringify(readDraft()?.values ?? null));
+    // What was typed in each workflow's form stays with that card while this screen is open: switching cards neither
+    // loses it nor carries it to the other card (it is said once when something typed is kept).
+    const perCard = React.useRef<Record<string, Record<string, string>>>({});
+    const [draftVer, setDraftVer] = React.useState(0);
+    const draftAt = React.useMemo(() => JSON.stringify((open && readDrafts()[open]) || null), [open, draftVer]);
     const unsaved = typed && JSON.stringify(values) !== draftAt;
+    const valuesRef = React.useRef(values);
+    valuesRef.current = values;
     useUnsaved('agents-workflow-form', unsaved, `the "${wf?.title ?? 'workflow'}" form`, {
         lostOnLeave: true,
-        save: async () => { writeDraft({ workflow: open ?? '', values }); setDraftAt(JSON.stringify(values)); message.info(`Kept the "${wf?.title ?? 'workflow'}" form as a draft: it is here when you come back.`); return true; },
-        discard: () => { writeDraft(null); setValues((v) => ({ project: v.project ?? '', env: v.env ?? '' })); },
+        save: async () => {
+            if (!open) return false;
+            writeDraft(open, valuesRef.current);
+            // Kept also for the card when the screen is opened again (in this tab, or after a reload or a new window).
+            perCard.current[open] = valuesRef.current;
+            setDraftVer((n) => n + 1);
+            message.info(`Kept the "${wf?.title ?? 'workflow'}" form as a draft: it is here when you come back.`);
+            return true;
+        },
+        discard: () => { if (open) { writeDraft(open, null); delete perCard.current[open]; } setDraftVer((n) => n + 1); setValues((v) => ({ project: v.project ?? '', env: v.env ?? '' })); },
+        // Another tab of this screen (Back or Forward between Workflows, Conversations, Tool servers, Setup): the form stays.
+        keeps: (to) => to[0] === 'agents',
     });
     // Plan first: the project's features (style example) and the story read from Azure DevOps.
     // Read for these values only (project | environment | story): a context read for other values is not used.
@@ -294,21 +324,19 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
             const s = await api.agentCreate(`${wf.title}${v.project ? ` (${v.project})` : ''}`, wf.task(v));
             await api.agentSend(s.id, wf.prompt(v));
             setValues((x) => ({ project: x.project ?? '', env: x.env ?? '' }));
-            writeDraft(null);
+            if (open) { writeDraft(open, null); delete perCard.current[open]; }
+            setDraftVer((n) => n + 1);
             openPanel(s.id);
             refresh();
         } catch (e) { message.error(errText(e)); } finally { setStarting(false); startingRef.current = false; }
     };
     const envs = meta?.environments[values.project ?? ''] ?? [];
     const ready = !!status?.auth?.isAuthenticated && !status.error && !status.policyProblems?.length;
-    // What was typed in each workflow's form stays with that card while this screen is open: switching cards neither
-    // loses it nor carries it to the other card (it is said once when something typed is kept).
-    const perCard = React.useRef<Record<string, Record<string, string>>>({});
     const pick = (key: string) => {
         if (key === open) return;
         if (open) perCard.current[open] = values;
         if (typed && wf) message.info(`Kept what you typed in "${wf.title}": it is there when you choose it again.`);
-        const kept = perCard.current[key];
+        const kept = perCard.current[key] ?? readDrafts()[key];
         setOpen(key);
         setValues((v) => ({ ...(kept ?? {}), project: v.project || meta?.projects[0] || '', env: v.env ?? '' }));
     };
@@ -362,7 +390,7 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
                 { key: 'conversations', icon: <MessageOutlined />, label: <span>Conversations <Tag bordered={false} style={{ marginInlineEnd: 0 }}>{chats.length}</Tag></span>, children: (
                     <Card size="small" styles={{ body: { padding: 0 } }} extra={null}>
                         {!chats.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: 16 }} description="None yet: start a workflow, or open Copilot from the top bar." /> : chats.map((s) => (
-                            <div key={s.id} role="button" tabIndex={0} className="item-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }} onClick={() => openPanel(s.id)} onKeyDown={(e) => { if (e.key === 'Enter') openPanel(s.id); }}>
+                            <div key={s.id} role="button" tabIndex={0} className="item-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }} onClick={() => { navigate(['agents', 'conversations', s.id], true); openPanel(s.id); }} onKeyDown={(e) => { if (e.key === 'Enter') { navigate(['agents', 'conversations', s.id], true); openPanel(s.id); } }}>
                                 <Typography.Text ellipsis={{ tooltip: s.title }} style={{ flex: 1, minWidth: 0 }}>{s.busy && <Tag color="processing" bordered={false}>working</Tag>}{s.title}</Typography.Text>
                                 <span className="item-id">{ago(s.createdAt)}</span>
                                 <Popconfirm title="Delete this conversation?" okText="Delete" okButtonProps={{ danger: true }} onConfirm={(e) => { e?.stopPropagation(); void api.agentDelete(s.id).then(refresh).catch((x) => message.error(errText(x))); }} onCancel={(e) => e?.stopPropagation()}>

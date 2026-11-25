@@ -256,7 +256,8 @@ test('triggers: a failed run starts its mission (filters, one at a time, a daily
         assert.equal(s.key, 'nightly-review');
         assert.equal(s.copy, undefined, 'a read-only team mission has no copy');
         await until(() => s.state === 'succeeded');
-        assert.equal(s.verifications[0].why, 'The team mission ends with its report.');
+        assert.equal(s.verifications[0].why, 'A read-only mission: the report is the result.', 'no team: not called a team mission');
+        assert.match(s.reason!, /^Done: reported \(the mission only reads: nothing was changed\); no test run verifies it\.$/);
     } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 

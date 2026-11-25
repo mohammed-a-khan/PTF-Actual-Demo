@@ -180,7 +180,7 @@ export interface RepoStatus { branch: string | null; head: string | null; upstre
     pullStash?: PullStash }
 /** A pull whose put-aside edits clashed: git's "ours" is the pulled version, "theirs" your own edit (kept in the stash entry `ref`). */
 export interface PullStash { stash: string; ref: string; before: string; after: string; branch: string | null; upstream: string | null; at: string; headMoved: boolean }
-export interface FetchResult { ok: boolean; newCommits: number; added: string[]; updated: string[]; removed: string[]; behind: number; upstream: string | null; branch: string | null }
+export interface FetchResult { ok: boolean; newCommits: number; added: string[]; updated: string[]; removed: string[]; tagsAdded?: string[]; tagsChanged?: string[]; tagsRemoved?: string[]; behind: number; upstream: string | null; branch: string | null }
 export interface BranchInfo { name: string; current: boolean; upstream: string | null; sha: string; remote: boolean; upstreamGone?: boolean }
 export interface LogEntry { sha: string; authorName: string; authorEmail: string; date: string; subject: string }
 export interface Finding { id: string; ruleId: string; type: string; reason: string; confidence: 'high' | 'medium'; file: string; line: number; column: number; preview: string; fingerprint: string; suggestedName?: string }

@@ -7,7 +7,7 @@ import { Alert, App, Button, Card, Col, Form, Input, Radio, Row, Segmented, Sele
 import { InfoCircleOutlined } from '@ant-design/icons';
 import { api, McpSettings, StudioSettings } from '../api';
 import { errText } from '../state';
-import { GitNetworkCard, StudioNetworkCard } from './NetworkSettings';
+import { GitNetworkCard, settingsKeeps, StudioNetworkCard } from './NetworkSettings';
 import { navigate, useRoute } from '../route';
 import { asciiDigits, charCount, useStoredTab } from '../datagit-common';
 import { useUnsaved } from '../unsaved';
@@ -130,7 +130,7 @@ export function Settings() {
     // A name or email typed but not saved: leaving the screen (menu, Back, a typed address) asks first.
     const idDirty = !!s && (name !== s.git.name || email !== s.git.email || (s.git.scope !== 'none' && scope !== (s.git.scope === 'global' ? 'global' : 'repository')));
     useUnsaved('settings-identity', idDirty, 'your name and email for commits', {
-        lostOnLeave: true, save: saveIdentity,
+        lostOnLeave: true, save: saveIdentity, keeps: settingsKeeps,
         discard: () => { if (s) { setName(s.git.name); setEmail(s.git.email); setScope(s.git.scope === 'global' ? 'global' : 'repository'); } },
     });
 

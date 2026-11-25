@@ -162,12 +162,24 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
     const instrProblem = instructionsProblem(a.instructions ?? '');
     const goalProblem = mission && !a.goal?.trim() ? 'Write the mission\'s goal.' : null;
     const cronProblems = mission ? (a.triggers ?? []).map((t) => (t.on === 'schedule' ? cronProblem(t.cron ?? '') : null)) : [];
+    // A trigger's other rules (the server's, src/agents/builder.ts): required inputs it must give, a WIQL query, the inputs it fills.
+    const agentInputs = (a.inputs ?? []).filter((x) => x.key);
+    const inputMissing = (t: AgentTriggerDef) => (t.on === 'schedule' && t.enabled !== false ? agentInputs.filter((x) => x.required && !String(t.inputs?.[x.key] ?? '').trim()).map((x) => x.key) : []);
+    const triggerProblems = mission ? (a.triggers ?? []).map((t) => {
+        const miss = inputMissing(t);
+        if (miss.length) return `Give the required input${miss.length > 1 ? 's' : ''} ${miss.map((k) => agentInputs.find((x) => x.key === k)?.label ?? k).join(', ')} (or turn the trigger off).`;
+        if (t.on === 'work-item' && !/^\s*select\b/i.test(String(t.query ?? ''))) return 'Write the WIQL query (SELECT [System.Id] FROM WorkItems WHERE …).';
+        if (t.on === 'work-item' && !agentInputs.some((x) => x.key === (t.input ?? 'story'))) return `It fills the input "${t.input ?? 'story'}": add that input.`;
+        if (t.on === 'pull-request' && !(agentInputs.some((x) => x.key === 'pr') && agentInputs.some((x) => x.key === 'repository'))) return 'It fills the inputs "repository" and "pr": add them.';
+        return null;
+    }) : [];
     const problems: Array<[string, string]> = [
         ...(nameProblem ? [['basics', `Name: ${nameProblem}`] as [string, string]] : []),
         ...(idProblem ? [['basics', `Id: ${idProblem}`] as [string, string]] : []),
         ...(goalProblem ? [['instructions', goalProblem] as [string, string]] : []),
         ...(instrProblem ? [['instructions', `Instructions: ${instrProblem}`] as [string, string]] : []),
         ...cronProblems.flatMap((c, i) => (c ? [['triggers', `Trigger ${i + 1}, schedule: ${c}`] as [string, string]] : [])),
+        ...triggerProblems.flatMap((c, i) => (c ? [['triggers', `Trigger ${i + 1}: ${c}`] as [string, string]] : [])),
     ];
     const saving = React.useRef(false);
     const save = async (): Promise<boolean> => {
@@ -293,10 +305,11 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
                             {(t.on === 'schedule' || t.on === 'work-item' || t.on === 'pull-request') && inputs.some((x) => x.key) && (
                                 <Form.Item label="Inputs given by this trigger" style={{ marginBottom: 0 }}>
                                     <Row gutter={[8, 8]}>{inputs.filter((x) => x.key && !(t.on === 'work-item' && x.key === (t.input ?? 'story')) && !(t.on === 'pull-request' && (x.key === 'pr' || x.key === 'repository'))).map((x) => (
-                                        <Col key={x.key} xs={24} md={8}><Input size="small" addonBefore={x.key} aria-label={`Trigger ${i + 1}: input ${x.key}`} value={(t as { inputs?: Record<string, string> }).inputs?.[x.key] ?? ''} onChange={(e) => setTrigger(i, { ...t, inputs: { ...((t as { inputs?: Record<string, string> }).inputs ?? {}), [x.key]: e.target.value } } as AgentTriggerDef)} /></Col>
+                                        <Col key={x.key} xs={24} md={8}><Input size="small" addonBefore={`${x.key}${x.required ? ' *' : ''}`} status={inputMissing(t).includes(x.key) ? 'error' : undefined} aria-required={x.required || undefined} aria-label={`Trigger ${i + 1}: input ${x.key}`} value={(t as { inputs?: Record<string, string> }).inputs?.[x.key] ?? ''} onChange={(e) => setTrigger(i, { ...t, inputs: { ...((t as { inputs?: Record<string, string> }).inputs ?? {}), [x.key]: e.target.value } } as AgentTriggerDef)} /></Col>
                                     ))}</Row>
                                 </Form.Item>
                             )}
+                            {triggerProblems[i] && <Typography.Text type="danger" role="alert" style={{ fontSize: 12, display: 'block', marginTop: 6 }}>{triggerProblems[i]}</Typography.Text>}
                         </Form>
                     </Card>
                 ))}

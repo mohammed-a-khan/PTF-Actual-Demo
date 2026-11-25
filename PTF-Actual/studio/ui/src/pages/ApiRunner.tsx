@@ -14,7 +14,7 @@ import { errText } from '../state';
 import { navigate, useRoute } from '../route';
 import { Split } from '../components/Split';
 import { ago } from '../format';
-import { FieldProblems, NumField, runnerRoute, RunnerTab, useFieldProblems, useRememberedTab } from '../apiperf-ui';
+import { FieldProblems, NumField, runnerRoute, runnerRunRoute, RunnerTab, useFieldProblems, useRememberedTab } from '../apiperf-ui';
 
 /** A step with its exchange (kept by the Studio for the first steps of a run). */
 type StepDetail = { request: { headers: Record<string, string>; body?: string }; response?: { statusText: string; headers: Record<string, string>; body: string; cut: boolean } };
@@ -66,7 +66,9 @@ export function ApiRunner() {
     const [onlyFailed, setOnlyFailed] = React.useState(false);
     // The order the requests run in (moved here without changing the collection).
     const [order, setOrder] = React.useState<string[]>([]);
-    const [cmpWith, setCmpWith] = React.useState<string | null>(null);
+    // The run compared with is in the address (#/api-runner/run/<id>/~compare.<other>): a reload keeps the comparison.
+    const cmpWith = rr.runId ? rr.compareWith : null;
+    const setCmpWith = (v: string | null) => { if (job) navigate(runnerRunRoute(job.id, v)); };
     const [cmp, setCmp] = React.useState<ApiRunComparison | null>(null);
     const [kept, keepTab] = useRememberedTab('api-runner', 'run');
     // The inner tab is the address's (a link opens it); a bare #/api-runner shows the one used last.
@@ -103,7 +105,7 @@ export function ApiRunner() {
         startingRef.current = true; setStarting(true);
         try {
             const j = await api.apiStartRun({ project, env: opts.env ?? envs[0], file, collection: coll, requests: chosen.length === reqs.length && !reordered ? [] : reqs.filter((r) => chosen.includes(r.id)).map((r) => r.id), iterations: opts.iterations, data: opts.data, delayMs: opts.delayMs, stopOnFailure: opts.stopOnFailure });
-            setJob(j); navigate(['api-runner', 'run', j.id]);
+            setJob(j); navigate(runnerRunRoute(j.id));
         } catch (e) { message.error(errText(e)); }
         finally { startingRef.current = false; setStarting(false); }
     };
@@ -120,6 +122,18 @@ export function ApiRunner() {
     // Same names numbered in the order the requests ran (all steps, so filtering keeps the numbers).
     const stepLabels = sameNameLabels((job?.steps ?? []).map((s) => ({ id: s.requestId || undefined, name: s.name })));
     const stepName = (s: Step) => labelOf(stepLabels, { id: s.requestId || undefined, name: s.name });
+    // A narrow results panel (1024 px screens): status, time and checks under the request, the result wrapping, no sideways scroll.
+    const resultsRef = React.useRef<HTMLDivElement>(null);
+    const [narrow, setNarrow] = React.useState(false);
+    React.useEffect(() => {
+        const el = resultsRef.current;
+        if (!el || typeof ResizeObserver === 'undefined') return;
+        const ro = new ResizeObserver(() => setNarrow(el.clientWidth < 680));
+        ro.observe(el); setNarrow(el.clientWidth < 680);
+        return () => ro.disconnect();
+    }, []);
+    const why = (s: Step) => s.error ?? s.checks.find((c) => !c.pass)?.message;
+    const facts = (s: Step) => [s.status !== undefined ? String(s.status) : 'no answer', s.timeMs !== undefined ? `${s.timeMs} ms` : '', s.checks.length ? `checks ${s.checks.filter((c) => c.pass).length}/${s.checks.length}` : ''].filter(Boolean).join(' · ');
     return (
         <>
         <Split id="api-runner" initial={380} min={300} max={600} style={{ height: 'calc(100vh - var(--chrome))' }}>
@@ -164,7 +178,7 @@ export function ApiRunner() {
                     </div> },
                 ]} />
             </div>
-            <div className="panel" style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: 16 }}>
+            <div ref={resultsRef} className="panel" style={{ flex: 1, minWidth: 0, overflow: 'auto', padding: 16 }}>
                 {!job ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="Choose a collection and press Run" /> : (
                     <Space direction="vertical" size={12} style={{ width: '100%' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -186,9 +200,16 @@ export function ApiRunner() {
                             <div className="kpi"><b>{job.iterations}</b><span>Iterations</span></div>
                         </div>
                         <Checkbox checked={onlyFailed} onChange={(e) => setOnlyFailed(e.target.checked)}>Only failures</Checkbox>
-                        <Table<Step> size="small" scroll={{ x: 620 }} rowKey={(s) => `${s.iteration}-${s.requestId}`} dataSource={steps} pagination={steps.length > 100 ? { pageSize: 100, showSizeChanger: false } : false}
+                        <Table<Step> size="small" scroll={narrow ? undefined : { x: 620 }} tableLayout={narrow ? 'fixed' : undefined} rowKey={(s) => `${s.iteration}-${s.requestId}`} dataSource={steps} pagination={steps.length > 100 ? { pageSize: 100, showSizeChanger: false } : false}
                             expandable={{ rowExpandable: (s) => !!s.requestId || s.checks.length > 0 || !!s.error || !!s.logs?.length, expandedRowRender: (s) => <StepView s={s} file={job.collection} /> }}
-                            columns={[
+                            columns={narrow ? [
+                                // Compact: the request with its status, time and checks under it; the result (and why it failed) wraps.
+                                { title: 'Request', dataIndex: 'name', render: (_n: string, s: Step) => <div style={{ minWidth: 0, wordBreak: 'break-word' }}>
+                                    <div><b style={{ fontSize: 11, fontFamily: 'var(--mono)' }}>{s.method}</b> {stepName(s)}{job.iterations > 1 ? <Typography.Text type="secondary"> · iteration {s.iteration}</Typography.Text> : null}</div>
+                                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>{facts(s)}</Typography.Text>
+                                </div> },
+                                { title: 'Result', width: '42%', render: (_, s) => (s.passed ? <Tag color="success">Passed</Tag> : <span><Tag color="error">Failed</Tag>{why(s) && <Typography.Text type="danger" style={{ fontSize: 11, display: 'block', whiteSpace: 'normal', wordBreak: 'break-word' }}>{why(s)}</Typography.Text>}</span>) },
+                            ] : [
                                 ...(job.iterations > 1 ? [{ title: 'Iteration', dataIndex: 'iteration', width: 80 }] : []),
                                 // Two requests with the same name: numbered in collection order, as in the reports, JUnit and Compare.
                                 { title: 'Request', dataIndex: 'name', ellipsis: true, width: 220, render: (_n: string, s: Step) => <><b style={{ fontSize: 11, fontFamily: 'var(--mono)' }}>{s.method}</b> {stepName(s)}</> },

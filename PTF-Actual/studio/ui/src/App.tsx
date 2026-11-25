@@ -10,6 +10,7 @@ import { api, GateResult, hasToken, setProtectedRunConfirm } from './api';
 import { errText, StudioProvider, useStudio } from './state';
 import { canSaveLost, discardLost, lostOnLeave, saveLost } from './unsaved';
 import { cameFrom, goBack, navigate, questionClosed, setPopGuard, useRoute } from './route';
+import { remoteSynced, tagNews } from './datagit-common';
 import { SourceControl } from './pages/SourceControl';
 import { RepoSwitcher } from './components/RepoSwitcher';
 import { Environments } from './pages/Environments';
@@ -195,7 +196,8 @@ function SyncButtons() {
     const { status, refresh } = useStudio();
     const [busy, setBusy] = React.useState<string | null>(null);
     const [gate, setGate] = React.useState<Extract<GateResult, { status: 'blocked' }> | null>(null);
-    const run = async (k: string, fn: () => Promise<void>) => { setBusy(k); try { await fn(); } catch (e) { modal.error({ title: 'Something went wrong', content: errText(e) }); } finally { setBusy(null); await refresh(); } };
+    // After Fetch, Pull or Push the lists showing the remote's state (Tags) read it again.
+    const run = async (k: string, fn: () => Promise<void>) => { setBusy(k); try { await fn(); } catch (e) { modal.error({ title: 'Something went wrong', content: errText(e) }); } finally { setBusy(null); await refresh(); remoteSynced(); } };
 
     const push = (opts?: { forceWithLease?: boolean; tags?: boolean }) => run('push', async () => {
         const r = await api.push(undefined, opts);
@@ -231,6 +233,7 @@ function SyncButtons() {
             f.newCommits ? `${f.newCommits} new commit${f.newCommits === 1 ? '' : 's'}` : '',
             f.added.length ? `${f.added.length} new branch${f.added.length === 1 ? '' : 'es'}` : '',
             f.removed.length ? `${f.removed.length} branch${f.removed.length === 1 ? '' : 'es'} deleted on the remote` : '',
+            ...tagNews(f),
         ].filter(Boolean);
         const behind = f.behind && f.branch ? ` ${f.branch} is ${f.behind} commit${f.behind === 1 ? '' : 's'} behind ${f.upstream ?? 'the remote'}: Pull to get ${f.behind === 1 ? 'it' : 'them'}.` : '';
         if (what.length) message.success(`Fetched from ${from}: ${what.join(', ')}.${behind}`);

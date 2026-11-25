@@ -29,6 +29,35 @@ export function useStoredTab<T extends string>(key: string, tabs: readonly T[], 
     return [tab, set];
 }
 
+/** What Fetch found about tags, in words ("1 new tag (v2)", "1 tag changed on the remote (v1)"). */
+export function tagNews(f: { tagsAdded?: string[]; tagsChanged?: string[]; tagsRemoved?: string[] }): string[] {
+    const list = (xs: string[]) => ` (${xs.slice(0, 3).join(', ')}${xs.length > 3 ? ', …' : ''})`;
+    const a = f.tagsAdded ?? [], c = f.tagsChanged ?? [], d = f.tagsRemoved ?? [];
+    return [
+        a.length ? `${a.length} new tag${a.length === 1 ? '' : 's'}${list(a)}` : '',
+        c.length ? `${c.length} tag${c.length === 1 ? '' : 's'} changed on the remote${list(c)}` : '',
+        d.length ? `${d.length} tag${d.length === 1 ? '' : 's'} deleted on the remote${list(d)}` : '',
+    ];
+}
+
+/** Fetch, Pull or Push talked to the remote: lists that show the remote's state (tags, remote branches) read it again. */
+const REMOTE_SYNCED = 'cs-studio:remote-synced';
+export function remoteSynced(): void { window.dispatchEvent(new Event(REMOTE_SYNCED)); }
+/** Call `load` after a Fetch/Pull/Push and when the window gets focus or is shown again (another tab, a terminal). */
+export function useReloadOnRemoteSync(load: () => void): void {
+    const ref = React.useRef(load);
+    ref.current = load;
+    React.useEffect(() => {
+        let timer: number | undefined;
+        const soon = () => { window.clearTimeout(timer); timer = window.setTimeout(() => ref.current(), 200); };
+        const onShown = () => { if (document.visibilityState === 'visible') soon(); };
+        window.addEventListener(REMOTE_SYNCED, soon);
+        window.addEventListener('focus', soon);
+        document.addEventListener('visibilitychange', onShown);
+        return () => { window.clearTimeout(timer); window.removeEventListener(REMOTE_SYNCED, soon); window.removeEventListener('focus', soon); document.removeEventListener('visibilitychange', onShown); };
+    }, []);
+}
+
 /** Choose the inner tab a screen shows (now, if it is open, and when it opens). */
 export function setStoredTab(key: string, tab: string): void {
     try { localStorage.setItem(`cs-studio-tab:${key}`, tab); } catch { /* private mode */ }
