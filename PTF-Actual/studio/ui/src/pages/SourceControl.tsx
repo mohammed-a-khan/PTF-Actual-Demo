@@ -143,6 +143,21 @@ function Changes() {
     };
 
     const op = status?.operation;
+    // A pull whose put-aside edits clashed with the pulled changes (no merge runs): undo it, or resolve and finish.
+    const ps = status?.pullStash;
+    const [psBusy, setPsBusy] = React.useState(false);
+    const pullStashAct = (action: 'undo' | 'finish') => async () => {
+        if (psBusy) return;
+        setPsBusy(true);
+        try { const r = await api.pullAutostash(action); message.success(r.message, 8); setSel(null); await refresh(); }
+        catch (e) { modal.error({ title: action === 'undo' ? 'Could not undo the pull' : 'Could not finish', content: errText(e) }); await refresh(); }
+        finally { setPsBusy(false); }
+    };
+    const undoPull = () => modal.confirm({
+        title: 'Undo the pull?', okText: 'Undo pull', okButtonProps: { danger: true },
+        content: <>Your branch goes back to where it was before the pull{ps ? <> (<Typography.Text code>{ps.before.slice(0, 7)}</Typography.Text>)</> : null} and your uncommitted edits come back exactly as they were, from the copy kept in the stash. Any choices you made in the clashing files are dropped. The pulled commits stay on {ps?.upstream ?? 'the remote'}: commit your edits, then Pull again.</>,
+        onOk: pullStashAct('undo'),
+    });
     const sequencing = op === 'cherry-pick' || op === 'revert' || op === 'rebase' || op === 'am';
     const commit = async (allowRewritePushed = false) => {
         setBusy(true);
@@ -155,12 +170,20 @@ function Changes() {
                 else message.warning(r.message);
                 return;
             }
-            const r = await api.commit(msg, undefined, { amend, allowRewritePushed, signoff });
+            // The branch this tab shows goes with it: another tab or a terminal may have switched since (refused then).
+            const r = await api.commit(msg, undefined, { amend, allowRewritePushed, signoff, expectBranch: status?.branch ?? null });
             if (r.status === 'ok') await afterCommit(r.sha);
             else if (r.status === 'blocked') setGate(r);
             else if (amend && /already pushed/.test(r.message)) {
                 modal.confirm({ title: 'Amend a pushed commit?', content: r.message, okText: 'Amend anyway', okButtonProps: { danger: true }, onOk: () => commit(true) });
-            } else message.warning(r.message);
+            } else if (/^This tab shows /.test(r.message)) {
+                modal.warning({ title: 'Another branch is checked out now', content: r.message, okText: 'Reload', onOk: () => refresh() });
+                await refresh();
+            } else {
+                message.warning(r.message);
+                // Refused (nothing staged, say): what this tab shows may be stale (another tab committed): read it again.
+                await refresh();
+            }
         } catch (e) { message.error(errText(e)); }
         finally { setBusy(false); }
     };
@@ -251,9 +274,20 @@ function Changes() {
                     {lfs?.used && !lfs.installed && <Alert type="warning" showIcon style={{ margin: '0 4px 8px' }} message="This repository stores large files with Git LFS, which is not installed" description="Install Git LFS (git-lfs.com, or it comes with Git for Windows), then reopen the repository." />}
                     {lfs?.used && lfs.installed && lfs.missing.length > 0 && <Alert type="warning" showIcon style={{ margin: '0 4px 8px' }} message={`${lfs.missing.length} large file${lfs.missing.length === 1 ? ' is' : 's are'} not downloaded (Git LFS)`}
                         action={<Button size="small" onClick={() => act(async () => { setLfs(await api.lfsPull()); })}>Download</Button>} />}
+                    {ps && <Alert type="warning" showIcon style={{ margin: '0 4px 8px' }} data-testid="pull-stash"
+                        message={conflicts.length ? 'Your uncommitted edits clash with the pulled changes' : 'A copy of your edits from the pull is still in the stash'}
+                        description={conflicts.length
+                            ? <>The pull went through, but your uncommitted edits clash with it in {conflicts.length} file{conflicts.length === 1 ? '' : 's'}. No merge is running. Resolve each file below (<b>Mine</b> is your edit, <b>Theirs</b> the pulled version), or undo the pull. Until then a copy of your edits is kept in the stash ({ps.ref}).</>
+                            : <>All clashes are resolved{ps.headMoved ? ' and committed' : ''}. The copy of your edits from before the pull is still in the stash ({ps.ref}): remove it when you no longer need it.</>}
+                        action={<Space direction="vertical">
+                            {!ps.headMoved && <Button size="small" danger loading={psBusy} onClick={undoPull}>Undo pull</Button>}
+                            {!conflicts.length && <Button size="small" loading={psBusy} onClick={pullStashAct('finish')}>Remove the copy</Button>}
+                        </Space>} />}
                     {nothing && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No changes. Your work is committed." style={{ marginTop: 40 }} />}
-                    <Section title="Merge conflicts" count={conflicts.length}
-                        extra={<Popconfirm title={`Stop the ${op ?? 'merge'} and go back to how things were before it?`} onConfirm={() => act(() => api.abortOp())}><Button size="small" danger type="text">Abort {op ?? 'merge'}</Button></Popconfirm>}>
+                    <Section title={ps || !op ? 'Conflicts' : 'Merge conflicts'} count={conflicts.length}
+                        extra={ps ? (ps.headMoved ? undefined : <Button size="small" danger type="text" onClick={undoPull}>Undo pull</Button>)
+                            : op ? <Popconfirm title={`Stop the ${op} and go back to how things were before it?`} onConfirm={() => act(async () => { const r = await api.abortOp(); if (r.message) message.info(r.message); else message.success(`Stopped the ${op}`); })}><Button size="small" danger type="text">Abort {op}</Button></Popconfirm>
+                            : undefined}>
                         <VirtualRows items={conflicts} rowHeight={30} keyOf={(f) => 'c' + f.path} render={(f) => <FileRow f={f} code="!" selected={sel?.path === f.path && sel.area === 'conflict'} onSelect={() => setSel({ path: f.path, area: 'conflict' })} />} />
                     </Section>
                     <Section title="Staged — in the next commit" count={staged.length}
@@ -287,7 +321,9 @@ function Changes() {
                 </div>
                 <div style={{ flex: 1, overflow: sel?.area === 'conflict' ? 'hidden' : 'auto', minHeight: 0 }}>
                     {!sel ? (status?.hasConflicts
-                        ? <Alert style={{ margin: 12 }} type="warning" showIcon icon={<WarningOutlined />} message="A merge needs your decision" description="Select a file under Merge conflicts to resolve it. When all are resolved, commit to finish the merge." />
+                        ? (ps ? <Alert style={{ margin: 12 }} type="warning" showIcon icon={<WarningOutlined />} message="Your uncommitted edits clash with the pulled changes" description="Select a file under Conflicts to resolve it: Mine is your edit, Theirs the pulled version. When the last one is resolved your edits stay as uncommitted changes on top of the pulled commits (nothing is committed). Or press Undo pull." />
+                            : !op ? <Alert style={{ margin: 12 }} type="warning" showIcon icon={<WarningOutlined />} message="Some files have conflicts" description="No merge is running: these conflicts come from applying stashed changes. Select a file under Conflicts to resolve it; nothing needs to be committed to finish." />
+                            : <Alert style={{ margin: 12 }} type="warning" showIcon icon={<WarningOutlined />} message={`A ${op} needs your decision`} description={op === 'merge' ? 'Select a file under Merge conflicts to resolve it. When all are resolved, commit to finish the merge.' : 'Select a file under Merge conflicts to resolve it. When all are resolved, press Continue.'} />)
                         : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="Click a file on the left" />)
                         : sel.area === 'conflict' ? <ConflictView file={sel.path} onResolved={() => setSel(null)} />
                             : <DiffView diff={diff} loading={loadingDiff} mode={prefs.mode}

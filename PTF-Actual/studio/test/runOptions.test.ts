@@ -43,6 +43,7 @@ test('runs against a protected environment need a confirmation; run configuratio
         const uat = await call('POST', '/api/runs', { project: 'shop', env: 'uat' });
         assert.equal(uat.status, 409, 'STUDIO_PROTECTED=true in the environment');
         assert.equal((await call('POST', '/api/runs', { project: 'shop', env: 'qa', variables: { PATH: 'x' } })).status, 400);
+        assert.equal((await call('POST', '/api/runs', { project: 'shop', env: 'qa', ado: 'yes' })).status, 400, 'Azure DevOps results is on or off');
         const none = (await call('GET', '/api/run-configs')).json;
         assert.deepEqual({ configs: none.configs, file: none.file }, { configs: [], file: '.cs-studio/run-configurations.json' });
         assert.equal(typeof none.version, 'string', 'the version a save sends back (two tabs)');

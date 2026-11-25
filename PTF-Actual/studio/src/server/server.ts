@@ -545,7 +545,9 @@ export function createServer(opts: ServerOptions): StudioServer {
         const b = body(req);
         const ov = override(b.override);
         const amend = b.amend === true;
-        const res = await git.commit(str(b.message, 'message', { max: 20_000 }), ov, { amend, allowRewritePushed: b.allowRewritePushed === true, signoff: b.signoff === true });
+        // expectBranch: the branch the screen showed ("Commit … to main"); null = it showed a detached commit.
+        const expectBranch = b.expectBranch === null ? null : typeof b.expectBranch === 'string' ? str(b.expectBranch, 'expectBranch', { max: 255 }) : undefined;
+        const res = await git.commit(str(b.message, 'message', { max: 20_000 }), ov, { amend, allowRewritePushed: b.allowRewritePushed === true, signoff: b.signoff === true, expectBranch });
         if (res.status === 'ok') {
             log('git.commit', `${amend ? 'Amended last commit' : 'Committed'} ${res.sha?.slice(0, 7)}${res.overridden ? ' with a secret-scan override' : ''}`,
                 { sha: res.sha ?? null, amend, overrideReason: res.overridden ? ov?.reason ?? null : null });
@@ -564,7 +566,20 @@ export function createServer(opts: ServerOptions): StudioServer {
         else if (res.status === 'blocked') log('secret-scan.blocked', `Push stopped: ${res.findings.length} possible secret(s)`, { findings: res.findings.length });
         return res;
     });
-    app.post('/api/git/pull', async (req) => { const m = (req.body as { mode?: string } | undefined)?.mode; return git.pull(m === 'merge' || m === 'rebase' || m === 'ff-only' ? m : undefined); });
+    app.post('/api/git/pull', async (req) => {
+        const m = (req.body as { mode?: string } | undefined)?.mode;
+        const r = await git.pull(m === 'merge' || m === 'rebase' || m === 'ff-only' ? m : undefined);
+        if (r.localEdits) log('git.pull', `Pulled ${r.pulled ?? 0} commit(s); uncommitted edits clash in ${r.conflicts?.length ?? 0} file(s) (kept in ${r.stash})`, { conflicts: r.conflicts?.length ?? 0 });
+        return r;
+    });
+    // A pull whose put-aside edits clashed: undo it (branch and edits back as before) or finish it (drop the stash copy).
+    app.post('/api/git/pull/autostash', async (req) => {
+        const action = body(req).action;
+        if (action !== 'undo' && action !== 'finish') throw new BadRequest('Give "action": "undo" or "finish".');
+        const r = action === 'undo' ? await git.undoPullAutostash() : await git.finishPullAutostash();
+        log(action === 'undo' ? 'git.pull.undo' : 'git.pull.finish', r.message, {});
+        return { ...(await git.status()), message: r.message };
+    });
     app.get('/api/git/pull/mode', async () => ({ mode: await git.pullMode() }));
     app.get('/api/git/commit-template', async () => ({ template: await git.commitTemplate() }));
     app.get('/api/git/clean', async (req) => ({ files: await git.cleanPreview((req.query as Record<string, string>).ignored === 'true') }));
@@ -607,7 +622,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.post('/api/git/lfs/pull', async () => { await git.lfsPull(); return git.lfs(); });
     app.post('/api/git/conflict/base', async (req) => { await git.conflictWithBase(str(body(req).file, 'file', { max: 4096 })); return { ok: true }; });
     app.post('/api/git/trust-folder', async () => { await git.trustFolder(); log('git.safe-directory', 'Trusted the repository folder (safe.directory)', {}); return { ok: true }; });
-    app.post('/api/git/fetch', async () => { await git.fetch(); return { ok: true }; });
+    app.post('/api/git/fetch', async () => ({ ok: true, ...(await git.fetch()) }));
     app.post('/api/git/branch', async (req) => {
         const b = body(req);
         await git.createBranch(str(b.name, 'name', { max: 255 }), { from: str(b.from, 'from', { optional: true, max: 255 }) || undefined, switchTo: b.switchTo !== false });
@@ -618,7 +633,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         const b = body(req);
         return git.merge(str(b.branch, 'branch', { max: 255 }), { noFastForward: b.noFastForward === true, squash: b.squash === true, noCommit: b.noCommit === true });
     });
-    app.post('/api/git/merge/abort', async () => { await git.abortMerge(); return git.status(); });
+    app.post('/api/git/merge/abort', async () => { const r = await git.abortMerge(); return { ...(await git.status()), ...(r.message ? { message: r.message } : {}) }; });
     // ---- A conflict in the user's own merge tool (it stays open as long as they need; the page asks how it ended).
     const mergeToolRuns = new Map<string, { tool: string; startedAt: string; done?: { resolved: boolean; message: string; at: string } }>();
     app.get('/api/git/mergetools', async () => ({ ...(await mergeTools(opts.repoRoot)), runs: Object.fromEntries(mergeToolRuns) }));
@@ -694,7 +709,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     app.post('/api/git/operation/continue', async (req) => git.continueOperation(override(body(req).override)));
     app.post('/api/git/operation/skip', async () => { const r = await git.skipOperation(); log('git.skip', 'Skipped the commit being applied', {}); return r; });
-    app.post('/api/git/operation/abort', async () => { await git.abortOperation(); log('git.abort', 'Aborted the operation in progress', {}); return git.status(); });
+    app.post('/api/git/operation/abort', async () => { const r = await git.abortOperation(); log('git.abort', r.message ?? 'Aborted the operation in progress', {}); return { ...(await git.status()), ...(r.message ? { message: r.message } : {}) }; });
     app.post('/api/git/reset', async (req) => {
         const b = body(req);
         const mode = str(b.mode, 'mode', { max: 5 }) as 'soft' | 'mixed' | 'hard';
@@ -781,7 +796,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         log('git.tag.delete', `Deleted tag ${name}${q.remote === 'true' ? ' (also on the remote)' : ''}`, { name });
         return git.tags();
     });
-    app.post('/api/git/tags/push', async (req) => { const name = str(body(req).name, 'name', { max: 200 }); await git.pushTag(name); log('git.tag.push', `Pushed tag ${name}`, { name }); return { ok: true }; });
+    app.post('/api/git/tags/push', async (req) => { const name = str(body(req).name, 'name', { max: 200 }); const r = await git.pushTag(name); if (!r.already) log('git.tag.push', `Pushed tag ${name}`, { name }); return { ok: true, ...(r.already ? { already: true } : {}) }; });
     app.post('/api/git/branch/delete', async (req) => {
         const b = body(req);
         const name = str(b.name, 'name', { max: 255 });
@@ -852,7 +867,10 @@ export function createServer(opts: ServerOptions): StudioServer {
             if (b.expect === 'new' && there) throw new StaleSaveError(`${key.name}${where} was added in another tab or by someone else since this list was shown.`);
             if (b.expect === 'existing' && !there) throw new StaleSaveError(`${key.name}${where} was deleted in another tab or by someone else since this list was shown.`);
         }
-        const meta = opts.store.set(key, str(b.value, 'value', { max: 65_536 }));
+        const value = str(b.value, 'value', { max: 65_536 });
+        // Only spaces (or tabs, new lines) is almost surely a slip (a paste that missed), and would be handed to the tests as is.
+        if (!value.trim()) throw new BadRequest('The value is only spaces: type or paste the secret value itself.');
+        const meta = opts.store.set(key, value);
         log('secret.set', `Saved secret ${meta.name}${meta.env ? ` (${meta.env})` : ''}`, { name: meta.name, env: meta.env ?? null });
         return meta;
     });
@@ -1863,6 +1881,8 @@ export function createServer(opts: ServerOptions): StudioServer {
             ...(typeof b.device === 'string' && b.device ? { device: b.device } : {}),
             ...(b.viewport && typeof b.viewport === 'object' ? { viewport: { width: Number((b.viewport as Record<string, unknown>).width), height: Number((b.viewport as Record<string, unknown>).height) } } : {}),
             ...(b.variables && typeof b.variables === 'object' && !Array.isArray(b.variables) ? { variables: Object.fromEntries(Object.entries(b.variables as Record<string, unknown>).map(([k, v]) => [k, String(v ?? '')])) } : {}),
+            // "Azure DevOps results" for this run (Don't send / Send); left out: as the project is configured.
+            ...(b.ado === true || b.ado === false ? { ado: b.ado } : b.ado !== undefined && b.ado !== null ? (() => { throw new BadRequest('Azure DevOps results: on or off.'); })() : {}),
             ...(b.debug && typeof b.debug === 'object' ? { debug: {
                 steps: (b.debug as Record<string, unknown>).steps === true,
                 pauseOnFailure: (b.debug as Record<string, unknown>).pauseOnFailure === true,
@@ -3298,7 +3318,12 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     app.get('/api/apiws/collection', async (req) => {
         const file = str((req.query as Record<string, string>).file, 'file', { max: 300 });
-        try { return { file, collection: readCollection(opts.repoRoot, file), version: fileVersion(path.join(opts.repoRoot, file)) }; } catch (e) { throw new BadRequest((e as Error).message); }
+        try { return { file, collection: readCollection(opts.repoRoot, file), version: fileVersion(path.join(opts.repoRoot, file)) }; }
+        catch (e) {
+            // A bad link (#/api/<file that is not there>): said in words, without this computer's paths.
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new NotFound(`There is no API collection ${file}: it was deleted or renamed, or the link is wrong.`);
+            throw new BadRequest(fileErrorText(e as NodeJS.ErrnoException, opts.repoRoot) ?? `${file}: ${(e as Error).message.replace(/\/[^\s'"]*\//g, '')}`);
+        }
     });
     app.put('/api/apiws/collection', async (req) => {
         const b = body(req);
@@ -5317,6 +5342,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     const agentHome = opts.home ?? path.join(gitDirOf(opts.repoRoot), 'cs-studio');
     // Set with the tool server routes (below).
     let onToolServer: (e: { name: string; status?: string; error?: string; toolCount?: number }) => void = () => undefined;
+    let probeToolServer: (name: string, timeoutMs: number) => Promise<{ ok: boolean; error?: string }> = async () => ({ ok: true });
     // ---- Tool servers (see agents/toolServers.ts): {secret:NAME} from the Studio secrets, {db:project/env/ALIAS} a PostgreSQL address.
     const tsSecret = (n: string) => (opts.store.exists ? opts.store.getStudio(n) : undefined);
     const tsDb = (ref: string): string | null => {
@@ -5356,6 +5382,7 @@ export function createServer(opts: ServerOptions): StudioServer {
             return [{ name: x.name, changes: x.server.changes !== false, config: sdkConfig(resolveServer(x.server, tsSecret, tsDb), opts.repoRoot, {}) }];
         }),
         onToolServer: (e) => onToolServer(e),
+        probeToolServer: (name, ms) => probeToolServer(name, ms),
         knowledge: (sources) => { ensureKnowledgeRef.current?.(); return knowledgeRef.current?.tools(sources) ?? []; },
         // The company network for the Copilot runtime: proxy (with its sign-in) and certificates.
         runtimeEnv: () => {
@@ -5455,7 +5482,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     const runEnv = () => { const e: Record<string, string> = {}; for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith('CS_STUDIO_')) e[k] = v; return e; };
     const checking = new Map<string, Promise<unknown>>();
     /** Start the server, list its tools, keep the result (compared with the last review). */
-    const checkServer = (name: string) => {
+    const checkServer = (name: string, timeoutMs?: number) => {
         const x = listServers(opts.repoRoot, agentHome).find((s) => s.name === name);
         if (!x) throw new BadRequest(`No tool server ${name}.`);
         const key = stateKey(x.scope, x.name);
@@ -5466,15 +5493,18 @@ export function createServer(opts: ServerOptions): StudioServer {
             try { missing = missingFor(x.server, tsSecret, tsDb); } catch (e) { missing = [(e as Error).message]; }
             const r = missing.length
                 ? { ok: false, tools: [], error: `Missing: ${missing.join(', ')}.`, ms: 0 }
-                : await testServer(resolveServer(x.server, tsSecret, tsDb), opts.repoRoot, runEnv(), undefined, netConnection());
+                : await testServer(resolveServer(x.server, tsSecret, tsDb), opts.repoRoot, runEnv(), timeoutMs, netConnection());
             const masked = { ...r, error: r.error ? maskAll(r.error) : undefined };
             const st = updateState(opts.repoRoot, agentHome, key, (prev) => recordCheck(prev, masked))!;
             log('agent.tool-server', `Checked the tool server ${name}: ${r.ok ? `${r.tools.length} tools${st.diff ? ` (changed: +${st.diff.added.length} −${st.diff.removed.length} ~${st.diff.changed.length})` : ''}` : 'failed'}`, {});
+            if (timeoutMs === undefined) agents.forgetProbe(name);
             return st;
         })().finally(() => checking.delete(key));
         checking.set(key, p);
         return p;
     };
+    // Before a session that may use tool servers: each must start within a short time (agents/host.ts), checked like Check.
+    probeToolServer = async (name, ms) => { const st = await checkServer(name, ms); return { ok: !!st.ok, ...(st.error ? { error: st.error } : {}) }; };
     // What agent sessions see: a failure is kept for the screen; a different number of tools starts a new check.
     const lastAuto = new Map<string, number>();
     onToolServer = (e) => {
@@ -5556,6 +5586,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         // One write: a new name that another server has is refused (a rename never replaces another server).
         try { putServer(opts.repoRoot, agentHome, scope, name, server, editing); } catch (e) { throw new BadRequest((e as Error).message); }
         if (editing && editing !== name) updateState(opts.repoRoot, agentHome, stateKey(scope, editing), () => null);
+        agents.forgetProbe();
         log('agent.tool-server', `${editing ? 'Changed' : 'Added'} the tool server ${name} (${scope === 'team' ? `for the team, in ${TEAM_FILE}` : 'for you'})`, {});
         return serverView();
     });
@@ -5569,6 +5600,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         if (b.tools === null) delete cur.tools;
         else if (Array.isArray(b.tools)) cur.tools = [...new Set(b.tools.map((t: unknown) => str(t, 'tool', { max: 200 })))].sort();
         try { saveServer(opts.repoRoot, agentHome, scope, name, cur); } catch (e) { throw new BadRequest((e as Error).message); }
+        agents.forgetProbe(name);
         log('agent.tool-server', `Changed the tool server ${name}: ${typeof b.enabled === 'boolean' ? (b.enabled ? 'turned on' : 'turned off') : cur.tools ? `${cur.tools.length} tools on` : 'all tools'}`, {});
         return serverView();
     });
@@ -5578,6 +5610,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         const scope = q.scope === 'team' ? 'team' : 'personal';
         const gone = serversIn(opts.repoRoot, agentHome, scope)[name];
         try { saveServer(opts.repoRoot, agentHome, scope, name, null); } catch (e) { throw new BadRequest((e as Error).message); }
+        agents.forgetProbe(name);
         updateState(opts.repoRoot, agentHome, stateKey(scope, name), () => null);
         // ?secrets=remove: the Studio secrets its pasted configuration made go too (unless another server uses them).
         const removed: string[] = [];

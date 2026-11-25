@@ -148,8 +148,11 @@ export function RunTree({ runId, reportKey, scenarios, ev, onOpenScenario, base 
                             </Space>
                             <span className="run-dur">{fmtDur(list.reduce((t, r) => t + (r.duration || 0), 0))}</span>
                         </div>
-                        {fOpen && list.map((r) => {
+                        {fOpen && list.map((r, i) => {
                             const se = evFor(r);
+                            // Each button says which scenario it opens (rows of an outline share a name: their number tells them apart).
+                            const same = list.filter((x) => x.name === r.name);
+                            const openLabel = `Open "${r.name}"${same.length > 1 ? ` (${list.slice(0, i + 1).filter((x) => x.name === r.name).length} of ${same.length})` : ''} in the editor`;
                             const sOpen = openScenarios.has(r._i);
                             return (
                                 <div key={r._i} className={`run-scenario${isFail(r.status) ? ' failed' : ''}`}>
@@ -165,7 +168,7 @@ export function RunTree({ runId, reportKey, scenarios, ev, onOpenScenario, base 
                                             <Tag color={r.flaky ? 'warning' : 'default'} style={{ marginInlineEnd: 0 }}>{r.flaky ? `passed after ${r.retries} retr${r.retries === 1 ? 'y' : 'ies'}` : `${r.retries + 1} attempts`}</Tag></Tooltip>}
                                         {!sOpen && r.error && <Typography.Text type="danger" className="mono run-scenario-err" ellipsis>{r.error}</Typography.Text>}
                                         {se && <span className="run-count">{se.steps.filter((s) => s.status !== 'not run').length}/{se.steps.length} steps</span>}
-                                        <Tooltip title="Open in the editor"><Button aria-label="Open in the editor" size="small" type="text" icon={<FileSearchOutlined />} onClick={(e) => { e.stopPropagation(); onOpenScenario(r, se); }} /></Tooltip>
+                                        <Tooltip title="Open in the editor"><Button aria-label={openLabel} size="small" type="text" icon={<FileSearchOutlined />} onClick={(e) => { e.stopPropagation(); onOpenScenario(r, se); }} /></Tooltip>
                                         <span className="run-dur">{fmtDur(r.duration)}</span>
                                     </div>
                                     {sOpen && <div className="run-scenario-body">

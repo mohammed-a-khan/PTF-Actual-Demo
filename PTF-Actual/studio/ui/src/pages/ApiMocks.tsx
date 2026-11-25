@@ -14,7 +14,7 @@ import { errText } from '../state';
 import { navigate, useRoute } from '../route';
 import { Split } from '../components/Split';
 import { staleVersion } from '../datagit-api';
-import { askChangedElsewhere, askUnsaved, FieldProblems, httpUrlProblem, isChangedElsewhere, NumField, SectionTitle, shownTab, useEscapeCloses, useFieldProblems, useRememberedTab, versionOf, withBase } from '../apiperf-ui';
+import { askChangedElsewhere, askUnsaved, FieldProblems, httpUrlProblem, isChangedElsewhere, NumField, SectionTitle, splitTab, useEscapeCloses, useFieldProblems, useInFlight, useRouteTab, versionOf, withBase } from '../apiperf-ui';
 
 const FAULTS: Array<{ value: MockFaultKind; label: string; help: string }> = [
     { value: 'none', label: 'None', help: 'Answers as set' },
@@ -28,8 +28,9 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 
 export function ApiMocks() {
     const { message, modal } = App.useApp();
-    const [tab, setTab] = useRememberedTab('api-mocks', 'routes');
-    const rt = useRoute();
+    const rt0 = useRoute();
+    // The inner tab is the address's last segment (#/api-mocks/<file>/~faults); the rest names the mock.
+    const rt = splitTab(rt0).rest;
     const here = rt[0] === 'api-mocks';
     // The open mock in the address: #/api-mocks/<file> (a reload, Back and links return to it).
     const fileInRoute = here && rt.length > 1 ? rt.slice(1).join('/') : null;
@@ -41,6 +42,7 @@ export function ApiMocks() {
     const [list, setList] = React.useState<MockInfo[] | null>(null);
     // version: the file as it was read (a save over a version saved in another tab is refused: Reload / Overwrite / Keep editing).
     const [cur, setCur] = React.useState<{ file: string; mock: MockDef; dirty: boolean; version?: string } | null>(null);
+    const [tab, setTab] = useRouteTab('api-mocks', 'routes', ['routes', 'faults', 'log', 'settings'], cur ? ['api-mocks', ...cur.file.split('/')] : null);
     const fields = useFieldProblems();
     // Loads answer in any order: only the last one asked for is shown (a Discard's reload never replaces the next mock).
     const loadSeq = React.useRef(0);
@@ -48,7 +50,9 @@ export function ApiMocks() {
     const problem = cur && !cur.mock.name.trim() ? 'give the mock a name.' : fields.problem;
     /** Discard: the saved mock again (no changes). */
     const discard = () => { const f = cur?.file; if (!f) return; setCur((c) => (c ? { ...c, dirty: false } : c)); void load(project, f); };
-    useUnsaved('api-mock', !!cur?.dirty, `the mock "${cur?.mock.name || cur?.file.split('/').pop() || ''}"`, { lostOnLeave: true, save: problem ? undefined : async () => !!(await save()), discard });
+    useUnsaved('api-mock', !!cur?.dirty, `the mock "${cur?.mock.name || cur?.file.split('/').pop() || ''}"`, { lostOnLeave: true, save: problem ? undefined : async () => !!(await save()), discard,
+        // Back/Forward between this mock's tabs keeps its changes.
+        keeps: (to) => !!cur && to[0] === 'api-mocks' && splitTab(to).rest.slice(1).join('/') === cur.file });
     const [url, setUrl] = React.useState<string | null>(null);
     const [log, setLog] = React.useState<MockLogEntryDef[]>([]);
     const [port, setPort] = React.useState<number | null>(null);
@@ -129,7 +133,8 @@ export function ApiMocks() {
             // Saved in another tab (or by a teammate) since it was opened here: Reload, Overwrite or Keep editing, never silently lost.
             if (isChangedElsewhere(e) && !force) {
                 setBusy(false);
-                const how = await askChangedElsewhere(modal, `The mock "${cur.mock.name || cur.file.split('/').pop()}"`);
+                // Named by its file: the copy saved elsewhere may have another name than the one edited here.
+                const how = await askChangedElsewhere(modal, `The mock file ${cur.file}`);
                 if (how === 'overwrite') return saveNow(true);
                 if (how === 'reload') { await load(project, cur.file); message.info('Showing the version saved elsewhere.'); }
                 // Keep editing: these edits now build on the version saved elsewhere, so the next Save goes through.
@@ -139,14 +144,16 @@ export function ApiMocks() {
             setErr(errText(e)); return false;
         } finally { setBusy(false); }
     };
-    const start = async () => {
+    // A double click on Start or Stop acts once.
+    const once = useInFlight();
+    const start = () => once.run('start', async () => {
         if (!cur) return;
         if (cur.dirty && !(await save())) return;
         setBusy(true); setErr(null);
         try { const r = await api.mockStart(project, cur.file, port ?? undefined); setUrl(r.url); setLog([]); refresh(); }
         catch (e) { setErr(errText(e)); } finally { setBusy(false); }
-    };
-    const stop = async () => { if (cur) { await api.mockStop(project, cur.file).catch(() => {}); setUrl(null); refresh(); } };
+    });
+    const stop = () => once.run('stop', async () => { if (cur) { await api.mockStop(project, cur.file).catch(() => {}); setUrl(null); refresh(); } });
     const create = async () => {
         if (!creating) return;
         setCreateErr(null);
@@ -225,7 +232,7 @@ export function ApiMocks() {
                             <Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Delete the mock" /></Popconfirm>
                     </div>
                     <FieldProblems value={fields.report}><div style={{ flex: 1, overflow: 'auto', padding: '0 12px 10px' }}>
-                        <Tabs size="small" className="ap-tabs" activeKey={shownTab(tab, ['routes', 'faults', 'log', 'settings'])} onChange={setTab} items={[
+                        <Tabs size="small" className="ap-tabs" activeKey={tab} onChange={setTab} items={[
                             { key: 'routes', label: <span>Routes <Tag bordered={false}>{m.routes.length}</Tag></span>, children: <>
                                 <Typography.Text type="secondary" className="ap-note" style={{ marginBottom: 6 }}>A body can answer with the request's values: {'{{path.id}}'}, {'{{query.name}}'}, {'{{body.field}}'}.</Typography.Text>
                                 <Table<MockRouteDef> size="small" tableLayout="fixed" pagination={false} rowKey={(_r, i) => String(i)} dataSource={m.routes}

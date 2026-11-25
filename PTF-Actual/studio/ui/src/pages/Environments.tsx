@@ -106,7 +106,7 @@ function EditModal({ project, env, entry, keyName, existing = [], onClose, onSav
                     onOk: async () => {
                         const del = async (force: boolean) => { await datagitApi.envRemove(entry.from.source, entry.key, entry.from.raw, force); filesChanged(); message.success(`Deleted ${entry.key} from ${entry.from.source}`); onSaved(); };
                         try { await del(false); }
-                        catch (e) { askStaleSave({ message, modal }, e, `${entry.key} in ${entry.from.source}`, { reload: onSaved, overwrite: () => del(true).catch((x) => message.error(errText(x))), keep: () => undefined }); }
+                        catch (e) { askStaleSave({ message, modal }, e, `${entry.key} in ${entry.from.source}`, { reload: onSaved, overwrite: () => del(true).catch((x) => message.error(errText(x))), keep: () => undefined, keepOverwrites: false }); }
                     },
                 })}>Delete</Button>}
                 <CancelBtn /><OkBtn />

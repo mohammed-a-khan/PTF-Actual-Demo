@@ -3,6 +3,7 @@
  * time on the x axis, hover read-out. Used for live load-test metrics and policy previews.
  */
 import React from 'react';
+import { timeTicks } from '../../../src/load/labels';
 
 export interface Series { name: string; color: string; values: number[]; unit?: string; area?: boolean; right?: boolean; /** A count: the axis shows whole numbers only. */ integer?: boolean }
 
@@ -67,15 +68,16 @@ export function LineChart({ x, series, height = 160, xMax, title, xFormat, xMin 
                     <text x={pad.l - 4} y={pad.t + ih * (1 - k) + 3} textAnchor="end" className="lc-axis">{fmt(leftMax * k)}</text>
                     {series.some((s) => s.right) && <text x={pad.l + iw + 4} y={pad.t + ih * (1 - k) + 3} className="lc-axis">{fmt(rightMax * k)}</text>}
                 </g>)}
-                {ticks.map((k) => <text key={k} x={pad.l + iw * k} y={height - 4} textAnchor={k === 0 ? 'start' : k === 1 ? 'end' : 'middle'} className="lc-axis">{fx(xMin + span * k)}</text>)}
-                {series.map((s) => s.values.length > 1 && <g key={s.name}>
+                {/* Whole seconds (or run numbers), each label once: no second skipped by rounding, none shown twice. */}
+                {timeTicks(xMin, x1, Math.max(2, Math.min(6, Math.floor(iw / 70)))).map((t) => <text key={t} x={px(t)} y={height - 4} textAnchor={t <= xMin ? 'start' : t >= x1 ? 'end' : 'middle'} className="lc-axis">{fx(t)}</text>)}
+                {series.map((s, i) => s.values.length > 1 && <g key={`${i}-${s.name}`}>
                     {s.area && <path d={areaPath(s)} fill={s.color} opacity={0.12} />}
                     <path d={path(s)} fill="none" stroke={s.color} strokeWidth={1.6} />
                 </g>)}
                 {hover !== null && <line x1={px(x[hover])} x2={px(x[hover])} y1={pad.t} y2={pad.t + ih} className="lc-hover" />}
             </svg>
             <div className="lc-legend">
-                {series.map((s) => <span key={s.name}><i style={{ background: s.color }} />{s.name}{hover !== null && Number.isFinite(s.values[hover]) ? `: ${fmt(s.values[hover])}${s.unit ?? ''}` : ''}</span>)}
+                {series.map((s, i) => <span key={`${i}-${s.name}`}><i style={{ background: s.color }} />{s.name}{hover !== null && Number.isFinite(s.values[hover]) ? `: ${fmt(s.values[hover])}${s.unit ?? ''}` : ''}</span>)}
                 {hover !== null && <span className="lc-at">{xFormat ? fx(x[hover]) : `at ${fx(x[hover])}`}</span>}
             </div>
         </div>

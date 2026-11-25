@@ -81,6 +81,9 @@ export function Secrets() {
     const q = find.trim().toLowerCase();
     const shown = q ? rows.filter((r) => `${r.name} ${r.env ?? ''} ${r.project ?? ''}`.toLowerCase().includes(q)) : rows;
     const nameOk = !!adding && /^[A-Z][A-Z0-9_]{0,63}$/.test(adding.name);
+    // A value of only spaces (or tabs) is a slip, not a secret: refused here (and by the server) with a message.
+    const valueBlank = !!adding?.value && !adding.value.trim();
+    const valueOk = !!adding?.value && !valueBlank;
     return (
         <div>
             <div className="dg-toolbar">
@@ -116,14 +119,14 @@ export function Secrets() {
                         </Space>) },
                 ]} />
             <Modal open={!!adding} title={adding?.replace ? `Replace ${adding.name}` : 'Add secret'} onCancel={() => setAdding(null)} onOk={save} okText="Save" destroyOnClose
-                okButtonProps={{ disabled: !nameOk || !adding?.value }}>
+                okButtonProps={{ disabled: !nameOk || !valueOk }}>
                 {adding && (
                     <Form layout="vertical">
                         <Form.Item label="Name" htmlFor="cs-secrets-name" tooltip="Capital letters, digits and _ — for example QA_DB_PASSWORD"
                             validateStatus={adding.name && !nameOk ? 'error' : undefined} help={adding.name && !nameOk ? 'Capital letters, digits and _, starting with a letter (at most 64).' : undefined}>
                             <Input id="cs-secrets-name" className="mono" autoFocus={!adding.name} maxLength={64} disabled={adding.replace} value={adding.name} placeholder="QA_DB_PASSWORD"
-                                onChange={(e) => setAdding({ ...adding, name: e.target.value.toUpperCase() })} onPressEnter={() => { if (nameOk && adding.value) void save(); }} /></Form.Item>
-                        <Form.Item label="Value" htmlFor="cs-secrets-value"><Input.Password id="cs-secrets-value" autoFocus={!!adding.name} value={adding.value} autoComplete="new-password" onChange={(e) => setAdding({ ...adding, value: e.target.value })} onPressEnter={() => { if (nameOk && adding.value) void save(); }} /></Form.Item>
+                                onChange={(e) => setAdding({ ...adding, name: e.target.value.toUpperCase() })} onPressEnter={() => { if (nameOk && valueOk) void save(); }} /></Form.Item>
+                        <Form.Item label="Value" htmlFor="cs-secrets-value" validateStatus={valueBlank ? 'error' : undefined} help={valueBlank ? 'The value is only spaces: type or paste the secret value itself.' : undefined}><Input.Password id="cs-secrets-value" autoFocus={!!adding.name} value={adding.value} autoComplete="new-password" onChange={(e) => setAdding({ ...adding, value: e.target.value })} onPressEnter={() => { if (nameOk && valueOk) void save(); }} /></Form.Item>
                         <Row gutter={12}>
                             <Col span={12}><Form.Item label="Environment" htmlFor="cs-secrets-environment" style={{ marginBottom: 0 }}><Select id="cs-secrets-environment" disabled={adding.replace} value={adding.env} onChange={(v) => setAdding({ ...adding, env: v })} options={envOptions} /></Form.Item></Col>
                             <Col span={12}><Form.Item label="Projects" htmlFor="cs-secrets-projects" style={{ marginBottom: 0 }}><Select id="cs-secrets-projects" disabled={adding.replace} value={adding.scope} onChange={(v) => setAdding({ ...adding, scope: v })}

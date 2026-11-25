@@ -63,6 +63,7 @@ function Item({ it, onDone, openConversation }: { it: InboxItemDef; onDone: (ite
 export const closeCopilot = () => window.dispatchEvent(new Event('cs-studio:close-copilot'));
 
 export function Inbox({ openConversation, onCount }: { openConversation: (id: string) => void; onCount?: (n: number) => void }) {
+    const { message } = App.useApp();
     const [items, setItems] = React.useState<InboxItemDef[] | null>(null);
     const [filter, setFilter] = useRememberedTab('inbox', 'all', ['all', 'answer', 'review'], 'inbox');
     // "Open" on a conversation is a step of its own (#/inbox/<tab>/conversation/<id>): Back closes the panel and
@@ -73,7 +74,19 @@ export function Inbox({ openConversation, onCount }: { openConversation: (id: st
     const shownByAddress = React.useRef<{ id: string; idx: number | null } | null>(null);
     const placeNow = () => { const i = (history.state as { idx?: unknown } | null)?.idx; return typeof i === 'number' ? i : null; };
     React.useEffect(() => {
-        if (conv) { if (shownByAddress.current?.id !== conv) { shownByAddress.current = { id: conv, idx: placeNow() }; openConversation(conv); } return; }
+        if (conv) {
+            if (shownByAddress.current?.id !== conv) {
+                shownByAddress.current = { id: conv, idx: placeNow() };
+                // A conversation that is not there (a mistyped or old address): said, and the address corrected in place.
+                void api.agentSessions().then((r) => {
+                    if (r.sessions.some((x) => x.id === conv)) { openConversation(conv); return; }
+                    shownByAddress.current = null;
+                    message.warning(`Conversation "${conv.slice(0, 80)}" not found: it may have been deleted.`);
+                    navigate(['inbox', filter], true);
+                }).catch(() => openConversation(conv));
+            }
+            return;
+        }
         const was = shownByAddress.current;
         shownByAddress.current = null;
         // Back from that step (an earlier place in the history) closes the panel; switching the Inbox's tab does not.

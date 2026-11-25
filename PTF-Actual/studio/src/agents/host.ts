@@ -173,7 +173,7 @@ export interface MissionSessionOptions {
     /** Changes nothing whatever the settings say (an evaluation): no file changes, commands or tool servers; Studio calls only read. */
     readOnly?: boolean;
 }
-const UNATTENDED = 'This is an unattended run (no one can approve): commands and actions that change files or systems outside your copy are not allowed. Read-only commands still work; change files with your file tools in your copy, and say in your report what you could not do.';
+const UNATTENDED = 'This is an unattended run (no one can approve): commands (unless the settings allow them without asking) and actions that change files or systems outside your copy are not allowed. Change files with your file tools in your copy, and say in your report what you could not do.';
 /** Studio calls that change something but write no repository file: allowed in an isolated mission (with the usual approval). */
 const ISOLATED_OK = [/^\/api\/ado\//, /^\/api\/lang\//, /^\/api\/db\/query/, /^\/api\/apiws\/send/, /^\/api\/pdf\/(inspect|compare)/];
 export const TEAM_MEMORY_FILE = '.cs-studio/agent-memory.md';
@@ -274,7 +274,21 @@ export interface HostDeps {
     knowledge?: (sources?: string[]) => ToolDef[];
     /** What a session saw of a tool server: its status (and error), the number of tools it listed. */
     onToolServer?: (e: { name: string; status?: string; error?: string; toolCount?: number }) => void;
+    /**
+     * Start a tool server quickly to see that it answers (a short timeout): one that does not is left out of the
+     * session, so it never holds the session up for the runtime's own (long) start timeout.
+     */
+    probeToolServer?: (name: string, timeoutMs: number) => Promise<{ ok: boolean; error?: string }>;
 }
+
+/** The runtime's built-in tools that run commands (bash on Linux and macOS, PowerShell on Windows). */
+export const SHELL_TOOLS = ['bash', 'write_bash', 'read_bash', 'stop_bash', 'list_bash', 'powershell', 'write_powershell', 'read_powershell', 'stop_powershell', 'list_powershell'];
+/** Of those, the ones that run something new (a command, or input typed into a running shell). */
+const SHELL_RUNS = new Set(['bash', 'write_bash', 'powershell', 'write_powershell']);
+/** Built-in tools that could run commands through another agent (sub-agents, workflows): off without the shell. */
+const SHELL_INDIRECT = ['task', 'run_dynamic_workflow', 'dynamic_workflows_manage', 'write_agent'];
+/** How long a tool server may take to start before a session leaves it out. */
+export const TOOL_SERVER_START_MS = 15_000;
 
 /** A GitHub sign-in in progress (the Copilot runtime's own sign-in, shown in the Studio). */
 export interface SignInState {
@@ -648,6 +662,40 @@ export class AgentHost {
         return Array.isArray(policy.toolServers) ? all.filter((x) => (policy.toolServers as string[]).includes(x.name)) : all;
     }
 
+    /** Recent probes of tool servers (name → when and how): a session does not wait on a server checked a moment ago. */
+    private probes = new Map<string, { at: number; ok: boolean; error?: string; running?: Promise<{ ok: boolean; error?: string }> }>();
+
+    /**
+     * The tool servers a session starts: each answered a quick start (TOOL_SERVER_START_MS) lately; one that did not
+     * is left out, and the conversation says which and why (the runtime itself would wait two minutes for it).
+     */
+    private async startableServers<T extends { name: string }>(s: SessionState, servers: T[]): Promise<T[]> {
+        const probe = this.d.probeToolServer;
+        if (!probe || !servers.length) return servers;
+        const results = await Promise.all(servers.map(async (x) => {
+            const known = this.probes.get(x.name);
+            // A good start is trusted for 10 minutes, a failed one for 1 (then it is tried again).
+            if (known && !known.running && Date.now() - known.at < (known.ok ? 10 * 60_000 : 60_000)) return { x, ok: known.ok, error: known.error };
+            const running = known?.running ?? Promise.race([
+                probe(x.name, TOOL_SERVER_START_MS).catch((e) => ({ ok: false, error: (e as Error).message })),
+                new Promise<{ ok: boolean; error?: string }>((r) => { const t = setTimeout(() => r({ ok: false, error: `no answer within ${Math.round(TOOL_SERVER_START_MS / 1000)} s` }), TOOL_SERVER_START_MS + 2000); t.unref?.(); }),
+            ]);
+            if (!known?.running) this.probes.set(x.name, { at: Date.now(), ok: false, running });
+            const r = await running;
+            this.probes.set(x.name, { at: Date.now(), ok: r.ok, ...(r.error ? { error: r.error } : {}) });
+            return { x, ...r };
+        }));
+        for (const r of results.filter((y) => !y.ok)) {
+            const why = String(r.error ?? 'no answer').split('\n')[0].slice(0, 300);
+            this.push(s, { type: 'info', text: `Tool server ${r.x.name} could not start (${why}): it is left out of this conversation. Agents → Tool servers.` });
+            this.d.onToolServer?.({ name: r.x.name, status: 'failed', error: why });
+        }
+        return results.filter((y) => y.ok).map((y) => y.x);
+    }
+
+    /** Forget what quick starts found (a tool server was changed or checked). */
+    forgetProbe(name?: string) { if (name) this.probes.delete(name); else this.probes.clear(); }
+
     // ---- MCP clients: the Studio's tools for an assistant outside the Studio (VS Code, another MCP client). Each
     // client is a conversation in the Agents screen: its tool calls are shown there, changes wait for the person's
     // approval card, the repository's agent policy and secret masking apply, and they are in the activity log.
@@ -786,7 +834,13 @@ How to work:
         const missionOwn = new Set((m0?.tools ?? []).map((t) => t.name));
         const all = [...studio.filter((t) => !mine.has(t.name)), ...own].filter((t) => !allowedNames || missionOwn.has(t.name) || allowedNames.has(t.name));
         const tools = guardTools(all, policy, this.d.mask ?? ((t: string) => t), (tool, text, args) => inspectExternal(tool, text, args, { policy, onFound: (src, f) => this.tainted(s, src, f) }));
-        const servers = this.allowedServers(policy);
+        // Commands: only with the "Run commands" tool group, outside an evaluation, and when the settings do not turn them off.
+        // The runtime's command tools are not even offered otherwise (it runs some commands it thinks read-only without asking).
+        const shellOk = !m0?.readOnly && may('shell') && this.effective().settings.approvals.shell !== 'deny';
+        // Tool servers start only for agents that may use them (a broken one never holds up the others),
+        // and each must answer within a short time first (else it is left out, and the conversation says which).
+        const serversOk = !m0?.readOnly && may('tool-servers') && this.effective().settings.approvals.mcp !== 'deny';
+        const servers = serversOk ? await this.startableServers(s, this.allowedServers(policy)) : [];
         // A file as the person knows it: its path in the repository (a mission's copy is a folder of its own).
         const shown = (f?: string) => {
             if (!f) return 'a file';
@@ -794,10 +848,61 @@ How to work:
             for (const base of [m0?.workdir, this.d.repoRoot].filter(Boolean) as string[]) { const rel = path.relative(base, abs); if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return rel.split(path.sep).join('/'); }
             return f;
         };
+        // Every command goes through here before the runtime runs it (whether or not the runtime would ask):
+        // the agent's tool groups, an evaluation, the "runs commands" setting, prompt injection and unattended runs.
+        const approvedCommands = new Map<string, number>();
+        const shellDecision = async (command: string): Promise<{ ok: true } | { ok: false; feedback: string }> => {
+            const shown = command.slice(0, 120);
+            if (m0?.readOnly) {
+                this.push(s, { type: 'info', text: `Refused (read only): shell ${shown}` });
+                return { ok: false, feedback: 'This session only reads (an evaluation): nothing may be changed or run. Say what you would do instead.' };
+            }
+            if (prof && !may('shell')) {
+                this.push(s, { type: 'info', text: `Not allowed for ${prof.name}: shell ${shown}` });
+                return { ok: false, feedback: `The agent "${prof.name}" is not allowed to run commands (its tool groups: ${prof.tools.join(', ')}).` };
+            }
+            const a = this.effective().settings.approvals;
+            if (a.shell === 'deny') return { ok: false, feedback: 'This is turned off by the agent settings or the repository\'s agent policy (shell).' };
+            const tainted = !!s.taint?.length;
+            if (a.shell === 'auto' && !tainted) {
+                this.d.log('agent.shell', `An agent (${s.title}) ran: ${command.slice(0, 300)} (allowed by the settings)`, { agentSession: s.id });
+                return { ok: true };
+            }
+            if (m0?.unattended) {
+                this.push(s, { type: 'info', text: `Refused (${tainted ? 'after possible prompt injection' : 'unattended'}): Run: ${command.slice(0, 200)}` });
+                return { ok: false, feedback: tainted ? 'Refused: this session read content that tried to steer you (possible prompt injection), and no one can approve changes in this run. Report what you found instead.' : UNATTENDED };
+            }
+            const d = await this.ask(s, `Run: ${command.slice(0, 200)}${tainted ? ' (after possible prompt injection)' : ''}`, command, 'shell');
+            return d === 'reject' ? { ok: false, feedback: 'The person did not approve this.' } : { ok: true };
+        };
+        const commandOf = (args: any): string => String(args?.command ?? args?.input ?? args?.text ?? (typeof args === 'string' ? args : JSON.stringify(args ?? {})));
+        const onPreToolUse = async (input: { toolName: string; toolArgs: unknown }) => {
+            const name = String(input?.toolName ?? '');
+            if (!SHELL_TOOLS.includes(name) && !SHELL_INDIRECT.includes(name)) return undefined;
+            if (!shellOk) {
+                const r = await shellDecision(SHELL_RUNS.has(name) ? commandOf(input.toolArgs) : name);
+                return { permissionDecision: 'deny' as const, permissionDecisionReason: r.ok ? 'Commands are not available in this session.' : r.feedback };
+            }
+            if (!SHELL_RUNS.has(name)) return undefined;
+            const command = commandOf(input.toolArgs);
+            const r = await shellDecision(command);
+            if (!r.ok) return { permissionDecision: 'deny' as const, permissionDecisionReason: r.feedback };
+            // The runtime may still ask for this command: it was decided here, so it is not asked twice.
+            approvedCommands.set(command.trim(), (approvedCommands.get(command.trim()) ?? 0) + 1);
+            return { permissionDecision: 'allow' as const };
+        };
         const onPermissionRequest = async (r: any) => {
             const a = this.effective().settings.approvals;
             const kind: string = r.kind;
             if (kind === 'read' || kind === 'custom-tool' || kind === 'memory' || kind === 'hook') return { kind: 'approve-once' };
+            if (kind === 'shell') {
+                // Decided before the tool ran (onPreToolUse): approved once for that command; else decided now.
+                const cmd = String(r.fullCommandText ?? '').trim();
+                const n = approvedCommands.get(cmd) ?? 0;
+                if (n > 0 && shellOk) { if (n === 1) approvedCommands.delete(cmd); else approvedCommands.set(cmd, n - 1); return { kind: 'approve-once' }; }
+                const d = await shellDecision(String(r.fullCommandText ?? ''));
+                return d.ok ? { kind: 'approve-once' } : { kind: 'reject', feedback: d.feedback };
+            }
             if (m0?.readOnly && (kind === 'write' || kind === 'shell' || kind === 'mcp')) {
                 this.push(s, { type: 'info', text: `Refused (read only): ${kind}${r.fileName ? ` ${r.fileName}` : r.fullCommandText ? ` ${String(r.fullCommandText).slice(0, 120)}` : ''}` });
                 return { kind: 'reject', feedback: 'This session only reads (an evaluation): nothing may be changed or run. Say what you would do instead.' };
@@ -852,6 +957,8 @@ How to work:
             ...(st.reasoningEffort ? { reasoningEffort: st.reasoningEffort } : {}),
             systemMessage: { mode: 'append', content: this.systemMessage(s.workflow) + (prof ? `\n\nYou are the team's agent "${prof.name}" (made in the Studio's Agent Builder). Its instructions come first:\n${prof.instructions}\nYou may use only these tool groups: ${prof.tools.join(', ')}.` : '') },
             tools: tools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters, skipPermission: t.skipPermission, handler: t.handler })),
+            ...(shellOk ? {} : { excludedTools: [...SHELL_TOOLS, ...SHELL_INDIRECT] }),
+            hooks: { onPreToolUse },
             onPermissionRequest,
         };
         const sdk = resume ? await client.resumeSession(s.id, config) : await client.createSession(config);

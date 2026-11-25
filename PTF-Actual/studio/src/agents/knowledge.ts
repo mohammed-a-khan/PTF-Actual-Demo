@@ -246,15 +246,16 @@ export class KnowledgeBase {
         checkVersion(this.version(), version, KNOWLEDGE_FILE);
         const cur = this.sources();
         if (cur.unreadable) throw new Error(cur.problems[0]);
-        if (cur.invalid.length) throw new Error(`Not saved: ${KNOWLEDGE_FILE} has ${cur.invalid.length === 1 ? 'an entry' : `${cur.invalid.length} entries`} the Studio leaves out (${cur.invalid.map((x) => `"${x.name}"`).join(', ')}); saving now would delete ${cur.invalid.length === 1 ? 'it' : 'them'}. Fix the file, or remove ${cur.invalid.length === 1 ? 'that entry' : 'those entries'} first.`);
-        const s = validateSources(list);
-        // A folder must be there (relative paths are from the repository).
-        for (const x of s) {
+        // What was sent is checked first (a wrong folder is said as such), then the entries the file leaves out.
+        const sent = validateSources(list);
+        for (const x of sent) {
             const before = cur.sources.find((y) => y.id === x.id);
             if (before && before.kind === x.kind && before.path === x.path) continue;
             const p = this.folderProblem(x);
             if (p) throw new Error(`Source "${x.name}": ${p.charAt(0).toLowerCase()}${p.slice(1)}`);
         }
+        if (cur.invalid.length) throw new Error(`Not saved: ${KNOWLEDGE_FILE} has ${cur.invalid.length === 1 ? 'an entry' : `${cur.invalid.length} entries`} the Studio leaves out (${cur.invalid.map((x) => `"${x.name}"`).join(', ')}); saving now would delete ${cur.invalid.length === 1 ? 'it' : 'them'}. Fix the file, or remove ${cur.invalid.length === 1 ? 'that entry' : 'those entries'} first.`);
+        const s = sent;
         const file = path.join(this.repoRoot, KNOWLEDGE_FILE);
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, `${JSON.stringify({ sources: s }, null, 2)}\n`);

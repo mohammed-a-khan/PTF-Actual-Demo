@@ -398,6 +398,8 @@ function once(method: string, url: string, headers: Record<string, string>, body
         const t0 = performance.now();
         let tSocket: number | undefined, tDns: number | undefined, tConnect: number | undefined, tTls: number | undefined, tSent: number | undefined, tFirst: number | undefined;
         let u: URL;
+        // No address at all (an empty URL and no base URL): said in words, not "Not a valid URL: ".
+        if (!url.trim()) { reject(new Error('No address to send to: type the request\'s URL (or set the collection\'s base URL).')); return; }
         try { u = new URL(url); } catch { reject(new Error(`Not a valid URL: ${url}`)); return; }
         if (u.protocol !== 'http:' && u.protocol !== 'https:') { reject(new Error('Only http:// and https:// URLs can be sent.')); return; }
         const h: Record<string, string> = { 'User-Agent': 'CS-Test-Studio', Accept: '*/*', 'Accept-Encoding': 'gzip, deflate, br', ...headers };

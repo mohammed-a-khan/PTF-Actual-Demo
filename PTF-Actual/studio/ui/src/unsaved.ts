@@ -6,9 +6,19 @@ import React from 'react';
 
 const dirty = new Map<string, string>();
 let installed = false;
+/** The address the screens show (the step Back/Forward makes is already in window.location while the app asks). */
+let shownHash = typeof window !== 'undefined' ? window.location.hash : '';
+const routeOf = (hash: string): string[] => hash.replace(/^#\/?/, '').split('/').filter((x) => x !== '' && !/^token=/.test(x)).map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
 function install() {
     if (installed || typeof window === 'undefined') return;
     installed = true;
+    // Registered after the address bar's own listener (route.ts): a step it refused never gets here, so this stays
+    // the address shown until the step is made.
+    const seen = () => { shownHash = window.location.hash; };
+    window.addEventListener('popstate', seen);
+    window.addEventListener('hashchange', seen);
+    window.addEventListener('cs-route', seen);
+    shownHash = window.location.hash;
     window.addEventListener('beforeunload', (e) => {
         if (!dirty.size) return;
         e.preventDefault();
@@ -19,7 +29,12 @@ function install() {
 /** Unsaved work a screen does not keep when another screen is opened (asked about in the menu). */
 const lost = new Set<string>();
 /** While isDirty is true, leaving the page asks first; with lostOnLeave, opening another screen asks too. */
-export function useUnsaved(key: string, isDirty: boolean, what: string, o: { lostOnLeave?: boolean; save?: () => Promise<boolean>; discard?: () => void } = {}) {
+export function useUnsaved(key: string, isDirty: boolean, what: string, o: { lostOnLeave?: boolean; save?: () => Promise<boolean>; discard?: () => void;
+    /** Back/Forward to this address keeps the work (the same item, another of its tabs): nothing to ask. */
+    keeps?: (to: string[]) => boolean } = {}) {
+    const keepsRef = React.useRef(o.keeps);
+    keepsRef.current = o.keeps;
+    React.useEffect(() => { keepers.set(key, (to) => !!keepsRef.current?.(to)); return () => { keepers.delete(key); }; }, [key]);
     // The screen's own Save, so "Leave without saving?" can offer to save first (kept current every render).
     const saveRef = React.useRef(o.save);
     saveRef.current = o.save;
@@ -42,8 +57,17 @@ export async function saveLost(): Promise<boolean> {
     for (const k of [...lost]) { const s = savers.get(k); if (!s || !(await s())) return false; }
     return true;
 }
-/** What another screen would throw away (its edits are not kept). */
-export const lostOnLeave = () => [...lost].map((k) => dirty.get(k)).filter((x): x is string => !!x);
+const keepers = new Map<string, (to: string[]) => boolean>();
+/**
+ * What another screen would throw away (its edits are not kept). While Back/Forward is being made (the address
+ * already differs from the one shown), a screen that keeps its work at the new address (another tab of the same
+ * item) is not counted: moving between the tabs of an item with unsaved changes does not ask.
+ */
+export const lostOnLeave = () => {
+    const stepping = typeof window !== 'undefined' && window.location.hash !== shownHash;
+    const to = stepping ? routeOf(window.location.hash) : null;
+    return [...lost].filter((k) => !(to && keepers.get(k)?.(to))).map((k) => dirty.get(k)).filter((x): x is string => !!x);
+};
 /** What is not saved now (for tests and the status bar). */
 export const unsavedNow = () => [...dirty.values()];
 

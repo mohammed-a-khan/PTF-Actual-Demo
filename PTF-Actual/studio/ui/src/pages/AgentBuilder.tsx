@@ -16,6 +16,7 @@ import { useRememberedTab } from '../agents-tabs';
 import { agentsApi, AgentBuilderView } from '../agents-api';
 import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
 import { useValidity, WholeNumber } from '../components/WholeNumber';
+import { agentIdProblem, cronProblem, instructionsProblem } from '../agents-checks';
 
 /** "storyId" → "Story id": the label an input gets until someone writes their own. */
 function labelOf(key: string): string {
@@ -155,9 +156,23 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
     const toggle = (g: ToolGroupId, on: boolean) => up({ tools: on ? [...new Set([...a.tools, g])] : a.tools.filter((x) => x !== g) });
     const finalId = isNew ? (a.id.replace(/^-+|-+$/g, '') || slug(a.name)) : a.id;
     const fail = (t: string, text: string) => { setTab(t); message.error({ content: text, key: 'agent-editor-check' }); };
+    // Checked as you type (the server's rules): each problem next to its field, and Save waits until they are put right.
+    const idProblem = isNew ? agentIdProblem(finalId, { reserved: d.reserved, existing: d.agents.map((x) => x.id) }) : null;
+    const nameProblem = a.name.trim() ? null : 'Give the agent a name.';
+    const instrProblem = instructionsProblem(a.instructions ?? '');
+    const goalProblem = mission && !a.goal?.trim() ? 'Write the mission\'s goal.' : null;
+    const cronProblems = mission ? (a.triggers ?? []).map((t) => (t.on === 'schedule' ? cronProblem(t.cron ?? '') : null)) : [];
+    const problems: Array<[string, string]> = [
+        ...(nameProblem ? [['basics', `Name: ${nameProblem}`] as [string, string]] : []),
+        ...(idProblem ? [['basics', `Id: ${idProblem}`] as [string, string]] : []),
+        ...(goalProblem ? [['instructions', goalProblem] as [string, string]] : []),
+        ...(instrProblem ? [['instructions', `Instructions: ${instrProblem}`] as [string, string]] : []),
+        ...cronProblems.flatMap((c, i) => (c ? [['triggers', `Trigger ${i + 1}, schedule: ${c}`] as [string, string]] : [])),
+    ];
     const saving = React.useRef(false);
     const save = async (): Promise<boolean> => {
         if (busy || saving.current) return false;
+        if (problems.length) { fail(problems[0][0], `Put right first: ${problems.map((x) => x[1]).join(' ')}`); return false; }
         if (!a.name.trim()) { fail('basics', 'Give the agent a name.'); return false; }
         if (isNew && !finalId) { fail('basics', 'Give the agent an id (letters, digits and -).'); return false; }
         if (!a.instructions.trim()) { fail('instructions', 'Write how it works (its instructions).'); return false; }
@@ -199,8 +214,8 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
         { key: 'basics', label: 'Basics', children: (
             <Form layout="vertical" size="small">
                 <Row gutter={12}>
-                    <Col xs={24} md={12}><Form.Item label="Name" required><Input value={a.name} maxLength={80} showCount aria-label="Name" placeholder="e.g. Checkout test reviewer" onChange={(e) => up({ name: e.target.value, ...(isNew && (!a.id || a.id === slug(a.name)) ? { id: slug(e.target.value) } : {}) })} /></Form.Item></Col>
-                    <Col xs={24} md={12}><Form.Item label="Id (its file name)" tooltip="Lower-case letters, digits and -; it cannot change later"><Input value={a.id} disabled={!isNew} maxLength={40} aria-label="Id" placeholder={slug(a.name) || 'my-agent'} onChange={(e) => up({ id: idTyping(e.target.value) })} /></Form.Item></Col>
+                    <Col xs={24} md={12}><Form.Item label="Name" required validateStatus={nameProblem && dirty ? 'error' : undefined} help={dirty ? nameProblem : undefined}><Input value={a.name} maxLength={80} showCount aria-label="Name" placeholder="e.g. Checkout test reviewer" onChange={(e) => up({ name: e.target.value, ...(isNew && (!a.id || a.id === slug(a.name)) ? { id: slug(e.target.value) } : {}) })} /></Form.Item></Col>
+                    <Col xs={24} md={12}><Form.Item label="Id (its file name)" tooltip="Lower-case letters, digits and -; it cannot change later" validateStatus={idProblem && (a.id || a.name) ? 'error' : undefined} help={idProblem && (a.id || a.name) ? idProblem : undefined}><Input value={a.id} disabled={!isNew} maxLength={40} aria-label="Id" placeholder={slug(a.name) || 'my-agent'} onChange={(e) => up({ id: idTyping(e.target.value) })} /></Form.Item></Col>
                 </Row>
                 <Form.Item label="Description"><Input value={a.description} maxLength={200} aria-label="Description" placeholder="What it is for, in one sentence" onChange={(e) => up({ description: e.target.value })} /></Form.Item>
                 <Row gutter={12}>
@@ -216,8 +231,8 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
         ) },
         { key: 'instructions', label: 'Instructions', children: (
             <Form layout="vertical" size="small">
-                {mission && <Form.Item label="Goal" required tooltip="What done means. {name} is filled from an input (Inputs tab)."><Input.TextArea autoSize={{ minRows: 2, maxRows: 5 }} value={a.goal} aria-label="Goal" onChange={(e) => up({ goal: e.target.value })} placeholder="Automate the work item {story} in project {project}, environment {env}." /></Form.Item>}
-                <Form.Item label="How it works" required tooltip="Its role, the rules it follows, the steps it takes, and what a good result is">
+                {mission && <Form.Item label="Goal" required tooltip="What done means. {name} is filled from an input (Inputs tab)." validateStatus={goalProblem && dirty ? 'error' : undefined} help={dirty ? goalProblem : undefined}><Input.TextArea autoSize={{ minRows: 2, maxRows: 5 }} value={a.goal} aria-label="Goal" onChange={(e) => up({ goal: e.target.value })} placeholder="Automate the work item {story} in project {project}, environment {env}." /></Form.Item>}
+                <Form.Item label="How it works" required tooltip="Its role, the rules it follows, the steps it takes, and what a good result is" validateStatus={instrProblem && (dirty || !isNew) ? 'error' : undefined} help={dirty || !isNew ? instrProblem : undefined}>
                     <Input.TextArea rows={mission ? 9 : 12} value={a.instructions} aria-label="Instructions" onChange={(e) => up({ instructions: e.target.value })} placeholder={'You review test code for the checkout team.\n- Always search the knowledge for the team\'s standards first.\n- Never change files: suggest the change with the file and line.\n- Finish with a short list of the most important improvements.'} />
                 </Form.Item>
                 {!mission && <Form.Item label="Conversation starters" tooltip="Shown when someone starts a chat with it (up to 6)">
@@ -268,7 +283,7 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
                             <Row gutter={12}>
                                 {t.on === 'run-failed' && <><Col xs={24} md={9}><Form.Item label="Projects"><Select mode="multiple" placeholder="Any project" aria-label={`Trigger ${i + 1}: projects`} value={t.projects ?? []} onChange={(v) => setTrigger(i, { ...t, projects: v })} options={projects.map((p) => ({ value: p }))} /></Form.Item></Col>
                                     <Col xs={24} md={9}><Form.Item label="Environments"><Select mode="tags" placeholder="Any environment" aria-label={`Trigger ${i + 1}: environments`} value={t.envs ?? []} onChange={(v) => setTrigger(i, { ...t, envs: v })} open={false} /></Form.Item></Col></>}
-                                {t.on === 'schedule' && <Col xs={24} md={18}><Form.Item label="Schedule (cron)" tooltip="Minute hour day month weekday, on this computer's clock; e.g. 0 2 * * 1-5 is 02:00 on weekdays"><Input className="mono" aria-label={`Trigger ${i + 1}: schedule (cron)`} value={t.cron} onChange={(e) => setTrigger(i, { ...t, cron: e.target.value })} placeholder="0 2 * * 1-5" status={t.cron.trim().split(/\s+/).length !== 5 ? 'warning' : undefined} /></Form.Item></Col>}
+                                {t.on === 'schedule' && <Col xs={24} md={18}><Form.Item label="Schedule (cron)" tooltip="Minute hour day month weekday, on this computer's clock; e.g. 0 2 * * 1-5 is 02:00 on weekdays" validateStatus={cronProblems[i] ? 'error' : undefined} help={cronProblems[i] ?? undefined}><Input className="mono" aria-label={`Trigger ${i + 1}: schedule (cron)`} value={t.cron} onChange={(e) => setTrigger(i, { ...t, cron: e.target.value })} placeholder="0 2 * * 1-5" /></Form.Item></Col>}
                                 {t.on === 'work-item' && <><Col xs={24} md={12}><Form.Item label="WIQL query"><Input.TextArea autoSize={{ minRows: 1, maxRows: 5 }} aria-label={`Trigger ${i + 1}: WIQL query`} value={t.query} onChange={(e) => setTrigger(i, { ...t, query: e.target.value })} placeholder="SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS 'automate'" /></Form.Item></Col>
                                     <Col xs={24} md={6}><Form.Item label="The work item fills"><Select aria-label={`Trigger ${i + 1}: the work item fills`} value={t.input ?? 'story'} onChange={(v) => setTrigger(i, { ...t, input: v })} options={inputs.filter((x) => x.key).map((x) => ({ value: x.key, label: x.key }))} /></Form.Item></Col></>}
                                 {t.on === 'pull-request' && <><Col xs={24} md={9}><Form.Item label="Into branch"><Input aria-label={`Trigger ${i + 1}: into branch`} value={t.target} placeholder="main" onChange={(e) => setTrigger(i, { ...t, target: e.target.value })} /></Form.Item></Col>
@@ -319,8 +334,8 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
     return (
         <Modal open width={900} title={<Space>{mission ? <RocketOutlined /> : <RobotOutlined />}{isNew ? 'New agent' : `Agent: ${agent.name}`}{dirty && <Tag color="gold" bordered={false}>unsaved</Tag>}</Space>} onCancel={close} maskClosable={false}
             styles={{ body: { minHeight: 380 } }}
-            footer={<Space wrap>{!isNew && <Button danger icon={<DeleteOutlined />} onClick={del}>Delete</Button>}{!isNew && a.mode === 'assistant' && <Button icon={<MessageOutlined />} onClick={() => { if (dirty) { message.warning('Save your changes first, then chat with it.'); return; } onClose(); onChat(a); }}>Chat with it</Button>}<Button onClick={close}>Cancel</Button><Button type="primary" loading={busy} onClick={() => void save()}>Save</Button></Space>}>
-            <Tabs size="small" activeKey={tab} onChange={setTab} items={items} />
+            footer={<Space wrap>{!isNew && <Button danger icon={<DeleteOutlined />} onClick={del}>Delete</Button>}{!isNew && a.mode === 'assistant' && <Button icon={<MessageOutlined />} onClick={() => { if (dirty) { message.warning('Save your changes first, then chat with it.'); return; } onClose(); onChat(a); }}>Chat with it</Button>}<Button onClick={close}>Cancel</Button><Tooltip title={problems.length ? <span>Put right first:{problems.map((x, k) => <div key={k}>{x[1]}</div>)}</span> : undefined}><Button type="primary" loading={busy} disabled={problems.length > 0} onClick={() => void save()}>Save</Button></Tooltip></Space>}>
+            <Tabs size="small" activeKey={tab} onChange={setTab} items={items.map((it) => ((dirty || !isNew) && problems.some((x) => x[0] === it.key) ? { ...it, label: <Tooltip title={problems.filter((x) => x[0] === it.key).map((x) => x[1]).join(' ')}><Typography.Text type="danger">{it.label} !</Typography.Text></Tooltip> } : it))} />
         </Modal>
     );
 }

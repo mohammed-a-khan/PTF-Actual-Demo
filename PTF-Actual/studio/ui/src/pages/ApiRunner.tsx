@@ -3,6 +3,7 @@
  * a database query or stored procedure, an API response or generated rows),
  * with their checks and saved values, and get a report.
  */
+import { labelOf, sameNameLabels } from '../../../src/load/labels';
 import React from 'react';
 import { Alert, App, Button, Checkbox, Col, Drawer, Dropdown, Empty, Form, Progress, Row, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, DownloadOutlined, DiffOutlined, StopOutlined } from '@ant-design/icons';
@@ -116,6 +117,9 @@ export function ApiRunner() {
         } catch (e) { message.error(errText(e)); }
     };
     const steps = (job?.steps ?? []).filter((s) => !onlyFailed || !s.passed);
+    // Same names numbered in the order the requests ran (all steps, so filtering keeps the numbers).
+    const stepLabels = sameNameLabels((job?.steps ?? []).map((s) => ({ id: s.requestId || undefined, name: s.name })));
+    const stepName = (s: Step) => labelOf(stepLabels, { id: s.requestId || undefined, name: s.name });
     return (
         <>
         <Split id="api-runner" initial={380} min={300} max={600} style={{ height: 'calc(100vh - var(--chrome))' }}>
@@ -185,12 +189,14 @@ export function ApiRunner() {
                         <Table<Step> size="small" scroll={{ x: 620 }} rowKey={(s) => `${s.iteration}-${s.requestId}`} dataSource={steps} pagination={steps.length > 100 ? { pageSize: 100, showSizeChanger: false } : false}
                             expandable={{ rowExpandable: (s) => !!s.requestId || s.checks.length > 0 || !!s.error || !!s.logs?.length, expandedRowRender: (s) => <StepView s={s} file={job.collection} /> }}
                             columns={[
-                                { title: '#', dataIndex: 'iteration', width: 50 },
-                                { title: 'Request', dataIndex: 'name', ellipsis: true, width: 220, render: (n: string, s) => <><b style={{ fontSize: 11, fontFamily: 'var(--mono)' }}>{s.method}</b> {n}</> },
+                                ...(job.iterations > 1 ? [{ title: 'Iteration', dataIndex: 'iteration', width: 80 }] : []),
+                                // Two requests with the same name: numbered in collection order, as in the reports, JUnit and Compare.
+                                { title: 'Request', dataIndex: 'name', ellipsis: true, width: 220, render: (_n: string, s: Step) => <><b style={{ fontSize: 11, fontFamily: 'var(--mono)' }}>{s.method}</b> {stepName(s)}</> },
                                 { title: 'Status', dataIndex: 'status', width: 80 },
                                 { title: 'Time', dataIndex: 'timeMs', width: 90, align: 'right', render: (v?: number) => (v === undefined ? '' : `${v} ms`) },
                                 { title: 'Checks', width: 90, render: (_, s) => `${s.checks.filter((c) => c.pass).length}/${s.checks.length}` },
-                                { title: 'Result', width: 110, render: (_, s) => (s.passed ? <Tag color="success">Passed</Tag> : <Tooltip title={s.error ?? s.checks.find((c) => !c.pass)?.message}><Tag color="error">Failed</Tag></Tooltip>) },
+                                // A failure says why on the row (no answer, a failed check), not only in a tooltip.
+                                { title: 'Result', width: 200, render: (_, s) => (s.passed ? <Tag color="success">Passed</Tag> : <Tooltip title={s.error ?? s.checks.find((c) => !c.pass)?.message}><span><Tag color="error">Failed</Tag>{(s.error ?? s.checks.find((c) => !c.pass)?.message) && <Typography.Text type="danger" style={{ fontSize: 11, display: 'block', whiteSpace: 'normal' }}>{s.error ?? s.checks.find((c) => !c.pass)?.message}</Typography.Text>}</span></Tooltip>) },
                             ]} />
                     </Space>)}
             </div>
@@ -204,10 +210,11 @@ export function ApiRunner() {
                     <Table size="small" pagination={false} rowKey="key" dataSource={[...cmp.rows].sort((x, y) => CHANGE_ORDER.indexOf(x.change) - CHANGE_ORDER.indexOf(y.change))}
                         expandable={{ rowExpandable: (r) => !!r.checksChanged?.length, expandedRowRender: (r) => <Space direction="vertical" size={2}>{r.checksChanged!.map((c, i) => <Typography.Text key={i} type={c.startsWith('now fails') ? 'danger' : 'success'}>{c}</Typography.Text>)}</Space> }}
                         columns={[
-                            { title: '#', dataIndex: 'iteration', width: 46 },
-                            // Paired by the request (not its name): its place in the run and its method and URL tell two "New request"s apart.
-                            { title: 'Request', dataIndex: 'name', render: (n: string, r) => <div style={{ minWidth: 0 }}>
-                                <div>{r.position ? <span className="item-id">{r.position}.</span> : null} {n}</div>
+                            // The iteration (only when the runs had more than one): not a row number.
+                            ...(cmp.rows.some((r) => r.iteration > 1) ? [{ title: 'Iteration', dataIndex: 'iteration', width: 80 }] : []),
+                            // Paired by the request (not its name): two "New request"s are numbered in collection order, as everywhere.
+                            { title: 'Request', dataIndex: 'name', render: (n: string, r: (typeof cmp.rows)[number]) => <div style={{ minWidth: 0 }}>
+                                <div>{r.label ?? n}</div>
                                 {(r.method || r.url) && <Typography.Text type="secondary" className="mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{r.method} {r.url || '(not sent)'}</Typography.Text>}
                             </div> },
                             { title: 'Change', width: 120, render: (_, r) => <Tag color={CHANGE_COLOR[r.change]}>{r.change}</Tag> },

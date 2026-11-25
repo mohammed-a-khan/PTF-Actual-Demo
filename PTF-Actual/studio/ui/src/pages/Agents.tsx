@@ -13,6 +13,7 @@ import { ToolServers } from '../components/ToolServers';
 import { errText } from '../state';
 import { ago } from '../format';
 import { useRememberedTab } from '../agents-tabs';
+import { navigate, useRoute } from '../route';
 import { useUnsaved } from '../unsaved';
 import { useKept } from '../kept';
 import { agentsApi, AgentStatusView } from '../agents-api';
@@ -227,7 +228,18 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
     const [values, setValues] = React.useState<Record<string, string>>(() => { const dr = readDraft(); return dr && dr.workflow === open ? dr.values : {}; });
     const [starting, setStarting] = React.useState(false);
     const [tab, setTab] = useRememberedTab('agents', 'workflows', ['workflows', 'conversations', 'tools', 'setup'], 'agents');
-    const refresh = React.useCallback(() => { api.agentSessions().then((r) => setSessions(r.sessions)).catch(() => {}); }, []);
+    const [sessionsRead, setSessionsRead] = React.useState(false);
+    const refresh = React.useCallback(() => { api.agentSessions().then((r) => { setSessions(r.sessions); setSessionsRead(true); }).catch(() => {}); }, []);
+    // A conversation's address (#/agents/conversations/<id>): opened in the panel; one that is not there is said
+    // ("not found") and the address corrected in place to the list.
+    const route = useRoute();
+    const convId = route[0] === 'agents' && route[1] === 'conversations' && route[2] ? route[2] : null;
+    React.useEffect(() => {
+        if (!convId || !sessionsRead) return;
+        if (sessions.some((x) => x.id === convId)) openPanel(convId);
+        else message.warning(`Conversation "${convId.slice(0, 80)}" not found: it may have been deleted.`);
+        navigate(['agents', 'conversations'], true);
+    }, [convId, sessionsRead]); // eslint-disable-line react-hooks/exhaustive-deps
     const reload = React.useCallback(() => { api.agentStatus().then(setStatus).catch((e) => setStatus({ error: errText(e) } as AgentStatus)); }, []);
     React.useEffect(() => {
         reload();
@@ -289,7 +301,17 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
     };
     const envs = meta?.environments[values.project ?? ''] ?? [];
     const ready = !!status?.auth?.isAuthenticated && !status.error && !status.policyProblems?.length;
-    const pick = (key: string) => { if (key === open) return; setOpen(key); setValues((v) => ({ project: v.project || meta?.projects[0] || '', env: v.env ?? '' })); };
+    // What was typed in each workflow's form stays with that card while this screen is open: switching cards neither
+    // loses it nor carries it to the other card (it is said once when something typed is kept).
+    const perCard = React.useRef<Record<string, Record<string, string>>>({});
+    const pick = (key: string) => {
+        if (key === open) return;
+        if (open) perCard.current[open] = values;
+        if (typed && wf) message.info(`Kept what you typed in "${wf.title}": it is there when you choose it again.`);
+        const kept = perCard.current[key];
+        setOpen(key);
+        setValues((v) => ({ ...(kept ?? {}), project: v.project || meta?.projects[0] || '', env: v.env ?? '' }));
+    };
     // A workflow kept from before the page was left: its project is filled in again.
     React.useEffect(() => { if (open && meta && !values.project) setValues((v) => ({ ...v, project: v.project || meta.projects[0] || '' })); }, [open, meta]); // eslint-disable-line react-hooks/exhaustive-deps
     const chats = sessions.filter((s) => !s.id.startsWith('mission-'));

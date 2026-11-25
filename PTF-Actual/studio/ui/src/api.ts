@@ -175,7 +175,12 @@ export interface RepoStatus { branch: string | null; head: string | null; upstre
     /** The upstream branch was deleted on the server. */
     upstreamGone?: boolean;
     /** During a rebase Git's "ours" is the branch being rebased onto and "theirs" is your commit. */
-    sidesSwapped?: boolean; rebaseBranch?: string | null; rebaseOnto?: string | null }
+    sidesSwapped?: boolean; rebaseBranch?: string | null; rebaseOnto?: string | null;
+    /** A pull went through but your uncommitted edits (put aside and back) clash with the pulled changes: no merge is running. */
+    pullStash?: PullStash }
+/** A pull whose put-aside edits clashed: git's "ours" is the pulled version, "theirs" your own edit (kept in the stash entry `ref`). */
+export interface PullStash { stash: string; ref: string; before: string; after: string; branch: string | null; upstream: string | null; at: string; headMoved: boolean }
+export interface FetchResult { ok: boolean; newCommits: number; added: string[]; updated: string[]; removed: string[]; behind: number; upstream: string | null; branch: string | null }
 export interface BranchInfo { name: string; current: boolean; upstream: string | null; sha: string; remote: boolean; upstreamGone?: boolean }
 export interface LogEntry { sha: string; authorName: string; authorEmail: string; date: string; subject: string }
 export interface Finding { id: string; ruleId: string; type: string; reason: string; confidence: 'high' | 'medium'; file: string; line: number; column: number; preview: string; fingerprint: string; suggestedName?: string }
@@ -226,7 +231,7 @@ export interface NameStatus { status: string; path: string; oldPath?: string }
 export interface CommitDetails { sha: string; parents: string[]; authorName: string; authorEmail: string; date: string; message: string; files: NameStatus[]; pushed: boolean; branches: string[] }
 export interface HistoryQuery { all?: boolean; text?: string; field?: 'message' | 'author' | 'path'; firstParent?: boolean; noMerges?: boolean; limit?: number; refs?: string }
 export interface StashEntry { index: number; ref: string; sha: string; message: string; date: string }
-export interface TagInfo { name: string; sha: string; date: string; message: string; annotated: boolean }
+export interface TagInfo { name: string; sha: string; date: string; message: string; annotated: boolean; /** On the remote: yes, no, or a different tag of that name; missing when the remote could not be asked. */ onRemote?: 'yes' | 'no' | 'different' }
 export interface Hunk { id: string; header: string; lines: string[]; added: number; removed: number; newStart: number }
 export interface Backup { ref: string; sha: string; date: string; subject: string }
 type OpResult = { status: 'ok' | 'conflicts' | 'rejected'; message?: string; conflicts?: string[] };
@@ -319,7 +324,7 @@ export interface ApiRunStep { iteration: number; requestId: string; name: string
 export type ApiRunChange = 'fixed' | 'broke' | 'same' | 'still failing' | 'new' | 'gone';
 export interface ApiRunComparison {
     a: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>; b: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;
-    rows: Array<{ key: string; name: string; requestId?: string; method?: string; url?: string; position?: number; iteration: number; change: ApiRunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;
+    rows: Array<{ key: string; name: string; /** Numbered when two requests share the name, in the run's order. */ label?: string; requestId?: string; method?: string; url?: string; position?: number; iteration: number; change: ApiRunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;
     counts: Record<ApiRunChange, number>; avgDelta: number;
 }
 export interface ApiMonitorDef { id: string; name: string; file: string; env: string; everyMinutes: number; enabled: boolean; webhookSecret?: string; alertOn: 'failure' | 'change'; last?: { at: string; runId: string; passed: boolean; failed: number; requests: number; alert?: string } }
@@ -365,7 +370,7 @@ export interface LoadExplainDef { status: 'green' | 'amber' | 'red'; headline: s
 export interface LoadCompareDef {
     a: { id: string; name: string; env: string; startedAt: string; passed: boolean; maxUsers: number; duration: number }; b: LoadCompareDef['a'];
     comparison: { status: 'green' | 'amber' | 'red'; headline: string; answer: string; metrics: Array<{ label: string; a: string; b: string; change: string; verdict: string; meaning: string }>;
-        transactions: Array<{ id?: string; name: string; aP95: number; bP95: number; changePct: number; aErrorRate?: number; bErrorRate?: number; verdict: string; why?: string }>; findings: string[]; notes: string[] };
+        transactions: Array<{ id?: string; name: string; /** Numbered when two requests share the name, in collection order. */ label?: string; aP95: number; bP95: number; changePct: number; aErrorRate?: number; bErrorRate?: number; verdict: string; why?: string }>; findings: string[]; notes: string[] };
     series: Array<{ id: string; label: string; points: Array<{ t: number; v: number }> }>; throughput: LoadCompareDef['series'];
 }
 export interface BugActionDef { kind: 'file' | 'update' | 'reopen' | 'resolve'; tag: string; bug?: number; title?: string; from?: string; to?: string; comment?: string; why: string }
@@ -697,9 +702,10 @@ export const api = {
     diff: (file: string, staged: boolean, o?: DiffOpts) => request<{ diff: string }>('GET', '/api/git/diff' + q({ file, staged, ...dq(o) })),
     stage: (paths: string[]) => request<RepoStatus>('POST', '/api/git/stage', { paths }),
     unstage: (paths: string[]) => request<RepoStatus>('POST', '/api/git/unstage', { paths }),
-    commit: (message: string, override?: Override, opts?: { amend?: boolean; allowRewritePushed?: boolean; signoff?: boolean }) => request<GateResult>('POST', '/api/git/commit', { message, override, ...opts }),
+    commit: (message: string, override?: Override, opts?: { amend?: boolean; allowRewritePushed?: boolean; signoff?: boolean; expectBranch?: string | null }) => request<GateResult>('POST', '/api/git/commit', { message, override, ...opts }),
     push: (override?: Override, opts?: { forceWithLease?: boolean; tags?: boolean }) => request<GateResult>('POST', '/api/git/push', { override, ...opts }),
-    pull: () => request<MergeResult & { mode?: string }>('POST', '/api/git/pull'),
+    pull: () => request<MergeResult & { mode?: string; localEdits?: boolean; pulled?: number; stash?: string }>('POST', '/api/git/pull'),
+    pullAutostash: (action: 'undo' | 'finish') => request<RepoStatus & { message: string }>('POST', '/api/git/pull/autostash', { action }),
     pullMode: () => request<{ mode: 'merge' | 'rebase' | 'ff-only' }>('GET', '/api/git/pull/mode'),
     commitTemplate: () => request<{ template: string }>('GET', '/api/git/commit-template'),
     cleanPreview: (ignored = false) => request<{ files: string[] }>('GET', '/api/git/clean' + q({ ignored: String(ignored) })),
@@ -716,7 +722,7 @@ export const api = {
     lfsPull: () => request<{ used: boolean; installed: boolean; missing: string[] }>('POST', '/api/git/lfs/pull'),
     conflictWithBase: (file: string) => request<{ ok: boolean }>('POST', '/api/git/conflict/base', { file }),
     trustFolder: () => request<{ ok: boolean }>('POST', '/api/git/trust-folder'),
-    fetch: () => request<{ ok: boolean }>('POST', '/api/git/fetch'),
+    fetch: () => request<FetchResult>('POST', '/api/git/fetch'),
     createBranch: (name: string, from?: string) => request<RepoStatus>('POST', '/api/git/branch', { name, from }),
     switchBranch: (name: string) => request<RepoStatus>('POST', '/api/git/switch', { name }),
     merge: (branch: string, opts?: { noFastForward?: boolean; squash?: boolean; noCommit?: boolean }) => request<MergeResult>('POST', '/api/git/merge', { branch, ...opts }),
@@ -729,7 +735,7 @@ export const api = {
     revert: (rev: string) => request<OpResult>('POST', '/api/git/revert', { rev }),
     cherryPick: (revs: string[]) => request<OpResult>('POST', '/api/git/cherry-pick', { revs }),
     continueOp: (override?: Override) => request<GateResult>('POST', '/api/git/operation/continue', { override }),
-    abortOp: () => request<RepoStatus>('POST', '/api/git/operation/abort'),
+    abortOp: () => request<RepoStatus & { message?: string }>('POST', '/api/git/operation/abort'),
     skipOp: () => request<{ status: 'ok' | 'conflicts' | 'rejected'; message?: string; conflicts?: string[] }>('POST', '/api/git/operation/skip'),
     reset: (rev: string, mode: 'soft' | 'mixed' | 'hard') => request<{ backup: string; uncommittedBackup?: string }>('POST', '/api/git/reset', { rev, mode }),
     backups: () => request<Backup[]>('GET', '/api/git/backups'),
@@ -750,12 +756,12 @@ export const api = {
     tags: () => request<TagInfo[]>('GET', '/api/git/tags'),
     createTag: (name: string, rev: string, message?: string) => request<TagInfo[]>('POST', '/api/git/tags', { name, rev, message }),
     deleteTag: (name: string, remote: boolean) => request<TagInfo[]>('DELETE', '/api/git/tags' + q({ name, remote })),
-    pushTag: (name: string) => request<{ ok: boolean }>('POST', '/api/git/tags/push', { name }),
+    pushTag: (name: string) => request<{ ok: boolean; already?: boolean }>('POST', '/api/git/tags/push', { name }),
     deleteBranch: (name: string, force = false) => request<{ status: 'ok' | 'not-merged'; message?: string }>('POST', '/api/git/branch/delete', { name, force }),
     deleteRemoteBranch: (name: string) => request<{ ok: boolean }>('POST', '/api/git/branch/delete-remote', { name }),
     renameBranch: (from: string, to: string) => request<BranchInfo[]>('POST', '/api/git/branch/rename', { from, to }),
     setUpstream: (upstream: string) => request<RepoStatus>('POST', '/api/git/branch/upstream', { upstream }),
-    abortMerge: () => request<RepoStatus>('POST', '/api/git/merge/abort'),
+    abortMerge: () => request<RepoStatus & { message?: string }>('POST', '/api/git/merge/abort'),
     conflict: (file: string) => request<{ base: string | null; ours: string | null; theirs: string | null; working: string | null }>('GET', '/api/git/conflict' + q({ file })),
     resolve: (file: string, choice: 'ours' | 'theirs' | { content: string }) =>
         request<RepoStatus & { resolved?: { deleted: boolean; message?: string } }>('POST', '/api/git/conflict/resolve', typeof choice === 'string' ? { file, choice } : { file, content: choice.content }),

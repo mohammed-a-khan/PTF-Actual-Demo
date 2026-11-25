@@ -79,6 +79,8 @@ export class GitService {
         const r = await this.git(['status', '--porcelain=v2', '--branch', '-z', '--untracked-files=all']);
         const st: StatusResult = { ...parseStatusV2(r.stdout), operation: await this.operation() };
         if (st.operation === 'rebase') Object.assign(st, await this.rebaseInfo());
+        // A pull whose put-aside edits clashed with the pulled changes (no merge is running; see pull()).
+        if (!st.operation) { const ps = await this.pullStash(st.head); if (ps) st.pullStash = ps; }
         // During a merge, git has already written the proper message ("Merge branch 'x'").
         const mp = path.resolve(this.repoRoot, (await this.git(['rev-parse', '--git-path', 'MERGE_MSG'])).stdout.trim());
         if (fs.existsSync(mp)) {
@@ -197,7 +199,15 @@ export class GitService {
 
     // ---------------------------------------------------------------- commit
 
-    async commit(message: string, override?: Override, opts: { amend?: boolean; allowRewritePushed?: boolean; signoff?: boolean } = {}): Promise<GateResult> {
+    async commit(message: string, override?: Override, opts: { amend?: boolean; allowRewritePushed?: boolean; signoff?: boolean; expectBranch?: string | null } = {}): Promise<GateResult> {
+        // The branch the screen showed (its "Commit … to <branch>" button): another tab or a terminal may have switched since.
+        if (opts.expectBranch !== undefined) {
+            const cur = (await this.git(['symbolic-ref', '--short', '-q', 'HEAD'], { allowFailure: true })).stdout.trim() || null;
+            if (cur !== opts.expectBranch) {
+                const name = (b: string | null) => b ?? 'a detached commit';
+                return { status: 'rejected', message: `This tab shows ${name(opts.expectBranch)} but ${name(cur)} is checked out now (switched in another tab or a terminal): reload to see ${name(cur)}, or switch back to ${name(opts.expectBranch)}, before you commit. Nothing was committed.` };
+            }
+        }
         const msg = message.replace(/\r\n/g, '\n').trim();
         if (!msg) return { status: 'rejected', message: 'Please write a commit message.' };
 
@@ -282,9 +292,32 @@ export class GitService {
         return { status: 'ok', output: r.stdout, overridden };
     }
 
-    async fetch(): Promise<void> {
+    /** Fetch every remote; says what arrived (new commits, branches added, changed or deleted on the remote). */
+    async fetch(): Promise<FetchResult> {
+        const snap = async (prefix: string) => {
+            const m = new Map<string, string>();
+            const out = (await this.git(['for-each-ref', '--format=%(refname)%1f%(objectname)', prefix], { allowFailure: true })).stdout;
+            for (const l of out.split('\n')) { const [ref, sha] = l.split('\x1f'); if (ref && sha && !ref.endsWith('/HEAD')) m.set(ref, sha); }
+            return m;
+        };
+        const before = await snap('refs/remotes');
         const r = await this.git(['fetch', '--all', '--prune'], { timeoutMs: 600_000, allowFailure: true });
         if (r.code !== 0) throw new GitError(explainGitFailure(r.stderr || r.stdout), ['fetch'], r.code, r.stderr);
+        const after = await snap('refs/remotes');
+        const short = (ref: string) => ref.replace(/^refs\/remotes\//, '');
+        const added: string[] = [], updated: string[] = [], removed: string[] = [];
+        for (const [ref, sha] of after) { const was = before.get(ref); if (was === undefined) added.push(short(ref)); else if (was !== sha) updated.push(short(ref)); }
+        for (const ref of before.keys()) if (!after.has(ref)) removed.push(short(ref));
+        let newCommits = 0;
+        const tips = [...after].filter(([ref, sha]) => before.get(ref) !== sha).map(([, sha]) => sha);
+        if (tips.length) {
+            // Commits on the changed remote branches that this computer did not have (on a remote branch or a local one) before.
+            const known = new Set([...before.values(), ...(await snap('refs/heads')).values()]);
+            const c = await this.git(['rev-list', '--count', '--stdin'], { input: [...new Set(tips)].join('\n') + '\n' + [...known].map((x) => '^' + x).join('\n') + '\n', allowFailure: true });
+            newCommits = c.code === 0 ? Number(c.stdout.trim()) || 0 : 0;
+        }
+        const st = await this.status();
+        return { newCommits, added, updated, removed, behind: st.upstream ? st.behind : 0, upstream: st.upstream, branch: st.branch };
     }
 
     /**
@@ -501,15 +534,95 @@ export class GitService {
     }
 
     /** Pull the way the team configured it (or as asked), local edits put aside and back (--autostash). */
-    async pull(mode?: 'merge' | 'rebase' | 'ff-only'): Promise<{ status: 'ok' | 'conflicts' | 'rejected'; message?: string; conflicts?: string[]; mode?: string }> {
+    async pull(mode?: 'merge' | 'rebase' | 'ff-only'): Promise<{ status: 'ok' | 'conflicts' | 'rejected'; message?: string; conflicts?: string[]; mode?: string; localEdits?: boolean; pulled?: number; stash?: string }> {
         await this.assertIdle('pull');
         const m = mode ?? await this.pullMode();
         const how = m === 'rebase' ? ['--rebase'] : m === 'ff-only' ? ['--ff-only'] : ['--no-rebase', '--no-edit'];
+        const head = async () => { const h = await this.git(['rev-parse', '--verify', '-q', 'HEAD'], { allowFailure: true }); return h.code === 0 ? h.stdout.trim() : null; };
+        const stashTop = async () => { const h = await this.git(['rev-parse', '--verify', '-q', 'refs/stash'], { allowFailure: true }); return h.code === 0 ? h.stdout.trim() : null; };
+        const before = await head();
+        const stashBefore = await stashTop();
         const r = await this.git(['pull', ...how, '--autostash'], { allowFailure: true, timeoutMs: 600_000 });
         if (m === 'ff-only' && r.code !== 0 && /not possible to fast-forward|diverging branches/i.test(r.stderr)) {
             return { status: 'rejected', mode: m, message: 'This repository pulls fast-forward only (pull.ff=only), and your branch has commits the remote does not: rebase onto it, or merge it, first.' };
         }
+        // The pull itself went through, but putting your uncommitted edits back (git's autostash) clashed with what
+        // was pulled: git leaves conflict markers and keeps your edits in a new stash entry. No merge is running, so
+        // say what happened, remember it (Undo puts everything back) and never call it "pulled".
+        const stashAfter = await stashTop();
+        if (stashAfter && stashAfter !== stashBefore && before) {
+            const st = await this.status();
+            const after = await head();
+            if (st.hasConflicts && !st.operation && after) {
+                const marker = await this.pullStashPath();
+                fs.mkdirSync(path.dirname(marker), { recursive: true });
+                const info: PullStashMarker = { stash: stashAfter, before, after, branch: st.branch, upstream: st.upstream, at: new Date().toISOString() };
+                fs.writeFileSync(marker, JSON.stringify(info, null, 2));
+                const conflicts = st.files.filter((f) => f.conflicted).map((f) => f.path);
+                const pulled = Number((await this.git(['rev-list', '--count', `${before}..${after}`], { allowFailure: true })).stdout.trim()) || 0;
+                const ref = (await this.pullStash(after))?.ref ?? 'stash@{0}';
+                return {
+                    status: 'conflicts', mode: m, localEdits: true, conflicts, pulled, stash: ref,
+                    message: `${pulled} commit${pulled === 1 ? ' was' : 's were'} pulled, but your uncommitted edits clash with the pulled changes in ${conflicts.length} file${conflicts.length === 1 ? '' : 's'} (${conflicts.slice(0, 3).join(', ')}${conflicts.length > 3 ? ', …' : ''}). No merge is running: resolve each file (Mine = your edit, Theirs = the pulled version), or Undo the pull to get back your branch and your edits as they were. A copy of your edits is kept in the stash (${ref}) until then.`,
+                };
+            }
+        }
         return { ...(await this.afterMerge(r)), mode: m };
+    }
+
+    private pullStashFile?: string;
+    /** Where pull() remembers it (asked once: every status reads it). */
+    private async pullStashPath(): Promise<string> {
+        this.pullStashFile ??= path.resolve(this.repoRoot, (await this.git(['rev-parse', '--git-path', 'cs-studio/pull-autostash.json'])).stdout.trim());
+        return this.pullStashFile;
+    }
+
+    /**
+     * The pull whose put-aside edits clashed (remembered by pull()), while its stash entry still exists; the marker of
+     * one whose stash entry is gone (dropped, popped) is removed.
+     */
+    private async pullStash(head?: string | null): Promise<PullStash | null> {
+        const p = await this.pullStashPath();
+        if (!fs.existsSync(p)) return null;
+        let m: PullStashMarker;
+        try { m = JSON.parse(fs.readFileSync(p, 'utf8')) as PullStashMarker; } catch { fs.rmSync(p, { force: true }); return null; }
+        const e = (await this.stashList()).find((x) => x.sha === m.stash);
+        if (!e || typeof m.before !== 'string' || typeof m.after !== 'string') { fs.rmSync(p, { force: true }); return null; }
+        const h = head !== undefined ? head : (await this.git(['rev-parse', '--verify', '-q', 'HEAD'], { allowFailure: true })).stdout.trim() || null;
+        return { ...m, ref: e.ref, headMoved: h !== m.after };
+    }
+
+    /**
+     * Undo a pull whose put-aside edits clashed: the branch goes back to where it was before the pull and your
+     * uncommitted edits come back from the stash entry exactly as they were (the entry is then removed). The pulled
+     * commits stay on the remote branch: commit (or stash) the edits, then pull again.
+     */
+    async undoPullAutostash(): Promise<{ message: string }> {
+        const ps = await this.pullStash();
+        if (!ps) throw new UserError('There is no pull to undo: the copy of your edits it kept is gone (it was restored or deleted).');
+        if (ps.headMoved) throw new UserError(`The branch has moved since the pull (a commit was made), so the pull can no longer be undone here. Your edits from before the pull are still in Stashes as ${ps.ref} ("autostash").`);
+        await this.createBackupRef(ps.after, 'before undoing a pull');
+        await this.git(['reset', '-q', '--hard', ps.before]);
+        let r = await this.git(['stash', 'pop', '--index', ps.ref], { allowFailure: true });
+        if (r.code !== 0 && !/CONFLICT/.test(r.stdout)) r = await this.git(['stash', 'pop', ps.ref], { allowFailure: true });
+        fs.rmSync(await this.pullStashPath(), { force: true });
+        if (r.code !== 0) throw new UserError(`The branch is back at ${ps.before.slice(0, 7)}, but your edits could not be put back cleanly: ${explainGitFailure(r.stderr || r.stdout)} They are still in Stashes (${ps.ref}).`);
+        return { message: `Undid the pull: ${ps.branch ?? 'the branch'} is back at ${ps.before.slice(0, 7)} with your uncommitted edits as they were. The pulled commits are still on ${ps.upstream ?? 'the remote'}: commit your edits (or stash them), then Pull again.` };
+    }
+
+    /**
+     * The clashes of such a pull are all resolved: your edits stay as uncommitted changes on top of the pulled commits
+     * (unstaged, as before the pull) and the stash copy is removed so no stray entry is left.
+     */
+    async finishPullAutostash(): Promise<{ message: string }> {
+        const ps = await this.pullStash();
+        if (!ps) return { message: 'Nothing to finish.' };
+        const st = await this.status();
+        if (st.hasConflicts) throw new UserError('Resolve every file that clashes first (or Undo the pull).');
+        if (!ps.headMoved) await this.git(['reset', '-q'], { allowFailure: true });
+        await this.git(['stash', 'drop', ps.ref], { allowFailure: true });
+        fs.rmSync(await this.pullStashPath(), { force: true });
+        return { message: `All clashes are resolved: your edits are uncommitted changes on top of the pulled commits. The copy kept in the stash (${ps.ref}) was removed.` };
     }
 
     // ---------------------------------------------------------------- branches / merge
@@ -585,12 +698,24 @@ export class GitService {
         return this.afterMerge(r);
     }
 
-    async abortMerge(): Promise<void> {
+    async abortMerge(): Promise<{ message?: string }> {
+        if (!(await this.operation())) return this.abortOperation();
         await this.git(['merge', '--abort']);
+        return {};
     }
 
     /** Resolve a conflicted file by taking one side whole, or by writing the user's merged text. */
     async resolveConflict(file: string, choice: 'ours' | 'theirs' | { content: string }): Promise<{ deleted: boolean; message?: string }> {
+        const r = await this.resolveConflictOnly(file, choice);
+        // The last clash of a pull whose put-aside edits clashed: finish it (no stray stash entry is left).
+        if ((await this.pullStash()) && !(await this.status()).hasConflicts) {
+            const f = await this.finishPullAutostash();
+            return { ...r, message: r.message ? `${r.message} ${f.message}` : f.message };
+        }
+        return r;
+    }
+
+    private async resolveConflictOnly(file: string, choice: 'ours' | 'theirs' | { content: string }): Promise<{ deleted: boolean; message?: string }> {
         const abs = this.safePath(file);
         if (typeof choice === 'string') {
             if (choice !== 'ours' && choice !== 'theirs') throw new UserError('Unknown choice.');
@@ -656,6 +781,8 @@ export class GitService {
             operation,
         };
         if (operation === 'rebase') Object.assign(res, await this.rebaseInfo());
+        // After a pull whose put-aside edits clashed, "ours" is the pulled version and "theirs" your own edit.
+        else if (!operation && await this.pullStash()) res.localEdits = true;
         return res;
     }
 
@@ -820,11 +947,17 @@ export class GitService {
         return this.afterSequencer(await this.git([op, '--skip'], { allowFailure: true, env: { GIT_EDITOR: 'true', GIT_SEQUENCE_EDITOR: 'true' } }), op);
     }
 
-    async abortOperation(): Promise<void> {
+    async abortOperation(): Promise<{ message?: string }> {
         const op = await this.operation();
-        if (!op) return;
+        if (!op) {
+            // Not a merge: a pull whose put-aside edits clashed. Aborting it is undoing the pull.
+            if (await this.pullStash()) return this.undoPullAutostash();
+            if ((await this.status()).hasConflicts) throw new UserError('No merge, rebase, cherry-pick or revert is running, so there is nothing to abort: these files clash after stashed changes were applied. Resolve each file, or discard your changes to it (the stash entry is kept until you delete it).');
+            return { message: 'Nothing is in progress.' };
+        }
         const r = await this.git([op, '--abort'], { allowFailure: true });
         if (r.code !== 0) throw new GitError(explainGitFailure(r.stderr || r.stdout), [op, '--abort'], r.code, r.stderr);
+        return {};
     }
 
     /**
@@ -1113,7 +1246,14 @@ export class GitService {
                     if (c.code === 0) sha = c.stdout.trim();
                 }
             }
-            out.push({ name, sha, date, message: type === 'tag' ? subject : '', annotated: type === 'tag' });
+            out.push({ name, sha, date, message: type === 'tag' ? subject : '', annotated: type === 'tag', object: obj });
+        }
+        // On the remote or not (pushed already, or to push): asked of the remote; unknown when it cannot be reached.
+        const remote = out.length ? await this.defaultRemote() : null;
+        const there = remote ? await this.remoteTags(remote) : null;
+        for (const t of out) {
+            if (there) { const o = there.get(t.name); t.onRemote = o === undefined ? 'no' : o === t.object ? 'yes' : 'different'; }
+            delete t.object;
         }
         return out;
     }
@@ -1154,12 +1294,32 @@ export class GitService {
         }
     }
 
-    async pushTag(name: string): Promise<void> {
+    async pushTag(name: string): Promise<{ already?: boolean }> {
         assertRev(name);
         const remote = await this.defaultRemote();
         if (!remote) throw new UserError(NO_REMOTE_TO_PUSH);
+        const local = (await this.git(['rev-parse', '--verify', '-q', `refs/tags/${name}`], { allowFailure: true })).stdout.trim();
+        const onRemote = async () => (await this.remoteTags(remote))?.get(name);
+        // Already there (pushed before, or a second click while the first push ran): nothing to do, not an error.
+        if (local && await onRemote() === local) return { already: true };
         const r = await this.git(['push', remote, `refs/tags/${name}`], { allowFailure: true, timeoutMs: 600_000 });
-        if (r.code !== 0) throw new GitError(explainGitFailure(r.stderr), ['push', 'tag'], r.code, r.stderr);
+        if (r.code !== 0) {
+            if (local && await onRemote() === local) return { already: true };
+            throw new GitError(explainGitFailure(r.stderr), ['push', 'tag'], r.code, r.stderr);
+        }
+        return {};
+    }
+
+    /** The tags on a remote (name → the tag's own object id), or null when the remote cannot be reached. */
+    private async remoteTags(remote: string): Promise<Map<string, string> | null> {
+        const r = await this.git(['ls-remote', '--tags', '--', remote], { allowFailure: true, timeoutMs: 15_000 });
+        if (r.code !== 0) return null;
+        const m = new Map<string, string>();
+        for (const l of r.stdout.split('\n')) {
+            const x = /^([0-9a-f]{40,64})\trefs\/tags\/(.+)$/.exec(l.trim());
+            if (x && !x[2].endsWith('^{}')) m.set(x[2], x[1]);
+        }
+        return m;
     }
 
     // ---------------------------------------------------------------- helpers
@@ -1248,6 +1408,11 @@ export class GitService {
         if (r.code !== 0 || name.startsWith('-')) throw new UserError(`"${name}" is not a valid branch name: no spaces, ~ ^ : ? * [ \\, "..", or a name starting with "-" or ending with "." or ".lock".`);
         const exists = await this.git(['show-ref', '--verify', '--quiet', `refs/heads/${name}`], { allowFailure: true });
         if (exists.code === 0) throw new UserError(what === 'rename' ? `A branch named "${name}" exists already: choose another name.` : `A branch named "${name}" exists already: choose another name, or switch to it.`);
+        // "origin/main" as a local branch name reads the same as the remote branch origin/main: Git warns that the name
+        // is ambiguous and commands may pick the wrong one.
+        const remotes = (await this.git(['remote'], { allowFailure: true })).stdout.split('\n').map((x) => x.trim()).filter(Boolean);
+        const shadow = remotes.find((r) => name.startsWith(r + '/'));
+        if (shadow) throw new UserError(`"${name}" starts with the remote name "${shadow}/", so it reads like the remote branch ${name}: Git would find the name ambiguous. Choose another name (for example "${name.slice(shadow.length + 1) || 'my-branch'}").`);
     }
 
     /** Resolve a repo-relative path and refuse anything outside the repository. */
@@ -1307,7 +1472,36 @@ export interface RebaseInfo {
     /** What it is being rebased onto (a branch name when one points there, else a sha). */
     rebaseOnto: string | null;
 }
-export type StatusResult = RepoStatus & { mergeMessage?: string; operation: Operation } & Partial<RebaseInfo>;
+export type StatusResult = RepoStatus & { mergeMessage?: string; operation: Operation; pullStash?: PullStash } & Partial<RebaseInfo>;
+/** What pull() remembers when the uncommitted edits it put aside clashed with the pulled changes. */
+export interface PullStashMarker {
+    /** The stash entry (commit) that holds your edits as they were before the pull. */
+    stash: string;
+    /** HEAD before and after the pull. */
+    before: string;
+    after: string;
+    branch: string | null;
+    upstream: string | null;
+    at: string;
+}
+export interface PullStash extends PullStashMarker {
+    /** stash@{n} of that entry now. */
+    ref: string;
+    /** A commit was made (or the branch moved) since: the pull can no longer be undone here. */
+    headMoved: boolean;
+}
+export interface FetchResult {
+    /** Commits that arrived (on remote branches, not on this computer before). */
+    newCommits: number;
+    /** Remote branches that are new, moved, or deleted on the remote (e.g. "origin/main"). */
+    added: string[];
+    updated: string[];
+    removed: string[];
+    /** How many commits the current branch is behind its upstream now. */
+    behind: number;
+    upstream: string | null;
+    branch: string | null;
+}
 export interface ConflictVersions extends Partial<RebaseInfo> {
     base: string | null;
     ours: string | null;
@@ -1318,6 +1512,8 @@ export interface ConflictVersions extends Partial<RebaseInfo> {
     /** The incoming (theirs) side deleted the file. */
     deletedTheirs: boolean;
     operation: Operation;
+    /** A pull's put-aside edits clashed: "ours" (stage 2) is the pulled version, "theirs" (stage 3) your own edit. */
+    localEdits?: boolean;
 }
 export interface DiffOptions { ignoreWhitespace?: 'none' | 'changes' | 'all'; ignoreLineEndings?: boolean }
 export interface HistoryQuery { limit?: number; skip?: number; all?: boolean; refs?: string[]; text?: string; field?: 'message' | 'author' | 'path'; path?: string; since?: string; until?: string; firstParent?: boolean; noMerges?: boolean }
@@ -1325,7 +1521,7 @@ export interface NameStatus { status: string; path: string; oldPath?: string }
 export interface CommitDetails { sha: string; parents: string[]; authorName: string; authorEmail: string; date: string; committerName: string; committerDate: string; message: string; files: NameStatus[]; pushed: boolean; branches: string[] }
 export type SequencerResult = { status: 'ok' | 'conflicts' | 'rejected'; message?: string; conflicts?: string[]; operation?: Operation };
 export interface StashEntry { index: number; ref: string; sha: string; message: string; date: string }
-export interface TagInfo { name: string; sha: string; date: string; message: string; annotated: boolean }
+export interface TagInfo { name: string; sha: string; date: string; message: string; annotated: boolean; /** On the default remote: yes, no, or a different tag of that name (unknown: not said). */ onRemote?: 'yes' | 'no' | 'different'; object?: string }
 export interface Hunk {
     header: string; lines: string[]; added: number; removed: number; newStart: number;
     /** sha256 of the hunk's exact text (header + lines); changes when the change changes. */

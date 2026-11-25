@@ -121,9 +121,12 @@ export function saveErrorToast(message: ReturnType<typeof App.useApp>['message']
  * Other errors: the usual toast.
  */
 export function askStaleSave(a: { message: ReturnType<typeof App.useApp>['message']; modal: ReturnType<typeof App.useApp>['modal'] }, e: unknown, what: string,
-    o: { reload: () => void; overwrite: () => Promise<unknown> | void; keep: (current: string | undefined) => void }): void {
+    o: { reload: () => void; overwrite: () => Promise<unknown> | void; keep: (current: string | undefined) => void;
+        /** Default true: after Keep editing the next Save replaces the version saved elsewhere (the question says so). false: it does not (a delete asked again). */
+        keepOverwrites?: boolean }): void {
     if (!isStale(e)) { a.message.error(errText(e)); return; }
-    askChangedElsewhere(a.modal, e, what, { reload: o.reload, overwrite: o.overwrite, keepEditing: () => o.keep(staleVersion(e)) });
+    // Keep editing hands over the version saved now: the next Save then replaces it, which the question says.
+    askChangedElsewhere(a.modal, e, what, { reload: o.reload, overwrite: o.overwrite, keepEditing: () => o.keep(staleVersion(e)), keepOverwrites: o.keepOverwrites ?? true });
 }
 
 /**

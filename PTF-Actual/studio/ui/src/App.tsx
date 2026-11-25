@@ -144,11 +144,20 @@ function BranchMenu() {
     // A branch of that name exists already (Git compares names exactly; a second one that differs only in
     // capitals clashes on Windows and macOS, so it is refused too).
     const taken = !!finalName && local.some((b) => b.name.toLowerCase() === finalName.toLowerCase());
-    const blocked = !finalName || tooLong || taken;
+    // "origin/main" reads like the remote branch origin/main (Git finds the name ambiguous): refused, with the reason.
+    const remoteNames = [...new Set(branches.filter((b) => b.remote).map((b) => b.name.split('/')[0]))];
+    const shadowRemote = finalName ? remoteNames.find((r) => finalName.startsWith(r + '/')) : undefined;
+    const shadowsBranch = !!shadowRemote && branches.some((b) => b.remote && b.name === finalName);
+    const [creating, setCreating] = React.useState(false);
+    const creatingRef = React.useRef(false);
+    const blocked = !finalName || tooLong || taken || !!shadowRemote;
     const shortName = finalName.length > 40 ? `${finalName.slice(0, 37)}…` : finalName;
     const createBranch = async () => {
-        if (blocked) return;
+        // Enter twice (or Enter then a click): one request, not a second one that fails with "exists already".
+        if (blocked || creatingRef.current) return;
+        creatingRef.current = true; setCreating(true);
         try { await api.createBranch(finalName); message.success(`Created ${finalName} and switched to it`); setDialog(null); await refresh(); } catch (e) { message.error(errText(e)); }
+        finally { creatingRef.current = false; setCreating(false); }
     };
     return (
         <>
@@ -170,10 +179,10 @@ function BranchMenu() {
             }}>
                 <Button icon={<BranchesOutlined />}>{status?.branch ?? (status?.head ? `detached at ${status.head.slice(0, 7)}` : 'no commits yet')} <DownOutlined /></Button>
             </Dropdown>
-            <Modal open={dialog === 'new'} title="New branch" okText={!blocked ? <span title={finalName}>Create {shortName} and switch</span> : 'Create and switch'} onCancel={() => setDialog(null)} okButtonProps={{ disabled: blocked, style: { maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis' } }} destroyOnClose
+            <Modal open={dialog === 'new'} title="New branch" okText={!blocked ? <span title={finalName}>Create {shortName} and switch</span> : 'Create and switch'} onCancel={() => setDialog(null)} okButtonProps={{ disabled: blocked, style: { maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis' } }} confirmLoading={creating} destroyOnClose
                 afterOpenChange={(o) => { if (o) document.getElementById('cs-new-branch')?.focus(); }}
                 onOk={createBranch}>
-                <Form layout="vertical"><Form.Item label="Branch name" htmlFor="cs-new-branch" validateStatus={tooLong || taken ? 'error' : undefined} help={<div style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{taken ? <><Typography.Text type="danger">A branch named {local.find((b) => b.name.toLowerCase() === finalName.toLowerCase())?.name} exists already: choose another name, or switch to it from the branch list.</Typography.Text><br /></> : null}{tooLong ? <><Typography.Text type="danger">Too long: at most {BRANCH_MAX} characters (it has {finalName.length}).</Typography.Text><br /></> : null}{finalName && !tooLong && finalName !== name.trim() ? <><Typography.Text type="warning">It will be created as <Typography.Text code style={{ wordBreak: 'break-all' }}>{finalName}</Typography.Text> (branch names have no spaces or {'~ ^ : ? * [ \\'}).</Typography.Text><br /></> : null}Starts from {status?.branch ?? 'the current commit'}. Example: feature/login-tests</div>}>
+                <Form layout="vertical"><Form.Item label="Branch name" htmlFor="cs-new-branch" validateStatus={tooLong || taken || shadowRemote ? 'error' : undefined} help={<div style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{shadowRemote ? <><Typography.Text type="danger">{shadowsBranch ? <>{finalName} is the name of the remote branch {finalName}</> : <>{finalName} starts with the remote name {shadowRemote}/ and reads like a remote branch</>}: Git would find the name ambiguous. Choose another name{finalName.slice(shadowRemote.length + 1) && !local.some((b) => b.name === finalName.slice(shadowRemote.length + 1)) ? <> (for example {finalName.slice(shadowRemote.length + 1)})</> : null}{shadowsBranch ? ', or check that branch out from the list.' : '.'}</Typography.Text><br /></> : null}{taken ? <><Typography.Text type="danger">A branch named {local.find((b) => b.name.toLowerCase() === finalName.toLowerCase())?.name} exists already: choose another name, or switch to it from the branch list.</Typography.Text><br /></> : null}{tooLong ? <><Typography.Text type="danger">Too long: at most {BRANCH_MAX} characters (it has {finalName.length}).</Typography.Text><br /></> : null}{finalName && !tooLong && finalName !== name.trim() ? <><Typography.Text type="warning">It will be created as <Typography.Text code style={{ wordBreak: 'break-all' }}>{finalName}</Typography.Text> (branch names have no spaces or {'~ ^ : ? * [ \\'}).</Typography.Text><br /></> : null}Starts from {status?.branch ?? 'the current commit'}. Example: feature/login-tests</div>}>
                     <Input id="cs-new-branch" value={name} onChange={(e) => setName(e.target.value)} onPressEnter={() => { if (!blocked) void createBranch(); }} /></Form.Item></Form>
             </Modal>
             <MergeDialog open={dialog === 'merge'} onClose={() => setDialog(null)} />
@@ -196,11 +205,17 @@ function SyncButtons() {
     });
     const pull = () => run('pull', async () => {
         const r = await api.pull();
-        if (r.status === 'ok') message.success(r.message?.includes('Already up to date') ? 'Already up to date' : `Pulled the latest changes${r.mode === 'rebase' ? ' (rebased, as this repository is set up)' : r.mode === 'ff-only' ? ' (fast-forward)' : ''}`);
+        if (r.status === 'conflicts' && r.localEdits) {
+            // The pull went through but putting your uncommitted edits back clashed: never "Pulled", and no merge runs.
+            modal.warning({ title: 'Your uncommitted edits clash with the pulled changes', width: 560,
+                content: <>{r.message}<br /><br />Source control › Changes shows the files: resolve them, or press <b>Undo pull</b> there.</>,
+                okText: 'Show the files', onOk: () => navigate(['git', 'changes']) });
+        } else if (r.status === 'ok') message.success(r.message?.includes('Already up to date') ? 'Already up to date' : `Pulled the latest changes${r.mode === 'rebase' ? ' (rebased, as this repository is set up)' : r.mode === 'ff-only' ? ' (fast-forward)' : ''}`);
         else if (r.status === 'conflicts') modal.warning({ title: 'Pull needs your decision', content: `${r.conflicts?.length} file(s) were changed both here and on the remote. Open Source control → Merge conflicts.` });
         else modal.warning({ title: 'Pull did not go through', content: r.message });
     });
     const noUpstream = status && status.branch && (!status.upstream || status.upstreamGone);
+    const nothingToPush = !noUpstream && !status?.ahead;
     // Remotes of the repository (none: Fetch and Pull say so instead of "up to date").
     const [remotes, setRemotes] = React.useState<number | null>(null);
     React.useEffect(() => { api.remotes().then((r) => setRemotes(r.length)).catch(() => setRemotes(null)); }, [status?.branch, status?.upstream]);
@@ -209,8 +224,17 @@ function SyncButtons() {
         const rs = await api.remotes();
         setRemotes(rs.length);
         if (!rs.length) { message.info(NO_REMOTE); return; }
-        await api.fetch();
-        message.success(rs.length === 1 ? `Fetched from ${rs[0].name}: up to date with the remote` : `Fetched from ${rs.length} remotes`);
+        const f = await api.fetch();
+        // What arrived, counted (not a fixed "up to date").
+        const from = rs.length === 1 ? rs[0].name : `${rs.length} remotes`;
+        const what = [
+            f.newCommits ? `${f.newCommits} new commit${f.newCommits === 1 ? '' : 's'}` : '',
+            f.added.length ? `${f.added.length} new branch${f.added.length === 1 ? '' : 'es'}` : '',
+            f.removed.length ? `${f.removed.length} branch${f.removed.length === 1 ? '' : 'es'} deleted on the remote` : '',
+        ].filter(Boolean);
+        const behind = f.behind && f.branch ? ` ${f.branch} is ${f.behind} commit${f.behind === 1 ? '' : 's'} behind ${f.upstream ?? 'the remote'}: Pull to get ${f.behind === 1 ? 'it' : 'them'}.` : '';
+        if (what.length) message.success(`Fetched from ${from}: ${what.join(', ')}.${behind}`);
+        else message.success(`Fetched from ${from}: nothing new.${behind || (f.upstream ? ' Up to date with the remote.' : '')}`);
     });
     // Why Pull is off, in its tooltip.
     const pullOff = remotes === 0 ? NO_REMOTE : !status?.branch ? 'Pull needs a branch (this is a detached commit): switch to a branch first.' : status.upstreamGone ? `${status.upstream ?? 'The remote branch'} was deleted on the remote: nothing to pull.` : !status.upstream ? `${status.branch} is not on the remote yet (Publish branch first), so there is nothing to pull.` : null;
@@ -222,9 +246,12 @@ function SyncButtons() {
                     // A disabled button gets no hover: the badge around it shows why it is off.
                     style={!status?.upstream || status?.upstreamGone ? { pointerEvents: 'none' } : undefined}>Pull</Button></Badge>
             </Tooltip>
-            <Tooltip title={remotes === 0 ? 'This repository has no remote to push to. Add one in Source control › Branches & tags › Remotes.' : noUpstream ? 'First push: publishes this branch to the remote' : status?.ahead ? `${status.ahead} commit(s) to send` : 'Nothing to push'}>
+            <Tooltip title={remotes === 0 ? 'This repository has no remote to push to. Add one in Source control › Branches & tags › Remotes.' : noUpstream ? 'First push: publishes this branch to the remote' : status?.ahead ? `${status.ahead} commit(s) to send${status.behind ? ` (the remote also has ${status.behind} new: Pull first)` : ''}` : status?.behind ? `Nothing to push: the remote has ${status.behind} new commit${status.behind === 1 ? '' : 's'}. Pull first.` : 'Nothing to push'}>
                 <Badge count={status?.ahead ?? 0} size="small" color="#93186C">
-                    <Dropdown.Button type="primary" buttonsRender={([main, more]) => [main, React.isValidElement(more) ? React.cloneElement(more as React.ReactElement<{ 'aria-label'?: string }>, { 'aria-label': 'More push and pull actions' }) : more]} loading={busy === 'push'} disabled={remotes === 0 || (!noUpstream && !status?.ahead && !status?.behind)} onClick={() => push()}
+                    {/* Push is off (and not highlighted) with nothing to send; the menu (force push) stays while behind. */}
+                    <Dropdown.Button type={nothingToPush ? 'default' : 'primary'} buttonsRender={([main, more]) => [
+                        nothingToPush && React.isValidElement(main) ? React.cloneElement(main as React.ReactElement<{ disabled?: boolean; style?: React.CSSProperties }>, { disabled: true, style: { pointerEvents: 'none' } }) : main,
+                        React.isValidElement(more) ? React.cloneElement(more as React.ReactElement<{ 'aria-label'?: string }>, { 'aria-label': 'More push and pull actions' }) : more]} loading={busy === 'push'} disabled={remotes === 0 || (!noUpstream && !status?.ahead && !status?.behind)} onClick={() => { if (!nothingToPush) void push(); }}
                         menu={{
                             items: [
                                 { key: 'tags', label: 'Push, including tags on these commits' },

@@ -26,7 +26,7 @@ import { errText, openInEditor, showRun } from '../state';
 import { navigate, useRoute } from '../route';
 import { askCopilot, useAgentContext } from '../agentContext';
 import { Split } from '../components/Split';
-import { apiRoute, askChangedElsewhere, askUnsaved, FieldProblems, isChangedElsewhere, NumField, restoredName, SectionTitle, shownTab, useFieldProblems, useRememberedTab, versionOf, withBase } from '../apiperf-ui';
+import { apiRoute, askChangedElsewhere, askUnsaved, FieldProblems, isChangedElsewhere, NumField, restoredName, SectionTitle, shownTab, splitTab, useFieldProblems, useInFlight, useRememberedTab, useRouteTab, versionOf, withBase } from '../apiperf-ui';
 
 const METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 /** Other methods (PURGE, PROPFIND…) in grey. */
@@ -224,9 +224,13 @@ function ScriptsEditor({ scripts, onChange }: { scripts?: ApiScriptsDef; onChang
 // ---------------------------------------------------------------- request & collection editors
 
 /** WebSocket steps: send a message, or wait for one containing a text (and save a value from it). */
-function RequestEditor({ req, onChange, onSend, sending, result, project, env, row, onRow, saved, file }: {
+function RequestEditor({ req, onChange, onSend, sending, result, project, env, row, onRow, saved, file, sendProblem, routeBase }: {
     req: ApiRequestDef; onChange: (r: ApiRequestDef) => void; onSend: () => void; sending: boolean; result: ApiSendResult | null;
     project: string; env?: string; row: number; onRow: (index: number, row: Record<string, string> | undefined) => void; saved: Record<string, string>; file?: string | null;
+    /** Why Send (and Code) is off now (a number field in error, no address), or null. */
+    sendProblem: string | null;
+    /** The request's address (#/api/<collection>/<request id>): its tab is added to it; null for a collection not saved yet. */
+    routeBase: string[] | null;
 }) {
     const [codeOpen, setCodeOpen] = React.useState(false);
     const [suggesting, setSuggesting] = React.useState(false);
@@ -238,11 +242,16 @@ function RequestEditor({ req, onChange, onSend, sending, result, project, env, r
     const settingsCount = req.settings ? Object.keys(req.settings).length : 0;
     const hasScripts = !!(req.scripts?.pre?.trim() || req.scripts?.test?.trim());
     const openComments = (req.comments ?? []).filter((c) => !c.replyTo && !c.resolved).length;
-    // The inner tab is remembered for every request (the editor is re-created per request).
-    const [tab0, setTab] = useRememberedTab('api-request', 'params');
+    // The inner tab is in the address (#/api/<collection>/<request>/~headers; nested: ~settings.scripts) and remembered
+    // for the next request opened without one (the editor is re-created per request). Back goes to the tab before.
+    const outerKeys = ['params', 'headers', !!req.ws && 'ws', hasBody && !req.ws && 'body', 'auth', !req.ws && 'checks', !req.ws && 'save', !req.ws && 'data', 'settings', 'more'];
+    const settingsKeys = [!req.ws && 'options', 'scripts'], moreKeys = [!req.ws && 'examples', 'comments', 'history'];
+    const allowed = outerKeys.flatMap((k) => (!k ? [] : k === 'settings' ? settingsKeys.filter(Boolean).map((i) => `settings.${i}`) : k === 'more' ? moreKeys.filter(Boolean).map((i) => `more.${i}`) : [k]));
+    const [tabFull, setTabFull] = useRouteTab('api-request-tab', 'params', allowed, routeBase);
+    const [activeTab, innerTab] = tabFull.split('.');
     const [settingsTab, setSettingsTab] = useRememberedTab('api-request-settings', 'options');
     const [moreTab, setMoreTab] = useRememberedTab('api-request-more', 'examples');
-    const activeTab = shownTab(tab0, ['params', 'headers', !!req.ws && 'ws', hasBody && !req.ws && 'body', 'auth', !req.ws && 'checks', !req.ws && 'save', !req.ws && 'data', 'settings', 'more']);
+    const setTab = (k: string) => setTabFull(k === 'settings' ? `settings.${shownTab(settingsTab, settingsKeys)}` : k === 'more' ? `more.${shownTab(moreTab, moreKeys)}` : k);
     return (
         <>
         <SnippetModal open={codeOpen} req={req} saved={saved} onClose={() => setCodeOpen(false)} />
@@ -255,11 +264,13 @@ function RequestEditor({ req, onChange, onSend, sending, result, project, env, r
                 <Select showSearch searchValue={methodSearch} onSearch={setMethodSearch} onBlur={() => setMethodSearch('')} filterOption={false} value={req.ws ? `@${req.ws.protocol ?? 'websocket'}` : req.method} onChange={(m) => (m.startsWith('@') ? set({ method: 'GET', body: { mode: 'none' }, ws: { steps: req.ws?.steps ?? [{ kind: 'send', text: '' }, { kind: 'expect', text: '' }], ...(m === '@websocket' ? {} : { protocol: m.slice(1) as ApiMsgProtocol }), ...(req.ws?.protocol === m.slice(1) && req.ws.options ? { options: req.ws.options } : {}) } }) : set({ method: m as HttpMethod, ws: undefined }))} style={{ width: 110 }} aria-label="Method"
                     options={[...[...METHODS, ...(METHODS.includes(req.method) || req.ws ? [] : [req.method]), ...(typedMethod(methodSearch) && !METHODS.includes(typedMethod(methodSearch)!) && typedMethod(methodSearch) !== req.method ? [typedMethod(methodSearch)!] : [])]
                         .filter((m) => !methodSearch || m.includes(methodSearch.trim().toUpperCase())).map((m) => ({ value: m, label: <span style={{ color: methodColor(m), fontWeight: 600 }}>{m}</span> })), ...PROTOCOLS.filter((x) => !methodSearch || x.short.includes(methodSearch.trim().toUpperCase()) || x.label.toUpperCase().includes(methodSearch.trim().toUpperCase())).map((x) => ({ value: `@${x.value}`, label: <Tooltip title={x.label} placement="right"><span style={{ color: x.color, fontWeight: 600 }}>{x.short}</span></Tooltip> }))]} />
-                <Input className="mono" value={req.url} onChange={(e) => set({ url: e.target.value })} onPressEnter={onSend}
+                <Input className="mono" value={req.url} onChange={(e) => set({ url: e.target.value })} onPressEnter={() => { if (!sendProblem) onSend(); }}
                     onBlur={() => { if (!req.ws) { const m = splitUrlQuery(req.url, req.query); if (m) set(m); } }} placeholder={req.ws ? protocolOf(req.ws).url : '/users/{{id}}  or  https://api.example.com/users'} aria-label="URL" />
-                <Button type="primary" icon={<CaretRightOutlined />} loading={sending} onClick={onSend}>{req.ws ? 'Connect' : 'Send'}</Button>
-                {!req.ws && <Tooltip title="The request as code (cURL, Python, Java, C#…)"><Button icon={<CodeOutlined />} onClick={() => setCodeOpen(true)} aria-label="Code" /></Tooltip>}
+                {/* Off while a field is in error (the request would go with a value not shown) or there is no address. */}
+                <Tooltip title={sendProblem ? `Cannot be sent yet: ${sendProblem}` : undefined}><Button type="primary" icon={<CaretRightOutlined />} loading={sending} disabled={!!sendProblem} onClick={onSend}>{req.ws ? 'Connect' : 'Send'}</Button></Tooltip>
+                {!req.ws && <Tooltip title={sendProblem ? `Cannot be shown as code yet: ${sendProblem}` : 'The request as code (cURL, Python, Java, C#…)'}><Button icon={<CodeOutlined />} disabled={!!sendProblem} onClick={() => setCodeOpen(true)} aria-label="Code" /></Tooltip>}
             </Space.Compact>
+            {sendProblem && <Typography.Text type="danger" role="alert" style={{ fontSize: 12, marginTop: -4 }}>{sendProblem.charAt(0).toUpperCase() + sendProblem.slice(1)}</Typography.Text>}
             {req.notes?.length ? <Alert type="info" showIcon closable message={`${req.notes.length} imported line${req.notes.length === 1 ? '' : 's'} could not be converted`} description={<pre className="code-box" style={{ maxHeight: 120 }}>{req.notes.join('\n')}</pre>} /> : null}
             <Tabs size="small" className="ap-tabs" tabBarGutter={14} more={{ icon: <EllipsisOutlined aria-label="More tabs" /> }} activeKey={activeTab} onChange={setTab} items={[
                 { key: 'params', label: <span>Params{count(req.query.length)}</span>, children: <KvTable rows={req.query} onChange={(query) => set({ query })} keyLabel="Parameter" /> },
@@ -299,12 +310,12 @@ function RequestEditor({ req, onChange, onSend, sending, result, project, env, r
                         children: <TestDataEditor project={project} env={env} data={req.data} prepare={req.prepare} row={row} onRow={onRow} onColumns={setColumns} onChange={(p) => set({ data: p.data, prepare: p.prepare?.length ? p.prepare : undefined })} /> },
                 ]),
                 { key: 'settings', label: <span>Settings{settingsCount ? <Tag bordered={false} style={{ marginInlineStart: 4 }}>{settingsCount}</Tag> : null}{hasScripts ? <Tag bordered={false} style={{ marginInlineStart: 4 }}>JS</Tag> : null}</span>, children: (
-                    <Tabs size="small" className="ap-inner-tabs" activeKey={shownTab(settingsTab, [!req.ws && 'options', 'scripts'])} onChange={setSettingsTab} items={[
+                    <Tabs size="small" className="ap-inner-tabs" activeKey={activeTab === 'settings' ? innerTab : shownTab(settingsTab, settingsKeys)} onChange={(k) => { setSettingsTab(k); setTabFull(`settings.${k}`); }} items={[
                         ...(req.ws ? [] : [{ key: 'options', label: 'Sending', children: <RequestSettingsEditor value={req.settings} onChange={(settings) => set({ settings })} /> }]),
                         { key: 'scripts', label: <span>Scripts{hasScripts ? <Tag bordered={false} style={{ marginInlineStart: 4 }}>JS</Tag> : null}</span>, children: <ScriptsEditor scripts={req.scripts} onChange={(scripts) => set({ scripts })} /> },
                     ]} />) },
                 { key: 'more', label: <span>Examples &amp; notes{openComments ? <Tag bordered={false} color="processing" style={{ marginInlineStart: 4 }}>{openComments}</Tag> : count(req.examples?.length ?? 0)}</span>, children: (
-                    <Tabs size="small" className="ap-inner-tabs" activeKey={shownTab(moreTab, [!req.ws && 'examples', 'comments', 'history'])} onChange={setMoreTab} items={[
+                    <Tabs size="small" className="ap-inner-tabs" activeKey={activeTab === 'more' ? innerTab : shownTab(moreTab, moreKeys)} onChange={(k) => { setMoreTab(k); setTabFull(`more.${k}`); }} items={[
                         ...(req.ws ? [] : [{ key: 'examples', label: <span>Examples{count(req.examples?.length ?? 0)}</span>, children: <ExamplesEditor examples={req.examples ?? []} onChange={(examples) => set({ examples })} /> }]),
                         { key: 'comments', label: <span>Comments{openComments ? <Tag bordered={false} color="processing" style={{ marginInlineStart: 4 }}>{openComments}</Tag> : null}</span>, children: <RequestComments comments={req.comments ?? []} onChange={(comments) => set({ comments })} /> },
                         { key: 'history', label: 'Changes', children: <RequestHistoryView file={file ?? null} id={req.id} /> },
@@ -315,10 +326,10 @@ function RequestEditor({ req, onChange, onSend, sending, result, project, env, r
     );
 }
 
-function CollectionSettings({ c, onChange, project, env }: { c: ApiCollectionDef; onChange: (c: ApiCollectionDef) => void; project: string; env?: string }) {
+function CollectionSettings({ c, onChange, project, env, routeBase }: { c: ApiCollectionDef; onChange: (c: ApiCollectionDef) => void; project: string; env?: string; /** #/api/<collection>: its tab is added (null: not saved yet). */ routeBase: string[] | null }) {
     const { message } = App.useApp();
     const [store, setStore] = React.useState<{ row: number; name: string; value: string } | null>(null);
-    const [tab, setTab] = useRememberedTab('api-collection', 'general');
+    const [tab, setTab] = useRouteTab('api-collection', 'general', ['general', 'variables', 'auth', 'scripts'], routeBase);
     const storing = React.useRef(false);
     const storeNow = async () => {
         if (!store || storing.current) return;
@@ -338,7 +349,7 @@ function CollectionSettings({ c, onChange, project, env }: { c: ApiCollectionDef
                 <Input variant="borderless" className="name-edit" value={c.name} placeholder="Collection name" suffix={<EditOutlined className="name-edit-icon" />} maxLength={200}
                     onChange={(e) => onChange({ ...c, name: e.target.value })} status={c.name.trim() ? undefined : 'error'} style={{ fontWeight: 600, fontSize: 16 }} aria-label="Collection name" />
                 {!c.name.trim() && <Typography.Text type="danger" style={{ fontSize: 12 }}>Give the collection a name (it cannot be saved without one).</Typography.Text>}
-                <Tabs size="small" className="ap-tabs" activeKey={shownTab(tab, ['general', 'variables', 'auth', 'scripts'])} onChange={setTab} items={[
+                <Tabs size="small" className="ap-tabs" activeKey={tab} onChange={setTab} items={[
                     { key: 'general', label: 'General', children: <Form layout="vertical" size="small" className="ap-form">
                         <Form.Item label="Base URL" tooltip="Use {config:API_BASE_URL} so each environment (dev, sit, uat) uses its own server, as set under Environments.">
                             <Input className="mono" value={c.baseUrl} onChange={(e) => onChange({ ...c, baseUrl: e.target.value })} placeholder="{config:API_BASE_URL}  or  https://api.example.com" aria-label="Base URL" />
@@ -610,7 +621,9 @@ export function ApiWorkspace() {
     const [scopesOpen, setScopesOpen] = React.useState(false);
     const [flowOpen, setFlowOpen] = React.useState(false);
     const [pipeline, setPipeline] = React.useState<{ group: string; schedule: string; yaml: string | null; file?: string; secrets?: string[]; saved?: boolean } | null>(null);
-    const docs = async (kind: 'html' | 'md' | 'wiki') => {
+    // A second click on a download (documentation, export) while the first is on its way is ignored.
+    const once = useInFlight();
+    const docs = (kind: 'html' | 'md' | 'wiki') => once.run('docs', async () => {
         if (!open?.file) return;
         if (open.dirty) { message.info('Save the collection first: the documentation is made from the saved file.'); return; }
         try {
@@ -627,7 +640,7 @@ export function ApiWorkspace() {
             a.href = URL.createObjectURL(new Blob([text], { type: kind === 'html' ? 'text/html' : 'text/markdown' }));
             a.download = `${open.collection.name.replace(/[^\w.-]+/g, '-')}.${kind}`; a.click(); URL.revokeObjectURL(a.href);
         } catch (e) { message.error(errText(e)); }
-    };
+    });
     const previewPipeline = async (save = false) => {
         if (!open?.file || !pipeline) return;
         try { const r = await api.apiPipeline({ file: open.file, variableGroup: pipeline.group || undefined, schedule: pipeline.schedule || undefined, save }); setPipeline({ ...pipeline, yaml: r.yaml, file: r.file, secrets: r.secretNames, saved: r.saved }); if (save) message.success(`Saved ${r.file}: commit it, then create the pipeline from it in Azure DevOps.`); }
@@ -644,14 +657,19 @@ export function ApiWorkspace() {
     // Number fields in error (said under them) and requests without a name keep Save off too.
     const fields = useFieldProblems();
     const unnamed = open ? allRequests(open.collection.items).find((x) => !x.name.trim()) : undefined;
+    // A request with no address (no URL and no base URL) cannot be sent, run or saved.
+    const noAddress = (r: ApiRequestDef) => !r.url.trim() && !(open?.collection.baseUrl ?? '').trim();
+    const unaddressed = open ? allRequests(open.collection.items).find(noAddress) : undefined;
     const saveProblem = open ? collectionNameProblem(open.collection.name, open.project, (meta?.collections ?? []).filter((c) => c.project === open.project), open.file)
-        ?? (unnamed ? 'give every request a name.' : null) ?? fields.problem : null;
+        ?? (unnamed ? 'give every request a name.' : null) ?? (unaddressed ? `give "${unaddressed.name.trim() || 'the request'}" an address (URL), or the collection a base URL.` : null) ?? fields.problem : null;
     // Loads answer in any order: only the last one asked for is shown (a Discard's reload never replaces the next collection).
     const loadSeq = React.useRef(0);
     const loadFile = (file: string, want: string | null, quiet = false) => {
         const n = ++loadSeq.current;
         return api.apiCollection(file).then((r) => {
             if (n !== loadSeq.current) return;
+            // A collection that opens: an earlier error (a bad link) is gone.
+            setErr(null);
             setOpen({ file: r.file, project: r.file.split('/')[1], collection: r.collection, dirty: false, version: versionOf(r) });
             const ok = !!want && findItem(r.collection.items, want)?.kind === 'request';
             // A request id in the address that the collection does not have: said (on the screen, until another request
@@ -663,7 +681,7 @@ export function ApiWorkspace() {
     /** A request id in the address the collection does not have (a bad link): said above the editor while that is shown. */
     const [missing, setMissing] = React.useState<{ id: string; file: string; name: string; shownSel: string | null } | null>(null);
     // Gone once another address is opened (a request, another collection).
-    const missingKey = `${route.join('/')}`;
+    const missingKey = splitTab(route).rest.join('/');
     const missingAt = React.useRef('');
     React.useEffect(() => { if (!missing) return; if (!missingAt.current) { missingAt.current = missingKey; return; } if (missingAt.current !== missingKey) { missingAt.current = ''; setMissing(null); } }, [missingKey]); // eslint-disable-line react-hooks/exhaustive-deps
     /**
@@ -687,7 +705,9 @@ export function ApiWorkspace() {
         setOpen((o) => (o ? { ...o, dirty: false } : o));
         void loadFile(open.file, sel, true);
     };
-    useUnsaved('api-collection', !!open?.dirty, `the API collection "${open?.collection.name ?? ''}"`, { lostOnLeave: true, save: saveProblem ? undefined : () => save(), discard });
+    // Back/Forward between requests and tabs of this collection keeps its changes (nothing to ask).
+    useUnsaved('api-collection', !!open?.dirty, `the API collection "${open?.collection.name ?? ''}"`, { lostOnLeave: true, save: saveProblem ? undefined : () => save(), discard,
+        keeps: (to) => !!open?.file && apiRoute(to).file === open.file });
     const [find, setFind] = React.useState('');
     const [feature, setFeature] = React.useState(false);
     const [correlating, setCorrelating] = React.useState(false);
@@ -767,6 +787,7 @@ export function ApiWorkspace() {
         const problem = collectionNameProblem(open.collection.name, open.project, collections, open.file);
         if (problem) { message.error(problem); setSel(null); return false; }
         if (unnamed) { message.error('Give every request a name before saving.'); setSel(unnamed.id); return false; }
+        if (unaddressed) { message.error(`Give "${unaddressed.name}" an address (URL) before saving, or the collection a base URL.`); setSel(unaddressed.id); return false; }
         if (fields.problem) { message.error(`Cannot be saved yet: ${fields.problem}`); return false; }
         try {
             const r = await api.apiSaveCollection(open.project, withBase(open.collection, open.version, force), open.file ?? undefined);
@@ -778,7 +799,8 @@ export function ApiWorkspace() {
         } catch (e) {
             // Saved in another tab (or by a teammate) since it was opened here: Reload or Overwrite, never silently lost.
             if (isChangedElsewhere(e) && open.file && !force) {
-                const how = await askChangedElsewhere(modal, `The collection "${open.collection.name}"`);
+                // Named by its file: the copy saved elsewhere may have another name than the one edited here.
+                const how = await askChangedElsewhere(modal, `The collection file ${open.file}`);
                 if (how === 'overwrite') return saveNow(true);
                 if (how === 'reload') { await loadFile(open.file, sel, true); message.info('Showing the version saved elsewhere.'); }
                 return false;
@@ -818,6 +840,7 @@ export function ApiWorkspace() {
     const inFlight = React.useRef(false);
     const sendNow = async () => {
         if (!open || !req || req.kind !== 'request' || inFlight.current) return;
+        if (fields.problem || noAddress(req)) return;
         inFlight.current = true;
         setSending(true);
         try {
@@ -840,8 +863,13 @@ export function ApiWorkspace() {
         void sendNow();
     }, [sendWhenShown, req?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // A double click on New request / New folder adds one: the second click of the pair is ignored.
+    const lastAdd = React.useRef(0);
     const addItem = (kind: 'request' | 'folder', inFolder?: string) => {
         if (!open) return;
+        const now = Date.now();
+        if (now - lastAdd.current < 600) return;
+        lastAdd.current = now;
         const it: ApiItemDef = kind === 'request' ? newRequest() : { kind: 'folder', id: rid(), name: 'New folder', items: [] };
         const items = inFolder ? mapItems(open.collection.items, (x) => (x.id === inFolder && x.kind === 'folder' ? { ...x, items: [...x.items, it] } : x)) : [...open.collection.items, it];
         update({ ...open.collection, items });
@@ -937,7 +965,7 @@ export function ApiWorkspace() {
         });
         update({ ...open.collection, items: put(without) });
     };
-    const exportFile = async () => {
+    const exportFile = () => once.run('export', async () => {
         if (!open) return;
         try {
             const { collection: json, warnings } = await api.apiExport(open.collection);
@@ -946,7 +974,7 @@ export function ApiWorkspace() {
             a.href = URL.createObjectURL(new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' }));
             a.download = `${open.collection.name.replace(/[^\w.-]+/g, '_')}.collection.v2.1.json`; a.click(); URL.revokeObjectURL(a.href);
         } catch (e) { message.error(errText(e)); }
-    };
+    });
     const matches = (it: ApiItemDef): boolean => !find || (it.kind === 'folder' ? it.items.some(matches) : `${it.name} ${it.method} ${it.url}`.toLowerCase().includes(find.toLowerCase()));
     const onCurl = async (text: string) => {
         const r = await api.apiImportCurl(text);
@@ -1024,8 +1052,8 @@ export function ApiWorkspace() {
                 {!open ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="Open a collection, or create one with New" /> : <>
                     <div className="toolbar">
                         <Typography.Text type="secondary" style={{ flex: 1, fontSize: 12 }} ellipsis>{open.file ?? `Not saved yet — will be test/${open.project}/api/…`}</Typography.Text>
-                        <Tooltip title={saveProblem ? `Cannot be saved yet: ${saveProblem}` : undefined}><Button size="small" icon={<SaveOutlined />} type={open.dirty ? 'primary' : 'default'} disabled={!!unnamed || !!fields.problem} onClick={() => void save()}>Save</Button></Tooltip>
-                        <Tooltip title="Run every request in order, with checks, and get a report"><Button size="small" icon={<CaretRightOutlined />} disabled={countRequests(open.collection.items) === 0} onClick={() => leave(() => navigate(['api-runner', ...(open.file ? open.file.split('/') : [])]))}>Run collection</Button></Tooltip>
+                        <Tooltip title={saveProblem ? `Cannot be saved yet: ${saveProblem}` : undefined}><Button size="small" icon={<SaveOutlined />} type={open.dirty ? 'primary' : 'default'} disabled={!!unnamed || !!unaddressed || !!fields.problem} onClick={() => void save()}>Save</Button></Tooltip>
+                        <Tooltip title={unaddressed ? `Cannot run yet: give "${unaddressed.name}" an address (URL), or the collection a base URL.` : 'Run every request in order, with checks, and get a report'}><Button size="small" icon={<CaretRightOutlined />} disabled={countRequests(open.collection.items) === 0 || !!unaddressed} onClick={() => leave(() => navigate(['api-runner', ...(open.file ? open.file.split('/') : [])]))}>Run collection</Button></Tooltip>
                         <Tooltip title={countRequests(open.collection.items) < 2 ? 'Needs at least 2 requests: a value is correlated when a later request sends what an earlier one received' : 'Replay the requests twice and save the values that change (tokens, ids) where later requests send them fixed'}><Button size="small" disabled={countRequests(open.collection.items) < 2} onClick={() => setCorrelating(true)}>Correlate</Button></Tooltip>
                         <Tooltip title="Write a framework feature (Gherkin) that runs these requests with the framework's API steps"><Button size="small" icon={<ExperimentOutlined />} disabled={countRequests(open.collection.items) === 0} onClick={() => setFeature(true)}>Create test</Button></Tooltip>
                         <Dropdown menu={{ items: [{ key: 'exp', label: 'Export as a collection v2.1 file' }, ...(open.file ? [{ key: 'doc-html', label: 'Documentation (HTML page)' }, { key: 'doc-md', label: 'Documentation (Markdown)' }, { key: 'doc-wiki', label: 'Publish the documentation to the Azure DevOps wiki…' }, { key: 'pipe', label: 'Run it in a pipeline…' }, { key: 'del', danger: true, label: 'Delete this collection…' }] : [])], onClick: ({ key }) => (key === 'exp' ? void exportFile() : key.startsWith('doc-') ? void docs(key.slice(4) as 'html') : key === 'pipe' ? leave(() => setPipeline({ group: '', schedule: '', yaml: null })) : modal.confirm({ title: `Delete "${open.collection.name}"?`, content: `${open.file} is deleted from the project (Git keeps it in history if it was committed).`, okText: 'Delete', okButtonProps: { danger: true }, onOk: async () => { try { await api.apiDeleteCollection(open.file!); setOpen(null); navigate(['api']); await loadMeta(); } catch (e) { message.error(errText(e)); } } })) }}><Button size="small">⋯</Button></Dropdown>
@@ -1035,7 +1063,8 @@ export function ApiWorkspace() {
                     <FieldProblems value={fields.report}><AuthContext.Provider value={{ project: open.project, env: env ?? envs[0], collection: open.collection }}>
                     {req && req.kind === 'request'
                         ? <Split id="api-response" direction="column" sizeOf="second" initial={300} min={120} max={900} style={{ flex: 1, minHeight: 0 }}>
-                            <RequestEditor key={req.id} saved={saved} file={open.file} req={req} onChange={setReq} onSend={() => void sendNow()} sending={sending} result={result[req.id] ?? null}
+                            <RequestEditor key={req.id} saved={saved} file={open.file} req={req} routeBase={open.file ? ['api', ...open.file.split('/'), req.id] : null}
+                                sendProblem={fields.problem ?? (noAddress(req) ? 'type the address (URL) of the request, or set the collection\'s base URL.' : null)} onChange={setReq} onSend={() => void sendNow()} sending={sending} result={result[req.id] ?? null}
                                 project={open.project} env={env} row={dataRow[req.id]?.index ?? 0} onRow={(index, row) => setDataRow((x) => ({ ...x, [req.id]: { index, row } }))} />
                             <div style={{ height: '100%', minHeight: 0, borderTop: '1px solid var(--panel-border)' }}><ResponseView result={result[req.id] ?? null} sending={sending}
                                 onSaveExample={req.ws ? undefined : () => {
@@ -1050,7 +1079,7 @@ export function ApiWorkspace() {
                                 }}
                                 onRemoveCookie={(name, domain) => { if (!open) return; void api.apiClearCookies(open.project, env, open.collection.name, name, domain).then((x) => setResult((all) => ({ ...all, [req.id]: { ...all[req.id], cookies: x.cookies } }))).catch((e) => message.error(errText(e))); }} /></div>
                         </Split>
-                        : <CollectionSettings c={open.collection} onChange={update} project={open.project} env={env ?? envs[0]} />}
+                        : <CollectionSettings c={open.collection} onChange={update} project={open.project} env={env ?? envs[0]} routeBase={open.file ? ['api', ...open.file.split('/')] : null} />}
                     </AuthContext.Provider></FieldProblems>
                 </>}
             </div>
@@ -1062,7 +1091,7 @@ export function ApiWorkspace() {
             <FlowView collection={open.collection} onOpen={(id) => { setSel(id); setFlowOpen(false); }} />
         </Drawer>}
         <Modal open={!!pipeline} width={820} title="Run this collection in a pipeline" onCancel={() => setPipeline(null)}
-            footer={pipeline ? <Space><Button onClick={() => void navigator.clipboard?.writeText(pipeline.yaml ?? '').then(() => message.success('Copied'))}>Copy</Button><Button type="primary" disabled={!pipeline.yaml} onClick={() => void previewPipeline(true)}>{pipeline.saved ? 'Saved' : `Save as ${pipeline.file?.split('/').pop() ?? 'a file'}`}</Button></Space> : null}>
+            footer={pipeline ? <Space><Button disabled={!pipeline.yaml} onClick={() => { if (pipeline.yaml) void navigator.clipboard?.writeText(pipeline.yaml).then(() => message.success('Copied'), () => message.error('The browser did not allow copying: select the text and copy it.')); }}>Copy</Button><Button type="primary" disabled={!pipeline.yaml} loading={once.busy('pipe')} onClick={() => void once.run('pipe', () => previewPipeline(true))}>{pipeline.saved ? 'Saved' : `Save as ${pipeline.file?.split('/').pop() ?? 'a file'}`}</Button></Space> : null}>
             {pipeline && <Space direction="vertical" style={{ width: '100%' }}>
                 <Tooltip title="Runs on changes to the collection (and on a schedule), for the environment chosen when it runs, and publishes the results as test results. The same command runs on any machine with the project installed."><Typography.Text type="secondary" style={{ fontSize: 12 }}>A pipeline that runs <Typography.Text code>npx cs-test-studio run {open?.file}</Typography.Text>.</Typography.Text></Tooltip>
                 <Space wrap>
@@ -1096,7 +1125,7 @@ function NewCollection({ project, problem, onClose, onCreate }: { project: strin
                 <Input ref={input} autoFocus value={name} maxLength={200} placeholder="e.g. Orders API" aria-label="Collection name" status={touched && p ? 'error' : undefined}
                     onChange={(e) => { setName(e.target.value); setTouched(true); }} onPressEnter={go} />
                 {touched && p ? <Typography.Text type="danger" style={{ fontSize: 12 }}>{p}</Typography.Text>
-                    : <Typography.Text type="secondary" style={{ fontSize: 12 }}>Saved as test/{project}/api/{collectionSlug(name || 'name')}.collection.json</Typography.Text>}
+                    : <Typography.Text type="secondary" style={{ fontSize: 12 }}>Create opens it here, not saved yet; Save then writes it as test/{project}/api/{collectionSlug(name || 'name')}.collection.json.</Typography.Text>}
             </Space>
         </Modal>
     );

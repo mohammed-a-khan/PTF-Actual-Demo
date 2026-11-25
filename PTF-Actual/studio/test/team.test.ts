@@ -140,7 +140,8 @@ test('team limits: members at once, read-only missions keep members read-only, m
         assert.deepEqual(templates(dir).find((x) => x.key === 'look')!.team, ['author', 'analyst', 'explorer', 'test-reviewer', 'not-there']);
         const m = await e.start('look', { project: 'shop', env: 'qa' });
         await until(() => (m.team ?? []).filter((x) => x.session).length === TEAM_PARALLEL);
-        assert.equal(m.team!.length, 3, `the fourth was refused: ${TEAM_PARALLEL} work at once`);
+        assert.equal(m.team!.length, 3, `the fourth waits its turn: ${TEAM_PARALLEL} work at once`);
+        assert.ok(m.timeline.some((x) => x.kind === 'team' && /^Queued for .* \(3 at once\)/.test(x.text)));
         // A member's approval shows in the mission with whose it is; approving it answers that member's session.
         const author = m.team!.find((x) => x.member === 'author')!;
         t.pending.set(author.session!, [{ id: 'ap1', title: 'Run npm test', detail: 'npm test', kind: 'shell' }]);
@@ -154,7 +155,7 @@ test('team limits: members at once, read-only missions keep members read-only, m
         assert.deepEqual(m.team!.map((x) => x.state), ['stopped', 'stopped', 'stopped']);
         for (const x of m.team!) assert.ok(t.aborted.includes(x.session!));
         await until(() => results.length === 4);
-        assert.match(results[3], /3 members are already working/);
+        assert.match(results[3], /The mission has ended/, 'the queued task is told the mission ended');
         assert.match(results[0], /The mission has ended/);
         release();
     } finally { fs.rmSync(tmp, { recursive: true, force: true }); }

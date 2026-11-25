@@ -5,10 +5,10 @@
  */
 import React from 'react';
 import { Alert, App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Progress, Radio, Result, Row, Select, Space, Table, Tabs, Tag, Timeline, Tooltip, Typography } from 'antd';
-import { AimOutlined, BranchesOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, ExperimentOutlined, FileTextOutlined, PauseCircleOutlined, PullRequestOutlined, ReloadOutlined, TeamOutlined, HistoryOutlined, RocketOutlined, SafetyCertificateOutlined, StopOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { AimOutlined, ArrowLeftOutlined, BranchesOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, ExperimentOutlined, FileTextOutlined, PauseCircleOutlined, PullRequestOutlined, ReloadOutlined, TeamOutlined, HistoryOutlined, RocketOutlined, SafetyCertificateOutlined, StopOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { api, ApiError, ExploreNoteDef, MissionDef, MissionStateDef, MissionSummaryDef, MissionTemplateDef, RunInfo } from '../api';
 import { errText, useStudio } from '../state';
-import { navigate, useRoute } from '../route';
+import { cameFrom, goBack, navigate, useRoute } from '../route';
 import { DiffView } from '../components/DiffView';
 import { isTab, useRememberedTab } from '../agents-tabs';
 import { useUnsaved } from '../unsaved';
@@ -59,6 +59,19 @@ export function Missions({ openConversation }: { openConversation: (session: str
         startNext = null;
         if (t) setStarting(t); else message.warning('That agent is not among the missions yet: check it in Agent builder.');
     }, [d, message]);
+    // Changed elsewhere (another tab, Agent builder, a teammate's pull): read again when this tab is looked at again,
+    // and every few seconds while the Triggers tab is shown (an agent deleted elsewhere takes its triggers with it).
+    React.useEffect(() => {
+        const again = () => { if (document.visibilityState === 'visible') load(); };
+        window.addEventListener('focus', again);
+        document.addEventListener('visibilitychange', again);
+        return () => { window.removeEventListener('focus', again); document.removeEventListener('visibilitychange', again); };
+    }, [load]);
+    React.useEffect(() => {
+        if (tab !== 'triggers' || open) return;
+        const t = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 3000);
+        return () => clearInterval(t);
+    }, [tab, open, load]);
     // Live missions change by themselves: refresh while one works.
     React.useEffect(() => {
         if (!d?.runs.some((r) => LIVE.includes(r.state))) return;
@@ -202,6 +215,9 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
     );
 }
 
+/** Screens a mission is often opened from, by name (for "Back to …" inside the drawer). */
+const FROM_TITLE: Record<string, string> = { inbox: 'Inbox', agents: 'Agents', 'agent-builder': 'Agent builder', knowledge: 'Knowledge', runs: 'Run tests', quality: 'Quality', activity: 'Activity', notify: 'Notifications', prs: 'Pull requests', work: 'Work items' };
+
 function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: { id: string; onClose: () => void; onChanged: () => void; openConversation: (session: string) => void; onDelete: (id: string) => Promise<void> }) {
     const { message, modal } = App.useApp();
     const [m, setM] = React.useState<MissionDef | null>(null);
@@ -211,6 +227,11 @@ function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: {
     const [prOpen, setPrOpen] = React.useState(false);
     const [replay, setReplay] = React.useState<{ session: string; title: string } | null>(null);
     const [missing, setMissing] = React.useState(false);
+    // Opened from another screen (the Inbox's "Open"): its way back is in the drawer too, since the drawer covers the
+    // page's own "Back to …" on smaller screens.
+    const from = cameFrom();
+    const fromTitle = from && from.route[0] !== 'missions' ? FROM_TITLE[from.route[0]] ?? (from.route[0].charAt(0).toUpperCase() + from.route[0].slice(1).replace(/-/g, ' ')) : null;
+    const back = from && fromTitle ? <Button size="small" icon={<ArrowLeftOutlined />} onClick={() => goBack(from)} title={`Back to ${fromTitle}, as you left it`}>Back to {fromTitle}</Button> : null;
     const load = React.useCallback(() => { api.mission(id).then((x) => { setM(x); setMissing(false); }).catch((e) => { if (e instanceof ApiError && e.status === 404) setMissing(true); else setErr(errText(e)); }); }, [id]);
     React.useEffect(load, [load]);
     React.useEffect(() => {
@@ -229,7 +250,7 @@ function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: {
             extra={<Button type="primary" onClick={onClose}>Back to the missions</Button>} /></Card>
     );
     return (
-        <Drawer open width="min(980px, calc(100vw - 32px))" onClose={onClose} title={m ? <Space wrap><span>{m.title}</span><Tag color={STATE[m.state].color}>{STATE[m.state].label}</Tag>{v?.passed && <Tag icon={<SafetyCertificateOutlined />} color="green">verified by the Studio</Tag>}</Space> : 'Mission'}
+        <Drawer open width="min(980px, calc(100vw - 32px))" onClose={onClose} title={m ? <Space wrap>{back}<span>{m.title}</span><Tag color={STATE[m.state].color}>{STATE[m.state].label}</Tag>{v?.passed && <Tag icon={<SafetyCertificateOutlined />} color="green">verified by the Studio</Tag>}</Space> : 'Mission'}
             extra={m && <Space>
                 {!finished && <Button danger icon={<StopOutlined />} onClick={() => modal.confirm({ title: 'Stop the mission?', content: 'What it changed so far is kept on its branch.', okText: 'Stop', okButtonProps: { danger: true }, onOk: () => act(() => api.missionStop(m.id), 'Stopped') })}>Stop</Button>}
                 {m.session && <Button onClick={() => openConversation(m.session!)}>Conversation</Button>}

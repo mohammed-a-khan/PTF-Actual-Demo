@@ -7,11 +7,16 @@ import { Alert, App, Button, Card, Col, Input, Radio, Row, Segmented, Space, Spi
 import { CheckCircleOutlined } from '@ant-design/icons';
 import { api } from '../api';
 import { errText, useStudio } from '../state';
-import { Choice, parseConflicts, resolveConflicts, Segment } from '../../../src/git/conflicts';
+import { Choice, parseConflicts, Parsed, resolveConflicts, Segment } from '../../../src/git/conflicts';
 import { ThreeWayMerge } from './ThreeWayMerge';
 import { MergeToolButton } from './MergeToolButton';
 
 const CONTEXT = 3;
+
+/** Swap the two sides of every block (shown the other way round; the text written back does not depend on it). */
+export function swapSides(p: Parsed): Parsed {
+    return { ...p, segments: p.segments.map((s) => s.kind === 'conflict' ? { ...s, ours: s.theirs, theirs: s.ours, oursLabel: s.theirsLabel, theirsLabel: s.oursLabel } : s) };
+}
 
 function Lines({ lines, start, tone }: { lines: string[]; start?: number; tone?: 'ours' | 'theirs' | 'ctx' }) {
     const bg = tone === 'ours' ? 'var(--hunk-bg)' : tone === 'theirs' ? 'var(--add-bg)' : undefined;
@@ -37,11 +42,15 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
         api.conflict(file).then(setV).catch((e) => message.error(errText(e)));
     }, [file, message]);
 
-    const parsed = React.useMemo(() => (v?.working ? parseConflicts(v.working) : null), [v]);
+    // After a pull whose put-aside edits clashed, git's "ours" is the pulled version and "theirs" your own edit:
+    // shown the right way round (Mine = your edit, Theirs = the pulled version).
+    const localEdits = !!status?.pullStash;
+    const parsed = React.useMemo(() => { const p = v?.working ? parseConflicts(v.working) : null; return p && localEdits ? swapSides(p) : p; }, [v, localEdits]);
 
     const save = async (choice: 'ours' | 'theirs' | { content: string }, label: string) => {
         setBusy(true);
-        try { const r = await api.resolve(file, choice); message.success(r.resolved?.message ?? label); await refresh(); onResolved(); }
+        const sent = localEdits && typeof choice === 'string' ? (choice === 'ours' ? 'theirs' : 'ours') : choice;
+        try { const r = await api.resolve(file, sent); message.success(r.resolved?.message ?? label, r.resolved?.message ? 6 : undefined); await refresh(); onResolved(); }
         catch (e) { message.error(errText(e)); }
         finally { setBusy(false); }
     };
@@ -50,8 +59,11 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
     // During a rebase Git swaps the sides: "ours" is the branch being rebased onto, "theirs" is
     // the user's own commit being replayed. Name them for what they are.
     const swapped = !!status?.sidesSwapped;
-    const current = swapped ? `${status?.rebaseOnto ?? 'the branch you rebase onto'} (rebasing onto)` : status?.branch ?? 'your branch';
-    const incomingOverride = swapped ? `your commit${status?.rebaseBranch ? ` from ${status.rebaseBranch}` : ''}` : null;
+    const current = localEdits ? 'your uncommitted edit' : swapped ? `${status?.rebaseOnto ?? 'the branch you rebase onto'} (rebasing onto)` : status?.branch ?? 'your branch';
+    const incomingOverride = localEdits ? `pulled from ${status?.pullStash?.upstream ?? 'the remote'}` : swapped ? `your commit${status?.rebaseBranch ? ` from ${status.rebaseBranch}` : ''}` : null;
+    // The whole versions, on the sides shown.
+    const mineV = localEdits ? v.theirs : v.ours;
+    const theirsV = localEdits ? v.ours : v.theirs;
     const blocks = parsed?.segments.filter((s): s is Extract<Segment, { kind: 'conflict' }> => s.kind === 'conflict') ?? [];
     const decided = choices.filter((c) => c !== undefined).length;
 
@@ -60,10 +72,11 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
         return (
             <div style={{ padding: 12 }}>
                 <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={`Conflict in ${file}`}
-                    description={v.ours === null ? `This file was deleted on ${swapped ? 'the branch you rebase onto' : 'your branch'} but changed in ${swapped ? 'your commit' : 'the incoming one'}.` : v.theirs === null ? `This file was changed on ${swapped ? 'the branch you rebase onto' : 'your branch'} but deleted in ${swapped ? 'your commit' : 'the incoming one'}.` : 'Choose which version of the whole file to keep.'} />
+                    description={localEdits ? (mineV === null ? 'You deleted this file (not committed) but the pull changed it.' : theirsV === null ? 'You changed this file (not committed) but the pull deleted it.' : 'Your edit and the pulled version clash: choose which version of the whole file to keep.')
+                        : v.ours === null ? `This file was deleted on ${swapped ? 'the branch you rebase onto' : 'your branch'} but changed in ${swapped ? 'your commit' : 'the incoming one'}.` : v.theirs === null ? `This file was changed on ${swapped ? 'the branch you rebase onto' : 'your branch'} but deleted in ${swapped ? 'your commit' : 'the incoming one'}.` : 'Choose which version of the whole file to keep.'} />
                 <Space>
-                    <Button loading={busy} onClick={() => save('ours', v.ours === null ? 'File stays deleted' : 'Kept your version')}>{v.ours === null ? 'Keep it deleted' : 'Keep current'}</Button>
-                    <Button loading={busy} onClick={() => save('theirs', 'Took the incoming version')}>{v.theirs === null ? 'Delete it' : 'Take incoming'}</Button>
+                    <Button loading={busy} onClick={() => save('ours', mineV === null ? 'File stays deleted' : 'Kept your version')}>{mineV === null ? 'Keep it deleted' : localEdits ? 'Keep mine (your edit)' : 'Keep current'}</Button>
+                    <Button loading={busy} onClick={() => save('theirs', localEdits ? 'Took the pulled version' : 'Took the incoming version')}>{theirsV === null ? 'Delete it' : localEdits ? 'Take theirs (pulled)' : 'Take incoming'}</Button>
                 </Space>
             </div>
         );
@@ -147,8 +160,8 @@ export function ConflictView({ file, onResolved }: { file: string; onResolved: (
                     Save resolution ({decided}/{parsed.conflicts} decided)
                 </Button>
                 <Typography.Text type="secondary">or for the whole file:</Typography.Text>
-                <Button size="small" loading={busy} onClick={() => save('ours', 'Kept the current version')}>Keep current</Button>
-                <Button size="small" loading={busy} onClick={() => save('theirs', 'Took the incoming version')}>Take incoming</Button>
+                <Button size="small" loading={busy} onClick={() => save('ours', localEdits ? 'Kept your edit' : 'Kept the current version')}>{localEdits ? 'Keep mine' : 'Keep current'}</Button>
+                <Button size="small" loading={busy} onClick={() => save('theirs', localEdits ? 'Took the pulled version' : 'Took the incoming version')}>{localEdits ? 'Take theirs' : 'Take incoming'}</Button>
             </Space>
         </div>
         </div>

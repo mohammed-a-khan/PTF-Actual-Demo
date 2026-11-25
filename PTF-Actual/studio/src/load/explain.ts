@@ -13,6 +13,7 @@ import type { RunResult } from './engine';
 import type { LoadScenario, Sla } from './scenario';
 import { runInsights } from './insights';
 import { describePolicy, maxUsers } from './policy';
+import { changeVerdict, labelOf, NOISE_MS, NOISE_PCT, sameNameLabels } from './labels';
 
 export type Rating = 'good' | 'acceptable' | 'poor' | 'critical' | 'info';
 export type Status = 'green' | 'amber' | 'red';
@@ -161,57 +162,60 @@ export interface Comparison {
     status: Status; headline: string; answer: string;
     metrics: ComparedMetric[];
     /** Paired by the request's id (two requests can have the same name); the error rates count in the verdict. */
-    transactions: Array<{ id: string; name: string; aP95: number; bP95: number; changePct: number; aErrorRate?: number; bErrorRate?: number; verdict: 'better' | 'worse' | 'same' | 'new' | 'gone' | 'failing'; why?: string }>;
+    transactions: Array<{ id: string; name: string; /** The name, numbered in collection order when two requests share it ("New request (2)"). */ label: string; aP95: number; bP95: number; changePct: number; aErrorRate?: number; bErrorRate?: number; verdict: 'better' | 'worse' | 'same' | 'new' | 'gone' | 'failing'; why?: string }>;
     findings: string[]; notes: string[];
 }
 
 /** Run B against run A (A: the earlier / reference run). Changes within ±10% are run-to-run noise. */
 export function compareRuns(a: RunResult, b: RunResult, names: { a: string; b: string }, defs?: { a?: Pick<LoadScenario, 'policy'>; b?: Pick<LoadScenario, 'policy'> }): Comparison {
-    const NOISE = 10, MIN_MS = 20;
-    const ch = (x: number, y: number) => (x ? ((y - x) / x) * 100 : y ? 100 : 0);
-    const judge = (c: number, lowerBetter: boolean): ComparedMetric['verdict'] => (Math.abs(c) < NOISE ? 'same' : (c < 0) === lowerBetter ? 'better' : 'worse');
+    // One rule for every screen (Trends, a run against its baseline, Compare): see labels.ts changeVerdict.
+    const NOISE = NOISE_PCT, MIN_MS = NOISE_MS;
+    const ch = (x: number, y: number) => changeVerdict(x, y, 'rate').pct;
     const fmtC = (c: number) => { const r = Math.round(c); return r === 0 ? '0%' : `${r > 0 ? '+' : ''}${r}%`; };
     const metrics: ComparedMetric[] = [];
     const time = (k: 'avg' | 'p50' | 'p90' | 'p95' | 'p99', label: string) => {
         // The same rule as the transactions: a change counts from 10% and 20 ms (3.5 ms → 2.7 ms is noise).
         // Every time measure is judged alike; a large % of a few ms says so (it is "same" because of the ms).
-        const d = b.total[k] - a.total[k];
-        const c = ch(a.total[k], b.total[k]), small = Math.abs(d) < MIN_MS, v = small ? 'same' : judge(c, true);
+        const { verdict: v, pct: c, diff: d } = changeVerdict(a.total[k], b.total[k], 'time');
+        const small = Math.abs(d) < MIN_MS;
         const dMs = `${d >= 0 ? '+' : '−'}${Math.abs(d) < MIN_MS ? Math.abs(d).toFixed(1) : Math.round(Math.abs(d))} ms`;
         metrics.push({ label, a: sec(a.total[k]), b: sec(b.total[k]), change: fmtC(c), verdict: v,
             meaning: v === 'same' ? (small && Math.abs(c) >= NOISE ? `About the same: ${dMs} is under ${MIN_MS} ms (normal variation).` : `About the same: under ${NOISE}% (normal variation).`) : v === 'worse' ? `Users waited ${Math.abs(c).toFixed(0)}% longer.` : `Users waited ${Math.abs(c).toFixed(0)}% less.` });
     };
-    const cThr = ch(a.total.throughput, b.total.throughput);
-    metrics.push({ label: 'Throughput', a: `${a.total.throughput.toFixed(1)}/s`, b: `${b.total.throughput.toFixed(1)}/s`, change: fmtC(cThr), verdict: judge(cThr, false), meaning: Math.abs(cThr) < NOISE ? 'Same amount of work delivered.' : cThr < 0 ? 'Less work delivered per second (if the load was the same, the system was slower to answer).' : 'More work delivered per second.' });
+    const thr = changeVerdict(a.total.throughput, b.total.throughput, 'rate'), cThr = thr.pct;
+    metrics.push({ label: 'Throughput', a: `${a.total.throughput.toFixed(1)}/s`, b: `${b.total.throughput.toFixed(1)}/s`, change: fmtC(cThr), verdict: thr.verdict, meaning: thr.verdict === 'same' ? 'Same amount of work delivered.' : cThr < 0 ? 'Less work delivered per second (if the load was the same, the system was slower to answer).' : 'More work delivered per second.' });
     const dErr = b.total.errorRate - a.total.errorRate;
-    metrics.push({ label: 'Error rate', a: pct(a.total.errorRate), b: pct(b.total.errorRate), change: `${dErr >= 0 ? '+' : ''}${dErr.toFixed(2)} pts`, verdict: Math.abs(dErr) < 0.1 ? 'same' : dErr > 0 ? 'worse' : 'better', meaning: Math.abs(dErr) < 0.1 ? 'No meaningful change in failures.' : dErr > 0 ? 'More requests failed.' : 'Fewer requests failed.' });
+    const errV = changeVerdict(a.total.errorRate, b.total.errorRate, 'errorRate').verdict;
+    metrics.push({ label: 'Error rate', a: pct(a.total.errorRate), b: pct(b.total.errorRate), change: `${dErr >= 0 ? '+' : ''}${dErr.toFixed(2)} pts`, verdict: errV, meaning: errV === 'same' ? 'No meaningful change in failures.' : dErr > 0 ? 'More requests failed.' : 'Fewer requests failed.' });
     time('avg', 'Average response time'); time('p50', 'Median (p50)'); time('p90', '90th percentile (p90)'); time('p95', '95th percentile (p95)'); time('p99', '99th percentile (p99)');
     // Transactions by the request's id (not its name: two requests may share one), with their errors: a request
     // that failed more is worse whatever its times (a request failing every time answers fast).
     const txKey = (t: { id?: string; name: string }) => t.id || `name:${t.name}`;
     const keys2 = [...new Set([...a.transactions, ...b.transactions].map(txKey))];
+    // Requests sharing a name: numbered in the order they ran (the collection's: each user goes through it in order).
+    const labels = sameNameLabels([...b.transactions, ...a.transactions]);
     const ERR_PTS = 1;
     const txs: Comparison['transactions'] = keys2.map((k): Comparison['transactions'][number] => {
         const x = a.transactions.find((t) => txKey(t) === k), y = b.transactions.find((t) => txKey(t) === k);
-        const id = (y ?? x)!.id ?? k, n = (y ?? x)!.name;
-        if (!x) return { id, name: n, aP95: 0, bP95: y!.p95, changePct: 0, bErrorRate: y!.errorRate, verdict: 'new' as const };
-        if (!y) return { id, name: n, aP95: x.p95, bP95: 0, changePct: 0, aErrorRate: x.errorRate, verdict: 'gone' as const };
+        const id = (y ?? x)!.id ?? k, n = (y ?? x)!.name, label = labelOf(labels, (y ?? x)!);
+        if (!x) return { id, name: n, label, aP95: 0, bP95: y!.p95, changePct: 0, bErrorRate: y!.errorRate, verdict: 'new' as const };
+        if (!y) return { id, name: n, label, aP95: x.p95, bP95: 0, changePct: 0, aErrorRate: x.errorRate, verdict: 'gone' as const };
         const c = ch(x.p95, y.p95);
         const dE = (y.errorRate ?? 0) - (x.errorRate ?? 0);
-        const timeV = (Math.abs(c) < NOISE || Math.abs(y.p95 - x.p95) < MIN_MS ? 'same' : c > 0 ? 'worse' : 'better') as 'same' | 'worse' | 'better';
+        const timeV = changeVerdict(x.p95, y.p95, 'time').verdict;
         // Failing (most of its requests) in both runs: never "the same" as a request that works (its times are the errors').
         const failing = dE < ERR_PTS && dE > -ERR_PTS && y.errorRate >= 50;
         const verdict: 'same' | 'worse' | 'better' | 'failing' = dE >= ERR_PTS ? 'worse' : dE <= -ERR_PTS ? (timeV === 'worse' ? 'worse' : 'better') : failing ? 'failing' : timeV;
         const why = dE >= ERR_PTS || dE <= -ERR_PTS ? `errors ${pct(x.errorRate)} → ${pct(y.errorRate)}` : failing ? `fails in both runs: ${pct(y.errorRate)} errors` : undefined;
-        return { id, name: n, aP95: x.p95, bP95: y.p95, changePct: Math.round(c), aErrorRate: x.errorRate, bErrorRate: y.errorRate, verdict, ...(why ? { why } : {}) };
+        return { id, name: n, label, aP95: x.p95, bP95: y.p95, changePct: Math.round(c), aErrorRate: x.errorRate, bErrorRate: y.errorRate, verdict, ...(why ? { why } : {}) };
     }).sort((p, q) => (q.verdict === 'worse' ? 1 : 0) - (p.verdict === 'worse' ? 1 : 0) || Math.abs(q.changePct) - Math.abs(p.changePct));
     const worse = txs.filter((t) => t.verdict === 'worse'), better = txs.filter((t) => t.verdict === 'better');
     const findings: string[] = [];
-    for (const t of worse.slice(0, 5)) findings.push(t.why && (t.bErrorRate ?? 0) > (t.aErrorRate ?? 0) ? `${t.name} failed more: ${t.why}.` : `${t.name} got slower: 95% within ${sec(t.bP95)} instead of ${sec(t.aP95)} (${t.changePct > 0 ? '+' : ''}${t.changePct}%).`);
-    for (const t of better.slice(0, 3)) findings.push(t.why ? `${t.name} failed less: ${t.why}.` : `${t.name} got faster: 95% within ${sec(t.bP95)} instead of ${sec(t.aP95)} (${t.changePct}%).`);
-    for (const t of txs.filter((x) => x.verdict === 'failing').slice(0, 3)) findings.push(`${t.name} ${t.why}.`);
-    for (const t of txs.filter((x) => x.verdict === 'new').slice(0, 3)) findings.push(`${t.name} is new in ${names.b}.`);
-    for (const t of txs.filter((x) => x.verdict === 'gone').slice(0, 3)) findings.push(`${t.name} did not run in ${names.b}.`);
+    for (const t of worse.slice(0, 5)) findings.push(t.why && (t.bErrorRate ?? 0) > (t.aErrorRate ?? 0) ? `${t.label} failed more: ${t.why}.` : `${t.label} got slower: 95% within ${sec(t.bP95)} instead of ${sec(t.aP95)} (${t.changePct > 0 ? '+' : ''}${t.changePct}%).`);
+    for (const t of better.slice(0, 3)) findings.push(t.why ? `${t.label} failed less: ${t.why}.` : `${t.label} got faster: 95% within ${sec(t.bP95)} instead of ${sec(t.aP95)} (${t.changePct}%).`);
+    for (const t of txs.filter((x) => x.verdict === 'failing').slice(0, 3)) findings.push(`${t.label} ${t.why}.`);
+    for (const t of txs.filter((x) => x.verdict === 'new').slice(0, 3)) findings.push(`${t.label} is new in ${names.b}.`);
+    for (const t of txs.filter((x) => x.verdict === 'gone').slice(0, 3)) findings.push(`${t.label} did not run in ${names.b}.`);
     const notes: string[] = [];
     const ua = defs?.a ? maxUsers(defs.a.policy) : undefined, ub = defs?.b ? maxUsers(defs.b.policy) : undefined;
     if (ua !== undefined && ub !== undefined && ua !== ub) notes.push(`The runs used different loads (${ua} vs ${ub} users): differences are partly due to that, not only to changes in the system.`);

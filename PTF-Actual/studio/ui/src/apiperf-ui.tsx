@@ -5,6 +5,7 @@
 import React from 'react';
 import { App, Button, Input, Space, Tooltip, Typography } from 'antd';
 import { QuestionCircleOutlined } from '@ant-design/icons';
+import { navigate, useRoute } from './route';
 import './styles-apiperf.css';
 
 const KEY = 'cs-apiperf-tab:';
@@ -20,6 +21,66 @@ export const shownTab = (k: string, keys: Array<string | undefined | false>): st
     const ok = keys.filter((x): x is string => !!x);
     return ok.includes(k) ? k : ok[0] ?? k;
 };
+
+/**
+ * The inner tab of an item in the address: a last segment "~<tab>" (#/perf/test/shop/load/x.load.json/~load,
+ * #/api/<collection>/<request>/~headers, #/perf-runs/<id>/~tx). A nested tab is "~outer.inner" (~settings.scripts).
+ */
+export const TAB_MARK = '~';
+export function splitTab(route: string[]): { rest: string[]; tab: string | null } {
+    const last = route[route.length - 1];
+    return last && last.startsWith(TAB_MARK) && last.length > 1 ? { rest: route.slice(0, -1), tab: last.slice(1) } : { rest: route, tab: null };
+}
+/** The address with a tab, or without one (null). */
+export const withTab = (route: string[], tab: string | null): string[] => [...splitTab(route).rest, ...(tab ? [TAB_MARK + tab] : [])];
+/** The tab shown and the address to correct to: the one in the address when it is one of `allowed`, else the remembered, else the first. */
+export function routeTabState(route: string[], base: string[] | null, remembered: string, allowed: Array<string | undefined | false>): { shown: string; fix: string[] | null; fromRoute: string | null } {
+    const ok = allowed.filter((x): x is string => !!x);
+    const { rest, tab } = splitTab(route);
+    const here = !!base && rest.length === base.length && rest.every((x, i) => x === base[i]);
+    const fromRoute = here && tab && ok.includes(tab) ? tab : null;
+    const shown = fromRoute ?? shownTab(remembered, ok);
+    // A bare item address, or one naming a tab the item does not have: corrected in place to the tab shown.
+    const fix = here && tab !== shown && ok.length ? [...base!, TAB_MARK + shown] : null;
+    return { shown, fix, fromRoute };
+}
+/**
+ * The inner tab of an item, in the address (see splitTab) when `base` (the item's address) is given and shown:
+ * a link opens that tab; choosing a tab adds a history entry (Back goes to the tab before); a bare address or an
+ * unknown tab is corrected in place. Also remembered on this computer, for items opened without a tab.
+ * `base` null (not saved yet, still loading): only remembered.
+ */
+export function useRouteTab(id: string, def: string, allowed: Array<string | undefined | false>, base: string[] | null): [string, (k: string) => void] {
+    const route = useRoute();
+    const [remembered, setRemembered] = useRememberedTab(id, def);
+    const { shown, fix, fromRoute } = routeTabState(route, base, remembered, allowed);
+    const fixKey = fix ? fix.join('/') : '';
+    React.useEffect(() => { if (fix) navigate(fix, true); }, [fixKey]); // eslint-disable-line react-hooks/exhaustive-deps
+    // A tab opened from a link (or Back) becomes the remembered one.
+    React.useEffect(() => { if (fromRoute && fromRoute !== remembered) setRemembered(fromRoute); }, [fromRoute]); // eslint-disable-line react-hooks/exhaustive-deps
+    const baseKey = base ? base.join('\0') : '';
+    const set = React.useCallback((k: string) => {
+        setRemembered(k);
+        if (base) navigate([...base, TAB_MARK + k]);
+    }, [baseKey, setRemembered]); // eslint-disable-line react-hooks/exhaustive-deps
+    return [shown, set];
+}
+
+/**
+ * Actions that must not run twice at once (a double click on Stop, Share, Add, a download): while one with the same
+ * key is on its way, another click is ignored. `busy(key)` for the button's loading state.
+ */
+export function useInFlight(): { run: <T>(key: string, fn: () => Promise<T>) => Promise<T | undefined>; busy: (key: string) => boolean } {
+    const keys = React.useRef(new Set<string>());
+    const [, force] = React.useState(0);
+    const run = React.useCallback(async <T,>(key: string, fn: () => Promise<T>): Promise<T | undefined> => {
+        if (keys.current.has(key)) return undefined;
+        keys.current.add(key); force((n) => n + 1);
+        try { return await fn(); } finally { keys.current.delete(key); force((n) => n + 1); }
+    }, []);
+    const busy = React.useCallback((key: string) => keys.current.has(key), []);
+    return { run, busy };
+}
 
 /** A small section title with its explanation behind a "?" (no paragraphs above forms). */
 export function SectionTitle({ children, help, extra }: { children: React.ReactNode; help?: React.ReactNode; extra?: React.ReactNode }) {
@@ -65,7 +126,8 @@ export function httpUrlProblem(u: string): string | null {
 }
 
 /** #/api/<collection file>[/<request id>]: the file is the segments up to the one ending in .json. */
-export function apiRoute(route: string[]): { file: string | null; request: string | null } {
+export function apiRoute(route0: string[]): { file: string | null; request: string | null } {
+    const route = splitTab(route0).rest;
     if (route[0] !== 'api' || route.length < 2) return { file: null, request: null };
     const parts = route.slice(1);
     const j = parts.findIndex((s) => s.endsWith('.json'));

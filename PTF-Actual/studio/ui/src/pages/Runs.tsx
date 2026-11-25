@@ -114,6 +114,21 @@ export function Runs() {
     const [outputDirs, setOutputDirs] = React.useState<string[]>([]);
     const { refresh } = useStudio();
     React.useEffect(() => { void loadRuns(); api.framework().then(setFw).catch(() => undefined); void loadCatalog(); }, [loadRuns, loadCatalog]);
+    // Runs started or finished in another tab (or by a teammate's agent): the list follows when this tab is shown
+    // again, every few seconds while a run is in progress and now and then otherwise, so Run is disabled (and enabled
+    // again) before a click.
+    const pollRuns = React.useCallback(() => { api.runs().then(setRuns).catch(() => undefined); }, []);
+    React.useEffect(() => {
+        const onShown = () => { if (document.visibilityState === 'visible') pollRuns(); };
+        window.addEventListener('focus', onShown);
+        document.addEventListener('visibilitychange', onShown);
+        return () => { window.removeEventListener('focus', onShown); document.removeEventListener('visibilitychange', onShown); };
+    }, [pollRuns]);
+    const anyRunning = runs.some((r) => r.state === 'running');
+    React.useEffect(() => {
+        const t = setInterval(() => { if (document.visibilityState === 'visible') pollRuns(); }, anyRunning ? 3000 : 15000);
+        return () => clearInterval(t);
+    }, [anyRunning, pollRuns]);
     React.useEffect(() => { if (!target.project && projects.length) setTarget((t) => ({ ...t, project: projects[0] })); }, [projects, target.project]);
     const envs = target.project ? (disc?.environments[target.project] ?? []) : [];
     React.useEffect(() => { if (target.project && envs.length && !envs.includes(target.env)) setTarget((t) => ({ ...t, env: envs[0] })); }, [target.project, envs.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -229,6 +244,7 @@ export function Runs() {
         ...(target.ado ? { ado: target.ado === 'on' } : {}),
         ...requestOf(pick, catalog, target.project),
     });
+    const [saveTip, setSaveTip] = React.useState(false);
     const saveConfig = () => {
         if (badOpts.length) { message.error(`Put the options right first: ${badOpts.join(', ')}.`); setSetupTab('options'); return; }
         let name = '', saving = false;
@@ -362,6 +378,8 @@ export function Runs() {
                         </Tooltip>
                     </Space>}>
                     {fw && !fw.installed && <Alert type="warning" showIcon style={{ margin: '8px 0' }} message={fw.message} />}
+                    {running && <Alert type="info" showIcon style={{ margin: '8px 0' }} message={<>A run is already in progress: Run is available again when it ends.{' '}
+                        {(() => { const r = runs.find((x) => x.state === 'running'); return r && r.id !== sel ? <a onClick={() => navigate(['runs', r.id])}>Show it</a> : null; })()}</>} />}
                     <Form layout="vertical" size="small">
                         <Tabs size="small" activeKey={setupTab} onChange={(k) => setSetupTab(k as SetupTab)} className="tests-tabs" items={[
                             { key: 'what', label: 'What to run', children: <>
@@ -405,7 +423,8 @@ export function Runs() {
                             </> },
                             { key: 'saved', label: <span>Saved runs{configs.length ? <span className="q-count">{configs.length}</span> : null}</span>, children: <>
                                 <Space size={6} style={{ marginBottom: 8 }} wrap>
-                                    <Tooltip title="Saved in .cs-studio/run-configurations.json: commit it to share it with the team"><Button size="small" onClick={saveConfig} disabled={!target.project || !target.env}>Save this run…</Button></Tooltip>
+                                    {/* Closed when pressed: the dialog covers the button, so the tooltip would never see the mouse leave and stay open after it. */}
+                                    <Tooltip title="Saved in .cs-studio/run-configurations.json: commit it to share it with the team" open={saveTip} onOpenChange={setSaveTip}><Button size="small" onClick={() => { setSaveTip(false); saveConfig(); }} disabled={!target.project || !target.env}>Save this run…</Button></Tooltip>
                                     <Tooltip title="An Azure DevOps pipeline (YAML) that runs these tests on a schedule, on pushes or for pull requests"><Button size="small" onClick={() => setPipelineOpen(true)} disabled={!target.project || !target.env}>Pipeline…</Button></Tooltip>
                                 </Space>
                                 <List size="small" bordered dataSource={configs} aria-label="Saved runs" locale={{ emptyText: 'No saved runs yet. Choose what to run, then press Save this run…' }}
@@ -417,7 +436,7 @@ export function Runs() {
                                                 <Tooltip title="Delete"><Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label={`Delete ${c.name}`} /></Tooltip></Popconfirm>,
                                         ]}>
                                             <List.Item.Meta title={<Typography.Text ellipsis={{ tooltip: c.name }} style={{ maxWidth: '100%' }}>{c.name}</Typography.Text>}
-                                                description={<Typography.Text type="secondary" ellipsis style={{ fontSize: 12, maxWidth: '100%' }}>{c.request.project} / {c.request.env}{c.request.tags ? ` · ${c.request.tags}` : ''}{c.request.scenarios?.length ? ` · ${c.request.scenarios.length} scenario(s)` : c.request.features?.length ? ` · ${c.request.features.length} feature(s)` : ''}</Typography.Text>} />
+                                                description={<Typography.Text type="secondary" ellipsis={{ tooltip: true }} style={{ fontSize: 12, maxWidth: '100%' }}>{c.request.project} / {c.request.env}{c.request.tags ? ` · ${c.request.tags}` : ''}{c.request.scenarios?.length ? ` · ${c.request.scenarios.length} scenario(s)` : c.request.features?.length ? ` · ${c.request.features.length} feature(s)` : ''}{c.request.ado === undefined ? '' : ` · Azure DevOps ${c.request.ado ? 'on' : 'off'}`}</Typography.Text>} />
                                         </List.Item>
                                     )} />
                             </> },

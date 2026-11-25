@@ -504,7 +504,25 @@ export function Quality() {
     );
 }
 
-const wholeRule = (what: string, max?: number) => ({ validator: (_: unknown, v: unknown) => (v === null || v === undefined || (typeof v === 'number' && Number.isInteger(v)) ? Promise.resolve() : Promise.reject(new Error(`${what} is a whole number (no decimals)${max !== undefined ? `: give 0 to ${max}` : ''}.`))) });
+/**
+ * A gate number as typed. InputNumber keeps its last good value when letters are typed ("abc" + Enter saved the old
+ * value and said "Gate saved."), so the field holds the text and the rule says what is wrong with it.
+ */
+function GateNumber({ value, onChange, id, addonAfter, label }: { value?: number | string | null; onChange?: (v: number | string | null) => void; id?: string; addonAfter?: string; label: string }) {
+    return (
+        <Input id={id} inputMode="numeric" aria-label={label} addonAfter={addonAfter} value={value === null || value === undefined ? '' : String(value)}
+            onChange={(e) => { const t = e.target.value; const x = t.trim(); onChange?.(x === '' ? null : /^\d+$/.test(x) ? Number(x) : t); }} />
+    );
+}
+
+const wholeRule = (what: string, min: number, max: number | undefined, empty: string | null) => ({ validator: (_: unknown, v: unknown) => {
+    const range = max === undefined ? `a whole number, ${min} or more` : `a whole number from ${min} to ${max}`;
+    if (v === null || v === undefined || (typeof v === 'string' && v.trim() === '')) return empty ? Promise.reject(new Error(empty)) : Promise.resolve();
+    if (typeof v === 'number' && Number.isInteger(v) && v >= min && (max === undefined || v <= max)) return Promise.resolve();
+    const t = String(v).trim();
+    const why = /^-/.test(t) ? 'no negative numbers' : /^-?\d*[.,]\d*$/.test(t) ? 'no decimals' : /^\d+$/.test(t) ? `not ${t}` : 'numbers only';
+    return Promise.reject(new Error(`${what}: ${why} (${range}).`));
+} });
 
 function GateModal({ open, value, version, onClose, onSaved, onReload }: { open: boolean; value: GateSettings; version?: string; onClose: () => void; onSaved: () => void; onReload: () => void }) {
     const { message, modal } = App.useApp();
@@ -535,10 +553,10 @@ function GateModal({ open, value, version, onClose, onSaved, onReload }: { open:
             <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 10 }}>Checked on the latest run. Kept on this computer for this repository.</Typography.Text>
             <Form form={form} layout="vertical" requiredMark={false} onKeyDown={(e) => { if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT') { e.preventDefault(); void saveGate(); } }}>
                 <Row gutter={16}>
-                    <Col span={12}><Form.Item name="minPassRate" label="Pass rate at least" rules={[{ required: true, message: 'Give a pass rate (0–100)' }, { type: 'number', min: 0, max: 100, message: 'The pass rate is a percentage: give a number from 0 to 100.' }, wholeRule('The pass rate', 100)]}><InputNumber addonAfter="%" style={{ width: '100%' }} aria-label="Pass rate at least" /></Form.Item></Col>
+                    <Col span={12}><Form.Item name="minPassRate" label="Pass rate at least" rules={[wholeRule('The pass rate', 0, 100, 'Give a pass rate (0–100).')]}><GateNumber addonAfter="%" label="Pass rate at least" /></Form.Item></Col>
                     <Col span={12}><Form.Item name="noNewFailures" label="No new failures" valuePropName="checked"><Switch size="small" /></Form.Item></Col>
                     <Col span={12}><Form.Item name="limitFlaky" label="Limit flaky scenarios" valuePropName="checked"><Switch size="small" /></Form.Item></Col>
-                    <Col span={12}>{limit && <Form.Item name="maxFlaky" label="At most" rules={[{ type: 'number', min: 0, message: 'Give 0 or more.' }, wholeRule('The number of flaky scenarios')]}><InputNumber style={{ width: '100%' }} addonAfter="flaky" /></Form.Item>}</Col>
+                    <Col span={12}>{limit && <Form.Item name="maxFlaky" label="At most" rules={[wholeRule('The number of flaky scenarios', 0, undefined, null)]}><GateNumber addonAfter="flaky" label="At most flaky scenarios" /></Form.Item>}</Col>
                     <Col span={12}><Form.Item name="ignoreQuarantined" label="Leave out quarantined" valuePropName="checked"><Switch size="small" /></Form.Item></Col>
                 </Row>
             </Form>

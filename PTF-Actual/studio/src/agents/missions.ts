@@ -27,7 +27,7 @@ import type { RunInfo, RunRequest, RunSummary } from '../run/runner';
 import type { AgentEvent, MissionSessionOptions, Usage } from './host';
 import type { ToolDef } from './tools';
 import type { StudioBrowser } from './browser';
-import { asTeamMission, BUDGET_LIMITS, listAgents, profileOf, simpleTriggers, teamMember, wholeProblem, type AgentProfile, type ToolGroup } from './builder';
+import { asTeamMission, BUDGET_LIMITS, listAgents, profileOf, simpleTriggers, teamMember, wholeProblem, type AgentProfile, type TeamAgent, type ToolGroup } from './builder';
 
 // ---------------------------------------------------------------------------------------------- definitions
 
@@ -374,7 +374,7 @@ const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…
 
 export class MissionEngine {
     private runs: MissionRun[] = [];
-    private live = new Map<string, { template: MissionTemplate; waiters: Map<string, (answer: string) => void>; nudges: number; lastTick: number; timer?: NodeJS.Timeout; idleBusy: boolean; spent?: boolean; members?: Map<string, { task: TeamTask; last: string; done: (answer: string) => void }> }>();
+    private live = new Map<string, { template: MissionTemplate; waiters: Map<string, (answer: string) => void>; nudges: number; lastTick: number; timer?: NodeJS.Timeout; idleBusy: boolean; spent?: boolean; members?: Map<string, { task: TeamTask; last: string; done: (answer: string) => void }>; running?: number; queue?: Array<() => void>; closed?: boolean }>();
     private file: string;
     private listeners = new Set<(m: MissionRun) => void>();
 
@@ -522,7 +522,7 @@ export class MissionEngine {
         }
         (live as { ctx?: MissionContext }).ctx = ctx;
         const team = this.teamOf(t);
-        const teamText = team.length ? `\n\nYour team (hand them work with team_delegate; up to ${TEAM_PARALLEL} work at once, each in its own session with its own tools, in the same working folder; you lead: split the goal, give each a precise task with everything it needs, check and combine their answers, and you report):\n${team.map((a) => `- ${a.id}: ${a.name}${a.description ? ` — ${a.description}` : ''} (tools: ${a.tools.join(', ')})`).join('\n')}` : '';
+        const teamText = team.length ? `\n\nYour team (hand them work with team_delegate; up to ${this.parallelOf(m)} work at once (more wait their turn), each in its own session with its own tools, in the same working folder; you lead: split the goal, give each a precise task with everything it needs, check and combine their answers, and you report):\n${team.map((a) => `- ${a.id}: ${a.name}${a.description ? ` — ${a.description}` : ''} (tools: ${a.tools.join(', ')})`).join('\n')}` : '';
         const workflow = `${t.title}. ${PROTOCOL}${teamText}${m.copy ? `\nYour working folder is your own copy of the repository: ${this.copyDir(m)} (branch ${m.copy.branch}). Change files only there.` : '\nThis mission only reads: change nothing in the repository.'}`;
         const s = await this.d.agent.start({
             title: `Mission: ${m.title}`, workflow,
@@ -552,8 +552,31 @@ export class MissionEngine {
         const text = String(task ?? '').trim();
         if (text.length < 10) return 'Give the member a precise task (what to do, with what, and what to answer with).';
         m.team ??= [];
-        if (m.team.filter((x) => x.state === 'working').length >= TEAM_PARALLEL) return `${TEAM_PARALLEL} members are already working: wait for one to answer.`;
-        if (m.team.length >= TEAM_TASKS) return `The mission has handed out ${TEAM_TASKS} tasks (the most it may): finish the work yourself.`;
+        if (live.closed) return 'The mission has ended.';
+        if (m.team.length + (live.queue?.length ?? 0) >= TEAM_TASKS) return `The mission has handed out ${TEAM_TASKS} tasks (the most it may): finish the work yourself.`;
+        // At most parallelOf(m) members work at once (an exploration's "Explorers at once"): the others wait their turn.
+        const limit = this.parallelOf(m);
+        if ((live.running ?? 0) >= limit) {
+            this.note(m, `Queued for ${a.name} (${limit} at once): ${short(text, 200)}`, 'team');
+            while ((live.running ?? 0) >= limit) {
+                await new Promise<void>((r) => (live.queue ??= []).push(r));
+                if (FINISHED.includes(m.state) || live.closed) return 'The mission has ended.';
+            }
+        }
+        live.running = (live.running ?? 0) + 1;
+        try { return await this.delegateNow(m, live, a, text); }
+        finally { live.running = Math.max(0, (live.running ?? 1) - 1); live.queue?.shift()?.(); }
+    }
+
+    /** How many team members may work at once: an exploration's "Explorers at once" (1 to 3), else TEAM_PARALLEL. */
+    parallelOf(m: Pick<MissionRun, 'id' | 'key' | 'inputs'>): number {
+        const tpl = this.live.get(m.id)?.template;
+        if (!(tpl ? tpl.explore : m.key === 'explore-app')) return TEAM_PARALLEL;
+        return Math.min(Math.max(parseInt(m.inputs?.explorers || '1', 10) || 1, 1), TEAM_PARALLEL);
+    }
+
+    private async delegateNow(m: MissionRun, live: NonNullable<ReturnType<MissionEngine['liveOf']>>, a: TeamAgent, text: string): Promise<string> {
+        m.team ??= [];
         this.sample(m);
         if (this.overLimit(m) || m.used.modelCalls >= m.budget.modelCalls) return `Not handed out: the mission's budget is used up (${m.used.modelCalls} of ${m.budget.modelCalls} model calls). Finish with what you have and report.`;
         const base = profileOf(a);
@@ -598,7 +621,7 @@ export class MissionEngine {
             const last = m.timeline[m.timeline.length - 1];
             const text = `${entry.task.name}: ${e.tool} ${short(e.args.replace(/\s+/g, ' '), 120)}`;
             if (!(last?.kind === 'tool' && last.text.startsWith(`${entry.task.name}: ${e.tool}`))) { m.timeline.push({ at: now(), text, kind: 'tool' }); }
-        } else if (e.type === 'error' || (e.type === 'info' && (e.text.startsWith('Possible prompt injection') || e.text.startsWith('Refused (')))) this.note(m, `${entry.task.name}: ${e.text}`, e.type === 'info' && e.text.startsWith('Refused (') ? 'ask' : 'error');
+        } else if (e.type === 'error' || (e.type === 'info' && (e.text.startsWith('Possible prompt injection') || e.text.startsWith('Refused (') || e.text.startsWith('Tool server ')))) this.note(m, `${entry.task.name}: ${e.text}`, e.type === 'info' && e.text.startsWith('Refused (') ? 'ask' : 'error');
         else if (e.type === 'idle') entry.done(entry.last.trim() || `${entry.task.name} stopped without an answer.`);
     }
 
@@ -641,13 +664,19 @@ export class MissionEngine {
     /** Stop every member still working (the mission ends). */
     private async stopMembers(m: MissionRun) {
         const live = this.live.get(m.id);
+        // From now on no task starts (one waiting its turn is told the mission ended).
+        if (live) live.closed = true;
         for (const [sid, entry] of live?.members ?? []) {
             entry.task.state = 'stopped';
             await this.d.agent.abort(sid).catch(() => undefined);
             entry.done('The mission has ended.');
         }
         live?.members?.clear();
+        // Tasks still waiting their turn: told the mission ended (none starts any more).
+        for (const r of live?.queue?.splice(0) ?? []) r();
     }
+
+    private liveOf(id: string) { return this.live.get(id); }
 
     /** The mission's own tools. */
     private tools(m: MissionRun, o: { browser?: Pick<StudioBrowser, 'screenshot' | 'pageNow'>; who?: string } = {}): ToolDef[] {
@@ -740,7 +769,7 @@ export class MissionEngine {
             if (!(last?.kind === 'tool' && last.text.startsWith(e.tool))) { m.timeline.push({ at: now(), text: `${e.tool} ${short(e.args.replace(/\s+/g, ' '), 140)}`, kind: 'tool' }); }
         } else if (e.type === 'error') this.note(m, `Agent error: ${e.text}`, 'error');
         else if (e.type === 'info' && e.text.startsWith('Refused (')) this.note(m, e.text, 'ask');
-        else if (e.type === 'info' && e.text.startsWith('Possible prompt injection')) this.note(m, e.text, 'error');
+        else if (e.type === 'info' && (e.text.startsWith('Possible prompt injection') || e.text.startsWith('Tool server '))) this.note(m, e.text, 'error');
         else if (e.type === 'idle') void this.onIdle(m).catch((err) => this.finish(m, 'failed', `Verification failed to run: ${(err as Error).message}`));
     }
 

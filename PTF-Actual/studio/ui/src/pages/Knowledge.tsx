@@ -42,20 +42,25 @@ export function Knowledge() {
     React.useEffect(() => { if (!d?.building) return; const t = setInterval(load, 1000); return () => clearInterval(t); }, [d, load]);
     const plain = (s: KnowledgeStatusDef): KnowledgeSourceDef => ({ id: s.id, name: s.name, kind: s.kind, enabled: s.enabled, ...(s.path ? { path: s.path } : {}), ...(s.include?.length ? { include: s.include } : {}), ...(s.query ? { query: s.query } : {}), ...(s.wiki ? { wiki: s.wiki } : {}), ...(s.urls?.length ? { urls: s.urls } : {}), ...(s.project ? { project: s.project } : {}) });
     // The whole list is saved with the version of the file this screen read: changed meanwhile (another tab, a pull) → asked.
-    const save = async (list: KnowledgeSourceDef[], ok: string, force = false): Promise<boolean> => {
+    // onError: the problem shown where the person is (the source's dialog) instead of a toast.
+    const save = async (list: KnowledgeSourceDef[], ok: string, force = false, onError?: (text: string) => void): Promise<boolean> => {
         try { await agentsApi.saveKnowledgeSources(list, d?.version, force); message.success(ok); load(); return true; }
         catch (e) {
             if (isChangedElsewhere(e)) {
-                return new Promise<boolean>((resolve) => askChangedElsewhere(modal, e, 'The knowledge sources', { reload: () => { load(); resolve(false); }, overwrite: async () => resolve(await save(list, ok, true)) }));
+                return new Promise<boolean>((resolve) => askChangedElsewhere(modal, e, 'The knowledge sources', { reload: () => { load(); resolve(false); }, overwrite: async () => resolve(await save(list, ok, true, onError)) }));
             }
-            message.error(errText(e)); return false;
+            if (onError) onError(errText(e)); else message.error(errText(e));
+            return false;
         }
     };
+    // While the file has entries the Studio leaves out, no change can be saved (it would delete them): said up front.
+    const blocked = d?.invalid?.length ? `Fix or remove the left-out ${d.invalid.length === 1 ? 'entry' : 'entries'} in ${d.file} first (${d.invalid.map((x) => `"${x.name}"`).join(', ')}): until then no change to the sources can be saved, so nothing in the file is lost.` : null;
     const building = React.useRef(false);
     const build = async (source?: string) => { if (building.current) return; building.current = true; setTimeout(() => { building.current = false; }, 1500); try { await api.buildKnowledge(source); message.info('Building the index…'); setTimeout(load, 300); } catch (e) { message.error(errText(e)); } };
     const MAX_Q = 500;
     const search = async () => {
-        if (!q.trim()) { message.info('Type what to look for.'); return; }
+        // Nothing to look for (empty, or only spaces): earlier results would look like this search's, so they go.
+        if (!q.trim()) { setHits(null); setSearchErr(q.length ? 'Only spaces: type what to look for.' : 'Type what to look for.'); return; }
         // Results of an earlier search would look like this one's: cleared when this one cannot run.
         if (q.length > MAX_Q) { setHits(null); setSearchErr(`The search is too long: at most ${MAX_Q} characters (it has ${q.length}).`); return; }
         try { setHits((await api.searchKnowledge(q)).hits); setSearchErr(null); } catch (e) { setHits(null); setSearchErr(errText(e)); }
@@ -75,7 +80,7 @@ export function Knowledge() {
             <Card size="small" title={<Space>Sources<Tooltip title={`The sources are the team's (${d.file}: commit it to share them). The index is built on this computer, with no outside service; secret values are masked. Agents search it with knowledge_search and cite what they use.`}><QuestionCircleOutlined style={{ color: 'var(--ant-color-text-tertiary, #999)', fontWeight: 400 }} /></Tooltip></Space>} extra={<Space>
                 {d.building && <Space size={6}><Typography.Text type="secondary">Indexing {d.building.source}</Typography.Text><Progress size="small" style={{ width: 120 }} percent={d.building.total ? Math.round((d.building.done / d.building.total) * 100) : 0} /></Space>}
                 <Button size="small" icon={<ReloadOutlined />} disabled={!!d.building} onClick={() => build()}>Rebuild all</Button>
-                <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setAdding({ id: '', name: '', kind: 'folder', enabled: true })}>Add a source</Button>
+                <Tooltip title={blocked ?? undefined}><Button size="small" type="primary" icon={<PlusOutlined />} disabled={!!blocked} onClick={() => setAdding({ id: '', name: '', kind: 'folder', enabled: true })}>Add a source</Button></Tooltip>
             </Space>}>
                 <Table<KnowledgeStatusView> size="small" rowKey="id" pagination={false} dataSource={d.sources} columns={[
                     { title: 'Source', render: (_: unknown, s) => <Space direction="vertical" size={0} style={{ minWidth: 0 }}><Typography.Text strong>{s.name}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 12, wordBreak: 'break-all' }}>{KINDS[s.kind].label}{s.path ? ` · ${s.path}` : ''}{s.include?.length ? ` · ${s.include.join(', ')}` : ''}{s.urls?.length ? ` · ${s.urls.length} page(s)` : ''}</Typography.Text>
@@ -86,7 +91,7 @@ export function Knowledge() {
                     { title: 'On', width: 60, render: (_: unknown, s) => <Switch size="small" checked={s.enabled !== false} onChange={(v) => save(d.sources.map((x) => (x.id === s.id ? { ...plain(x), enabled: v } : plain(x))), v ? 'Source on' : 'Source off')} /> },
                     { title: '', width: 190, render: (_: unknown, s) => <Space>
                         <Tooltip title={s.warning ? 'Fix its folder first' : undefined}><Button size="small" disabled={!!d.building || s.enabled === false || !!s.warning} onClick={() => build(s.id)}>Update</Button></Tooltip>
-                        {s.kind === 'folder' && <Tooltip title="Change the source (its folder)"><Button size="small" type="text" icon={<EditOutlined />} aria-label={`Change ${s.name}`} onClick={() => setAdding({ ...plain(s), includeText: s.include?.join(', ') })} /></Tooltip>}
+                        {s.kind === 'folder' && <Tooltip title={blocked ?? 'Change the source (its folder)'}><Button size="small" type="text" icon={<EditOutlined />} aria-label={`Change ${s.name}`} disabled={!!blocked} onClick={() => setAdding({ ...plain(s), includeText: s.include?.join(', ') })} /></Tooltip>}
                         <Popconfirm title={`Remove ${s.name}?`} description="Its index is deleted; agents no longer find it." okText="Remove" okButtonProps={{ danger: true }} onConfirm={() => save(d.sources.filter((x) => x.id !== s.id).map(plain), 'Removed')}>
                             <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label="Remove" />
                         </Popconfirm></Space> },
@@ -106,8 +111,8 @@ export function Knowledge() {
                 ))}
             </Card>) }]} />
             {adding && (adding.id
-                ? <AddSource s={adding} editing existing={d.sources.map((x) => x.id).filter((x) => x !== adding.id)} onClose={() => setAdding(null)} onSave={async (s) => { if (await save(d.sources.map((x) => (x.id === adding.id ? { ...s, id: adding.id, enabled: x.enabled } : plain(x))), `Saved ${s.name}: building its index`)) { setAdding(null); if (d.sources.find((x) => x.id === adding.id)?.enabled !== false) void build(adding.id); } }} />
-                : <AddSource s={adding} existing={d.sources.map((x) => x.id)} onClose={() => setAdding(null)} onSave={async (s) => { if (await save([...d.sources.map(plain), s], `Added ${s.name}: building its index`)) { setAdding(null); void build(s.id); } }} />)}
+                ? <AddSource s={adding} editing blocked={blocked} existing={d.sources.map((x) => x.id).filter((x) => x !== adding.id)} onClose={() => setAdding(null)} onSave={async (s, onError) => { if (await save(d.sources.map((x) => (x.id === adding.id ? { ...s, id: adding.id, enabled: x.enabled } : plain(x))), `Saved ${s.name}: building its index`, false, onError)) { setAdding(null); if (d.sources.find((x) => x.id === adding.id)?.enabled !== false) void build(adding.id); } }} />
+                : <AddSource s={adding} blocked={blocked} existing={d.sources.map((x) => x.id)} onClose={() => setAdding(null)} onSave={async (s, onError) => { if (await save([...d.sources.map(plain), s], `Added ${s.name}: building its index`, false, onError)) { setAdding(null); void build(s.id); } }} />)}
             <Modal open={!!open} width={860} title={open?.title} footer={null} onCancel={() => setOpen(null)}>
                 {open && <><Typography.Text type="secondary">{open.path}{open.lines ? `, lines ${open.lines[0]}–${open.lines[1]}` : ''}</Typography.Text>
                     <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 520, overflow: 'auto', fontSize: 12, background: 'rgba(127,127,127,.08)', padding: 10, borderRadius: 6 }}>{open.text}</pre></>}
@@ -116,9 +121,15 @@ export function Knowledge() {
     );
 }
 
-function AddSource({ s, existing, editing, onClose, onSave }: { s: KnowledgeSourceDef & { includeText?: string; urlsText?: string }; existing: string[]; editing?: boolean; onClose: () => void; onSave: (s: KnowledgeSourceDef) => void | Promise<void> }) {
+function AddSource({ s, existing, editing, blocked, onClose, onSave }: { s: KnowledgeSourceDef & { includeText?: string; urlsText?: string }; existing: string[]; editing?: boolean; blocked?: string | null; onClose: () => void; onSave: (s: KnowledgeSourceDef, onError: (text: string) => void) => void | Promise<void> }) {
     const [busy, setBusy] = React.useState(false);
-    const [v, setV] = React.useState<KnowledgeSourceDef & { urlsText?: string; includeText?: string }>(s);
+    const [v0, setV0] = React.useState<KnowledgeSourceDef & { urlsText?: string; includeText?: string }>(s);
+    // What the server said about the last try, next to the field it is about (cleared as the person changes things).
+    const [saveErr, setSaveErr] = React.useState<string | null>(null);
+    const v = v0;
+    const setV = (x: typeof v0) => { setV0(x); setSaveErr(null); };
+    const folderErr = saveErr && /folder|not found|no such|not a directory/i.test(saveErr) && v.kind === 'folder' ? saveErr.replace(/^Source "[^"]*": (.)/, (_m, c: string) => c.toUpperCase()) : null;
+    const otherErr = saveErr && !folderErr ? saveErr : null;
     // The id from the name (or the kind's label when the name is left empty); a name with no Latin letters or digits gets a short stable code.
     const base = (v.id || v.name.trim() || KINDS[v.kind].label);
     const latin = base.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40).replace(/-+$/, '');
@@ -129,18 +140,20 @@ function AddSource({ s, existing, editing, onClose, onSave }: { s: KnowledgeSour
     // Sub-folders inside the folder only (the server says the same).
     const outside = (v.includeText ?? '').split(/[,\n]/).map((x) => x.trim()).filter((x) => x.includes('..'));
     const includeProblem = (v.kind === 'repo' || v.kind === 'folder') && outside.length ? `Only sub-folders inside it, without "..": ${outside.map((x) => `"${x}"`).join(', ')}.` : null;
-    const go = async () => { if (busy || !id || clash || includeProblem || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim())) return; setBusy(true); try { await onSave({ id, name: v.name.trim() || KINDS[v.kind].label, kind: v.kind, enabled: true,
+    const go = async () => { if (busy || blocked || !id || clash || includeProblem || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim())) return; setBusy(true); try { await onSave({ id, name: v.name.trim() || KINDS[v.kind].label, kind: v.kind, enabled: true,
         ...(v.kind === 'folder' && v.path ? { path: v.path.trim() } : {}),
         ...((v.kind === 'repo' || v.kind === 'folder') && v.includeText?.trim() ? { include: v.includeText.split(/[,\n]/).map((x) => x.trim()).filter(Boolean) } : {}),
         ...(v.kind === 'ado-workitems' && v.query?.trim() ? { query: v.query.trim() } : {}),
         ...(v.kind === 'ado-wiki' && v.wiki?.trim() ? { wiki: v.wiki.trim() } : {}),
-        ...(v.kind === 'url' ? { urls: (v.urlsText ?? '').split(/\s+/).filter(Boolean) } : {}) }); } finally { setBusy(false); } };
+        ...(v.kind === 'url' ? { urls: (v.urlsText ?? '').split(/\s+/).filter(Boolean) } : {}) }, setSaveErr); } finally { setBusy(false); } };
     return (
-        <Modal open title={editing ? `Change ${s.name}` : 'Add a knowledge source'} onCancel={onClose} onOk={() => void go()} confirmLoading={busy} okText={editing ? 'Save and index' : 'Add and index'} okButtonProps={{ disabled: !id || clash || !!includeProblem || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim()) }} width={620}>
+        <Modal open title={editing ? `Change ${s.name}` : 'Add a knowledge source'} onCancel={onClose} onOk={() => void go()} confirmLoading={busy} okText={editing ? 'Save and index' : 'Add and index'} okButtonProps={{ disabled: !!blocked || !id || clash || !!includeProblem || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim()) }} width={620}>
+            {blocked && <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="Cannot be saved yet" description={blocked} />}
+            {otherErr && <Alert type="error" showIcon style={{ marginBottom: 12 }} message={otherErr} />}
             <Form layout="vertical" size="small">
                 <Form.Item label="Kind"><Select value={v.kind} disabled={editing} aria-label="Kind" onChange={(k) => setV({ ...v, kind: k })} options={(Object.keys(KINDS) as KnowledgeKind[]).map((k) => ({ value: k, label: KINDS[k].label }))} /><Typography.Text type="secondary" style={{ fontSize: 12 }}>{KINDS[v.kind].about}</Typography.Text></Form.Item>
                 <Form.Item label="Name" help={clash ? 'A source with this name exists.' : undefined} validateStatus={clash ? 'error' : undefined}><Input value={v.name} maxLength={80} aria-label="Name" placeholder={KINDS[v.kind].label} onPressEnter={() => void go()} onChange={(e) => setV({ ...v, name: e.target.value })} /></Form.Item>
-                {v.kind === 'folder' && <Form.Item label="Folder" tooltip="An absolute folder, or one relative to this repository"><Input value={v.path} aria-label="Folder" placeholder="C:\work\shop-app  or  ../shop-app" onChange={(e) => setV({ ...v, path: e.target.value })} /></Form.Item>}
+                {v.kind === 'folder' && <Form.Item label="Folder" tooltip="An absolute folder, or one relative to this repository" validateStatus={folderErr ? 'error' : undefined} help={folderErr ?? undefined}><Input value={v.path} aria-label="Folder" placeholder="C:\work\shop-app  or  ../shop-app" onChange={(e) => setV({ ...v, path: e.target.value })} /></Form.Item>}
                 {(v.kind === 'repo' || v.kind === 'folder') && <Form.Item label="Only these sub-folders (optional)" validateStatus={includeProblem ? 'error' : undefined} help={includeProblem ?? undefined}><Input value={v.includeText} aria-label="Only these sub-folders" placeholder="docs, src/orders" onChange={(e) => setV({ ...v, includeText: e.target.value })} /></Form.Item>}
                 {v.kind === 'ado-workitems' && <Form.Item label="WIQL query (optional)"><Input.TextArea rows={3} value={v.query} aria-label="WIQL query" placeholder="SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER 'Shop\\Checkout'" onChange={(e) => setV({ ...v, query: e.target.value })} /></Form.Item>}
                 {v.kind === 'ado-wiki' && <Form.Item label="Wiki name (optional)"><Input value={v.wiki} aria-label="Wiki name" placeholder="the project wiki" onChange={(e) => setV({ ...v, wiki: e.target.value })} /></Form.Item>}

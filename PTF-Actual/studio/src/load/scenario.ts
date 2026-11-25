@@ -10,6 +10,7 @@ import { ApmTagging, validApm } from './apm';
 import { RegressionGate, validGate } from './analysis';
 import { GeneratorDef, validGenerator } from './generators';
 import { DataSource, validSource } from '../data/source';
+import { labelOf, sameNameLabels } from './labels';
 import type { PathLogic } from './logic';
 
 export interface DataFile {
@@ -287,8 +288,11 @@ function judge(s: Sla, m: Measured): { level: 'pass' | 'warning' | 'fail'; detai
 
 /** Check the service levels against the results (whole run; per interval when asked, with the intervals). */
 export function checkSlas(slas: Sla[], tx: Array<{ id: string; name: string } & Measured>, total: Measured, run: { due?: number; dropped?: number; intervals?: Array<{ t0: number; t1: number; total: Measured; tx: Record<string, Measured> }> } = {}): SlaResult[] {
+    // A target named like another request: numbered as everywhere else ("New request (2)").
+    const labels = sameNameLabels(tx);
     return slas.map((s) => {
-        const t = s.target === '*' ? { name: 'All requests', ...total } : tx.find((x) => x.id === s.target);
+        const found = s.target === '*' ? undefined : tx.find((x) => x.id === s.target);
+        const t = s.target === '*' ? { name: 'All requests', ...total } : found && { ...found, name: labelOf(labels, found) };
         if (!t) return { sla: s, name: s.target, pass: false, level: 'fail' as const, details: ['No requests of this kind ran.'] };
         let level: 'pass' | 'warning' | 'fail';
         let details: string[];

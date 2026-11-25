@@ -9,6 +9,7 @@
  *    transactions, an overloaded load generator;
  *  - a short narrative summary.
  */
+import { labelOf, sameNameLabels } from './labels';
 import type { RunResult } from './engine';
 import { correlateMonitors } from './analysis';
 
@@ -32,6 +33,8 @@ function stretches(n: number, bad: (i: number) => boolean, min = 2): Array<[numb
 
 export function runInsights(r: Pick<RunResult, 'timeline' | 'transactions' | 'monitors' | 'total' | 'overload' | 'slas' | 'passed' | 'elapsed' | 'stopReason'>): Insights {
     const out: Insight[] = [];
+    const txl = sameNameLabels(r.transactions ?? []);
+    const nm = (t: { id: string; name: string }) => labelOf(txl, t);
     const tl = (r.timeline ?? []).filter((s) => s.requests > 0);
     // ---- Response-time spikes: p95 of a second far above the run's usual (median + 5 × MAD, and at least 1.5 ×).
     if (tl.length >= 10) {
@@ -92,11 +95,11 @@ export function runInsights(r: Pick<RunResult, 'timeline' | 'transactions' | 'mo
         const first = Math.min(...e.samples.map((s) => s.t));
         const status = /HTTP (\d{3})/.exec(e.message)?.[1] ?? (e.samples.find((s) => s.response)?.response?.status ? String(e.samples.find((s) => s.response)!.response!.status) : '');
         const hint = /^5\d\d$/.test(status) ? (status === '503' || status === '502' || status === '504' ? 'the server or a gateway in front of it was overloaded or unavailable' : 'the server failed while processing') : /^429$/.test(status) ? 'rate limiting: the system refused the extra load' : /^4\d\d$/.test(status) ? 'requests the server rejected (test data used twice, expired session, missing correlation)' : /timed? ?out|ETIMEDOUT/i.test(e.message) ? 'answers took longer than the timeout' : /ECONNRESET|ECONNREFUSED|socket hang up/i.test(e.message) ? 'connections refused or dropped (a limit on connections, or a restart)' : 'see the error samples';
-        out.push({ kind: 'cause', severity: 'critical', title: `${e.count}× "${e.message.slice(0, 80)}" on ${t.name}`, detail: `${Number.isFinite(first) ? `First seen at ${mmss(first)}. ` : ''}Likely: ${hint}.` });
+        out.push({ kind: 'cause', severity: 'critical', title: `${e.count}× "${e.message.slice(0, 80)}" on ${nm(t)}`, detail: `${Number.isFinite(first) ? `First seen at ${mmss(first)}. ` : ''}Likely: ${hint}.` });
     }
     // ---- The slowest transactions (when one stands out).
     const busy = r.transactions.filter((t) => t.count >= 10).sort((a, b) => b.p95 - a.p95);
-    if (busy.length >= 2 && busy[0].p95 > busy[1].p95 * 2) out.push({ kind: 'cause', severity: 'info', title: `${busy[0].name} is the slowest by far`, detail: `Its 95% is ${busy[0].p95} ms, more than twice the next one (${busy[1].name}, ${busy[1].p95} ms): start there.` });
+    if (busy.length >= 2 && busy[0].p95 > busy[1].p95 * 2) out.push({ kind: 'cause', severity: 'info', title: `${nm(busy[0])} is the slowest by far`, detail: `Its 95% is ${busy[0].p95} ms, more than twice the next one (${nm(busy[1])}, ${busy[1].p95} ms): start there.` });
     if (r.overload) out.push({ kind: 'note', severity: 'warning', title: 'The load generator was the bottleneck', detail: r.overload });
 
     // ---- The narrative.

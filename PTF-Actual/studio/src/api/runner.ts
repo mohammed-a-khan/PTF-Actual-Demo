@@ -11,6 +11,7 @@ import { prepareValues, type QueryRows } from './checks';
 import { wsAsResponse, wsUrl } from './ws';
 import { PROTOCOL_LABEL, runExchange } from './messaging';
 import { runPreScripts, withGlobals, runTestScripts, scriptSender } from './scripts';
+import { labelOf, sameNameLabels } from '../load/labels';
 
 export interface RunnerStep {
     iteration: number;
@@ -193,10 +194,20 @@ export class CollectionRunner {
 
 const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+/**
+ * The names of a run's requests as shown everywhere (screen, reports, JUnit, compare): two requests with the same
+ * name are numbered in the order they run (the collection's), "New request (1)", "New request (2)".
+ */
+export function stepLabels(steps: ReadonlyArray<Pick<RunnerStep, 'requestId' | 'name'>>): (s: Pick<RunnerStep, 'requestId' | 'name'>) => string {
+    const labels = sameNameLabels(steps.map((s) => ({ id: s.requestId || undefined, name: s.name })));
+    return (s) => labelOf(labels, { id: s.requestId || undefined, name: s.name });
+}
+
 /** A self-contained HTML report (everything escaped; no scripts). */
 export function runnerReport(j: RunnerJob): string {
     const s = j.summary;
-    const rows = j.steps.map((x) => `<tr class="${x.passed ? 'ok' : 'bad'}"><td>${x.iteration}</td><td>${esc(x.name)}</td><td><code>${esc(x.method)}</code> ${esc(x.url)}</td><td>${x.status ?? ''}</td><td>${x.timeMs ?? ''}</td><td>${x.passed ? 'Passed' : 'Failed'}${x.error ? `<div class="err">${esc(x.error)}</div>` : ''}${x.checks.map((c) => `<div class="${c.pass ? 'cp' : 'cf'}">${c.pass ? '✓' : '✗'} ${esc(c.message)}${!c.pass && c.actual !== undefined && !c.message.includes(String(c.actual)) ? ` (got ${esc(c.actual)})` : ''}</div>`).join('')}</td></tr>`).join('\n');
+    const name = stepLabels(j.steps);
+    const rows = j.steps.map((x) => `<tr class="${x.passed ? 'ok' : 'bad'}"><td>${x.iteration}</td><td>${esc(name(x))}</td><td><code>${esc(x.method)}</code> ${esc(x.url)}</td><td>${x.status ?? ''}</td><td>${x.timeMs ?? ''}</td><td>${x.passed ? 'Passed' : 'Failed'}${x.error ? `<div class="err">${esc(x.error)}</div>` : ''}${x.checks.map((c) => `<div class="${c.pass ? 'cp' : 'cf'}">${c.pass ? '✓' : '✗'} ${esc(c.message)}${!c.pass && c.actual !== undefined && !c.message.includes(String(c.actual)) ? ` (got ${esc(c.actual)})` : ''}</div>`).join('')}</td></tr>`).join('\n');
     return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(j.name)} — API run</title><style>
 body{font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;margin:24px;color:#1f2328}h1{font-size:20px;margin:0 0 4px}.m{color:#6b7280;font-size:13px;margin-bottom:16px}
 .k{display:flex;gap:28px;margin:12px 0 18px}.k b{display:block;font-size:20px}.k span{font-size:11px;color:#6b7280;text-transform:uppercase}
@@ -204,7 +215,7 @@ table{border-collapse:collapse;width:100%;font-size:13px}th,td{border-bottom:1px
 tr.bad td{background:#fff5f5}.err{color:#cf222e}.cp{color:#1a7f37}.cf{color:#cf222e}code{font-family:ui-monospace,Consolas,monospace;font-size:12px}</style></head><body>
 <h1>${esc(j.name)}</h1><div class="m">${esc(j.project)} / ${esc(j.env)} · ${esc(new Date(j.startedAt).toLocaleString())} · ${j.iterations} iteration${j.iterations === 1 ? '' : 's'} · ${esc(j.state)}</div>
 <div class="k"><div><b>${s.passed}/${s.requests}</b><span>Requests passed</span></div><div><b>${s.checksPassed}/${s.checks}</b><span>Checks passed</span></div><div><b>${s.avgMs} ms</b><span>Average time</span></div></div>
-<table><thead><tr><th>#</th><th>Request</th><th>URL</th><th>Status</th><th>ms</th><th>Result</th></tr></thead><tbody>
+<table><thead><tr><th>Iteration</th><th>Request</th><th>URL</th><th>Status</th><th>ms</th><th>Result</th></tr></thead><tbody>
 ${rows}
 </tbody></table></body></html>`;
 }
@@ -214,15 +225,19 @@ const xml = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g,
 /** JUnit XML (Azure DevOps "Publish test results", Jenkins…): a test suite per iteration, a test case per request, each failed check a failure. */
 export function runnerJUnit(j: RunnerJob): string {
     const its = [...new Set(j.steps.map((s) => s.iteration))];
+    const label = stepLabels(j.steps);
     const suites = its.map((it) => {
         const st = j.steps.filter((s) => s.iteration === it);
+        // Test case names are unique in their suite: same names numbered; a request run again (setNextRequest) says so.
+        const used = new Map<string, number>();
+        const caseName = (s: RunnerStep) => { const l = label(s); const n = (used.get(l) ?? 0) + 1; used.set(l, n); return n > 1 ? `${l} — run ${n}` : l; };
         const fails = st.filter((s) => !s.passed).length;
         const time = st.reduce((n, s) => n + (s.timeMs ?? 0), 0) / 1000;
         const cases = st.map((s) => {
             const failed = s.checks.filter((c) => !c.pass);
             const body = s.passed ? '' : `\n      <failure message="${xml(s.error ?? failed[0]?.message ?? 'Failed')}" type="${s.error ? 'error' : 'check'}">${xml([s.error, ...failed.map((c) => `${c.message}${c.actual !== undefined && !c.message.includes(String(c.actual)) ? ` (got ${c.actual})` : ''}`)].filter(Boolean).join('\n'))}</failure>\n    `;
             const out = s.logs?.length ? `\n      <system-out>${xml(s.logs.join('\n'))}</system-out>\n    ` : '';
-            return `    <testcase classname="${xml(j.name)}" name="${xml(s.name)}" time="${((s.timeMs ?? 0) / 1000).toFixed(3)}">${body}${out}${body || out ? '' : ''}</testcase>`;
+            return `    <testcase classname="${xml(j.name)}" name="${xml(caseName(s))}" time="${((s.timeMs ?? 0) / 1000).toFixed(3)}">${body}${out}${body || out ? '' : ''}</testcase>`;
         }).join('\n');
         return `  <testsuite name="${xml(`${j.name} — iteration ${it}`)}" tests="${st.length}" failures="${fails}" errors="0" skipped="0" time="${time.toFixed(3)}" timestamp="${xml(j.startedAt.replace(/Z$/, ''))}">\n${cases}\n  </testsuite>`;
     }).join('\n');
@@ -235,7 +250,7 @@ export interface RunComparison {
     a: Pick<RunnerJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;
     b: Pick<RunnerJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;
     /** requestId pairs the rows (names may repeat); method, url and position (1, 2… in the run) tell same names apart. */
-    rows: Array<{ key: string; name: string; requestId?: string; method?: string; url?: string; position?: number; iteration: number; change: RunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;
+    rows: Array<{ key: string; name: string; /** The name, numbered when two requests share it ("New request (2)"), in the run's order. */ label: string; requestId?: string; method?: string; url?: string; position?: number; iteration: number; change: RunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;
     counts: Record<RunChange, number>;
     avgDelta: number;
 }
@@ -248,13 +263,14 @@ export function compareRuns(a: RunnerJob, b: RunnerJob): RunComparison {
     const keys = [...new Set([...A.keys(), ...B.keys()])];
     // The request's place in the run (the later run's order first): two requests named alike are told apart.
     const order = [...new Set([...b.steps, ...a.steps].map((s) => s.requestId || s.name))];
+    const label = stepLabels([...b.steps, ...a.steps]);
     const rows: RunComparison['rows'] = keys.map((k) => {
         const x = A.get(k), y = B.get(k);
         const v = (s?: RunnerStep) => (s ? { status: s.status, timeMs: s.timeMs, passed: s.passed } : undefined);
         const change: RunChange = !x ? 'new' : !y ? 'gone' : x.passed && y.passed ? 'same' : !x.passed && y.passed ? 'fixed' : x.passed && !y.passed ? 'broke' : 'still failing';
         const checksChanged = x && y ? y.checks.filter((c) => { const was = x.checks.find((d) => d.message === c.message); return was ? was.pass !== c.pass : false; }).map((c) => `${c.pass ? 'now passes' : 'now fails'}: ${c.message}`) : undefined;
         const s = (y ?? x)!;
-        return { key: k, name: s.name, ...(s.requestId ? { requestId: s.requestId } : {}), method: s.method, url: y?.url || x?.url || '', position: order.indexOf(s.requestId || s.name) + 1, iteration: s.iteration, change, a: v(x), b: v(y), ...(x?.timeMs !== undefined && y?.timeMs !== undefined ? { timeDelta: y.timeMs - x.timeMs } : {}), ...(checksChanged?.length ? { checksChanged } : {}) };
+        return { key: k, name: s.name, label: label(s), ...(s.requestId ? { requestId: s.requestId } : {}), method: s.method, url: y?.url || x?.url || '', position: order.indexOf(s.requestId || s.name) + 1, iteration: s.iteration, change, a: v(x), b: v(y), ...(x?.timeMs !== undefined && y?.timeMs !== undefined ? { timeDelta: y.timeMs - x.timeMs } : {}), ...(checksChanged?.length ? { checksChanged } : {}) };
     });
     const counts = { fixed: 0, broke: 0, same: 0, 'still failing': 0, new: 0, gone: 0 } as Record<RunChange, number>;
     for (const r of rows) counts[r.change]++;

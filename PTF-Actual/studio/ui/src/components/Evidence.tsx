@@ -17,11 +17,13 @@ import '../styles-tests.css';
 export const evidenceUrl = (runId: string, key: string, f: EvidenceFile, base?: string) =>
     `${base ?? `/report/${encodeURIComponent(runId)}/${encodeURIComponent(key)}`}/${f.file.split('/').map(encodeURIComponent).join('/')}`;
 
-/** 08:47:37.229 — milliseconds tell apart files saved in the same second. */
+/**
+ * In the user's own time format, as the run list shows times (1:24:53.229 PM, or 13:24:53.229): the milliseconds
+ * tell apart files saved in the same second.
+ */
 const time = (f: EvidenceFile) => {
     if (!f.time) return '';
-    const d = new Date(f.time);
-    return `${d.toLocaleTimeString([], { hour12: false })}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+    return new Date(f.time).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
 };
 const size = (n: number) => (n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 

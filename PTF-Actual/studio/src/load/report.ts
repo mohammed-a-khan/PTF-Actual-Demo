@@ -11,6 +11,7 @@ import { describePolicy } from './policy';
 import { describeSource } from '../data/source';
 import { runInsights } from './insights';
 import { explainRun } from './explain';
+import { labelOf, sameNameLabels, timeTicks } from './labels';
 
 const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const ms = (v: number) => `${v} ms`;
@@ -22,17 +23,27 @@ export function svgChart(title: string, x: number[], series: Array<{ name: strin
     const pad = { l: 46, r: series.some((s) => s.right) ? 46 : 12, t: 26, b: 22 };
     const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
     const nice = (m: number) => { if (m <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(m))); for (const k of [1, 2, 2.5, 5, 10]) if (m <= k * p) return k * p; return 10 * p; };
-    const lmax = nice(Math.max(0, ...series.filter((s) => !s.right).flatMap((s) => s.values)));
-    const rmax = nice(Math.max(0, ...series.filter((s) => s.right).flatMap((s) => s.values)));
+    const lmax = nice(Math.max(0, ...series.filter((s) => !s.right).flatMap((s) => s.values).filter(Number.isFinite)));
+    const rmax = nice(Math.max(0, ...series.filter((s) => s.right).flatMap((s) => s.values).filter(Number.isFinite)));
     const x0 = x[0] ?? 0, x1 = Math.max(x0 + 1, x[x.length - 1] ?? 1);
     const px = (t: number) => pad.l + ((t - x0) / (x1 - x0)) * iw;
     const py = (v: number, right?: boolean) => pad.t + ih - (v / (right ? rmax : lmax)) * ih;
     const f = (v: number) => (v >= 1000 ? `${Math.round(v / 100) / 10}k` : String(v < 10 ? Math.round(v * 100) / 100 : Math.round(v * 10) / 10));
     const grid = [0, 0.25, 0.5, 0.75, 1].map((k) => `<line x1="${pad.l}" x2="${pad.l + iw}" y1="${(pad.t + ih * (1 - k)).toFixed(1)}" y2="${(pad.t + ih * (1 - k)).toFixed(1)}" stroke="#e5e7eb"/>`
         + `<text x="${pad.l - 4}" y="${(pad.t + ih * (1 - k) + 3).toFixed(1)}" text-anchor="end">${f(lmax * k)}</text>`
-        + (series.some((s) => s.right) ? `<text x="${pad.l + iw + 4}" y="${(pad.t + ih * (1 - k) + 3).toFixed(1)}">${f(rmax * k)}</text>` : '')
-        + `<text x="${(pad.l + iw * k).toFixed(1)}" y="${h - 5}" text-anchor="${k === 0 ? 'start' : k === 1 ? 'end' : 'middle'}">${mmss(x0 + (x1 - x0) * k)}</text>`).join('');
-    const lines = series.filter((s) => s.values.length > 1).map((s) => `<path d="${s.values.map((v, i) => `${i ? 'L' : 'M'}${px(x[i]).toFixed(1)},${py(v, s.right).toFixed(1)}`).join('')}" fill="none" stroke="${s.color}" stroke-width="1.6"/>`).join('');
+        + (series.some((s) => s.right) ? `<text x="${pad.l + iw + 4}" y="${(pad.t + ih * (1 - k) + 3).toFixed(1)}">${f(rmax * k)}</text>` : '')).join('')
+        // Whole seconds on the time axis, each label once (0:00, 0:01, 0:02… never "0:02" twice or a second skipped by rounding).
+        + timeTicks(x0, x1).map((t) => `<text x="${px(t).toFixed(1)}" y="${h - 5}" text-anchor="${t <= x0 ? 'start' : t >= x1 ? 'end' : 'middle'}">${mmss(t)}</text>`).join('');
+    // A value that is not a number: no measurement in that second (a transaction that did not run). The line joins the
+    // seconds that have one, each marked with a dot when there are gaps (so a line between them is not read as data).
+    const lines = series.map((s) => {
+        const pts = s.values.map((v, i) => [x[i], v] as const).filter(([, v]) => Number.isFinite(v));
+        if (!pts.length) return '';
+        const gaps = pts.length < s.values.length;
+        const path = pts.length > 1 ? `<path d="${pts.map(([t, v], i) => `${i ? 'L' : 'M'}${px(t).toFixed(1)},${py(v, s.right).toFixed(1)}`).join('')}" fill="none" stroke="${s.color}" stroke-width="1.6"${gaps ? ' stroke-dasharray="4 3"' : ''}/>` : '';
+        const dots = gaps || pts.length === 1 ? pts.map(([t, v]) => `<circle cx="${px(t).toFixed(1)}" cy="${py(v, s.right).toFixed(1)}" r="2.5" fill="${s.color}"/>`).join('') : '';
+        return path + dots;
+    }).join('');
     const legend = series.map((s, i) => `<g transform="translate(${pad.l + 8 + i * 170},12)"><rect width="10" height="3" y="-3" fill="${s.color}"/><text x="14" y="0">${esc(s.name)}</text></g>`).join('');
     return `<figure><figcaption>${esc(title)}</figcaption><svg viewBox="0 0 ${w} ${h}" width="100%" role="img" aria-label="${esc(title)}" font-size="10" fill="#6b7280">${grid}${lines}${legend}</svg></figure>`;
 }
@@ -61,25 +72,33 @@ export function reportSections(run: LoadRunDetail): Record<string, string> {
     const d = run.definition;
     const tl: Second[] = r.timeline;
     const x = tl.map((s) => s.t);
+    // Two requests with the same name are numbered in the order they ran (the collection's): "New request (1)", "(2)".
+    const labels = sameNameLabels(r.transactions);
+    const nm = (t: { id: string; name: string }) => esc(labelOf(labels, t));
     const kpi = (v: string, l: string) => `<div><b>${esc(v)}</b><span>${esc(l)}</span></div>`;
     const verdict = (r.passed ? '<span class="ok">Passed</span>' : `<span class="bad">Failed${r.stopReason === 'error-rate' ? ' (stopped: too many errors)' : r.stopReason === 'alert' ? ' (stopped by a critical alert)' : ''}</span>`) + (r.stopReason === 'data-used' ? ' <span>(ended when every data row had been used once)</span>' : '') + (r.stopReason === 'stopped' ? ` <span class="warn">(stopped by hand after ${esc(mmss(r.elapsed))} of ${esc(mmss(d.policy.duration))}: not the full test)</span>` : '');
     const slas = r.slas.length ? `<h2>Service levels</h2><table><tr><th>Applies to</th><th>Result</th><th>Details</th></tr>${r.slas.map((s) => `<tr class="${s.pass ? (s.level === 'warning' ? 'warnrow' : '') : 'badrow'}"><td>${esc(s.name)}${s.sla.per === 'interval' ? ' (every interval)' : ''}</td><td>${!s.pass ? '<span class="bad">Missed</span>' : s.level === 'warning' ? '<span class="warn">Warning</span>' : '<span class="ok">Met</span>'}</td><td>${esc(s.details.join('; '))}</td></tr>`).join('')}</table>` : '';
     const alerts = (r.alerts ?? []).length ? `<h2>Alerts</h2><table><tr><th>At</th><th>Level</th><th>What</th></tr>${r.alerts.map((a) => `<tr class="${a.level === 'critical' ? 'badrow' : a.level === 'warning' ? 'warnrow' : ''}"><td>${mmss(a.t)}</td><td>${a.level}</td><td>${esc(a.message)}</td></tr>`).join('')}</table>` : '';
     const pops = (r.populations ?? []).length > 1 ? `<h2>User paths</h2><table><tr><th>User path</th><th>Share of users</th></tr>${r.populations.map((p) => `<tr><td>${esc(p.name)}</td><td>${p.share}%</td></tr>`).join('')}</table>` : '';
-    const tx = `<h2>Transactions</h2><table><tr><th>Transaction</th><th>Count</th><th>Errors</th><th>Avg</th><th>Min</th><th>50%</th><th>90%</th><th>95%</th><th>99%</th><th>Max</th><th>Per second</th></tr>${r.transactions.map((t) => `<tr class="${t.errors ? 'badrow' : ''}"><td>${esc(t.name)}</td><td>${t.count}</td><td>${t.errors} (${pct(t.errorRate)})</td><td>${t.avg}</td><td>${t.min}</td><td>${t.p50}</td><td>${t.p90}</td><td>${t.p95}</td><td>${t.p99}</td><td>${t.max}</td><td>${t.throughput.toFixed(2)}</td></tr>`).join('')}</table><p class="m">Times in milliseconds.</p>`;
+    const tx = `<h2>Transactions</h2><table><tr><th>Transaction</th><th>Count</th><th>Errors</th><th>Avg</th><th>Min</th><th>50%</th><th>90%</th><th>95%</th><th>99%</th><th>Max</th><th>Per second</th></tr>${r.transactions.map((t) => `<tr class="${t.errors ? 'badrow' : ''}"><td>${nm(t)}</td><td>${t.count}</td><td>${t.errors} (${pct(t.errorRate)})</td><td>${t.avg}</td><td>${t.min}</td><td>${t.p50}</td><td>${t.p90}</td><td>${t.p95}</td><td>${t.p99}</td><td>${t.max}</td><td>${t.throughput.toFixed(2)}</td></tr>`).join('')}</table><p class="m">Times in milliseconds.</p>`;
     // Where the time goes: the average exchange per phase.
     const PH: Array<[keyof NonNullable<TransactionStats['phases']>, string]> = [['blocked', 'Waiting for a connection'], ['dns', 'DNS'], ['connect', 'Connect'], ['tls', 'TLS'], ['send', 'Send'], ['wait', 'Waiting for the server'], ['download', 'Download']];
     const withPhases = r.transactions.filter((t) => t.phases);
-    const phases = withPhases.length ? `<h2>Where the time goes</h2><table><tr><th>Transaction</th>${PH.map(([, l]) => `<th>${esc(l)}</th>`).join('')}</tr>${withPhases.map((t) => `<tr><td>${esc(t.name)}</td>${PH.map(([k]) => `<td>${t.phases![k]}</td>`).join('')}</tr>`).join('')}</table><p class="m">Average milliseconds per HTTP exchange; a kept-alive connection has no DNS, connect or TLS time.</p>` : '';
+    // Every transaction has its row (one that never got an answer says so, rather than looking merged into another).
+    const phases = withPhases.length ? `<h2>Where the time goes</h2><table><tr><th>Transaction</th>${PH.map(([, l]) => `<th>${esc(l)}</th>`).join('')}</tr>${r.transactions.map((t) => (t.phases ? `<tr><td>${nm(t)}</td>${PH.map(([k]) => `<td>${t.phases![k]}</td>`).join('')}</tr>` : `<tr><td>${nm(t)}</td><td colspan="${PH.length}" class="m">No HTTP exchange completed (every request failed before an answer).</td></tr>`)).join('')}</table><p class="m">Average milliseconds per HTTP exchange; a kept-alive connection has no DNS, connect or TLS time.</p>` : '';
     const overload = r.overload ? `<p class="bad">${esc(r.overload)}</p>` : '';
     const sample = (s: NonNullable<LoadRunDetail['result']>['transactions'][number]['topErrors'][number]['samples'][number]) => `<details><summary>At ${mmss(s.t)}${s.user !== undefined ? `, user ${s.user + 1}` : ''}${s.response ? ` — HTTP ${s.response.status}` : ''}${s.page ? ` — on ${esc(s.page)}` : ''}</summary>`
         + (s.request ? `<pre>${esc(`${s.request.method} ${s.request.url}\n${Object.entries(s.request.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}${s.request.body ? `\n\n${s.request.body}` : ''}`)}</pre>` : '')
         + (s.response ? `<pre>${esc(`HTTP ${s.response.status} ${s.response.statusText ?? ''} (${s.response.timeMs} ms)\n${Object.entries(s.response.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}${s.response.body ? `\n\n${s.response.body}` : ''}`)}</pre>` : '') + '</details>';
     const errs = r.transactions.filter((t) => t.errors);
-    const errors = errs.length ? `<h2>Errors</h2>${errs.map((t) => `<h3>${esc(t.name)} — ${t.errors} error${t.errors === 1 ? '' : 's'}</h3>${t.topErrors.map((e) => `<div class="err"><b>${e.count}×</b> ${esc(e.message)}${e.samples.map(sample).join('')}</div>`).join('')}`).join('')}` : '';
+    const errors = errs.length ? `<h2>Errors</h2>${errs.map((t) => `<h3>${nm(t)} — ${t.errors} error${t.errors === 1 ? '' : 's'}</h3>${t.topErrors.map((e) => `<div class="err"><b>${e.count}×</b> ${esc(e.message)}${e.samples.map(sample).join('')}</div>`).join('')}`).join('')}` : '';
+    // Per transaction over the whole run: its seconds without requests are 0 per second (so the line averages to the
+    // table's "Per second"), and gaps in its times.
     const txCharts = r.transactions.filter((t) => (r.txTimeline?.[t.id] ?? []).length > 1).slice(0, 30).map((t) => {
-        const s: TxSecond[] = r.txTimeline[t.id];
-        return svgChart(`${t.name}: response time (ms) and requests per second`, s.map((p) => p.t), [{ name: 'Average', color: '#2563eb', values: s.map((p) => p.avg) }, { name: '95%', color: '#d97706', values: s.map((p) => p.p95) }, { name: 'Per second', color: '#16a34a', values: s.map((p) => p.n), right: true }], 860, 170);
+        const by = new Map((r.txTimeline[t.id] as TxSecond[]).map((p) => [p.t, p]));
+        const xs = x.length ? x : [...by.keys()];
+        const at = (k: 'avg' | 'p95') => xs.map((sec) => by.get(sec)?.[k] ?? NaN);
+        return svgChart(`${labelOf(labels, t)}: response time (ms) and requests per second (on average ${t.throughput.toFixed(2)} per second)`, xs, [{ name: 'Average', color: '#2563eb', values: at('avg') }, { name: '95%', color: '#d97706', values: at('p95') }, { name: 'Per second', color: '#16a34a', values: xs.map((sec) => by.get(sec)?.n ?? 0), right: true }], 860, 170);
     }).join('');
     const monitors = `${(r.monitors ?? []).some((m) => m.points.length > 1) ? `<h2>Monitoring</h2>${(r.monitors ?? []).filter((m) => m.points.length > 1).map((m) => svgChart(`${m.name}${m.unit ? ` (${m.unit})` : ''}${m.max !== undefined ? ` — maximum ${m.max}` : ''}`, m.points.map((p) => p.t), [{ name: m.name, color: m.generator ? '#6b7280' : '#7c3aed', values: m.points.map((p) => p.v) }], 860, 150)).join('')}` : ''}${(r.monitors ?? []).filter((m) => m.error).map((m) => `<p class="m">Monitor ${esc(m.name)}: ${esc(m.error)}</p>`).join('')}`;
     return {
@@ -150,16 +169,17 @@ export function loadReportXlsx(run: LoadRunDetail): Buffer {
         ['Requests per second', Number(r.total.throughput.toFixed(3))], ['Iterations', r.iterations], ...(r.dropped !== undefined ? [['Dropped iterations (all users busy)', r.dropped] as [string, number]] : []), ...(r.due !== undefined ? [['Iterations due (arrival rate)', r.due] as [string, number]] : []), ...(r.overload ? [['Load generator', r.overload] as [string, string]] : []),
         ...(r.populations ?? []).filter(() => (r.populations ?? []).length > 1).map((p): Cell[] => [`User path: ${p.name} (%)`, p.share]),
     ];
-    const name = new Map(r.transactions.map((t) => [t.id, t.name]));
+    const labels = sameNameLabels(r.transactions);
+    const name = new Map(r.transactions.map((t) => [t.id, labelOf(labels, t)]));
     const sheets: Sheet[] = [
         { name: 'Summary', columns: ['Item', 'Value'], rows: summary, widths: [28, 50] },
         { name: 'Transactions', columns: ['Transaction', 'Count', 'Errors', 'Error rate (%)', 'Average (ms)', 'Min (ms)', '50% (ms)', '90% (ms)', '95% (ms)', '99% (ms)', 'Max (ms)', 'Per second'],
-            rows: r.transactions.map((t) => [t.name, t.count, t.errors, Number(t.errorRate.toFixed(3)), t.avg, t.min, t.p50, t.p90, t.p95, t.p99, t.max, Number(t.throughput.toFixed(3))]) },
+            rows: r.transactions.map((t) => [name.get(t.id) ?? t.name, t.count, t.errors, Number(t.errorRate.toFixed(3)), t.avg, t.min, t.p50, t.p90, t.p95, t.p99, t.max, Number(t.throughput.toFixed(3))]) },
         { name: 'Where the time goes', columns: ['Transaction', 'Exchanges', 'Waiting for a connection (ms)', 'DNS (ms)', 'Connect (ms)', 'TLS (ms)', 'Send (ms)', 'Waiting for the server (ms)', 'Download (ms)'],
-            rows: r.transactions.filter((t) => t.phases).map((t) => [t.name, t.phaseCount ?? t.count, t.phases!.blocked, t.phases!.dns, t.phases!.connect, t.phases!.tls, t.phases!.send, t.phases!.wait, t.phases!.download]) },
+            rows: r.transactions.filter((t) => t.phases).map((t) => [name.get(t.id) ?? t.name, t.phaseCount ?? t.count, t.phases!.blocked, t.phases!.dns, t.phases!.connect, t.phases!.tls, t.phases!.send, t.phases!.wait, t.phases!.download]) },
         { name: 'Service levels', columns: ['Applies to', 'Result', 'Details'], rows: r.slas.map((s) => [s.name, s.pass ? 'Met' : 'Missed', s.details.join('; ')]) },
         { name: 'Errors', columns: ['Transaction', 'Count', 'Message', 'First seen (s)', 'Request', 'Response status', 'Response body (start)', 'Page'],
-            rows: r.transactions.flatMap((t) => t.topErrors.map((e): Cell[] => { const s = e.samples[0]; return [t.name, e.count, e.message, s?.t, s?.request ? `${s.request.method} ${s.request.url}` : '', s?.response?.status, s?.response?.body?.slice(0, 1000) ?? '', s?.page ?? '']; })) },
+            rows: r.transactions.flatMap((t) => t.topErrors.map((e): Cell[] => { const s = e.samples[0]; return [name.get(t.id) ?? t.name, e.count, e.message, s?.t, s?.request ? `${s.request.method} ${s.request.url}` : '', s?.response?.status, s?.response?.body?.slice(0, 1000) ?? '', s?.page ?? '']; })) },
         { name: 'Monitors', columns: ['Monitor', 'Second', 'Value', 'Unit', 'Maximum'], rows: (r.monitors ?? []).flatMap((m) => m.points.map((p): Cell[] => [m.name, p.t, p.v, m.unit, m.max])) },
         { name: 'Timeline', columns: ['Second', 'Users', 'Requests', 'Errors', 'Average (ms)', '95% (ms)'], rows: r.timeline.map((s) => [s.t, s.users, s.requests, s.errors, s.avg, s.p95]) },
         { name: 'Transaction timeline', columns: ['Transaction', 'Second', 'Requests', 'Errors', 'Average (ms)', '95% (ms)'],

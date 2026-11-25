@@ -15,10 +15,11 @@ import { askCopilot, useAgentContext } from '../agentContext';
 import { Split } from '../components/Split';
 import { LineChart } from '../components/LineChart';
 import { curveFromCsv, curveProblems, policyCurve, validPolicy } from '../../../src/load/policy';
+import { changeVerdict, labelOf, sameNameLabels, type ChangeKind } from '../../../src/load/labels';
 import { ago } from '../format';
 import { LogicEditor } from '../components/LogicEditor';
 import { RecordPathModal } from '../components/RecordPathModal';
-import { askChangedElsewhere, askUnsaved, FieldProblems, isChangedElsewhere, nameProblem, NumField, SectionTitle, shownTab, useEscapeCloses, useFieldProblems, useNestedFieldProblems, useRememberedTab, verdictWords, versionOf, withBase } from '../apiperf-ui';
+import { askChangedElsewhere, askUnsaved, FieldProblems, isChangedElsewhere, nameProblem, NumField, SectionTitle, splitTab, useEscapeCloses, useFieldProblems, useInFlight, useNestedFieldProblems, useRouteTab, verdictWords, versionOf, withBase } from '../apiperf-ui';
 
 const C = { users: '#8250df', rps: '#0969da', avg: '#1a7f37', p95: '#bf8700', errors: '#cf222e' };
 const dur = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s >= 60 ? `${Math.floor(s / 60)} min${s % 60 ? ` ${Math.round(s % 60)} s` : ''}` : `${Math.round(s)} s`);
@@ -140,7 +141,7 @@ function PolicyEditor({ p, onChange }: { p: LoadPolicyDef; onChange: (p: LoadPol
 
 const dataLabel = (d: NonNullable<LoadScenarioDef['data']>) => d.source ? (d.source.kind === 'file' ? d.source.file : d.source.kind === 'query' ? `${d.source.connection} query` : d.source.kind === 'procedure' ? `${d.source.connection} ${d.source.procedure}` : d.source.kind === 'api' ? 'API response' : 'generated') : d.file;
 
-function ScenarioEditor({ sc, onChange, reqs, collections, onCollection, browserPaths, bpath, project, env }: { project: string; env?: string; sc: LoadScenarioDef; onChange: (s: LoadScenarioDef) => void; reqs: Req[] | null; collections: ApiCollectionInfo[]; onCollection: (file: string) => void; browserPaths: BrowserPathInfo[]; bpath: BrowserPathDef | null }) {
+function ScenarioEditor({ sc, onChange, reqs, collections, onCollection, browserPaths, bpath, project, env, routeBase }: { /** #/perf/<file>: its tab is added (null: not saved yet). */ routeBase: string[] | null; project: string; env?: string; sc: LoadScenarioDef; onChange: (s: LoadScenarioDef) => void; reqs: Req[] | null; collections: ApiCollectionInfo[]; onCollection: (file: string) => void; browserPaths: BrowserPathInfo[]; bpath: BrowserPathDef | null }) {
     const set = (patch: Partial<LoadScenarioDef>) => onChange({ ...sc, ...patch });
     const pops = sc.populations ?? [];
     const [popReqs, setPopReqs] = React.useState<Record<number, Req[]>>({});
@@ -149,8 +150,10 @@ function ScenarioEditor({ sc, onChange, reqs, collections, onCollection, browser
     const mainShare = 100 - pops.reduce((n, p) => n + (p.share || 0), 0);
     const mainName = sc.mainName?.trim() || 'Main';
     // Service levels can target a request of any user path (ids of other paths: p<n>:<request id>).
+    // Requests sharing a name are numbered in collection order, as in the results.
+    const reqLabels = sameNameLabels(reqs ?? []);
     const slaTargets = [{ value: '*', label: 'All requests together' },
-        ...(reqs ?? []).map((r) => ({ value: r.id, label: pops.length ? `${mainName} › ${r.name}` : r.name })),
+        ...(reqs ?? []).map((r) => ({ value: r.id, label: pops.length ? `${mainName} › ${labelOf(reqLabels, r)}` : labelOf(reqLabels, r) })),
         ...pops.flatMap((p, i) => (popReqs[i] ?? []).filter((r) => !p.requests.length || p.requests.includes(r.id)).map((r) => ({ value: `p${i + 1}:${r.id}`, label: `${p.name || `Path ${i + 2}`} › ${r.name}` })))];
     const chosen = sc.requests.length ? sc.requests : (reqs ?? []).map((r) => r.id);
     const toggle = (id: string, on: boolean) => {
@@ -159,7 +162,7 @@ function ScenarioEditor({ sc, onChange, reqs, collections, onCollection, browser
         set({ requests: next.length === all.length ? [] : next });
     };
     const setSla = (i: number, s: LoadSla) => set({ slas: sc.slas.map((x, j) => (j === i ? s : x)) });
-    const [tab, setTab] = useRememberedTab('perf-scenario', 'path');
+    const [tab, setTab] = useRouteTab('perf-scenario', 'path', ['path', 'load', 'sla', 'monitors', 'advanced'], routeBase);
     const tag = (n: number | string | undefined, color?: string) => (n ? <Tag bordered={false} color={color} style={{ marginInlineStart: 4 }}>{n}</Tag> : null);
     const advancedCount = [sc.iterationsPerUser, sc.wan, sc.generators?.length, sc.apm].filter(Boolean).length;
     const policyErr = validPolicy(sc.policy);
@@ -282,7 +285,7 @@ function ScenarioEditor({ sc, onChange, reqs, collections, onCollection, browser
         <div className="ap-editor">
             <div className="ap-editor-inner">
                 <Input variant="borderless" value={sc.name} maxLength={200} onChange={(e) => set({ name: e.target.value })} onBlur={() => { if (!sc.name.trim()) set({ name: 'Untitled scenario' }); }} style={{ fontWeight: 600, fontSize: 16, paddingInline: 0 }} aria-label="Scenario name" placeholder="Scenario name" />
-                <Tabs size="small" className="ap-tabs" activeKey={shownTab(tab, ['path', 'load', 'sla', 'monitors', 'advanced'])} onChange={setTab} items={[
+                <Tabs size="small" className="ap-tabs" activeKey={tab} onChange={setTab} items={[
                     { key: 'path', label: <span>Requests &amp; data{sc.browserPath ? tag('browser') : tag(reqs ? chosen.length : undefined)}</span>, children: userPath },
                     { key: 'load', label: <span>Load{policyErr ? tag('!', 'error') : tag(`${maxUsersOf(sc)} users`)}</span>, children: <PolicyEditor p={sc.policy} onChange={(policy) => set({ policy })} /> },
                     { key: 'sla', label: <span>Service levels{tag(sc.slas.length + (sc.slaProfile ? 1 : 0))}</span>, children: slaPane },
@@ -345,10 +348,11 @@ function ScheduleButton({ file, env }: { file: string; env?: string }) {
     const [draft, setDraft] = React.useState<Partial<LoadScheduleDef>>({ kind: 'daily', at: '02:00', days: [1, 2, 3, 4, 5] });
     const reload = React.useCallback(() => api.loadSchedules().then((r) => setList(r.schedules.filter((s) => s.file === file)), () => undefined), [file]);
     React.useEffect(() => { void reload(); }, [reload]);
-    const add = async () => {
+    const once = useInFlight();
+    const add = () => once.run('add', async () => {
         try { await api.loadSaveSchedule({ ...draft, file, ...(env ? { env } : {}), ...(draft.kind === 'once' ? { at: new Date(draft.at ?? '').toISOString() } : {}) }); message.success('Scheduled'); void reload(); }
         catch (e) { message.error(errText(e)); }
-    };
+    });
     const when = (s: LoadScheduleDef) => (s.kind === 'once' ? new Date(s.at).toLocaleString() : `${s.kind === 'daily' ? 'every day' : (s.days ?? []).map((d) => DAYS[d]).join(', ')} at ${s.at}`);
     return (
         <>
@@ -360,7 +364,7 @@ function ScheduleButton({ file, env }: { file: string; env?: string }) {
                         <div key={s.id} className="check-row">
                             <Tag color={s.enabled ? 'blue' : 'default'}>{when(s)}</Tag>
                             <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>{s.next ? `next ${new Date(s.next).toLocaleString()}` : 'done'}{s.last ? ` · last ${new Date(s.last.at).toLocaleString()}${s.last.error ? `: ${s.last.error}` : ''}` : ''}</Typography.Text>
-                            <Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Remove schedule" onClick={async () => { try { await api.loadDeleteSchedule(s.id); void reload(); } catch (e) { message.error(errText(e)); } }} />
+                            <Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Remove schedule" onClick={() => void once.run(`del-${s.id}`, async () => { try { await api.loadDeleteSchedule(s.id); void reload(); } catch (e) { message.error(errText(e)); } })} />
                         </div>
                     ))}
                     <Space wrap>
@@ -369,7 +373,7 @@ function ScheduleButton({ file, env }: { file: string; env?: string }) {
                             ? <Input size="small" type="datetime-local" style={{ width: 210 }} value={draft.at} onChange={(e) => setDraft({ ...draft, at: e.target.value })} aria-label="When" />
                             : <Input size="small" type="time" style={{ width: 110 }} value={draft.at} onChange={(e) => setDraft({ ...draft, at: e.target.value })} aria-label="At" />}
                         {draft.kind === 'weekly' && <Checkbox.Group value={draft.days} onChange={(v) => setDraft({ ...draft, days: v as number[] })} options={DAYS.map((d, i) => ({ value: i, label: d }))} />}
-                        <Button size="small" type="primary" onClick={() => void add()}>Add</Button>
+                        <Button size="small" type="primary" loading={once.busy('add')} onClick={() => void add()}>Add</Button>
                     </Space>
                 </Space>
             </Modal>
@@ -385,20 +389,28 @@ function PipelineButton({ file }: { file: string }) {
     const [o, setO] = React.useState<{ generators: number; schedule: string; variableGroup: string; pool: string; teamFolder: string }>({ generators: 1, schedule: '0 2 * * 1-5', variableGroup: '', pool: '', teamFolder: '' });
     const [r, setR] = React.useState<{ yaml: string; file: string; secretNames: string[] } | null>(null);
     const fields = useFieldProblems();
+    // The YAML shown is for these settings (Copy is off while it is being made again or a field is in error).
+    const [fresh, setFresh] = React.useState(false);
+    const saving = React.useRef(false);
+    React.useEffect(() => { setFresh(false); }, [o]);
     const build = React.useCallback(async (save = false) => {
         // A number in error (said under it) is not sent: the server would refuse it anyway.
         if (fields.problem) return;
+        // A double click on Save writes once.
+        if (save) { if (saving.current) return; saving.current = true; }
         try {
             const x = await api.loadPipeline({ file, generators: o.generators, ...(o.schedule.trim() ? { schedule: o.schedule.trim() } : {}), ...(o.variableGroup.trim() ? { variableGroup: o.variableGroup.trim() } : {}), ...(o.pool.trim() ? { pool: o.pool.trim() } : {}), ...(o.teamFolder.trim() ? { teamFolder: o.teamFolder.trim() } : {}), save });
-            setR(x); if (save) message.success(`Wrote ${x.file}`);
+            setR(x); setFresh(true); if (save) message.success(`Wrote ${x.file}`);
         } catch (e) { message.error(errText(e)); }
+        finally { if (save) saving.current = false; }
     }, [file, o, message, fields.problem]);
+    const copyProblem = fields.problem ?? (!r || !fresh ? 'the pipeline is being prepared for these settings.' : null);
     React.useEffect(() => { if (open) void build(); }, [open, build]);
     return (
         <>
             <Button size="small" onClick={() => setOpen(true)}>Pipeline</Button>
             <Modal open={open} title="Azure DevOps load-test pipeline" width={820} onCancel={() => setOpen(false)}
-                footer={[<Button key="c" onClick={() => { void navigator.clipboard.writeText(r?.yaml ?? ''); message.success('Copied'); }}>Copy</Button>, <Button key="s" type="primary" disabled={!!fields.problem} title={fields.problem ?? undefined} onClick={() => void build(true)}>Save to the repository</Button>]}>
+                footer={[<Tooltip key="c" title={copyProblem ? `Cannot be copied yet: ${copyProblem}` : undefined}><Button disabled={!!copyProblem} onClick={() => { if (copyProblem || !r) return; void navigator.clipboard.writeText(r.yaml).then(() => message.success('Copied'), () => message.error('The browser did not allow copying: select the text and copy it.')); }}>Copy</Button></Tooltip>, <Button key="s" type="primary" disabled={!!fields.problem} title={fields.problem ?? undefined} onClick={() => void build(true)}>Save to the repository</Button>]}>
                 <FieldProblems value={fields.report}><Space direction="vertical" style={{ width: '100%' }}>
                     <Space wrap>
                         <NumField size="small" min={1} max={50} value={o.generators} onChange={(v) => v !== undefined && setO((x) => ({ ...x, generators: v }))} addonBefore="generators" width={160} label="Load generators" />
@@ -408,7 +420,8 @@ function PipelineButton({ file }: { file: string }) {
                         <Input size="small" className="mono" style={{ width: 170 }} value={o.teamFolder} onChange={(e) => setO({ ...o, teamFolder: e.target.value })} placeholder="team results folder" aria-label="Team folder" />
                     </Space>
                     {r?.secretNames.length ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>Secrets it reads (put them in the variable group): {r.secretNames.join(', ')}</Typography.Text> : null}
-                    <pre className="mono" style={{ maxHeight: 420, overflow: 'auto', fontSize: 11.5, background: 'var(--cs-code-bg, #f6f8fa)', padding: 10 }}>{r?.yaml ?? ''}</pre>
+                    <pre className="mono" style={{ maxHeight: 420, overflow: 'auto', fontSize: 11.5, background: 'var(--cs-code-bg, #f6f8fa)', padding: 10, opacity: fields.problem ? 0.45 : 1 }} aria-label="Pipeline YAML">{r?.yaml ?? ''}</pre>
+                    {fields.problem && r && <Typography.Text type="secondary" style={{ fontSize: 12 }}>Shown for the last valid settings: put the field right to see (and copy) the pipeline for yours.</Typography.Text>}
                     {r && <Typography.Text type="secondary" style={{ fontSize: 12 }}>Saved as {r.file}: commit it, then create the pipeline from it in Azure DevOps.</Typography.Text>}
                 </Space></FieldProblems>
             </Modal>
@@ -469,17 +482,18 @@ function RunSummary({ id }: { id: string }) {
 }
 
 /** Two runs of a scenario side by side: verdict, measures with their change and meaning, transactions, both over time, reports. */
-function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[]; a?: string; b?: string }) {
+function CompareView({ file, runs, a, b, routeBase }: { file: string; runs: LoadRunInfoDef[]; a?: string; b?: string; /** The comparison's address: its tab is added. */ routeBase: string[] }) {
     const { message } = App.useApp();
     const list = runs.filter((r) => r.scenario === file && r.state === 'finished' && r.summary).sort((x, y) => y.startedAt.localeCompare(x.startedAt));
     const ids = { a: a ?? list[1]?.id, b: b ?? list[0]?.id };
     const [c, setC] = React.useState<LoadCompareDef | null>(null);
-    const [tab, setTab] = useRememberedTab('perf-compare', 'overview');
+    const once = useInFlight();
+    const [tab, setTab] = useRouteTab('perf-compare', 'overview', ['overview', 'charts', 'tx'], c ? routeBase : null);
     React.useEffect(() => { setC(null); if (ids.a && ids.b && ids.a !== ids.b) void api.loadCompare(ids.a, ids.b).then(setC, (e) => message.error(errText(e))); }, [ids.a, ids.b, message]);
     if (list.length < 2) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="This scenario needs at least two finished runs to compare." />;
     const pick = (k: 'a' | 'b', v: string) => navigate(['perf-compare', ...file.split('/'), '@', k === 'a' ? v : ids.a!, k === 'b' ? v : ids.b!]);
     const opts = list.map((r) => ({ value: r.id, label: `${new Date(r.startedAt).toLocaleString()} · ${r.env} · p95 ${ms(r.summary!.p95)}${r.baseline ? ' · baseline' : ''}` }));
-    const download = async (format: 'html' | 'pdf' | 'docx') => { try { const r = await api.loadReport(ids.a!, format, [ids.b!]); const el = document.createElement('a'); el.href = URL.createObjectURL(r.blob); el.download = r.name; el.click(); URL.revokeObjectURL(el.href); } catch (e) { message.error(errText(e)); } };
+    const download = (format: 'html' | 'pdf' | 'docx') => once.run('report', async () => { try { const r = await api.loadReport(ids.a!, format, [ids.b!]); const el = document.createElement('a'); el.href = URL.createObjectURL(r.blob); el.download = r.name; el.click(); URL.revokeObjectURL(el.href); } catch (e) { message.error(errText(e)); } });
     const vColor = (v: string) => (v === 'worse' || v === 'failing' ? '#cf222e' : v === 'better' ? '#1a7f37' : undefined);
     const xs = c ? [...new Set([...c.series, ...c.throughput].flatMap((s) => s.points.map((p) => p.t)))].sort((p, q) => p - q) : [];
     const values = (s: LoadCompareDef['series'][number]) => { const m = new Map(s.points.map((p) => [p.t, p.v])); return xs.map((x) => m.get(x) ?? NaN); };
@@ -490,13 +504,13 @@ function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[
                     <Row gutter={12} align="bottom">
                         <Col xs={24} sm={12} xxl={10}><Form.Item label="Run A (reference)"><Select value={ids.a} onChange={(v: string) => pick('a', v)} options={opts} aria-label="Run A" /></Form.Item></Col>
                         <Col xs={24} sm={12} xxl={10}><Form.Item label="Run B"><Select value={ids.b} onChange={(v: string) => pick('b', v)} options={opts} aria-label="Run B" /></Form.Item></Col>
-                        <Col xs={24} xxl={4}><Form.Item><Dropdown menu={{ items: [{ key: 'html', label: 'HTML report' }, { key: 'pdf', label: 'PDF report' }, { key: 'docx', label: 'Word document' }], onClick: ({ key }) => void download(key as 'html' | 'pdf' | 'docx') }}><Button size="small" icon={<DownloadOutlined />} disabled={!c}>Report</Button></Dropdown></Form.Item></Col>
+                        <Col xs={24} xxl={4}><Form.Item><Dropdown menu={{ items: [{ key: 'html', label: 'HTML report' }, { key: 'pdf', label: 'PDF report' }, { key: 'docx', label: 'Word document' }], onClick: ({ key }) => void download(key as 'html' | 'pdf' | 'docx') }}><Button size="small" icon={<DownloadOutlined />} disabled={!c} loading={once.busy('report')}>Report</Button></Dropdown></Form.Item></Col>
                     </Row>
                 </Form>
                 {ids.a === ids.b && <Alert type="info" showIcon message="Choose two different runs." />}
                 {c && <>
                     <StatusBanner status={c.comparison.status} headline={c.comparison.headline} answer={c.comparison.answer} />
-                    <Tabs size="small" className="ap-tabs" activeKey={shownTab(tab, ['overview', 'charts', 'tx'])} onChange={setTab} items={[
+                    <Tabs size="small" className="ap-tabs" activeKey={tab} onChange={setTab} items={[
                         { key: 'overview', label: 'Measures', children: <Space direction="vertical" size={12} style={{ width: '100%' }}>
                             <Table size="small" rowKey="label" pagination={false} dataSource={c.comparison.metrics} scroll={{ x: 800 }} columns={[
                                 { title: 'Measure', dataIndex: 'label', width: 170 },
@@ -512,7 +526,8 @@ function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[
                         </Row> },
                         { key: 'tx', label: <span>Transactions <Tag bordered={false}>{c.comparison.transactions.length}</Tag></span>, children: <Table size="small" rowKey={(t) => t.id ?? t.name} pagination={false} dataSource={c.comparison.transactions} columns={[
                             // Paired by the request (two requests may share a name: the number tells them apart).
-                            { title: 'Transaction', render: (_, t) => { const same = c.comparison.transactions.filter((x) => x.name === t.name); return same.length > 1 ? `${t.name} (${same.indexOf(t) + 1})` : t.name; } },
+                            // Numbered in collection order by the server, as on the run's page and in the reports.
+                            { title: 'Transaction', render: (_, t) => t.label ?? t.name },
                             { title: 'Errors A → B', width: 130, align: 'right', render: (_, t) => <span style={{ color: (t.bErrorRate ?? 0) > (t.aErrorRate ?? 0) ? '#cf222e' : undefined }}>{t.aErrorRate === undefined ? '—' : `${t.aErrorRate.toFixed(1)}%`} → {t.bErrorRate === undefined ? '—' : `${t.bErrorRate.toFixed(1)}%`}</span> },
                             { title: 'A: 95% within', width: 130, align: 'right', render: (_, t) => (t.verdict === 'new' ? '—' : ms(t.aP95)) },
                             { title: 'B: 95% within', width: 130, align: 'right', render: (_, t) => (t.verdict === 'gone' ? '—' : <b>{ms(t.bP95)}</b>) },
@@ -734,13 +749,20 @@ function Kpi({ label, value, tone }: { label: string; value: React.ReactNode; to
     return <div className="kpi"><b style={{ color: tone === 'bad' ? '#cf222e' : tone === 'good' ? '#1a7f37' : undefined }}>{value}</b><span>{label}</span></div>;
 }
 
-function Delta({ a, b, lowerIsBetter = true, unit = '' }: { a: number; b?: number; lowerIsBetter?: boolean; unit?: string }) {
-    if (b === undefined || !Number.isFinite(b) || b === 0) return null;
-    const d = ((a - b) / b) * 100;
-    if (Math.abs(d) < 1) return <Typography.Text type="secondary" style={{ fontSize: 11 }}> (same)</Typography.Text>;
-    const worse = lowerIsBetter ? d > 0 : d < 0;
-    return <Tooltip title={`Baseline: ${b}${unit}`}><span style={{ fontSize: 11, color: worse ? '#cf222e' : '#1a7f37' }}> {d > 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}{Math.abs(d).toFixed(0)}%</span></Tooltip>;
+/**
+ * This run's number (a) against an earlier one (b): ▲/▼ with the change, green when better, red when worse, "≈ same"
+ * within normal variation. The same rule as Compare (src/load/labels.ts changeVerdict), so one change gets one verdict.
+ */
+function Delta({ a, b, kind, unit = '', of = 'Baseline' }: { a: number; b?: number; kind: ChangeKind; unit?: string; of?: string }) {
+    if (b === undefined || !Number.isFinite(b) || !Number.isFinite(a)) return null;
+    const { verdict, pct, diff } = changeVerdict(b, a, kind);
+    const change = kind === 'errorRate' ? `${Math.abs(pct).toFixed(2)} pts` : `${Math.abs(pct).toFixed(0)}%`;
+    const tip = `${of}: ${b}${unit}. ${verdict === 'same' ? 'Within normal run-to-run variation' : verdict === 'better' ? 'Better' : 'Worse'} (${SAME_RULE_SHORT}).`;
+    const shows = kind === 'errorRate' ? Math.abs(pct) >= 0.005 : Math.round(Math.abs(pct)) >= 1;
+    if (verdict === 'same') return <Tooltip title={tip}><Typography.Text type="secondary" style={{ fontSize: 11 }}> (≈ same{shows ? `, ${diff > 0 ? '+' : '−'}${change}` : ''})</Typography.Text></Tooltip>;
+    return <Tooltip title={tip}><span style={{ fontSize: 11, color: verdict === 'worse' ? '#cf222e' : '#1a7f37' }} aria-label={`${verdict}, ${diff > 0 ? 'up' : 'down'} ${change}`}> {diff > 0 ? <ArrowUpOutlined /> : <ArrowDownOutlined />}{change} {verdict}</span></Tooltip>;
 }
+const SAME_RULE_SHORT = 'response times: under 10% or under 20 ms is the same; throughput: under 10%; errors: under 0.1 points';
 
 const TX_COLORS = ['#0969da', '#1a7f37', '#bf8700', '#8250df', '#cf222e', '#1b7c83', '#bc4c00', '#6e7781'];
 
@@ -800,6 +822,7 @@ function AnalysisPanel({ d, others, bare }: { d: LoadRunDetailDef; others: LoadR
     const [with_, setWith] = React.useState<string[]>([]);
     const [metric, setMetric] = React.useState<'p95' | 'avg' | 'throughput' | 'errors' | 'users'>('p95');
     const [ov, setOv] = React.useState<Array<{ id: string; label: string; points: Array<{ t: number; v: number }> }> | null>(null);
+    const once = useInFlight();
     const load = React.useCallback((r?: [number, number]) => api.loadAnalysis(d.id, r ? { from: r[0], to: r[1] } : undefined).then((x) => { setA(x); if (!r) setRange(x.steady ? [x.steady.from, x.steady.to] : null); }, (e) => message.error(errText(e))), [d.id, message]);
     React.useEffect(() => { void load(); }, [load]);
     React.useEffect(() => { if (!with_.length) { setOv(null); return; } void api.loadOverlay([d.id, ...with_], metric).then((x) => setOv(x.series), () => setOv(null)); }, [d.id, with_, metric]);
@@ -813,7 +836,7 @@ function AnalysisPanel({ d, others, bare }: { d: LoadRunDetailDef; others: LoadR
         ...(['avg', 'p50', 'p90', 'p95', 'p99'] as const).map((k) => ({ title: k === 'avg' ? 'Average' : k, render: (_: unknown, x: LoadRangeTx) => `${x[k]} ms`, align: 'right' as const })),
         { title: 'Req/s', render: (_: unknown, x: LoadRangeTx) => x.throughput.toFixed(1), align: 'right' as const },
     ];
-    const toggleBaseline = async () => { try { await api.loadSetBaseline(d.id, !a.isBaseline); message.success(a.isBaseline ? 'No longer the baseline' : 'This run is now the baseline of its scenario'); void load(range ?? undefined); } catch (e) { message.error(errText(e)); } };
+    const toggleBaseline = () => once.run('baseline', async () => { try { await api.loadSetBaseline(d.id, !a.isBaseline); message.success(a.isBaseline ? 'No longer the baseline' : 'This run is now the baseline of its scenario'); void load(range ?? undefined); } catch (e) { message.error(errText(e)); } });
     const body = (
             <Space direction="vertical" style={{ width: '100%' }} size={14}>
                 {a.intervals.length > 1 && <div>
@@ -861,6 +884,50 @@ function AnalysisPanel({ d, others, bare }: { d: LoadRunDetailDef; others: LoadR
     return bare ? body : <Collapse size="small" items={[{ key: 'a', label: <b>Analysis</b>, children: body }]} />;
 }
 
+/**
+ * A run's transactions. In a narrow panel (a 1024 px window) the columns that fit are shown (request, errors, average,
+ * 95%, per second; the count under the name) and the rest are in the row's tooltip, without a sideways scroll.
+ */
+function TxTable({ list, name, sel, onSel, base }: { list: LoadTx[]; name: (t: LoadTx) => string; sel: string | null; onSel: (id: string | null) => void; base: Map<string, LoadTx> }) {
+    const box = React.useRef<HTMLDivElement>(null);
+    const [w, setW] = React.useState(1200);
+    React.useEffect(() => {
+        const el = box.current; if (!el) return;
+        const ro = new ResizeObserver(() => setW(el.clientWidth || 1200)); ro.observe(el); setW(el.clientWidth || 1200);
+        return () => ro.disconnect();
+    }, []);
+    const narrow = w < 820;
+    const errCol = { title: 'Errors', dataIndex: 'errorRate', width: narrow ? 78 : 100, align: 'right' as const, render: (v: number, t: LoadTx) => <span style={{ color: v > 0 ? '#cf222e' : undefined }}>{v.toFixed(2)}%{base.get(t.id) && <Delta a={v} b={base.get(t.id)!.errorRate} kind="errorRate" unit="%" />}</span> };
+    const avgCol = { title: 'Avg', dataIndex: 'avg', width: narrow ? 72 : 100, align: 'right' as const, render: (v: number, t: LoadTx) => <>{ms(v)}{base.get(t.id) && <Delta a={v} b={base.get(t.id)!.avg} kind="time" unit=" ms" />}</> };
+    const p95Col = { title: '95%', dataIndex: 'p95', width: narrow ? 72 : 100, align: 'right' as const, render: (v: number, t: LoadTx) => <>{ms(v)}{base.get(t.id) && <Delta a={v} b={base.get(t.id)!.p95} kind="time" unit=" ms" />}</> };
+    const perSec = { title: narrow ? '/ s' : 'Per second', dataIndex: 'throughput', width: narrow ? 50 : 90, align: 'right' as const, render: (v: number) => v.toFixed(2) };
+    const columns = narrow ? [
+        // The whole name wraps (its number, "(2)", is what tells two requests apart: never cut off).
+        { title: 'Request', dataIndex: 'name', render: (_: string, t: LoadTx) => <Tooltip title={`${name(t)}: ${t.count.toLocaleString()} requests · 50% ${ms(t.p50)} · 90% ${ms(t.p90)} · 99% ${ms(t.p99)} · max ${ms(t.max)}`}><div style={{ minWidth: 0 }}><div style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{name(t)}</div><Typography.Text type="secondary" style={{ fontSize: 11 }}>{t.count.toLocaleString()} requests</Typography.Text></div></Tooltip> },
+        errCol, avgCol, p95Col, perSec,
+    ] : [
+        { title: 'Request', dataIndex: 'name', width: 190, fixed: 'left' as const, ellipsis: { showTitle: true }, render: (_: string, t: LoadTx) => name(t) },
+        { title: 'Count', dataIndex: 'count', width: 70, align: 'right' as const, render: (v: number) => v.toLocaleString() },
+        errCol, avgCol,
+        { title: '50%', dataIndex: 'p50', width: 80, align: 'right' as const, render: ms },
+        { title: '90%', dataIndex: 'p90', width: 80, align: 'right' as const, render: ms },
+        p95Col,
+        { title: '99%', dataIndex: 'p99', width: 80, align: 'right' as const, render: ms },
+        { title: 'Max', dataIndex: 'max', width: 80, align: 'right' as const, render: ms },
+        perSec,
+        { title: 'Where the time goes', key: 'phases', width: 200, render: (_: unknown, t: LoadTx) => (t.phases ? <PhaseBar p={t.phases} /> : null) },
+    ];
+    return (
+        <div ref={box}>
+            <Table<LoadTx> size="small" rowKey="id" pagination={false} dataSource={list} tableLayout="fixed" scroll={narrow ? undefined : { x: 1100 }}
+                rowClassName={(t) => (t.id === sel ? 'ant-table-row-selected' : '')}
+                onRow={(t) => ({ onClick: () => onSel(t.id === sel ? null : t.id), style: { cursor: 'pointer' } })}
+                expandable={{ rowExpandable: (t) => t.topErrors.length > 0, expandedRowRender: (t) => <TxErrors t={t} />, columnWidth: narrow ? 32 : undefined }}
+                columns={columns} />
+        </div>
+    );
+}
+
 function RunView({ id, runs, onChanged }: { id: string; runs: LoadRunInfoDef[]; onChanged: () => void }) {
     const { message, modal } = App.useApp();
     const [d, setD] = React.useState<LoadRunDetailDef | null>(null);
@@ -868,8 +935,12 @@ function RunView({ id, runs, onChanged }: { id: string; runs: LoadRunInfoDef[]; 
     const [baseId, setBaseId] = React.useState<string | undefined>();
     const [base, setBase] = React.useState<LoadRunDetailDef | null>(null);
     const [txSel, setTxSel] = React.useState<string | null>(null);
-    const [tab, setTab] = useRememberedTab('perf-run', 'summary');
+    // A second click on Stop, Share, a load step or a download while the first is on its way is ignored.
+    const once = useInFlight();
     const load = React.useCallback(() => api.loadRun(id).then(setD).catch((e) => setErr(errText(e))), [id]);
+    // The tab is in the address (#/perf-runs/<id>/~tx) once the run is read (its tabs depend on its state).
+    const runTabs = [d?.state === 'finished' && !!d.result && 'summary', 'charts', !!(d?.result ?? d?.live)?.transactions.length && 'tx', d?.state === 'finished' && !!d.result && 'analysis'];
+    const [tab, setTab] = useRouteTab('perf-run', 'summary', runTabs, d && d.id === id ? ['perf-runs', id] : null);
     React.useEffect(() => { setD(null); setBaseId(undefined); void load(); }, [load]);
     const live = d && (d.state === 'running' || d.state === 'stopping');
     React.useEffect(() => { if (!live) return; const t = setInterval(() => { void load(); }, 1000); return () => clearInterval(t); }, [live, load]);
@@ -882,20 +953,23 @@ function RunView({ id, runs, onChanged }: { id: string; runs: LoadRunInfoDef[]; 
     const others = runs.filter((r) => r.id !== id && r.scenario === d.scenario && r.state === 'finished');
     const bt = base?.result?.total;
     const btx = new Map((base?.result?.transactions ?? []).map((t) => [t.id, t]));
-    const downloadJunit = async () => {
+    const downloadJunit = () => once.run('download', async () => {
         try {
             const xml = await api.loadJunit(id);
             const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([xml], { type: 'application/xml' })); a.download = `load-${id}.junit.xml`; a.click(); URL.revokeObjectURL(a.href);
         } catch (e) { message.error(errText(e)); }
-    };
-    const report = async (format: 'html' | 'xlsx' | 'pdf' | 'docx') => {
+    });
+    const report = (format: 'html' | 'xlsx' | 'pdf' | 'docx') => once.run('download', async () => {
         try { const r = await api.loadReport(id, format); const a = document.createElement('a'); a.href = URL.createObjectURL(r.blob); a.download = r.name; a.click(); URL.revokeObjectURL(a.href); }
         catch (e) { message.error(errText(e)); }
-    };
+    });
     // Per transaction: one chart for the chosen one, and the 95% of the busiest ones together.
     const txt = s?.txTimeline ?? {};
     const seconds = tl.map((x) => x.t);
     const fill = (id: string, key: 'p95' | 'avg') => { const m = new Map((txt[id] ?? []).map((p) => [p.t, p[key]])); let last = 0; return seconds.map((t) => { const v = m.get(t); if (v !== undefined) last = v; return last; }); };
+    // Two requests with the same name are numbered in collection order (as in Compare and the reports).
+    const txLabels = sameNameLabels(s?.transactions ?? []);
+    const txName = (t: { id: string; name: string }) => labelOf(txLabels, t);
     const busiest = [...(s?.transactions ?? [])].sort((a, b) => b.count - a.count).slice(0, TX_COLORS.length);
     const chosen = s?.transactions.find((t) => t.id === txSel) ?? null;
     const chosenTl = chosen ? txt[chosen.id] ?? [] : [];
@@ -911,18 +985,18 @@ function RunView({ id, runs, onChanged }: { id: string; runs: LoadRunInfoDef[]; 
                     <Typography.Text type="secondary">{d.project} / {d.env} · {new Date(d.startedAt).toLocaleString()}{d.result ? ` · ${dur(d.result.elapsed)}` : ''}</Typography.Text>
                     <div style={{ flex: 1 }} />
                     {live && d.state === 'running' && <Space.Compact>
-                        {[0.5, 1, 1.5, 2].map((f) => <Tooltip key={f} title={`Run at ${f * 100}% of the planned load from now`}><Button size="small" type={(d.loadFactor ?? 1) === f ? 'primary' : 'default'} onClick={async () => { try { await api.loadAdjust(id, f); void load(); } catch (e) { message.error(errText(e)); } }}>{f * 100}%</Button></Tooltip>)}
+                        {[0.5, 1, 1.5, 2].map((f) => <Tooltip key={f} title={`Run at ${f * 100}% of the planned load from now`}><Button size="small" type={(d.loadFactor ?? 1) === f ? 'primary' : 'default'} onClick={() => void once.run('adjust', async () => { try { await api.loadAdjust(id, f); void load(); } catch (e) { message.error(errText(e)); } })}>{f * 100}%</Button></Tooltip>)}
                     </Space.Compact>}
-                    {live && <Button danger icon={<StopOutlined />} disabled={d.state === 'stopping'} onClick={async () => { try { await api.loadStop(id); void load(); } catch (e) { message.error(errText(e)); } }}>Stop</Button>}
+                    {live && <Button danger icon={<StopOutlined />} disabled={d.state === 'stopping'} loading={once.busy('stop')} onClick={() => void once.run('stop', async () => { try { await api.loadStop(id); void load(); } catch (e) { message.error(errText(e)); } })}>Stop</Button>}
                     {d.state === 'finished' && <>
                         {others.length > 0 && <Select size="small" allowClear placeholder="Compare with an earlier run" style={{ width: 260 }} value={baseId} onChange={setBaseId}
                             options={others.map((r) => ({ value: r.id, label: `${new Date(r.startedAt).toLocaleString()} · p95 ${r.summary?.p95 ?? '?'} ms` }))} />}
                         <Dropdown menu={{ items: [{ key: 'html', label: 'HTML report (charts, errors; to share or print)' }, { key: 'pdf', label: 'PDF report' }, { key: 'docx', label: 'Word document' }, { key: 'xlsx', label: 'Excel workbook (all numbers, timelines)' }, { type: 'divider' }, { key: 'junit', label: 'JUnit XML (one test per service level, for a pipeline)' }],
                             onClick: ({ key }) => (key === 'junit' ? void downloadJunit() : void report(key as 'html' | 'xlsx' | 'pdf' | 'docx')) }}>
-                            <Button size="small" icon={<DownloadOutlined />}>Report</Button>
+                            <Button size="small" icon={<DownloadOutlined />} loading={once.busy('download')}>Report</Button>
                         </Dropdown>
                         {others.length > 0 && <Button size="small" onClick={() => navigate(['perf-compare', ...d.scenario.split('/'), '@', others[0].id, id])}>Compare with…</Button>}
-                        <Button size="small" onClick={async () => { try { const t = await api.loadShare(id); message.success(`Shared with the team: ${t.file}`); } catch (e) { message.error(errText(e)); } }}>Share with the team</Button>
+                        <Button size="small" loading={once.busy('share')} onClick={() => void once.run('share', async () => { try { const t = await api.loadShare(id); message.success(`Shared with the team: ${t.file}`); } catch (e) { message.error(errText(e)); } })}>Share with the team</Button>
                         <Dropdown menu={{ items: [{ key: 'del', danger: true, icon: <DeleteOutlined />, label: 'Delete this run…' }], onClick: () => modal.confirm({ title: 'Delete this run?', content: 'Its results are removed from this computer.', okButtonProps: { danger: true }, onOk: async () => { try { await api.loadDeleteRun(id); onChanged(); navigate(['perf-runs']); } catch (e) { message.error(errText(e)); } } }) }}><Button size="small" aria-label="More">⋯</Button></Dropdown>
                     </>}
                 </div>
@@ -938,11 +1012,11 @@ function RunView({ id, runs, onChanged }: { id: string; runs: LoadRunInfoDef[]; 
                 {live && <Progress percent={Math.min(100, Math.round(((s?.elapsed ?? 0) / d.duration) * 100))} format={() => `${dur(s?.elapsed ?? 0)} of ${dur(d.duration)}`} />}
                 {s && <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap' }}>
                     <Kpi label="Users now" value={s.users} />
-                    <Kpi label="Requests" value={<>{s.total.count.toLocaleString()}{bt && <Delta a={s.total.count} b={bt.count} lowerIsBetter={false} />}</>} />
-                    <Kpi label="Requests / s" value={<>{s.total.throughput.toFixed(1)}{bt && <Delta a={s.total.throughput} b={bt.throughput} lowerIsBetter={false} />}</>} />
-                    <Kpi label="Errors" value={<>{s.total.errorRate.toFixed(2)}%{bt && <Delta a={s.total.errorRate} b={bt.errorRate} unit="%" />}</>} tone={s.total.errorRate > 0 ? 'bad' : 'good'} />
-                    <Kpi label="Average" value={<>{ms(s.total.avg)}{bt && <Delta a={s.total.avg} b={bt.avg} unit=" ms" />}</>} />
-                    <Kpi label="95% under" value={<>{ms(s.total.p95)}{bt && <Delta a={s.total.p95} b={bt.p95} unit=" ms" />}</>} />
+                    <Kpi label="Requests" value={<>{s.total.count.toLocaleString()}{bt && <Delta a={s.total.count} b={bt.count} kind="rate" />}</>} />
+                    <Kpi label="Requests / s" value={<>{s.total.throughput.toFixed(1)}{bt && <Delta a={s.total.throughput} b={bt.throughput} kind="rate" />}</>} />
+                    <Kpi label="Errors" value={<>{s.total.errorRate.toFixed(2)}%{bt && <Delta a={s.total.errorRate} b={bt.errorRate} kind="errorRate" unit="%" />}</>} tone={s.total.errorRate > 0 ? 'bad' : 'good'} />
+                    <Kpi label="Average" value={<>{ms(s.total.avg)}{bt && <Delta a={s.total.avg} b={bt.avg} kind="time" unit=" ms" />}</>} />
+                    <Kpi label="95% under" value={<>{ms(s.total.p95)}{bt && <Delta a={s.total.p95} b={bt.p95} kind="time" unit=" ms" />}</>} />
                     <Kpi label="99% under" value={ms(s.total.p99)} />
                     <Kpi label="Iterations" value={s.iterations.toLocaleString()} />
                     {s.dropped !== undefined && <Kpi label="Dropped" value={s.dropped.toLocaleString()} tone={s.dropped > 0 ? 'bad' : 'good'} />}
@@ -951,7 +1025,7 @@ function RunView({ id, runs, onChanged }: { id: string; runs: LoadRunInfoDef[]; 
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>User paths:</Typography.Text>
                     {pops.map((p, i) => <Tag key={p.name} bordered={false} color={['purple', 'blue', 'green', 'gold', 'magenta', 'cyan'][i % 6]}>{p.name} · {p.share}%{live ? ` · ${p.users} user${p.users === 1 ? '' : 's'} now` : ''}</Tag>)}
                 </div>}
-                <Tabs size="small" className="ap-tabs" activeKey={shownTab(tab, [d.state === 'finished' && !!d.result && 'summary', 'charts', !!s?.transactions.length && 'tx', d.state === 'finished' && !!d.result && 'analysis'])} onChange={setTab} items={[
+                <Tabs size="small" className="ap-tabs" activeKey={tab} onChange={setTab} items={[
                     ...(d.state === 'finished' && d.result ? [{ key: 'summary', label: <span>Summary{d.result.slas.length ? <Tag bordered={false} color={d.result.slas.every((x) => x.pass) ? 'success' : 'error'} style={{ marginInlineStart: 4 }}>{d.result.slas.filter((x) => x.pass).length}/{d.result.slas.length}</Tag> : null}</span>, children: <Space direction="vertical" size={14} style={{ width: '100%' }}>
                         <RunSummary id={d.id} />
                         {d.result && d.result.slas.length > 0 && <div>
@@ -967,7 +1041,7 @@ function RunView({ id, runs, onChanged }: { id: string; runs: LoadRunInfoDef[]; 
                             <Col xs={24} xl={12}><LineChart title="Response time" x={tl.map((x) => x.t)} xMax={d.duration} series={[{ name: 'Average', color: C.avg, values: tl.map((x) => x.avg), unit: ' ms' }, { name: '95%', color: C.p95, values: tl.map((x) => x.p95), unit: ' ms' }, { name: 'Errors/s', color: C.errors, values: tl.map((x) => x.errors), right: true }]} /></Col>
                         </Row>}
                         {tl.length > 1 && busiest.length > 1 && Object.keys(txt).length > 0 && <LineChart title="95% response time by transaction" x={seconds} xMax={d.duration}
-                            series={busiest.map((t, i) => ({ name: t.name, color: TX_COLORS[i], values: fill(t.id, 'p95'), unit: ' ms' }))} />}
+                            series={busiest.map((t, i) => ({ name: txName(t), color: TX_COLORS[i], values: fill(t.id, 'p95'), unit: ' ms' }))} />}
                         {(s?.monitors ?? []).some((m) => m.points.length > 1 || m.error) && <div>
                             <SectionTitle>Monitoring</SectionTitle>
                             <Row gutter={[16, 8]}>{(s?.monitors ?? []).map((m) => (
@@ -982,28 +1056,12 @@ function RunView({ id, runs, onChanged }: { id: string; runs: LoadRunInfoDef[]; 
                     </Space> },
                     ...(s && s.transactions.length > 0 ? [{ key: 'tx', label: <span>Transactions<Tag bordered={false} style={{ marginInlineStart: 4 }}>{s.transactions.length}</Tag></span>, children: <div>
                     <Typography.Text type="secondary" className="ap-note" style={{ marginBottom: 6 }}>Click a row for its chart; open a row with errors for what was sent and received.</Typography.Text>
-                    <Table<LoadTx> size="small" rowKey="id" pagination={false} dataSource={s.transactions} scroll={{ x: 1100 }}
-                        rowClassName={(t) => (t.id === txSel ? 'ant-table-row-selected' : '')}
-                        onRow={(t) => ({ onClick: () => setTxSel(t.id === txSel ? null : t.id), style: { cursor: 'pointer' } })}
-                        expandable={{ rowExpandable: (t) => t.topErrors.length > 0, expandedRowRender: (t) => <TxErrors t={t} /> }}
-                        columns={[
-                            { title: 'Request', dataIndex: 'name', width: 240, fixed: 'left', ellipsis: { showTitle: true } },
-                            { title: 'Count', dataIndex: 'count', width: 80, align: 'right', render: (v: number) => v.toLocaleString() },
-                            { title: 'Errors', dataIndex: 'errorRate', width: 100, align: 'right', render: (v: number, t) => <span style={{ color: v > 0 ? '#cf222e' : undefined }}>{v.toFixed(2)}%{btx.get(t.id) && <Delta a={v} b={btx.get(t.id)!.errorRate} />}</span> },
-                            { title: 'Avg', dataIndex: 'avg', width: 100, align: 'right', render: (v: number, t) => <>{ms(v)}{btx.get(t.id) && <Delta a={v} b={btx.get(t.id)!.avg} />}</> },
-                            { title: '50%', dataIndex: 'p50', width: 80, align: 'right', render: ms },
-                            { title: '90%', dataIndex: 'p90', width: 80, align: 'right', render: ms },
-                            { title: '95%', dataIndex: 'p95', width: 100, align: 'right', render: (v: number, t) => <>{ms(v)}{btx.get(t.id) && <Delta a={v} b={btx.get(t.id)!.p95} />}</> },
-                            { title: '99%', dataIndex: 'p99', width: 80, align: 'right', render: ms },
-                            { title: 'Max', dataIndex: 'max', width: 80, align: 'right', render: ms },
-                            { title: 'Per second', dataIndex: 'throughput', width: 90, align: 'right', render: (v: number) => v.toFixed(1) },
-                            { title: 'Where the time goes', key: 'phases', width: 200, render: (_, t) => (t.phases ? <PhaseBar p={t.phases} /> : null) },
-                        ]} />
+                    <TxTable list={s.transactions} name={txName} sel={txSel} onSel={setTxSel} base={btx} />
                     {chosen && <div style={{ marginTop: 12 }}>
                         {chosenTl.length > 1 ? <Row gutter={16}>
-                            <Col xs={24} xl={12}><LineChart title={`${chosen.name}: response time`} x={chosenTl.map((p) => p.t)} xMax={d.duration} series={[{ name: 'Average', color: C.avg, values: chosenTl.map((p) => p.avg), unit: ' ms' }, { name: '95%', color: C.p95, values: chosenTl.map((p) => p.p95), unit: ' ms' }]} /></Col>
-                            <Col xs={24} xl={12}><LineChart title={`${chosen.name}: per second`} x={chosenTl.map((p) => p.t)} xMax={d.duration} series={[{ name: 'Requests/s', color: C.rps, values: chosenTl.map((p) => p.n) }, { name: 'Errors/s', color: C.errors, values: chosenTl.map((p) => p.e), right: true }]} /></Col>
-                        </Row> : <Typography.Text type="secondary">{chosen.name} ran in fewer than two seconds of the run: not enough for a chart.</Typography.Text>}
+                            <Col xs={24} xl={12}><LineChart title={`${txName(chosen)}: response time`} x={chosenTl.map((p) => p.t)} xMax={d.duration} series={[{ name: 'Average', color: C.avg, values: chosenTl.map((p) => p.avg), unit: ' ms' }, { name: '95%', color: C.p95, values: chosenTl.map((p) => p.p95), unit: ' ms' }]} /></Col>
+                            <Col xs={24} xl={12}><LineChart title={`${txName(chosen)}: per second`} x={chosenTl.map((p) => p.t)} xMax={d.duration} series={[{ name: 'Requests/s', color: C.rps, values: chosenTl.map((p) => p.n) }, { name: 'Errors/s', color: C.errors, values: chosenTl.map((p) => p.e), right: true }]} /></Col>
+                        </Row> : <Typography.Text type="secondary">{txName(chosen)} ran in fewer than two seconds of the run: not enough for a chart.</Typography.Text>}
                     </div>}
                     </div> }] : []),
                     ...(d.state === 'finished' && d.result ? [{ key: 'analysis', label: 'Analysis', children: <AnalysisPanel d={d} others={others} bare /> }] : []),
@@ -1048,10 +1106,10 @@ function Trends({ file, runs, name }: { file: string; runs: LoadRunInfoDef[]; na
             <Space direction="vertical" size={14} style={{ width: '100%' }}>
                 <Space wrap><Typography.Text strong style={{ fontSize: 15 }}>{name} <Typography.Text type="secondary" style={{ fontWeight: 400 }}>· {list.length} run{list.length === 1 ? '' : 's'}</Typography.Text></Typography.Text>{switcher}</Space>
                 <div style={{ display: 'flex', gap: 22, flexWrap: 'wrap' }}>
-                    <Kpi label="Latest: 95% under" value={<>{ms(last.p95)}{prev && <Delta a={last.p95} b={prev.p95} unit=" ms" />}</>} />
-                    <Kpi label="Latest: average" value={<>{ms(last.avg)}{prev && <Delta a={last.avg} b={prev.avg} unit=" ms" />}</>} />
-                    <Kpi label="Latest: errors" value={<>{last.errorRate.toFixed(2)}%{prev && <Delta a={last.errorRate} b={prev.errorRate} unit="%" />}</>} tone={last.errorRate > 0 ? 'bad' : 'good'} />
-                    <Kpi label="Latest: requests / s" value={<>{last.throughput.toFixed(1)}{prev && <Delta a={last.throughput} b={prev.throughput} lowerIsBetter={false} />}</>} />
+                    <Kpi label="Latest: 95% under" value={<>{ms(last.p95)}{prev && <Delta a={last.p95} b={prev.p95} kind="time" unit=" ms" of="The run before" />}</>} />
+                    <Kpi label="Latest: average" value={<>{ms(last.avg)}{prev && <Delta a={last.avg} b={prev.avg} kind="time" unit=" ms" of="The run before" />}</>} />
+                    <Kpi label="Latest: errors" value={<>{last.errorRate.toFixed(2)}%{prev && <Delta a={last.errorRate} b={prev.errorRate} kind="errorRate" unit="%" of="The run before" />}</>} tone={last.errorRate > 0 ? 'bad' : 'good'} />
+                    <Kpi label="Latest: requests / s" value={<>{last.throughput.toFixed(1)}{prev && <Delta a={last.throughput} b={prev.throughput} kind="rate" of="The run before" />}</>} />
                     <Kpi label="Passed" value={`${list.filter((r) => r.passed).length} of ${list.length}`} />
                 </div>
                 {list.length > 1 && <Row gutter={16}>
@@ -1087,7 +1145,9 @@ const SAME_RULE = '≈ same means normal run-to-run variation. Response times (a
 /** Performance: Scenarios (edit, run), Runs (live and results), Trends (one scenario across runs). */
 export function Performance({ mode }: { mode: PerfMode }) {
     const { message, modal } = App.useApp();
-    const route = useRoute();
+    // The inner tab is the address's last segment (…/~load); the rest names the scenario, run or comparison.
+    const fullRoute = useRoute();
+    const route = splitTab(fullRoute).rest;
     const here = route[0] === KEY[mode];
     const [meta, setMeta] = React.useState<Awaited<ReturnType<typeof api.loadScenarios>> | null>(null);
     const [runs, setRuns] = React.useState<LoadRunInfoDef[]>([]);
@@ -1104,7 +1164,9 @@ export function Performance({ mode }: { mode: PerfMode }) {
     const problem = !open ? null : curveInvalid ? 'the custom curve has mistakes (shown under it).' : !open.sc.name.trim() ? 'give the scenario a name.' : fields.problem ?? validPolicy(open.sc.policy);
     /** Discard: the saved scenario again (no changes), or nothing for one never saved. */
     const discard = () => { const f = open?.file; if (f) { setOpenRaw((o) => (o ? { ...o, dirty: false } : o)); void loadFile(f); } else setOpen(null); };
-    useUnsaved('load-scenario', !!open?.dirty, `the load scenario "${open?.sc.name ?? ''}"`, { lostOnLeave: true, save: problem ? undefined : async () => !!(await save()), discard });
+    useUnsaved('load-scenario', !!open?.dirty, `the load scenario "${open?.sc.name ?? ''}"`, { lostOnLeave: true, save: problem ? undefined : async () => !!(await save()), discard,
+        // Back/Forward between this scenario's tabs keeps its changes.
+        keeps: (to) => !!open?.file && to[0] === 'perf' && splitTab(to).rest.slice(1).join('/') === open.file });
     useAgentContext('perf', { project, environment: env, scenario: open?.file ?? null, scenarioName: open?.sc.name, unsaved: open?.dirty });
     const [reqs, setReqs] = React.useState<Req[] | null>(null);
     const [err, setErr] = React.useState<string | null>(null);
@@ -1176,7 +1238,8 @@ export function Performance({ mode }: { mode: PerfMode }) {
         } catch (e) {
             // Saved in another tab (or by a teammate) since it was opened here: Reload or Overwrite, never silently lost.
             if (isChangedElsewhere(e) && open.file && !force) {
-                const how = await askChangedElsewhere(modal, `The scenario "${open.sc.name}"`);
+                // Named by its file: the copy saved elsewhere may have another name than the one edited here.
+                const how = await askChangedElsewhere(modal, `The scenario file ${open.file}`);
                 if (how === 'overwrite') return saveNow(true);
                 if (how === 'reload') { await loadFile(open.file); message.info('Showing the version saved elsewhere.'); }
                 return null;
@@ -1296,7 +1359,7 @@ export function Performance({ mode }: { mode: PerfMode }) {
             </div>
             <div className="panel" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                 {mode === 'runs' ? (runId ? <RunView key={runId} id={runId} runs={runs} onChanged={() => void refresh()} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description={projectRuns.length ? 'Select a run' : 'No load test has run in this project yet. Start one from Scenarios.'} />)
-                    : mode === 'compare' ? (compareFile ? <CompareView key={compareFile} file={compareFile} runs={runs} a={compareIds.a} b={compareIds.b} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="Select a scenario to compare two of its runs" />)
+                    : mode === 'compare' ? (compareFile ? <CompareView key={compareFile} file={compareFile} runs={runs} a={compareIds.a} b={compareIds.b} routeBase={route} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="Select a scenario to compare two of its runs" />)
                     : mode === 'trends' ? (trendFile ? <Trends file={trendFile} runs={runs} name={scenarios.find((x) => x.file === trendFile)?.name ?? trendFile} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="Select a scenario to see how its results changed from run to run" />)
                     : open ? <>
                         <div className="toolbar">
@@ -1307,7 +1370,7 @@ export function Performance({ mode }: { mode: PerfMode }) {
                             {open.file && <PipelineButton file={open.file} />}
                             {open.file && <Dropdown menu={{ items: [{ key: 'd', danger: true, label: 'Delete this scenario…' }], onClick: () => modal.confirm({ title: `Delete "${open.sc.name}"?`, okButtonProps: { danger: true }, onOk: async () => { try { await api.loadDeleteScenario(open.file!); setOpen(null); navigate(['perf']); await refresh(); } catch (e) { message.error(errText(e)); } } }) }}><Button size="small">⋯</Button></Dropdown>}
                         </div>
-                        <FieldProblems value={fields.report}><ScenarioEditor project={project} env={env} sc={open.sc} onChange={(sc) => setOpen({ ...open, sc, dirty: true })} reqs={reqs} collections={collections} onCollection={() => setReqs(null)} browserPaths={paths} bpath={bpath} /></FieldProblems>
+                        <FieldProblems value={fields.report}><ScenarioEditor routeBase={open.file ? ['perf', ...open.file.split('/')] : null} project={project} env={env} sc={open.sc} onChange={(sc) => setOpen({ ...open, sc, dirty: true })} reqs={reqs} collections={collections} onCollection={() => setReqs(null)} browserPaths={paths} bpath={bpath} /></FieldProblems>
                     </>
                     : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description={<>Load-test your APIs: virtual users run the requests of an API collection<br />under a load policy, and the results are checked against your service levels.</>} />}
             </div>

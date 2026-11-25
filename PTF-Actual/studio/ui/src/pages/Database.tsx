@@ -656,6 +656,7 @@ export function Database() {
         const put = () => { setEd({ file: null, text, dirty: true }); setResult(null); setError(null); navigate(home(), true); setScript(null); setInserting(false); };
         if (ed.dirty && ed.text.trim()) modal.confirm({ title: 'Replace the current query?', okText: 'Replace', onOk: put }); else put();
     };
+    const savingFile = React.useRef(false);
     const stop = async () => { if (environment) { await api.dbStop(project, environment).catch(() => {}); } };
     const save = async (asNew = false) => {
         if (!project) return;
@@ -684,7 +685,13 @@ export function Database() {
                 return errText(e);
             }
         };
-        if (ed.file && !asNew) { const err = await doSave(); if (err) message.error(err); return; }
+        if (ed.file && !asNew) {
+            // A double click on Save: one request (two refused saves would stack two questions).
+            if (savingFile.current) return;
+            savingFile.current = true;
+            try { const err = await doSave(); if (err) message.error(err); } finally { savingFile.current = false; }
+            return;
+        }
         // The name dialog stays open with the problem shown (a name in use, too long), keeping what was typed.
         let name = '';
         const body = (problem: string | null) => <Space direction="vertical" style={{ width: '100%' }}>

@@ -11,6 +11,7 @@ import { describePolicy } from './policy';
 import { Block, docx } from '../core/docx';
 import { loadPlaywright } from './browserPath';
 import { compareRuns, explainRun } from './explain';
+import { labelOf, sameNameLabels } from './labels';
 
 const esc = (s: unknown) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const COLORS = ['#2563eb', '#d97706', '#16a34a', '#7c3aed'];
@@ -33,14 +34,11 @@ export function verdictText(verdict: string, change: string): string {
 /** Transactions of runs paired by their request's id (two requests may share a name); the label tells same names apart. */
 function txRows(done: LoadRunDetail[]): Array<{ key: string; label: string; of: (r: LoadRunDetail) => NonNullable<LoadRunDetail['result']>['transactions'][number] | undefined }> {
     const key = (t: { id?: string; name: string }) => t.id || `name:${t.name}`;
-    const seen = new Map<string, string>();
-    for (const r of done) for (const t of r.result!.transactions) if (!seen.has(key(t))) seen.set(key(t), t.name);
-    const count = new Map<string, number>();
-    return [...seen].map(([k, name]) => {
-        const n = (count.get(name) ?? 0) + 1; count.set(name, n);
-        const same = [...seen.values()].filter((x) => x === name).length;
-        return { key: k, label: same > 1 ? `${name} (${n})` : name, of: (r: LoadRunDetail) => r.result!.transactions.find((t) => key(t) === k) };
-    });
+    const all = done.flatMap((r) => r.result!.transactions);
+    const labels = sameNameLabels(all);
+    const seen = new Set<string>();
+    return all.filter((t) => { const k = key(t); if (seen.has(k)) return false; seen.add(k); return true; })
+        .map((t) => ({ key: key(t), label: labelOf(labels, t), of: (r: LoadRunDetail) => r.result!.transactions.find((x) => key(x) === key(t)) }));
 }
 const label = (r: LoadRunDetail, i: number) => `Run ${String.fromCharCode(65 + i)} (${when(r)})`;
 
@@ -151,6 +149,7 @@ export async function loadReportDocx(run: LoadRunDetail, projectRoot?: string): 
     const r = run.result;
     if (!r) throw new Error('The run has no results.');
     const d = run.definition;
+    const txLabels = sameNameLabels(r.transactions);
     const tl = r.timeline, x = tl.map((s) => s.t);
     const figs: Array<{ caption: string; svg: string }> = [
         { caption: 'Users and requests per second', svg: svgChart('Users and requests per second', x, [{ name: 'Users', color: '#7c3aed', values: tl.map((s) => s.users) }, { name: 'Requests per second', color: '#16a34a', values: tl.map((s) => s.requests), right: true }]) },
@@ -188,12 +187,12 @@ export async function loadReportDocx(run: LoadRunDetail, projectRoot?: string): 
         shade: (k) => (!r.slas[k].pass ? 'FFF5F5' : r.slas[k].level === 'warning' ? 'FFFBEB' : undefined) });
     if ((r.alerts ?? []).length) blocks.push({ kind: 'heading', level: 2, text: 'Alerts' }, { kind: 'table', header: ['At', 'Level', 'What'], widths: [1, 1, 6], rows: r.alerts.map((a) => [mmss(a.t), a.level, a.message]) });
     blocks.push({ kind: 'heading', level: 2, text: 'Transactions' }, { kind: 'table', header: ['Transaction', 'Count', 'Errors', 'Avg', '90%', '95%', '99%', 'Max', 'Per second'], widths: [3, 1, 1, 1, 1, 1, 1, 1, 1],
-        rows: r.transactions.map((t) => [t.name, String(t.count), pct(t.errorRate), String(t.avg), String(t.p90), String(t.p95), String(t.p99), String(t.max), t.throughput.toFixed(2)]),
+        rows: r.transactions.map((t) => [labelOf(txLabels, t), String(t.count), pct(t.errorRate), String(t.avg), String(t.p90), String(t.p95), String(t.p99), String(t.max), t.throughput.toFixed(2)]),
         shade: (k) => (r.transactions[k].errors ? 'FFF5F5' : undefined) }, { kind: 'para', muted: true, runs: 'Times in milliseconds.' });
     const errs = r.transactions.filter((t) => t.errors);
     if (errs.length) {
         blocks.push({ kind: 'heading', level: 2, text: 'Errors' });
-        for (const t of errs) blocks.push({ kind: 'heading', level: 3, text: `${t.name} — ${t.errors} error${t.errors === 1 ? '' : 's'}` }, ...t.topErrors.map((e) => ({ kind: 'para' as const, runs: [{ text: `${e.count}× `, bold: true }, { text: e.message }] })));
+ for (const t of errs) blocks.push({ kind: 'heading', level: 3, text: `${labelOf(txLabels, t)} — ${t.errors} error${t.errors === 1 ? '' : 's'}` }, ...t.topErrors.map((e) => ({ kind: 'para' as const, runs: [{ text: `${e.count}× `, bold: true }, { text: e.message }] })));
     }
     if (pics.length > 2) { blocks.push({ kind: 'heading', level: 2, text: 'Monitoring' }); pics.slice(2).forEach((p, i) => blocks.push({ kind: 'image', ...p, caption: figs[i + 2].caption })); }
     blocks.push({ kind: 'para', muted: true, runs: `Think time ${d.thinkTime.min}–${d.thinkTime.max} ms${d.pacing ? `, pacing ${d.pacing} ms` : ''}, timeout ${d.timeout} ms. Secrets are masked in the error details.` });

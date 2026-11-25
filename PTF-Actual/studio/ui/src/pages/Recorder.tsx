@@ -146,7 +146,6 @@ export function Recorder() {
     const reviewDirty = reviewEdited && reviewSig !== savedSig;
     // "Discard" (leaving the screen): the review goes back to the recording as saved.
     const discardReview = () => { if (cur) setName(cur.name || nameFromUrl(cur.url)); setLabels({}); setValues({}); setLocators({}); setSavedSig(null); };
-    useUnsaved('recorder-review', reviewDirty, `the review of the recording "${name || 'recording'}"`, { lostOnLeave: true, discard: discardReview });
     /** Opening another recording (or starting one) while the review has changes not made into a test: asked first. */
     const unlessDirty = (go: () => void) => {
         if (!reviewDirty) { go(); return; }
@@ -195,18 +194,21 @@ export function Recorder() {
         } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
     };
 
-    const save = async (run: boolean, confirmed = false, force = false) => {
-        if (!request || !preview) return;
-        if (preview.review?.blocked && !force) {
-            modal.confirm({ title: 'Save although the framework check found problems?', width: 560, content: findingsSummary(preview.review), okText: 'Save anyway', okButtonProps: { danger: true }, onOk: () => save(run, confirmed, true) });
-            return;
+    /**
+     * Make the review into a test. True once saved. `leaving`: from "Leave without saving?" (the App's dialog), so
+     * the saved feature is not opened in the editor (the person is going to another screen).
+     */
+    const save = async (run: boolean, confirmed = false, force = false, leaving = false): Promise<boolean> => {
+        if (!request || !preview) return false;
+        const review = preview.review;
+        if (review?.blocked && !force) {
+            return new Promise<boolean>((resolve) => modal.confirm({ title: 'Save although the framework check found problems?', width: 560, content: findingsSummary(review), okText: 'Save anyway', okButtonProps: { danger: true }, onOk: async () => resolve(await save(run, confirmed, true, leaving)), onCancel: () => resolve(false) }));
         }
         const updates = preview.files.filter((f) => f.change === 'update');
         if (updates.length && !confirmed) {
-            modal.confirm({ title: 'Update existing files?', width: 560, okText: 'Save',
+            return new Promise<boolean>((resolve) => modal.confirm({ title: 'Update existing files?', width: 560, okText: 'Save',
                 content: <div>These files of the project are updated (see each file's tab):<ul>{updates.map((f) => <li key={f.path}><Typography.Text code>{f.path}</Typography.Text> {f.kind === 'feature' ? 'replaced by this recording' : f.kind === 'data' ? 'rows kept, new columns added' : f.kind === 'config' ? 'keys added' : f.kind === 'other' ? 'shared helpers added' : 'new members added at the end of the class'}</li>)}</ul></div>,
-                onOk: () => save(run, true, force) });
-            return;
+                onOk: async () => resolve(await save(run, true, force, leaving)), onCancel: () => resolve(false) }));
         }
         setBusy(true);
         try {
@@ -216,11 +218,15 @@ export function Recorder() {
             setSavedSig(reviewSig);
             message.success(`Saved: ${r.files.filter((f) => f.change === 'new').length} new and ${r.files.filter((f) => f.change === 'update').length} updated files${r.secretsSaved.length ? `, ${r.secretsSaved.length} Studio secret${r.secretsSaved.length === 1 ? '' : 's'}` : ''}.`);
             if (run && r.feature) { const x = await api.startRun({ project: r.project, env: r.env, features: [r.feature], workers: 1 }); showRun(x.id); }
-            else if (r.feature) openInEditor(r.feature);
+            else if (r.feature && !leaving) openInEditor(r.feature);
             api.dbConnections().then((m) => setMeta({ projects: m.projects, environments: m.environments })).catch(() => {});
-            setPreview(await api.recPreview(request));
-        } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
+            api.recPreview(request).then(setPreview).catch(() => undefined);
+            return true;
+        } catch (e) { setErr(errText(e)); if (leaving) message.error(errText(e)); return false; } finally { setBusy(false); }
     };
+    // The screen's Save, offered by "Leave without saving?" when it could be pressed here.
+    const canSave = !!cur && !!preview?.rows.length && cur.state !== 'recording' && !!name.trim();
+    useUnsaved('recorder-review', reviewDirty, `the review of the recording "${name || 'recording'}"`, { lostOnLeave: true, save: canSave ? () => save(false, false, false, true) : undefined, discard: discardReview });
 
     // Record from a step of a recording made in the Studio (its steps up to there done again first).
     const canContinue = !!cur && cur.engine === 'studio' && cur.id !== 'pasted' && cur.state !== 'recording' && !!preview?.rows.length;

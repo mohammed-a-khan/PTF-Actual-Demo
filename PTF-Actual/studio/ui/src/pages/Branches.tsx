@@ -29,6 +29,11 @@ export function tagNameProblem(name: string, branchNames: string[], tagNames: st
 type BranchPart = 'local' | 'remote' | 'tags' | 'remotes';
 const PARTS: readonly BranchPart[] = ['local', 'remote', 'tags', 'remotes'];
 
+/** The tag name git gets for what was typed: spaces (inside) become "-", as for a branch. */
+export function tagFinalName(typed: string): string {
+    return typed.trim().replace(/\s+/g, '-');
+}
+
 /** The name git gets for what was typed (the same clean-up as New branch): no spaces or ~ ^ : ? * [ \, no "..". */
 export function branchFinalName(typed: string): string {
     return typed.trim().replace(/\s+/g, '-').replace(/[~^:?*[\\\x00-\x1f\x7f]+/g, '').replace(/\.{2,}/g, '.').replace(/\/{2,}/g, '/').replace(/@\{/g, '@').replace(/^[-./]+/, '').replace(/(\.lock|[./])+$/, '');
@@ -79,11 +84,26 @@ export function Branches() {
     };
     // Create tag (button or Enter), once even when clicked twice.
     const tagBusy = React.useRef(false);
-    const tagProblem = newTag ? tagNameProblem(newTag.name.trim(), branches.filter((b) => !b.remote).map((b) => b.name), tags.map((t) => t.name)) : null;
+    // What was typed stays in the field; the name Git gets (spaces as "-") is shown under it when it differs.
+    const tagFinal = newTag ? tagFinalName(newTag.name) : '';
+    const tagProblem = newTag ? tagNameProblem(tagFinal, branches.filter((b) => !b.remote).map((b) => b.name), tags.map((t) => t.name)) : null;
     const createTag = () => {
-        if (!newTag || !newTag.name.trim() || tagProblem || tagBusy.current) return;
+        if (!newTag || !tagFinal || tagProblem || tagBusy.current) return;
         tagBusy.current = true;
-        void run(`Created tag ${newTag.name}`, () => api.createTag(newTag.name.trim(), newTag.rev, newTag.message)).then((ok) => { tagBusy.current = false; if (ok) setNewTag(null); });
+        void run(`Created tag ${tagFinal}`, () => api.createTag(tagFinal, newTag.rev, newTag.message)).then((ok) => { tagBusy.current = false; if (ok) setNewTag(null); });
+    };
+    // Push a tag once even when clicked twice (the second click would race the first and fail with a lock error).
+    const [pushingTag, setPushingTag] = React.useState<string | null>(null);
+    const pushingTagRef = React.useRef(false);
+    const pushTag = async (name: string) => {
+        if (pushingTagRef.current) return;
+        pushingTagRef.current = true; setPushingTag(name);
+        try {
+            const r = await api.pushTag(name);
+            message.success(r.already ? `Tag ${name} is already on the remote` : `Pushed tag ${name}`);
+            loadTags();
+        } catch (e) { modal.error({ title: `Could not push tag ${name}`, content: errText(e) }); }
+        finally { pushingTagRef.current = false; setPushingTag(null); }
     };
 
     // Rename (button or Enter), once even when clicked twice; the dialog stays open if Git refuses.
@@ -187,7 +207,10 @@ export function Branches() {
                 locale={{ emptyText: q ? 'No branch matches.' : 'No branches.' }}
                 columns={[
                     { title: 'Branch', dataIndex: 'name', render: (n: string, b) => <Space><Typography.Text strong={b.current}>{n}</Typography.Text>{b.current && <Tag color="magenta">current</Tag>}</Space> },
-                    { title: 'Tracks', dataIndex: 'upstream', render: (u: string | null) => u ? <Tag color="orange">{u}</Tag> : <Typography.Text type="secondary">not published</Typography.Text> },
+                    { title: 'Tracks', dataIndex: 'upstream', render: (u: string | null, b) => !u ? <Typography.Text type="secondary">not published</Typography.Text>
+                        // The remote branch was deleted: say so here (not only in the header), struck through.
+                        : b.upstreamGone ? <Tooltip title={`${u} was deleted on the remote. Push publishes ${b.name} again; or delete this branch if it was merged.`}><Space size={4} wrap><Tag style={{ textDecoration: 'line-through' }}>{u}</Tag><Typography.Text type="warning">deleted on the remote</Typography.Text></Space></Tooltip>
+                        : <Tag color="orange">{u}</Tag> },
                     { title: 'Last commit', dataIndex: 'sha', width: 120, render: (s: string) => <Typography.Text code>{s.slice(0, 7)}</Typography.Text> },
                     { title: '', width: 220, render: (_: unknown, b) => (
                         <Space>
@@ -226,14 +249,17 @@ export function Branches() {
             <Table<TagInfo> size="small" rowKey="name" dataSource={tags.filter(match)} pagination={false}
                 locale={{ emptyText: q && tags.length ? 'No tag matches.' : 'No tags yet. Tags mark a version, e.g. the code a regression run used.' }}
                 columns={[
-                    { title: 'Tag', dataIndex: 'name', render: (n: string, t) => <Space><Tag color="gold">{n}</Tag>{t.annotated && <Typography.Text type="secondary">{t.message}</Typography.Text>}</Space> },
+                    { title: 'Tag', dataIndex: 'name', render: (n: string, t) => <Space wrap><Tag color="gold">{n}</Tag>
+                        {t.onRemote === 'yes' && <Tooltip title="This tag is on the remote (pushed)"><Tag icon={<CloudUploadOutlined />} color="green">on the remote</Tag></Tooltip>}
+                        {t.onRemote === 'different' && <Tooltip title="The remote has a tag of this name that points elsewhere: pushing is refused. Delete one of them, or use another name."><Tag color="red">differs on the remote</Tag></Tooltip>}
+                        {t.annotated && <Typography.Text type="secondary">{t.message}</Typography.Text>}</Space> },
                     { title: 'Commit', dataIndex: 'sha', width: 120, render: (s: string) => <Typography.Text code>{s.slice(0, 7)}</Typography.Text> },
                     { title: 'Created', dataIndex: 'date', width: 200, render: (d: string) => d ? new Date(d).toLocaleString() : '' },
                     { title: '', width: 230, render: (_: unknown, t) => (
                         <Space>
-                            <Tooltip title={remoteCount === 0 ? 'This repository has no remote to push to: add one under Remotes.' : undefined}>
-                                <Button size="small" icon={<CloudUploadOutlined />} disabled={remoteCount === 0} onClick={() => run(`Pushed tag ${t.name}`, () => api.pushTag(t.name))}>Push</Button>
-                            </Tooltip>
+                            {t.onRemote !== 'yes' && <Tooltip title={remoteCount === 0 ? 'This repository has no remote to push to: add one under Remotes.' : undefined}>
+                                <Button size="small" icon={<CloudUploadOutlined />} disabled={remoteCount === 0 || (!!pushingTag && pushingTag !== t.name)} loading={pushingTag === t.name} onClick={() => void pushTag(t.name)}>Push</Button>
+                            </Tooltip>}
                             <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={() => {
                                 let alsoRemote = false;
                                 // The remote option only when there is a remote (else the tag exists on this computer only).
@@ -257,10 +283,10 @@ export function Branches() {
                     <Input id="cs-branches-rename" autoFocus value={rename?.to} maxLength={250} onPressEnter={() => void doRename()} onChange={(e) => { setRenameErr(null); if (rename) setRename({ ...rename, to: e.target.value.replace(/^\s+/, '') }); }} />
                 </Form.Item></Form>
             </Modal>
-            <Modal open={!!newTag} title="New tag" okText="Create tag" onCancel={() => setNewTag(null)} okButtonProps={{ disabled: !newTag?.name.trim() || !!tagProblem }}
+            <Modal open={!!newTag} title="New tag" okText="Create tag" onCancel={() => setNewTag(null)} okButtonProps={{ disabled: !tagFinal || !!tagProblem }}
                 onOk={createTag}>
                 {newTag && <Form layout="vertical">
-                    <Form.Item label="Tag name" help={tagProblem ?? 'For example v1.4.0 or regression-2026-11'} validateStatus={tagProblem ? 'error' : undefined} htmlFor="cs-branches-tag-name"><Input id="cs-branches-tag-name" value={newTag.name} onChange={(e) => setNewTag({ ...newTag, name: e.target.value.replace(/^\s+/, '').replace(/\s+/g, '-') })} onPressEnter={createTag} autoFocus /></Form.Item>
+                    <Form.Item label="Tag name" help={<div style={{ overflowWrap: 'anywhere' }}>{tagProblem ?? (tagFinal && tagFinal !== newTag.name.trim() ? <Typography.Text type="warning">It will be created as <Typography.Text code>{tagFinal}</Typography.Text> (tag names have no spaces).</Typography.Text> : 'For example v1.4.0 or regression-2026-11')}</div>} validateStatus={tagProblem ? 'error' : undefined} htmlFor="cs-branches-tag-name"><Input id="cs-branches-tag-name" value={newTag.name} onChange={(e) => setNewTag({ ...newTag, name: e.target.value.replace(/^\s+/, '') })} onPressEnter={createTag} autoFocus /></Form.Item>
                     <Form.Item label="At" htmlFor="cs-branches-at"><Input id="cs-branches-at" value={newTag.rev} onChange={(e) => setNewTag({ ...newTag, rev: e.target.value })} className="mono" /></Form.Item>
                     <Form.Item label="Description (optional — makes an annotated tag)" htmlFor="cs-branches-description-optional-makes-an-"><Input.TextArea id="cs-branches-description-optional-makes-an-" value={newTag.message} onChange={(e) => setNewTag({ ...newTag, message: e.target.value })} /></Form.Item>
                 </Form>}

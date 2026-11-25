@@ -92,7 +92,9 @@ function FindingCard({ f, mode, onFixed }: { f: Finding; mode: 'commit' | 'push'
 
 export function ScanGate({ mode, blocked, message: commitMessage, amend, signoff, proceed: proceedFn, onClose, onDone }: ScanGateProps) {
     const { message } = App.useApp();
-    const { refresh } = useStudio();
+    const { refresh, status } = useStudio();
+    // The branch the commit was meant for (as when the review opened): a commit that would land elsewhere is refused.
+    const branchAtOpen = React.useRef(status?.branch ?? null);
     const [state, setState] = React.useState<Blocked>(blocked);
     const [reason, setReason] = React.useState('');
     const [busy, setBusy] = React.useState(false);
@@ -109,7 +111,7 @@ export function ScanGate({ mode, blocked, message: commitMessage, amend, signoff
         setBusy(true); setError(null);
         try {
             const ov = withOverride ? { reason, digest: state.digest } : undefined;
-            const res = proceedFn ? await proceedFn(ov) : mode === 'commit' ? await api.commit(commitMessage ?? '', ov, { amend, allowRewritePushed: amend, signoff }) : await api.push(ov);
+            const res = proceedFn ? await proceedFn(ov) : mode === 'commit' ? await api.commit(commitMessage ?? '', ov, { amend, allowRewritePushed: amend, signoff, expectBranch: branchAtOpen.current }) : await api.push(ov);
             if (res.status === 'ok') {
                 if (mode === 'push') message.success('Pushed');
                 onDone(res.status === 'ok' ? res.sha : undefined);

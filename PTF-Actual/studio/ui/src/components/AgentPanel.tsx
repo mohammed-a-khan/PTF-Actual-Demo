@@ -88,6 +88,13 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
             try {
                 const r = await api.agentEvents(current, seq.current);
                 if (stop) return;
+                // Not a conversation (a mistyped or old address, or deleted elsewhere): said, and not shown as an empty one.
+                if (r.known === false && !r.events.length && seq.current === 0) {
+                    message.warning(`Conversation "${current.slice(0, 80)}" not found: it may have been deleted.`);
+                    try { localStorage.removeItem('cs-studio-agent-session'); } catch { /* private mode */ }
+                    setCurrent(null);
+                    return;
+                }
                 if (r.events.length) { seq.current = r.events[r.events.length - 1].seq; setEvents((x) => [...x, ...r.events]); }
                 setBusy(r.busy);
                 if (r.usage) setUsage(r.usage);

@@ -66,7 +66,7 @@ export const CALLS: CatalogCall[] = [
   "area": "git",
   "method": "POST",
   "path": "/api/git/commit",
-  "args": "message: string, override?: Override, opts?: { amend?: boolean; allowRewritePushed?: boolean; signoff?: boolean }",
+  "args": "message: string, override?: Override, opts?: { amend?: boolean; allowRewritePushed?: boolean; signoff?: boolean; expectBranch?: string | null }",
   "body": "{ message, override, ...opts }",
   "result": "GateResult"
  },
@@ -85,7 +85,16 @@ export const CALLS: CatalogCall[] = [
   "method": "POST",
   "path": "/api/git/pull",
   "args": "",
-  "result": "MergeResult & { mode?: string }"
+  "result": "MergeResult & { mode?: string; localEdits?: boolean; pulled?: number; stash?: string }"
+ },
+ {
+  "name": "pullAutostash",
+  "area": "git",
+  "method": "POST",
+  "path": "/api/git/pull/autostash",
+  "args": "action: 'undo' | 'finish'",
+  "body": "{ action }",
+  "result": "RepoStatus & { message: string }"
  },
  {
   "name": "pullMode",
@@ -229,7 +238,7 @@ export const CALLS: CatalogCall[] = [
   "method": "POST",
   "path": "/api/git/fetch",
   "args": "",
-  "result": "{ ok: boolean }"
+  "result": "FetchResult"
  },
  {
   "name": "createBranch",
@@ -344,7 +353,7 @@ export const CALLS: CatalogCall[] = [
   "method": "POST",
   "path": "/api/git/operation/abort",
   "args": "",
-  "result": "RepoStatus"
+  "result": "RepoStatus & { message?: string }"
  },
  {
   "name": "skipOp",
@@ -528,7 +537,7 @@ export const CALLS: CatalogCall[] = [
   "path": "/api/git/tags/push",
   "args": "name: string",
   "body": "{ name }",
-  "result": "{ ok: boolean }"
+  "result": "{ ok: boolean; already?: boolean }"
  },
  {
   "name": "deleteBranch",
@@ -572,7 +581,7 @@ export const CALLS: CatalogCall[] = [
   "method": "POST",
   "path": "/api/git/merge/abort",
   "args": "",
-  "result": "RepoStatus"
+  "result": "RepoStatus & { message?: string }"
  },
  {
   "name": "conflict",
@@ -3119,7 +3128,9 @@ export const TYPES: Record<string, string> = {
  "RunConfigDef": "export interface RunConfigDef { name: string; description?: string; request: RunRequest }",
  "FileStatus": "export interface FileStatus { path: string; origPath?: string; staged: string; unstaged: string; untracked: boolean; conflicted: boolean }",
  "GitRemote": "export interface GitRemote { name: string; fetchUrl: string; pushUrl: string }",
- "RepoStatus": "export interface RepoStatus { branch: string | null; head: string | null; upstream: string | null; ahead: number; behind: number; files: FileStatus[]; hasConflicts: boolean; mergeMessage?: string; operation: 'merge' | 'cherry-pick' | 'revert' | 'rebase' | 'am' | null;\n    /** The upstream branch was deleted on the server. */\n    upstreamGone?: boolean;\n    /** During a rebase Git's \"ours\" is the branch being rebased onto and \"theirs\" is your commit. */\n    sidesSwapped?: boolean; rebaseBranch?: string | null; rebaseOnto?: string | null }",
+ "RepoStatus": "export interface RepoStatus { branch: string | null; head: string | null; upstream: string | null; ahead: number; behind: number; files: FileStatus[]; hasConflicts: boolean; mergeMessage?: string; operation: 'merge' | 'cherry-pick' | 'revert' | 'rebase' | 'am' | null;\n    /** The upstream branch was deleted on the server. */\n    upstreamGone?: boolean;\n    /** During a rebase Git's \"ours\" is the branch being rebased onto and \"theirs\" is your commit. */\n    sidesSwapped?: boolean; rebaseBranch?: string | null; rebaseOnto?: string | null;\n    /** A pull went through but your uncommitted edits (put aside and back) clash with the pulled changes: no merge is running. */\n    pullStash?: PullStash }",
+ "PullStash": "export interface PullStash { stash: string; ref: string; before: string; after: string; branch: string | null; upstream: string | null; at: string; headMoved: boolean }",
+ "FetchResult": "export interface FetchResult { ok: boolean; newCommits: number; added: string[]; updated: string[]; removed: string[]; behind: number; upstream: string | null; branch: string | null }",
  "BranchInfo": "export interface BranchInfo { name: string; current: boolean; upstream: string | null; sha: string; remote: boolean; upstreamGone?: boolean }",
  "LogEntry": "export interface LogEntry { sha: string; authorName: string; authorEmail: string; date: string; subject: string }",
  "Finding": "export interface Finding { id: string; ruleId: string; type: string; reason: string; confidence: 'high' | 'medium'; file: string; line: number; column: number; preview: string; fingerprint: string; suggestedName?: string }",
@@ -3150,7 +3161,7 @@ export const TYPES: Record<string, string> = {
  "CommitDetails": "export interface CommitDetails { sha: string; parents: string[]; authorName: string; authorEmail: string; date: string; message: string; files: NameStatus[]; pushed: boolean; branches: string[] }",
  "HistoryQuery": "export interface HistoryQuery { all?: boolean; text?: string; field?: 'message' | 'author' | 'path'; firstParent?: boolean; noMerges?: boolean; limit?: number; refs?: string }",
  "StashEntry": "export interface StashEntry { index: number; ref: string; sha: string; message: string; date: string }",
- "TagInfo": "export interface TagInfo { name: string; sha: string; date: string; message: string; annotated: boolean }",
+ "TagInfo": "export interface TagInfo { name: string; sha: string; date: string; message: string; annotated: boolean; /** On the remote: yes, no, or a different tag of that name; missing when the remote could not be asked. */ onRemote?: 'yes' | 'no' | 'different' }",
  "Hunk": "export interface Hunk { id: string; header: string; lines: string[]; added: number; removed: number; newStart: number }",
  "Backup": "export interface Backup { ref: string; sha: string; date: string; subject: string }",
  "FileData": "export interface FileData { path: string; content?: string; hash: string; size: number; eol?: string; binary: boolean }",
@@ -3205,7 +3216,7 @@ export const TYPES: Record<string, string> = {
  "ApiSendResult": "export interface ApiSendResult {\n    prepared: { method: string; url: string; headers: Record<string, string>; body?: string; missing: string[] };\n    error?: string;\n    response?: { status: number; statusText: string; headers: Record<string, string>; body: string; truncated: boolean; size: number; timeMs: number; redirects: string[]; timings?: ApiTimings; bodyBase64?: string; remote?: string; tls?: ApiTlsInfo };\n    checks?: ApiCheckResult[];\n    extracted?: Array<{ variable: string; value?: string; found: boolean }>;\n    /** Test data values that took their defaults (the row left them empty); a body that is not valid JSON. */\n    notes?: string[];\n    /** The cookies Send keeps for this collection (after this response). */\n    cookies?: ApiCookie[];\n    /** console.log of the request's scripts. */\n    logs?: Array<{ level: 'log' | 'info' | 'warn' | 'error'; text: string }>;\n    /** Values the scripts set (pm.environment / pm.collectionVariables / pm.variables). */\n    scriptVars?: Record<string, string>;\n    /** pm.visualizer.set: the page the template made (shown in a sandboxed frame). */\n    visualizer?: string;\n}",
  "ApiRunStep": "export interface ApiRunStep { iteration: number; requestId: string; name: string; method: string; url: string; status?: number; timeMs?: number; size?: number; passed: boolean; error?: string; checks: Array<{ pass: boolean; message: string; actual?: string }>; logs?: string[] }",
  "ApiRunChange": "export type ApiRunChange = 'fixed' | 'broke' | 'same' | 'still failing' | 'new' | 'gone';",
- "ApiRunComparison": "export interface ApiRunComparison {\n    a: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>; b: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;\n    rows: Array<{ key: string; name: string; requestId?: string; method?: string; url?: string; position?: number; iteration: number; change: ApiRunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;\n    counts: Record<ApiRunChange, number>; avgDelta: number;\n}",
+ "ApiRunComparison": "export interface ApiRunComparison {\n    a: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>; b: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;\n    rows: Array<{ key: string; name: string; /** Numbered when two requests share the name, in the run's order. */ label?: string; requestId?: string; method?: string; url?: string; position?: number; iteration: number; change: ApiRunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;\n    counts: Record<ApiRunChange, number>; avgDelta: number;\n}",
  "ApiMonitorDef": "export interface ApiMonitorDef { id: string; name: string; file: string; env: string; everyMinutes: number; enabled: boolean; webhookSecret?: string; alertOn: 'failure' | 'change'; last?: { at: string; runId: string; passed: boolean; failed: number; requests: number; alert?: string } }",
  "ApiFlow": "export interface ApiFlow {\n    nodes: Array<{ id: string; name: string; method: string; folder: string; scenario: number; column: number; row: number; saves: string[]; uses: string[] }>;\n    edges: Array<{ from: string; to: string; kind: 'value' | 'jump' | 'order'; label: string }>;\n    scenarios: Array<{ index: number; name: string; requests: string[] }>;\n    unresolved: Array<{ request: string; name: string }>;\n}",
  "ApiRunJob": "export interface ApiRunJob { id: string; collection: string; name: string; project: string; env: string; startedAt: string; endedAt?: string; state: 'running' | 'stopped' | 'finished'; iterations: number; total: number; steps: ApiRunStep[]; summary: { requests: number; passed: number; failed: number; checks: number; checksPassed: number; avgMs: number } }",
@@ -3229,7 +3240,7 @@ export const TYPES: Record<string, string> = {
  "LoadInsightsDef": "export interface LoadInsightsDef { summary: string; insights: Array<{ kind: 'anomaly' | 'capacity' | 'cause' | 'note'; severity: 'info' | 'warning' | 'critical'; title: string; detail: string; at?: { from: number; to: number } }> }",
  "LoadRating": "export type LoadRating = 'good' | 'acceptable' | 'poor' | 'critical' | 'info';",
  "LoadExplainDef": "export interface LoadExplainDef { status: 'green' | 'amber' | 'red'; headline: string; answer: string; metrics: Array<{ key: string; label: string; value: string; meaning: string; rating: LoadRating; basis: string }>;\n    behaviour: { verdict: string; text: string }; risks: string[]; recommendations: string[]; glossary: Array<{ term: string; text: string }> }",
- "LoadCompareDef": "export interface LoadCompareDef {\n    a: { id: string; name: string; env: string; startedAt: string; passed: boolean; maxUsers: number; duration: number }; b: LoadCompareDef['a'];\n    comparison: { status: 'green' | 'amber' | 'red'; headline: string; answer: string; metrics: Array<{ label: string; a: string; b: string; change: string; verdict: string; meaning: string }>;\n        transactions: Array<{ id?: string; name: string; aP95: number; bP95: number; changePct: number; aErrorRate?: number; bErrorRate?: number; verdict: string; why?: string }>; findings: string[]; notes: string[] };\n    series: Array<{ id: string; label: string; points: Array<{ t: number; v: number }> }>; throughput: LoadCompareDef['series'];\n}",
+ "LoadCompareDef": "export interface LoadCompareDef {\n    a: { id: string; name: string; env: string; startedAt: string; passed: boolean; maxUsers: number; duration: number }; b: LoadCompareDef['a'];\n    comparison: { status: 'green' | 'amber' | 'red'; headline: string; answer: string; metrics: Array<{ label: string; a: string; b: string; change: string; verdict: string; meaning: string }>;\n        transactions: Array<{ id?: string; name: string; /** Numbered when two requests share the name, in collection order. */ label?: string; aP95: number; bP95: number; changePct: number; aErrorRate?: number; bErrorRate?: number; verdict: string; why?: string }>; findings: string[]; notes: string[] };\n    series: Array<{ id: string; label: string; points: Array<{ t: number; v: number }> }>; throughput: LoadCompareDef['series'];\n}",
  "BugActionDef": "export interface BugActionDef { kind: 'file' | 'update' | 'reopen' | 'resolve'; tag: string; bug?: number; title?: string; from?: string; to?: string; comment?: string; why: string }",
  "PrNewDef": "export interface PrNewDef { branch: string; repositories: Array<{ id: string; name: string; defaultBranch?: string }>; repository: string | null; target?: string; commits?: number; pushed?: boolean; title?: string; description?: string; workItems?: number[]; reviewers?: Array<{ id: string; name: string; email?: string; team: string }>; problem?: string }",
  "LoadSlaProfileInfo": "export interface LoadSlaProfileInfo { file: string; name: string; description?: string; slas: number; interval?: number; error?: string }",

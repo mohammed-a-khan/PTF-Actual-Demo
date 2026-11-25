@@ -526,3 +526,40 @@ test('reports: old framework reports are repaired when served (chart code needs 
     assert.equal(repairFrameworkReport(out), out, 'repairing twice changes nothing');
     assert.equal(repairFrameworkReport('<p>plain</p>'), '<p>plain</p>');
 });
+
+test('QA6: a secret value of only spaces is refused with a message', async () => {
+    for (const value of ['   ', '\t \n']) {
+        const r = await call('PUT', '/api/secrets', { body: { name: 'QA6_SPACES', value } });
+        assert.equal(r.status, 400);
+        assert.match(r.json.error ?? r.json.message ?? JSON.stringify(r.json), /only spaces/);
+    }
+    assert.equal((await call('GET', '/api/secrets')).json.some((s: { name: string }) => s.name === 'QA6_SPACES'), false);
+    // A value with spaces around real text is kept as typed.
+    assert.equal((await call('PUT', '/api/secrets', { body: { name: 'QA6_SPACES', value: ' pw ' } })).status, 200);
+    await call('DELETE', '/api/secrets?name=QA6_SPACES');
+});
+
+test('QA6: a commit names the branch the screen showed; another branch checked out is refused', async () => {
+    const st = (await call('GET', '/api/git/status')).json;
+    fs.writeFileSync(path.join(dir, 'qa6-branch.txt'), 'x\n');
+    await call('POST', '/api/git/stage', { body: { paths: ['qa6-branch.txt'] } });
+    const wrong = await call('POST', '/api/git/commit', { body: { message: 'qa6', expectBranch: 'some-other-branch' } });
+    assert.equal(wrong.status, 200);
+    assert.equal(wrong.json.status, 'rejected');
+    assert.match(wrong.json.message, new RegExp(`This tab shows some-other-branch but ${st.branch} is checked out now`));
+    const ok = await call('POST', '/api/git/commit', { body: { message: 'qa6', expectBranch: st.branch } });
+    assert.equal(ok.json.status, 'ok');
+});
+
+test('QA6: fetch answers with what arrived; abort with nothing running says so', async () => {
+    const f = await call('POST', '/api/git/fetch');
+    assert.equal(f.status, 200);
+    assert.equal(f.json.ok, true);
+    assert.equal(f.json.newCommits, 0);
+    assert.deepEqual(f.json.updated, []);
+    const a = await call('POST', '/api/git/operation/abort');
+    assert.equal(a.status, 200);
+    assert.equal(a.json.message, 'Nothing is in progress.');
+    assert.equal((await call('POST', '/api/git/pull/autostash', { body: { action: 'undo' } })).status, 400);
+    assert.equal((await call('POST', '/api/git/pull/autostash', { body: { action: 'nope' } })).status, 400);
+});
