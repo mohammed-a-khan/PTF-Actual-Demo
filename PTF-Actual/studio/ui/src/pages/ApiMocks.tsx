@@ -165,22 +165,22 @@ export function ApiMocks() {
                         <Tabs size="small" className="ap-tabs" activeKey={shownTab(tab, ['routes', 'faults', 'log', 'settings'])} onChange={setTab} items={[
                             { key: 'routes', label: <span>Routes <Tag bordered={false}>{m.routes.length}</Tag></span>, children: <>
                                 <Typography.Text type="secondary" className="ap-note" style={{ marginBottom: 6 }}>A body can answer with the request's values: {'{{path.id}}'}, {'{{query.name}}'}, {'{{body.field}}'}.</Typography.Text>
-                                <Table<MockRouteDef> size="small" scroll={{ x: 520 }} pagination={false} rowKey={(_r, i) => String(i)} dataSource={m.routes}
+                                <Table<MockRouteDef> size="small" tableLayout="fixed" pagination={false} rowKey={(_r, i) => String(i)} dataSource={m.routes}
                                     columns={[
                                         { title: 'On', width: 56, render: (_v, r, i) => <Switch size="small" checked={r.enabled !== false} onChange={(on) => route(i, { enabled: on })} aria-label={`Serve ${r.method} ${r.path}`} /> },
-                                        { title: 'Route', width: 170, render: (_v, r) => routeLabel(r) },
-                                        { title: 'Status', width: 96, render: (_v, r, i) => <InputNumber size="small" min={100} max={599} style={{ width: 76 }} value={r.status} onChange={(v) => route(i, { status: Number(v ?? 200) })} aria-label={`Status of ${r.method} ${r.path}`} /> },
+                                        { title: 'Route', ellipsis: true, render: (_v, r) => <span title={`${r.method.toUpperCase()} ${r.path}`}>{routeLabel(r)}</span> },
+                                        { title: 'Status', width: 90, render: (_v, r, i) => <InputNumber size="small" min={100} max={599} style={{ width: 76 }} value={r.status} onChange={(v) => route(i, { status: Number(v ?? 200) })} aria-label={`Status of ${r.method} ${r.path}`} /> },
                                         { title: 'Body', width: 96, render: (_v, r, i) => <Button size="small" onClick={() => setEditBody({ i, text: r.body === undefined ? '' : typeof r.body === 'string' ? r.body : JSON.stringify(r.body, null, 2) })}>{r.body === undefined ? 'None' : 'Edit'}</Button> },
                                         { title: <Tooltip title="Other answers chosen by query, headers or body; or answers in turn (stateful)">Answers</Tooltip>, width: 130, render: (_v, r, i) => <Button size="small" onClick={() => setEditAnswers({ i, text: JSON.stringify({ sequence: !!r.sequence, responses: r.responses ?? [] }, null, 2) })}>{r.responses?.length ? `${r.responses.length} more${r.sequence ? ' · in turn' : ''}` : 'Add'}</Button> },
                                     ]} />
                             </> },
                             { key: 'faults', label: <span>Delays &amp; faults{m.routes.some((r) => (r.fault && r.fault.kind !== 'none') || r.delayMs) ? <Tag bordered={false} color="orange" style={{ marginInlineStart: 4 }}>{m.routes.filter((r) => (r.fault && r.fault.kind !== 'none') || r.delayMs).length}</Tag> : null}</span>, children: <>
                                 <Typography.Text type="secondary" className="ap-note" style={{ marginBottom: 6 }}>Test how the application copes: a slow answer, an error, a dropped connection, a body that does not parse.</Typography.Text>
-                                <Table<MockRouteDef> size="small" scroll={{ x: 520 }} pagination={false} rowKey={(_r, i) => String(i)} dataSource={m.routes}
+                                <Table<MockRouteDef> size="small" tableLayout="fixed" pagination={false} rowKey={(_r, i) => String(i)} dataSource={m.routes}
                                     columns={[
-                                        { title: 'Route', width: 170, render: (_v, r) => routeLabel(r) },
+                                        { title: 'Route', ellipsis: true, render: (_v, r) => <span title={`${r.method.toUpperCase()} ${r.path}`}>{routeLabel(r)}</span> },
                                         { title: <Tooltip title="Wait before every answer (ms)">Delay</Tooltip>, width: 110, render: (_v, r, i) => <InputNumber size="small" min={0} max={300000} step={100} style={{ width: 96 }} value={r.delayMs ?? 0} onChange={(v) => route(i, { delayMs: Number(v ?? 0) })} aria-label={`Delay of ${r.method} ${r.path}`} /> },
-                                        { title: 'Fault', width: 340, render: (_v, r, i) => {
+                                        { title: 'Fault', width: 230, render: (_v, r, i) => {
                                             const f = r.fault ?? { kind: 'none' as MockFaultKind };
                                             return <Space size={4} wrap>
                                                 <Select size="small" style={{ width: 110 }} value={f.kind} onChange={(k: MockFaultKind) => fault(i, { kind: k })} aria-label={`Fault of ${r.method} ${r.path}`}

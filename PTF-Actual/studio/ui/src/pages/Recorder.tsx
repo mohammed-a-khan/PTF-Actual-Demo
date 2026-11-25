@@ -5,6 +5,7 @@
  * Studio secrets. A Playwright script can also be pasted and converted.
  */
 import React from 'react';
+import type { Breakpoint } from 'antd/es/_util/responsiveObserver';
 import { Alert, App, AutoComplete, Button, Checkbox, Col, Collapse, Empty, Form, Input, Modal, Popover, Row, Select, Space, Table, Tabs, Tag, Tooltip, Typography, Popconfirm } from 'antd';
 import { BlockOutlined, CaretRightOutlined, DeleteOutlined, FileTextOutlined, PlusOutlined, ScissorOutlined, StopOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import { api, baseHashesOf, RecDataChoice, RecDataFileInfo, RecLocator, RecordingInfo, RecPreview, RecRow, RecValueMode } from '../api';
@@ -319,7 +320,7 @@ export function Recorder() {
                         </Typography.Text>}
                         {!!preview?.warnings.length && <Alert type="warning" showIcon message={<ul style={{ margin: 0, paddingLeft: 18 }}>{preview.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>} />}
                         {!cur.script?.trim() && cur.state === 'recording' && <Alert type="info" showIcon message="Waiting for the first action in the recorded browser…" />}
-                        {preview && <Table size="small" pagination={false} rowKey={(r) => String(r.index)} dataSource={preview.rows} scroll={{ x: 980, y: 'calc(100vh - var(--chrome) - 330px)' }} tableLayout="fixed"
+                        {preview && <Table size="small" pagination={false} rowKey={(r) => String(r.index)} dataSource={preview.rows} scroll={{ x: (window.innerWidth >= 1200 ? 860 : 560), y: 'calc(100vh - var(--chrome) - 330px)' }} tableLayout="fixed"
                             rowSelection={{ columnWidth: 32, selectedRowKeys: picked.map(String), onChange: (keys) => setPicked(keys.map(Number).sort((a, b) => a - b)), getCheckboxProps: (r) => ({ disabled: !!r.block || !!r.signIn, 'aria-label': `Step ${r.index + 1}` }) }}
                             columns={[
                                 { title: '#', width: 86, render: (_v, r) => <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><span className="item-id">{r.index + 1}</span>
@@ -327,13 +328,13 @@ export function Recorder() {
                                         <Button size="small" type="text" className="rec-from" icon={<VideoCameraOutlined />} aria-label={`Record from step ${r.index + 1}`} disabled={busy} onClick={() => void recordFrom(r.index)} /></Tooltip>}
                                     {r.scriptLine && cur.state !== 'recording' && <Popconfirm title={`Delete step ${r.index + 1}?`} description={r.line} okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => deleteStep(r)}>
                                         <Button size="small" type="text" danger className="rec-from" icon={<DeleteOutlined />} aria-label={`Delete step ${r.index + 1}`} /></Popconfirm>}</span> },
-                                { title: 'Page', width: 110, render: (_v, r, i) => pageStarts[i] !== undefined
+                                { title: 'Page', width: 110, responsive: ['xl'] as Breakpoint[], render: (_v, r, i) => pageStarts[i] !== undefined
                                     ? <Popover trigger="click" title="Page (one of the project's, or a new name)" content={<AutoComplete size="small" style={{ width: 240 }} autoFocus defaultValue={r.page} aria-label="Page name"
                                         options={(preview.existingPages ?? []).map((c) => ({ value: c.replace(/Page$/, '') }))} filterOption={(q, o) => String(o?.value ?? '').toLowerCase().includes(q.toLowerCase())}
                                         onSelect={(v: string) => setBreaks({ ...breaks, [i]: v })} onKeyDown={(e) => { if (e.key === 'Enter') { const v = (e.target as HTMLInputElement).value.trim(); if (v) setBreaks({ ...breaks, [i]: v }); } }} />}>
                                         <Tag color={r.pageExisting ? 'blue' : 'purple'} style={{ cursor: 'pointer' }}>{r.page}{r.pageExisting ? ' ·' : ''}</Tag></Popover>
                                     : <Tooltip title="Start a new page here"><Button size="small" type="text" icon={<ScissorOutlined />} aria-label="New page here" onClick={() => setSplitAt({ index: i, name: '' })} /></Tooltip> },
-                                { title: 'Element', width: 140, render: (_v, r) => r.elementKey
+                                { title: 'Element', width: 140, responsive: ['xl'] as Breakpoint[], render: (_v, r) => r.elementKey
                                     ? <><Tooltip title={<span className="mono">{r.selector}{r.frames.length ? ` (in ${r.frames.join(' › ')})` : ''}</span>}>
                                         <Typography.Text editable={r.elementReused ? false : { tooltip: 'Rename', onChange: (v) => { if (v.trim()) setLabels({ ...labels, [r.elementKey!]: v.trim() }); } }}>{r.element}</Typography.Text>
                                         {r.elementReused && <Tag bordered={false} color="blue" style={{ marginLeft: 4 }}>existing</Tag>}</Tooltip>
