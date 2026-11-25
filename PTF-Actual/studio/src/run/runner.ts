@@ -39,6 +39,8 @@ export interface RunRequest {
     viewport?: { width: number; height: number };
     /** Configuration values for this run only (they override the project's config files, as environment variables do). */
     variables?: Record<string, string>;
+    /** Send this run's results to Azure DevOps (ADO_INTEGRATION_ENABLED for this run only); not set: as the project is configured. */
+    ado?: boolean;
     /** A debug run: pause before each step and/or on a failure (the framework's DEBUG_STEPS / PAUSE_ON_FAILURE),
      *  in a visible browser, one scenario at a time; slowMo slows each browser action (BROWSER_SLOWMO, ms). */
     debug?: {
@@ -184,6 +186,10 @@ export function runEnvOf(r: RunRequest): Record<string, string> {
         if (/^(PROJECT|ENVIRONMENT|NODE_OPTIONS|PATH|HOME|DEBUG_CONTROL|DEBUG_BREAKPOINTS)$/.test(k)) throw new UserError(`${k} cannot be set per run.`);
         if (typeof v !== 'string' || v.length > 4000 || v.includes('\0')) throw new UserError(`The value of ${k} is not valid.`);
         env[k] = v;
+    }
+    if (r.ado !== undefined) {
+        if (typeof r.ado !== 'boolean') throw new UserError('Azure DevOps results: on or off.');
+        env.ADO_INTEGRATION_ENABLED = r.ado ? 'true' : 'false';
     }
     return env;
 }

@@ -496,6 +496,8 @@ export interface LoadRunDetailDef extends LoadRunInfoDef { live?: LoadSnapshot; 
 
 export interface RunRequest { project: string; env: string; features?: string[]; tags?: string; scenario?: string; scenarios?: string[]; headless?: boolean; browser?: string; workers?: number;
     retries?: number; device?: string; viewport?: { width: number; height: number }; variables?: Record<string, string>;
+    /** Send results to Azure DevOps for this run; not set: as the project is configured. */
+    ado?: boolean;
     /** A debug run: pause before each step and/or on a failure, browser shown, one scenario at a time. */
     debug?: { steps?: boolean; pauseOnFailure?: boolean; slowMo?: number; exceptions?: boolean } }
 export interface DebugPause { kind: 'before-step' | 'after-failure'; step: string; scenario?: string; error?: string; file?: string; line?: number; reason?: 'breakpoint' | 'step' }

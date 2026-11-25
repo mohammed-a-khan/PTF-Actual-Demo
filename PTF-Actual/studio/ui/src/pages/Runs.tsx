@@ -53,7 +53,7 @@ export function Runs() {
     const projects = disc?.projects ?? [];
     const saved = loadRunTarget();
     const [target, setTarget] = React.useState({ project: saved?.project ?? '', env: saved?.env ?? '', browser: saved?.browser ?? 'chromium', headless: saved?.headless ?? true, workers: saved?.workers ?? 1,
-        retries: saved?.retries ?? 0, device: saved?.device ?? '', width: saved?.width, height: saved?.height, vars: saved?.vars ?? '' });
+        retries: saved?.retries ?? 0, device: saved?.device ?? '', width: saved?.width, height: saved?.height, vars: saved?.vars ?? '', ado: saved?.ado as 'on' | 'off' | undefined });
     const [configs, setConfigs] = React.useState<RunConfigDef[]>([]);
     // The version read: saving over a newer file (another tab, a teammate's pull) is refused, and the screen offers to reload.
     const configsVersion = React.useRef<string | undefined>(undefined);
@@ -201,6 +201,7 @@ export function Runs() {
         retries: Math.max(0, Math.round(target.retries ?? 0)), ...(target.device ? { device: target.device } : {}),
         ...(target.width && target.height ? { viewport: { width: target.width, height: target.height } } : {}),
         ...(variables() ? { variables: variables() } : {}),
+        ...(target.ado ? { ado: target.ado === 'on' } : {}),
         ...requestOf(pick, catalog, target.project),
     });
     const saveConfig = () => {
@@ -226,7 +227,8 @@ export function Runs() {
     const useConfig = (c: RunConfigDef) => {
         const r = c.request;
         setTarget({ project: r.project, env: r.env, browser: r.browser ?? 'chromium', headless: r.headless ?? true, workers: r.workers ?? 1, retries: r.retries ?? 0, device: r.device ?? '',
-            width: r.viewport?.width, height: r.viewport?.height, vars: Object.entries(r.variables ?? {}).map(([k, v]) => `${k}=${v}`).join('\n') });
+            width: r.viewport?.width, height: r.viewport?.height, vars: Object.entries(r.variables ?? {}).map(([k, v]) => `${k}=${v}`).join('\n'),
+            ado: r.ado === undefined ? undefined : r.ado ? 'on' : 'off' });
         // What to run, too (features, tags, scenarios), so Run runs what was saved.
         setPick(pickOf(r, catalog));
         message.info(`"${c.name}" is filled in: press Run to start it.`);
@@ -242,7 +244,7 @@ export function Runs() {
     type SetupTab = 'what' | 'options' | 'saved';
     const [setupTab, setSetupTabRaw] = React.useState<SetupTab>(() => { try { const v = localStorage.getItem('cs-studio-runs-setup-tab'); return (v === 'options' || v === 'saved' ? v : 'what'); } catch { return 'what'; } });
     const setSetupTab = (v: SetupTab) => { setSetupTabRaw(v); try { localStorage.setItem('cs-studio-runs-setup-tab', v); } catch { /* ignore */ } };
-    const optSummary = `${target.browser}${target.device ? ` · ${target.device}` : ''} · ${target.workers} worker${target.workers === 1 ? '' : 's'}${target.retries ? ` · ${target.retries} retr${target.retries === 1 ? 'y' : 'ies'}` : ''} · ${target.headless ? 'browser hidden' : 'browser shown'}${target.width && target.height ? ` · ${target.width}×${target.height}` : ''}${variables() ? ` · ${Object.keys(variables()!).length} value(s)` : ''}`;
+    const optSummary = `${target.browser}${target.device ? ` · ${target.device}` : ''} · ${target.workers} worker${target.workers === 1 ? '' : 's'}${target.retries ? ` · ${target.retries} retr${target.retries === 1 ? 'y' : 'ies'}` : ''} · ${target.headless ? 'browser hidden' : 'browser shown'}${target.width && target.height ? ` · ${target.width}×${target.height}` : ''}${variables() ? ` · ${Object.keys(variables()!).length} value(s)` : ''}${target.ado ? ` · Azure DevOps ${target.ado === 'on' ? 'on' : 'off'}` : ''}`;
     // Lines of "Values for this run" that are not KEY=value (they are left out of the run).
     const badVars = target.vars.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^[A-Za-z][\w]*\s*=/.test(l));
     const scope = scopeOf(pick, catalog, target.project);
@@ -364,6 +366,10 @@ export function Runs() {
                                     <Col span={24}><Form.Item label="Window size" style={{ marginBottom: 8 }} tooltip="Browser window size (width × height); empty: the project's setting">
                                         <Space.Compact style={{ width: '100%' }}><InputNumber min={200} max={7680} precision={0} controls={false} placeholder="Width" style={{ width: '50%' }} value={target.width} onChange={(v) => setTarget({ ...target, width: v ?? undefined })} aria-label="Window width" /><InputNumber min={200} max={7680} precision={0} controls={false} placeholder="Height" style={{ width: '50%' }} value={target.height} onChange={(v) => setTarget({ ...target, height: v ?? undefined })} aria-label="Window height" /></Space.Compact></Form.Item></Col>
                                 </Row>
+                                <Form.Item label="Azure DevOps results" style={{ marginBottom: 8 }} htmlFor="cs-runs-ado" tooltip="Whether this run sends its results to Azure DevOps test plans. Don't send: for local tries, and off the company network (otherwise each call waits for Azure DevOps).">
+                                    <Select id="cs-runs-ado" value={target.ado ?? 'config'} onChange={(v) => setTarget({ ...target, ado: v === 'config' ? undefined : v as 'on' | 'off' })}
+                                        options={[{ value: 'config', label: 'As the project is configured' }, { value: 'off', label: "Don't send" }, { value: 'on', label: 'Send' }]} />
+                                </Form.Item>
                                 <Form.Item label="Values for this run" style={{ marginBottom: 8 }} htmlFor="cs-runs-vars" tooltip="One KEY=value per line; they override the project's configuration for this run only (e.g. BASE_URL, a feature flag)"
                                     help={badVars.length ? `Not KEY=value, left out: ${badVars.slice(0, 3).join(', ')}${badVars.length > 3 ? '…' : ''}` : undefined} validateStatus={badVars.length ? 'warning' : undefined}>
                                     <Input.TextArea id="cs-runs-vars" autoSize={{ minRows: 2, maxRows: 8 }} value={target.vars} onChange={(e) => setTarget({ ...target, vars: e.target.value })} placeholder={'BASE_URL=https://qa2.example.test\nFEATURE_NEW_CHECKOUT=true'} style={{ fontFamily: 'var(--mono, monospace)', fontSize: 12 }} />

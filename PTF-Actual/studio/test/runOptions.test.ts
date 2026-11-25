@@ -55,3 +55,12 @@ test('runs against a protected environment need a confirmation; run configuratio
         await srv.app.close();
     } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
+
+test('Azure DevOps results per run: on, off or as configured', async () => {
+    assert.equal(runEnvOf({ project: 'p', env: 'e', ado: false }).ADO_INTEGRATION_ENABLED, 'false');
+    assert.equal(runEnvOf({ project: 'p', env: 'e', ado: true }).ADO_INTEGRATION_ENABLED, 'true');
+    assert.equal(runEnvOf({ project: 'p', env: 'e' }).ADO_INTEGRATION_ENABLED, undefined);
+    // The choice wins over the same key typed under "Values for this run".
+    assert.equal(runEnvOf({ project: 'p', env: 'e', ado: false, variables: { ADO_INTEGRATION_ENABLED: 'true' } }).ADO_INTEGRATION_ENABLED, 'false');
+    assert.throws(() => runEnvOf({ project: 'p', env: 'e', ado: 'yes' as never }), /on or off/);
+});

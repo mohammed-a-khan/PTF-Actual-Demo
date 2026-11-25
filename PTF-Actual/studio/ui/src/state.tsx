@@ -65,7 +65,7 @@ export function openInEditor(path: string, line?: number, column?: number): void
 }
 
 /** Remembered "where to run" choice (project + environment and options), shared by every Run button. */
-export interface RunTarget { project: string; env: string; browser?: string; headless?: boolean; workers?: number; retries?: number; device?: string; width?: number; height?: number; vars?: string }
+export interface RunTarget { project: string; env: string; browser?: string; headless?: boolean; workers?: number; retries?: number; device?: string; width?: number; height?: number; vars?: string; ado?: 'on' | 'off' }
 export function loadRunTarget(): RunTarget | null {
     try { const v = JSON.parse(localStorage.getItem('cs-studio-run-target') ?? 'null'); return v && v.project && v.env ? v : null; } catch { return null; }
 }
