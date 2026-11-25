@@ -373,7 +373,7 @@ function Shell({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => vo
     React.useEffect(() => { onAgentContext((c) => { void api.agentContext(c).catch(() => undefined); }); }, []);
     // Screens stay loaded when hidden: a dialog still open on the screen left behind is closed with it.
     const prevPage = React.useRef(page);
-    React.useEffect(() => { if (prevPage.current !== page) { Modal.destroyAll(); prevPage.current = page; } }, [page]);
+    React.useEffect(() => { if (prevPage.current !== page) { Modal.destroyAll(); questionClosed(); prevPage.current = page; } }, [page]);
     React.useEffect(() => { setAgentScreen({ page: PAGE_INFO[page].title, screen: page, route: route.join('/') }); }, [page, route.join('/')]); // eslint-disable-line react-hooks/exhaustive-deps
     React.useEffect(() => {
         const k = (e: KeyboardEvent) => { if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 'i') { e.preventDefault(); setAgentOpen((o) => !o); } };

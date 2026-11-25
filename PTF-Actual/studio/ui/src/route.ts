@@ -20,13 +20,21 @@ let popGuard: PopGuard | null = null;
 export function setPopGuard(g: PopGuard | null): void { popGuard = g; }
 let shownHash = typeof window !== 'undefined' ? window.location.hash : '';
 let shownIdx = 0;
-/** Pop events the guard itself caused (undoing a refused step, or making it again after "leave"). */
-let ownPops = 0;
+/** The history place the guard itself is moving to (undoing a refused step, or making it again after
+ *  "leave"). A place, not a count: a Back pressed before that move lands is still seen as the person's. */
+let expect: number | null = null;
 /** The guard's question is open (closed by stay/leave: see questionClosed). */
 let asking = false;
-/** The guard's question was answered "Stay" (or dismissed): further steps may ask again. */
+/** The guard's question was answered or dismissed: further steps may ask again. */
 export function questionClosed(): void { asking = false; }
 const idxOf = (st: unknown) => (st && typeof (st as { idx?: unknown }).idx === 'number' ? (st as { idx: number }).idx : null);
+/** Move the browser to history place `idx` (from wherever it is now). */
+function goTo(idx: number): void {
+    const cur = idxOf(history.state) ?? shownIdx;
+    if (cur === idx) { expect = null; return; }
+    expect = idx;
+    history.go(idx - cur);
+}
 if (typeof window !== 'undefined') {
     // The first entry gets its place too.
     if (idxOf(history.state) === null) history.replaceState({ ...(history.state ?? {}), idx: 0 }, '');
@@ -34,32 +42,32 @@ if (typeof window !== 'undefined') {
     // Registered before any screen listens, so a refused step never reaches them.
     window.addEventListener('popstate', (e) => {
         const toHash = window.location.hash;
-        const toIdx = idxOf(history.state);
-        if (ownPops > 0) {
-            ownPops--;
-            // Undoing a refused step: nothing changed for the screens.
-            if (toHash === shownHash) { e.stopImmediatePropagation(); shownIdx = toIdx ?? shownIdx; return; }
-            shownHash = toHash; shownIdx = toIdx ?? shownIdx;
+        let toIdx = idxOf(history.state);
+        if (expect !== null && toIdx === expect) {
+            expect = null;
+            // Back where the screens are: nothing changed for them.
+            if (toHash === shownHash) { e.stopImmediatePropagation(); shownIdx = toIdx; return; }
+            shownHash = toHash; shownIdx = toIdx;
             return;
         }
         const from = routeOf(shownHash), to = currentRoute();
         // An address typed in the address bar makes a new entry without a place: it is the next one.
-        let typed = false;
-        if (toIdx === null) { typed = true; history.replaceState({ ...(history.state ?? {}), idx: shownIdx + 1 }, ''); }
-        const delta = typed ? 1 : (toIdx as number) - shownIdx;
+        if (toIdx === null) { toIdx = shownIdx + 1; history.replaceState({ ...(history.state ?? {}), idx: toIdx }, ''); }
+        const target = toIdx;
+        const delta = target - shownIdx;
         if (popGuard && from[0] && to.join('\0') !== from.join('\0') && delta) {
-            // A second Back/Forward while the question is open: undone quietly (one question at a time).
-            if (asking) { e.stopImmediatePropagation(); ownPops++; history.go(-delta); return; }
-            const asked = popGuard(to, from, () => { asking = false; ownPops++; history.go(delta); });
+            // A second Back/Forward while the question is open: back to the shown screen (one question at a time).
+            if (asking) { e.stopImmediatePropagation(); goTo(shownIdx); return; }
+            const asked = popGuard(to, from, () => { asking = false; goTo(target); });
             if (asked) {
                 asking = true;
                 e.stopImmediatePropagation();
-                ownPops++;
-                history.go(-delta);
+                goTo(shownIdx);
                 return;
             }
         }
-        shownHash = toHash; shownIdx = idxOf(history.state) ?? shownIdx;
+        expect = null;
+        shownHash = toHash; shownIdx = target;
     });
     window.addEventListener(EVENT, () => { shownHash = window.location.hash; shownIdx = idxOf(history.state) ?? shownIdx; });
     window.addEventListener('hashchange', () => { shownHash = window.location.hash; });
