@@ -167,8 +167,9 @@ export function validScenario(x: unknown): LoadScenario {
     } else if (typeof s.collection !== 'string' || !/^test\/[A-Za-z0-9][\w.-]*\/api\/[\w.-]+\.collection\.json$/.test(s.collection)) fail('collection');
     if (!Array.isArray(s.requests) || s.requests.some((r) => typeof r !== 'string')) fail('requests');
     if (!s.thinkTime || !(s.thinkTime.min >= 0) || !(s.thinkTime.max >= s.thinkTime.min) || s.thinkTime.max > 600_000) fail('think time');
-    if (!(s.pacing >= 0) || s.pacing > 3_600_000) fail('pacing');
-    if (!(s.timeout >= 100) || s.timeout > 600_000) fail('timeout');
+    if (!Number.isInteger(s.thinkTime.min) || !Number.isInteger(s.thinkTime.max)) fail('think time (whole milliseconds)');
+    if (!(s.pacing >= 0) || s.pacing > 3_600_000 || !Number.isInteger(s.pacing)) fail('pacing (a whole number of ms, 0 to 3600000)');
+    if (!(s.timeout >= 100) || s.timeout > 600_000 || !Number.isInteger(s.timeout)) fail('timeout (a whole number of ms, 100 to 600000)');
     const p = validPolicy(s.policy ?? ({} as LoadPolicy));
     if (p) fail(p);
     if (!Array.isArray(s.slas)) fail('slas');
@@ -176,7 +177,12 @@ export function validScenario(x: unknown): LoadScenario {
     if (s.slaProfile !== undefined && (typeof s.slaProfile !== 'string' || !/^[\w./ -]+\.sla\.json$/.test(s.slaProfile) || s.slaProfile.includes('..'))) fail('the service-level profile (a .sla.json file of the project)');
     if (s.slaInterval !== undefined && !(Number.isInteger(s.slaInterval) && s.slaInterval >= 1 && s.slaInterval <= 3600)) fail('service-level interval (1–3600 s)');
     if (s.iterationsPerUser !== undefined && !(Number.isInteger(s.iterationsPerUser) && s.iterationsPerUser >= 1 && s.iterationsPerUser <= 1_000_000)) fail('iterations per user (1–1000000)');
-    for (const w of [s.wan, ...(s.populations ?? []).map((p) => p.wan)]) if (w !== undefined && (typeof w !== 'object' || [w.latencyMs, w.bandwidthKbps, w.lossPercent].some((x) => x !== undefined && !(Number(x) >= 0)) || (w.lossPercent ?? 0) > 100)) fail('network emulation');
+    for (const w of [s.wan, ...(s.populations ?? []).map((p) => p.wan)]) if (w !== undefined && (typeof w !== 'object' || [w.latencyMs, w.bandwidthKbps, w.lossPercent].some((x) => x !== undefined && !(Number(x) >= 0)) || (w.lossPercent ?? 0) > 100 || [w.latencyMs, w.bandwidthKbps].some((x) => x !== undefined && !Number.isInteger(x)))) fail('network emulation (latency and bandwidth are whole numbers)');
+    for (const p of s.populations ?? []) {
+        if (p.startDelay !== undefined && !(Number.isInteger(p.startDelay) && p.startDelay >= 0)) fail(`start of ${p.name} (whole seconds)`);
+        if (p.stopAfter !== undefined && !(Number.isInteger(p.stopAfter) && p.stopAfter >= 1)) fail(`stop of ${p.name} (whole seconds)`);
+    }
+    if (s.stopOnErrorRate !== undefined && !(Number.isInteger(s.stopOnErrorRate) && s.stopOnErrorRate >= 1 && s.stopOnErrorRate <= 100)) fail('stop on error rate (a whole percent, 1–100)');
     for (const p of s.populations ?? []) if (p.policy !== undefined) { const e = validPolicy(p.policy); if (e) fail(`policy of ${p.name}: ${e}`); }
     if (s.logic !== undefined && (!s.logic || typeof s.logic !== 'object' || !Array.isArray(s.logic.actions))) fail('logic (Init / Actions / End)');
     if (s.monitors !== undefined) {

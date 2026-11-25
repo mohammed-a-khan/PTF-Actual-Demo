@@ -12,6 +12,7 @@ import { navigate, useRoute } from '../route';
 import { LineChart } from '../components/LineChart';
 import { TeamTrends } from '../components/TeamTrends';
 import { useKept } from '../kept';
+import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
 import '../styles-tests.css';
 
 const CLASS: Record<QualityClass, { label: string; color: string; about: string }> = {
@@ -272,6 +273,7 @@ export function Quality() {
     const shown = data.scenarios.filter((s) => (cls === 'all' || s.cls === cls) && (!onlyQuarantined || s.quarantined)
         && (!find.trim() || `${s.name} ${s.feature}`.toLowerCase().includes(find.trim().toLowerCase())));
     const noRuns = !data.runs.length;
+    const fromStudio = data.runs.filter((r) => r.source === 'studio').length, fromReports = data.runs.length - fromStudio;
 
     const toolbar = (
         <div className="toolbar">
@@ -280,7 +282,13 @@ export function Quality() {
             <Select size="small" value={windowSize} onChange={setWindowSize} style={{ width: 140 }} aria-label="Runs"
                 options={[10, 30, 100].map((n) => ({ value: n, label: `Last ${n} runs` }))} />
             <Typography.Text type="secondary" style={{ fontSize: 12, flex: 1 }}>
-                {noRuns ? '' : `${data.runs.length} run${data.runs.length === 1 ? '' : 's'}, ${new Date(data.runs[0].at).toLocaleDateString()} – ${new Date(latest.at).toLocaleDateString()} · ${data.scenarios.length} scenarios`}
+                {noRuns ? '' : <>
+                    {/* Run tests lists only the runs started in the Studio; Quality also counts the reports found on disk. */}
+                    <Tooltip title={fromReports ? `${fromStudio} started in the Studio (listed under Run tests) and ${fromReports} found as report folders on disk (command line, pipeline, older runs). Pull request and debug-copy runs are not counted.` : 'All started in the Studio (listed under Run tests).'}>
+                        <span style={{ cursor: 'help', textDecoration: 'underline dotted' }}>{data.runs.length} run{data.runs.length === 1 ? '' : 's'}{fromReports ? ` (${fromStudio} from Run tests, ${fromReports} from reports on disk)` : ''}</span>
+                    </Tooltip>
+                    {`, ${new Date(data.runs[0].at).toLocaleDateString()} – ${new Date(latest.at).toLocaleDateString()} · ${data.scenarios.length} scenarios`}
+                </>}
             </Typography.Text>
             <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()} aria-label="Refresh" />
         </div>
@@ -317,7 +325,7 @@ export function Quality() {
                         </Tooltip>
                     </div>
                     <Card size="small" style={{ marginTop: 12 }} title="Pass rate per run">
-                        <LineChart height={150} x={data.runs.map((_, i) => i + 1)} xMin={1} xMax={Math.max(2, data.runs.length)} xFormat={(v) => (Math.abs(v - Math.round(v)) < 0.01 ? `#${Math.round(v)}` : '')}
+                        <LineChart height={150} yMax={100} x={data.runs.map((_, i) => i + 1)} xMin={1} xMax={Math.max(2, data.runs.length)} xFormat={(v) => (Math.abs(v - Math.round(v)) < 0.01 ? `#${Math.round(v)}` : '')}
                             series={[{ name: 'Pass rate', color: '#1a7f37', values: data.runs.map((r) => r.passRate), unit: '%', area: true }, { name: 'Failed', color: '#cf222e', values: data.runs.map((r) => r.failed), right: true, integer: true }]} />
                     </Card>
                 </Col>
@@ -491,13 +499,15 @@ export function Quality() {
                 </>}
             </Drawer>
 
-            <GateModal open={gateOpen} value={data.settings} onClose={() => setGateOpen(false)} onSaved={() => { setGateOpen(false); void load(); }} />
+            <GateModal open={gateOpen} value={data.settings} version={data.settingsVersion} onClose={() => setGateOpen(false)} onSaved={() => { setGateOpen(false); void load(); }} onReload={() => void load()} />
         </div>
     );
 }
 
-function GateModal({ open, value, onClose, onSaved }: { open: boolean; value: GateSettings; onClose: () => void; onSaved: () => void }) {
-    const { message } = App.useApp();
+const wholeRule = (what: string, max?: number) => ({ validator: (_: unknown, v: unknown) => (v === null || v === undefined || (typeof v === 'number' && Number.isInteger(v)) ? Promise.resolve() : Promise.reject(new Error(`${what} is a whole number (no decimals)${max !== undefined ? `: give 0 to ${max}` : ''}.`))) });
+
+function GateModal({ open, value, version, onClose, onSaved, onReload }: { open: boolean; value: GateSettings; version?: string; onClose: () => void; onSaved: () => void; onReload: () => void }) {
+    const { message, modal } = App.useApp();
     const [form] = Form.useForm<GateSettings & { limitFlaky: boolean }>();
     React.useEffect(() => { if (open) form.setFieldsValue({ ...value, limitFlaky: value.maxFlaky !== null, maxFlaky: value.maxFlaky ?? 0 }); }, [open, value, form]);
     const limit = Form.useWatch('limitFlaky', form);
@@ -507,7 +517,16 @@ function GateModal({ open, value, onClose, onSaved }: { open: boolean; value: Ga
                 try { v = await form.validateFields(); } catch { return; }
                 if (saving) return;
                 setSaving(true);
-                try { await api.qualityGate({ minPassRate: v.minPassRate, noNewFailures: v.noNewFailures, ignoreQuarantined: v.ignoreQuarantined, maxFlaky: v.limitFlaky ? v.maxFlaky ?? 0 : null }); message.success('Gate saved.'); onSaved(); } catch (e) { message.error(errText(e)); } finally { setSaving(false); }
+                const g = { minPassRate: v.minPassRate, noNewFailures: v.noNewFailures, ignoreQuarantined: v.ignoreQuarantined, maxFlaky: v.limitFlaky ? v.maxFlaky ?? 0 : null };
+                const put = async (force: boolean): Promise<void> => {
+                    try { await api.qualityGate(g, version, force); message.success('Gate saved.'); onSaved(); }
+                    catch (e) {
+                        // Saved in another tab since this one read it: Reload / Overwrite / Keep editing.
+                        if (isChangedElsewhere(e)) askChangedElsewhere(modal, e, 'The quality gate', { reload: onReload, overwrite: () => put(true) });
+                        else message.error(errText(e));
+                    }
+                };
+                try { await put(false); } finally { setSaving(false); }
     };
     return (
         <Modal open={open} title="Quality gate" okText="Save" onCancel={onClose} destroyOnClose
@@ -516,10 +535,10 @@ function GateModal({ open, value, onClose, onSaved }: { open: boolean; value: Ga
             <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 10 }}>Checked on the latest run. Kept on this computer for this repository.</Typography.Text>
             <Form form={form} layout="vertical" requiredMark={false} onKeyDown={(e) => { if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT') { e.preventDefault(); void saveGate(); } }}>
                 <Row gutter={16}>
-                    <Col span={12}><Form.Item name="minPassRate" label="Pass rate at least" rules={[{ required: true, message: 'Give a pass rate (0–100)' }, { type: 'number', min: 0, max: 100, message: 'The pass rate is a percentage: give a number from 0 to 100.' }]}><InputNumber precision={0} addonAfter="%" style={{ width: '100%' }} aria-label="Pass rate at least" /></Form.Item></Col>
+                    <Col span={12}><Form.Item name="minPassRate" label="Pass rate at least" rules={[{ required: true, message: 'Give a pass rate (0–100)' }, { type: 'number', min: 0, max: 100, message: 'The pass rate is a percentage: give a number from 0 to 100.' }, wholeRule('The pass rate', 100)]}><InputNumber addonAfter="%" style={{ width: '100%' }} aria-label="Pass rate at least" /></Form.Item></Col>
                     <Col span={12}><Form.Item name="noNewFailures" label="No new failures" valuePropName="checked"><Switch size="small" /></Form.Item></Col>
                     <Col span={12}><Form.Item name="limitFlaky" label="Limit flaky scenarios" valuePropName="checked"><Switch size="small" /></Form.Item></Col>
-                    <Col span={12}>{limit && <Form.Item name="maxFlaky" label="At most" rules={[{ type: 'number', min: 0, message: 'Give 0 or more.' }]}><InputNumber precision={0} style={{ width: '100%' }} addonAfter="flaky" /></Form.Item>}</Col>
+                    <Col span={12}>{limit && <Form.Item name="maxFlaky" label="At most" rules={[{ type: 'number', min: 0, message: 'Give 0 or more.' }, wholeRule('The number of flaky scenarios')]}><InputNumber style={{ width: '100%' }} addonAfter="flaky" /></Form.Item>}</Col>
                     <Col span={12}><Form.Item name="ignoreQuarantined" label="Leave out quarantined" valuePropName="checked"><Switch size="small" /></Form.Item></Col>
                 </Row>
             </Form>

@@ -8,14 +8,14 @@ import { Alert, App, Button, Card, Checkbox, Col, Dropdown, Empty, Form, Input, 
 import { DeleteOutlined, DownOutlined, ExperimentOutlined, MessageOutlined, PlusOutlined, QuestionCircleOutlined, RobotOutlined, RocketOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { AgentBuilderDef, AgentTriggerDef, api, MissionInputDef, TeamAgentDef, ToolGroupId } from '../api';
 import { errText, useStudio } from '../state';
-import { navigate } from '../route';
+import { navigate, useRoute } from '../route';
 import { useUnsaved } from '../unsaved';
 import { AgentEvals } from '../components/AgentEvals';
 import { startMissionFor } from './Missions';
 import { useRememberedTab } from '../agents-tabs';
 import { agentsApi, AgentBuilderView } from '../agents-api';
 import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
-import { WholeNumber } from '../components/WholeNumber';
+import { useValidity, WholeNumber } from '../components/WholeNumber';
 
 /** "storyId" → "Story id": the label an input gets until someone writes their own. */
 function labelOf(key: string): string {
@@ -34,6 +34,11 @@ export const slug = (s: string) => {
     return `agent-${h.toString(36)}`;
 };
 const TRIGGER_LABEL: Record<AgentTriggerDef['on'], string> = { 'run-failed': 'When a run fails', schedule: 'On a schedule', 'work-item': 'New or changed work items', 'pull-request': 'New or updated pull requests' };
+
+/** The editor tab to open with the next linked agent (e.g. 'triggers' from Missions › Triggers). */
+let openTabNext: string | null = null;
+/** Open a team agent's editor in Agent builder (on a tab of it). */
+export function openAgentEditor(id: string, mode: 'assistant' | 'mission', tab?: string): void { openTabNext = tab ?? null; navigate(['agent-builder', mode, id]); }
 
 export function AgentBuilder({ openConversation }: { openConversation: (session: string) => void }) {
     const { message } = App.useApp();
@@ -54,6 +59,18 @@ export function AgentBuilder({ openConversation }: { openConversation: (session:
         } catch (e) { message.error(errText(e)); }
     }, [message]);
     React.useEffect(load, [load]);
+    // #/agent-builder/<kind>/<agent id> (a link from Missions › Triggers): that agent's editor opens (on the tab asked
+    // for), and the address goes back to the list in place, so Back returns to where the link was.
+    const route = useRoute();
+    const linked = route[0] === 'agent-builder' && route[2] ? route[2] : null;
+    React.useEffect(() => {
+        if (!d || !linked) return;
+        const a = d.agents.find((x) => x.id === linked);
+        if (a) { setEditing({ agent: a, isNew: false }); if (openTabNext) { try { localStorage.setItem('cs-studio-tab-agent-editor', openTabNext); } catch { /* storage off */ } } }
+        else message.warning(`No agent "${linked}" in Agent builder (deleted or renamed?).`);
+        openTabNext = null;
+        navigate(['agent-builder', kind], true);
+    }, [d, linked]); // eslint-disable-line react-hooks/exhaustive-deps
     const chatting = React.useRef(false);
     const chat = async (a: TeamAgentDef) => { if (chatting.current) return; chatting.current = true; try { const s = await api.agentCreate(a.name, undefined, a.id); openConversation(s.id); } catch (e) { message.error(errText(e)); } finally { chatting.current = false; } };
     if (err) return <Alert type="error" showIcon message={err} />;
@@ -128,19 +145,26 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
     const [tab, setTab] = useRememberedTab('agent-editor', 'basics', tabKeys);
     const up = (p: Partial<TeamAgentDef>) => setA((x) => ({ ...x, ...p }));
     // Unsaved work: closing asks first, and so does leaving the page.
-    const dirty = JSON.stringify(a) !== JSON.stringify(agent);
-    useUnsaved('agent-editor', dirty, `the agent "${a.name || 'new agent'}"`);
+    // Whole-number fields in error (a budget, a trigger's daily limit): not saved until put right (and not lost silently).
+    const numbers = useValidity();
+    const dirty = JSON.stringify(a) !== JSON.stringify(agent) || numbers.bad.length > 0;
+    // Another screen (the menu, Back, an address typed) asks first: Save, Discard or Stay.
+    const saveRef = React.useRef<() => Promise<boolean>>(async () => false);
+    useUnsaved('agent-editor', dirty, `the agent "${a.name || 'new agent'}"`, { lostOnLeave: true, save: () => saveRef.current(), discard: onClose });
     const close = () => { if (!dirty) { onClose(); return; } modal.confirm({ title: 'Discard your changes to this agent?', okText: 'Discard', okButtonProps: { danger: true }, cancelText: 'Keep editing', onOk: onClose }); };
     const toggle = (g: ToolGroupId, on: boolean) => up({ tools: on ? [...new Set([...a.tools, g])] : a.tools.filter((x) => x !== g) });
     const finalId = isNew ? (a.id.replace(/^-+|-+$/g, '') || slug(a.name)) : a.id;
     const fail = (t: string, text: string) => { setTab(t); message.error({ content: text, key: 'agent-editor-check' }); };
-    const save = async () => {
-        if (busy) return;
-        if (!a.name.trim()) { fail('basics', 'Give the agent a name.'); return; }
-        if (isNew && !finalId) { fail('basics', 'Give the agent an id (letters, digits and -).'); return; }
-        if (!a.instructions.trim()) { fail('instructions', 'Write how it works (its instructions).'); return; }
-        if (mission && !a.goal?.trim()) { fail('instructions', 'Write the mission\'s goal.'); return; }
-        if (mission && (a.inputs ?? []).some((x) => !x.key)) { fail('inputs', 'Every input needs a name (or remove the empty one).'); return; }
+    const saving = React.useRef(false);
+    const save = async (): Promise<boolean> => {
+        if (busy || saving.current) return false;
+        if (!a.name.trim()) { fail('basics', 'Give the agent a name.'); return false; }
+        if (isNew && !finalId) { fail('basics', 'Give the agent an id (letters, digits and -).'); return false; }
+        if (!a.instructions.trim()) { fail('instructions', 'Write how it works (its instructions).'); return false; }
+        if (mission && !a.goal?.trim()) { fail('instructions', 'Write the mission\'s goal.'); return false; }
+        if (mission && (a.inputs ?? []).some((x) => !x.key)) { fail('inputs', 'Every input needs a name (or remove the empty one).'); return false; }
+        if (mission && numbers.bad.length) { const b = numbers.bad[0]; fail(/^Trigger/.test(b) ? 'triggers' : 'limits', `Put right first: ${numbers.bad.join(', ')} (a whole number in range).`); return false; }
+        saving.current = true;
         setBusy(true);
         const out: TeamAgentDef = { ...a, name: a.name.trim(), id: finalId, ...(mission ? {} : { goal: undefined, inputs: undefined, writes: undefined, budget: undefined, verify: undefined, triggers: undefined, team: undefined }) };
         const put = async (force: boolean) => {
@@ -148,13 +172,20 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
             message.success({ content: `Saved ${r.agent.name}`, key: 'agent-editor-check' });
             onSaved(r);
         };
-        try { await put(false); }
+        try { await put(false); return true; }
         catch (e) {
             // Changed in another tab or by someone else since this editor opened: reload it, or overwrite on purpose.
-            if (isChangedElsewhere(e)) askChangedElsewhere(modal, e, `The agent "${agent.name}"`, { reload: () => onReload(agent.id), overwrite: () => put(true).catch((x) => { const t = errText(x); fail(tabOfError(t, mission) ?? tab, t); }) });
-            else { const t = errText(e); fail(tabOfError(t, mission) ?? tab, t); }
-        } finally { setBusy(false); }
+            if (isChangedElsewhere(e)) {
+                return new Promise<boolean>((resolve) => askChangedElsewhere(modal, e, `The agent "${agent.name}"`, {
+                    reload: () => { resolve(false); onReload(agent.id); },
+                    overwrite: () => put(true).then(() => resolve(true), (x) => { const t = errText(x); fail(tabOfError(t, mission) ?? tab, t); resolve(false); }),
+                    keepEditing: () => resolve(false),
+                }));
+            }
+            const t = errText(e); fail(tabOfError(t, mission) ?? tab, t); return false;
+        } finally { saving.current = false; setBusy(false); }
     };
+    saveRef.current = save;
     const del = () => modal.confirm({ title: `Delete ${a.name}?`, content: `Its file ${d.dir}/${a.id}.json and its evaluation cases (.cs-studio/evals/${a.id}.json, if any) are deleted (commit to share that).`, okText: 'Delete', okButtonProps: { danger: true },
         onOk: async () => { try { onSaved(await api.deleteTeamAgent(a.id)); message.success('Deleted'); } catch (e) { message.error(errText(e)); } } });
     const inputs = a.inputs ?? [];
@@ -242,7 +273,7 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
                                     <Col xs={24} md={6}><Form.Item label="The work item fills"><Select aria-label={`Trigger ${i + 1}: the work item fills`} value={t.input ?? 'story'} onChange={(v) => setTrigger(i, { ...t, input: v })} options={inputs.filter((x) => x.key).map((x) => ({ value: x.key, label: x.key }))} /></Form.Item></Col></>}
                                 {t.on === 'pull-request' && <><Col xs={24} md={9}><Form.Item label="Into branch"><Input aria-label={`Trigger ${i + 1}: into branch`} value={t.target} placeholder="main" onChange={(e) => setTrigger(i, { ...t, target: e.target.value })} /></Form.Item></Col>
                                     <Col xs={24} md={9}><Form.Item label="Repository"><Input aria-label={`Trigger ${i + 1}: repository`} value={t.repository} placeholder="Any" onChange={(e) => setTrigger(i, { ...t, repository: e.target.value || undefined })} /></Form.Item></Col></>}
-                                <Col xs={24} md={6}><Form.Item label="At most"><WholeNumber min={1} max={50} fallback={3} label={`Trigger ${i + 1}: at most, a day`} value={t.maxPerDay ?? 3} onChange={(v) => setTrigger(i, { ...t, maxPerDay: v })} suffix="a day" style={{ width: '100%' }} /></Form.Item></Col>
+                                <Col xs={24} md={6}><Form.Item label="At most"><WholeNumber min={1} max={50} fallback={3} label={`Trigger ${i + 1}: at most, a day`} onValidity={numbers.ok(`Trigger ${i + 1}: at most, a day`)} value={t.maxPerDay ?? 3} onChange={(v) => setTrigger(i, { ...t, maxPerDay: v })} suffix="a day" style={{ width: '100%' }} /></Form.Item></Col>
                             </Row>
                             {(t.on === 'schedule' || t.on === 'work-item' || t.on === 'pull-request') && inputs.some((x) => x.key) && (
                                 <Form.Item label="Inputs given by this trigger" style={{ marginBottom: 0 }}>
@@ -277,9 +308,9 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { 
                 </Row>
                 <Form.Item label="Budget" tooltip="The mission stops when it uses more; time waiting for a person does not count.">
                     <Row gutter={8}>
-                        <Col xs={24} md={8}><WholeNumber min={5} max={480} fallback={45} value={a.budget?.minutes ?? 45} label="Minutes" onChange={(v) => up({ budget: { ...a.budget, minutes: v } })} suffix="min" style={{ width: '100%' }} /></Col>
-                        <Col xs={24} md={8}><WholeNumber min={10} max={2000} fallback={120} value={a.budget?.modelCalls ?? 120} label="Model calls" onChange={(v) => up({ budget: { ...a.budget, modelCalls: v } })} suffix="model calls" style={{ width: '100%' }} /></Col>
-                        <Col xs={24} md={8}><WholeNumber min={1} max={10} fallback={3} value={a.budget?.attempts ?? 3} label="Attempts" onChange={(v) => up({ budget: { ...a.budget, attempts: v } })} suffix="attempts" style={{ width: '100%' }} /></Col>
+                        <Col xs={24} md={8}><WholeNumber min={5} max={480} fallback={45} value={a.budget?.minutes ?? 45} label="Minutes" onValidity={numbers.ok('Minutes')} onChange={(v) => up({ budget: { ...a.budget, minutes: v } })} suffix="min" style={{ width: '100%' }} /></Col>
+                        <Col xs={24} md={8}><WholeNumber min={10} max={2000} fallback={120} value={a.budget?.modelCalls ?? 120} label="Model calls" onValidity={numbers.ok('Model calls')} onChange={(v) => up({ budget: { ...a.budget, modelCalls: v } })} suffix="model calls" style={{ width: '100%' }} /></Col>
+                        <Col xs={24} md={8}><WholeNumber min={1} max={10} fallback={3} value={a.budget?.attempts ?? 3} label="Attempts" onValidity={numbers.ok('Attempts')} onChange={(v) => up({ budget: { ...a.budget, attempts: v } })} suffix="attempts" style={{ width: '100%' }} /></Col>
                     </Row>
                 </Form.Item>
             </Form>

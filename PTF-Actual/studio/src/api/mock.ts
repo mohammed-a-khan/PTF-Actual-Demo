@@ -92,15 +92,21 @@ export function mockProblems(d: MockDefinition): string[] {
     const out: string[] = [];
     if (!d || typeof d !== 'object') return ['Not a mock definition.'];
     if (!Array.isArray(d.routes)) out.push('"routes" is not a list.');
-    if (d.port !== undefined && (!Number.isInteger(d.port) || d.port < 0 || d.port > 65535)) out.push(`port ${d.port}: 0–65535.`);
+    // Whole numbers only (a port of 47393.5 or a delay of 2.5 ms is refused, never rounded).
+    const whole = (v: unknown, min: number, max: number) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+    const notWhole = (v: unknown, min: number, max: number) => `a whole number from ${min} to ${max}${typeof v === 'number' && !Number.isInteger(v) ? ', not a decimal' : ''} (not ${JSON.stringify(v)})`;
+    if (d.port !== undefined && !whole(d.port, 0, 65535)) out.push(`Port: ${notWhole(d.port, 0, 65535)}; 0 is any free port.`);
     (Array.isArray(d.routes) ? d.routes : []).forEach((r, i) => {
         const at = `Route ${i + 1}`;
         if (!METHODS.includes(String(r?.method).toLowerCase())) out.push(`${at}: the method "${r?.method}" is not an HTTP method.`);
         if (typeof r?.path !== 'string' || !r.path.startsWith('/')) out.push(`${at}: the path starts with /.`);
         if (!Number.isInteger(r?.status) || r.status < 100 || r.status > 599) out.push(`${at}: the status ${r?.status} is not an HTTP status.`);
+        if (r?.delayMs !== undefined && !whole(r.delayMs, 0, 300_000)) out.push(`${at}: the delay (ms) is ${notWhole(r.delayMs, 0, 300_000)}.`);
         const f = r?.fault;
         if (f && !['none', 'delay', 'error', 'drop', 'malformed'].includes(f.kind)) out.push(`${at}: the fault "${f.kind}" is unknown (none, delay, error, drop, malformed).`);
-        if (f?.rate !== undefined && (typeof f.rate !== 'number' || f.rate < 0 || f.rate > 100)) out.push(`${at}: the fault's rate is a share 0–100.`);
+        if (f?.rate !== undefined && !whole(f.rate, 0, 100)) out.push(`${at}: the fault's share of requests (%) is ${notWhole(f.rate, 0, 100)}.`);
+        if (f?.delayMs !== undefined && !whole(f.delayMs, 1, 300_000)) out.push(`${at}: the fault's delay (ms) is ${notWhole(f.delayMs, 1, 300_000)}.`);
+        if (f?.status !== undefined && !whole(f.status, 400, 599)) out.push(`${at}: the fault's error status is ${notWhole(f.status, 400, 599)}.`);
         if (r?.responses !== undefined && !Array.isArray(r.responses)) out.push(`${at}: "responses" is not a list.`);
         (Array.isArray(r?.responses) ? r.responses : []).forEach((x, j) => { if (!Number.isInteger(x?.status) || x.status < 100 || x.status > 599) out.push(`${at}, answer ${j + 1}: the status ${x?.status} is not an HTTP status.`); });
     });

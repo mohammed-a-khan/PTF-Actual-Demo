@@ -9,7 +9,8 @@ import { CheckCircleTwoTone, CloseCircleTwoTone, CloudUploadOutlined, Exclamatio
 import { api, PipelineRow, PipelineSecrets as PS } from '../api';
 import { errText, useStudio } from '../state';
 import { navigate } from '../route';
-import { charCount, isAdoNotSetUp, saveErrorToast, useRouteTab } from '../datagit-common';
+import { askStaleSave, charCount, isAdoNotSetUp, useRouteTab } from '../datagit-common';
+import { useUnsaved } from '../unsaved';
 import { datagitApi } from '../datagit-api';
 
 const PIPELINE_TABS = ['secrets', 'setup'] as const;
@@ -33,7 +34,8 @@ const yes = <CheckCircleTwoTone twoToneColor="#52c41a" />;
 const no = <CloseCircleTwoTone twoToneColor="#cf1322" />;
 
 export function PipelineSecrets() {
-    const { message, modal } = App.useApp();
+    const app = App.useApp();
+    const { message, modal } = app;
     const { env: disc, refresh: refreshStudio } = useStudio();
     const projects = disc?.projects ?? [];
     const [project, setProject] = React.useState('');
@@ -64,13 +66,23 @@ export function PipelineSecrets() {
     }, [project, env, message]);
     React.useEffect(() => { void load(false); }, [load]);
     const patternProblem = variableGroupProblem(pattern);
-    const savePattern = async () => {
-        if (patternProblem || savingPattern || pattern.trim() === saved?.variableGroup) return;
+    /** true when saved (also for "Leave without saving?" → Save). */
+    const savePattern = async (force = false): Promise<boolean> => {
+        if (patternProblem || savingPattern || pattern.trim() === saved?.variableGroup) return !patternProblem && pattern.trim() === saved?.variableGroup;
         setSavingPattern(true);
-        try { const r = await datagitApi.setPipelineSettings(pattern.trim(), saved?.version); setSaved(r); setPattern(r.variableGroup); message.success('Saved in .cs-studio/pipeline.json — commit it so your team uses the same name'); await load(false); await refreshStudio(); }
-        catch (e) { saveErrorToast(message, e, readSettings); }
-        finally { setSavingPattern(false); }
+        try { const r = await datagitApi.setPipelineSettings(pattern.trim(), saved?.version, force); setSaved(r); setPattern(r.variableGroup); message.success('Saved in .cs-studio/pipeline.json — commit it so your team uses the same name'); await load(false); await refreshStudio(); return true; }
+        catch (e) {
+            askStaleSave(app, e, 'The variable group name', {
+                reload: readSettings, overwrite: () => { setSavingPattern(false); return savePattern(true); },
+                // Keep editing: the next Save goes over the name saved now.
+                keep: (v) => setSaved((x) => (x ? { ...x, version: v } : x)),
+            });
+            return false;
+        } finally { setSavingPattern(false); }
     };
+    // A changed variable group name not saved yet: leaving the screen (menu, Back, a typed address) asks first.
+    const patternDirty = !!saved && pattern.trim() !== saved.variableGroup;
+    useUnsaved('pipeline-variable-group', patternDirty, 'the pipeline variable group name', { lostOnLeave: true, save: () => savePattern(), discard: () => { if (saved) setPattern(saved.variableGroup); } });
 
     if (projects.length === 0) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="No framework projects found under config/." />;
     if (project && envs.length === 0) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description={`${project} has no environments yet. Create one in Environments.`} />;

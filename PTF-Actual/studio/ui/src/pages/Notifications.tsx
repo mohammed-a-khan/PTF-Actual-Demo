@@ -6,7 +6,7 @@ import { api, NotifyChannelDef, NotifyDef } from '../api';
 import { errText, useStudio } from '../state';
 import { markUnsaved } from '../unsaved';
 import { navigate } from '../route';
-import { saveErrorToast, usePageHeadTooltip, useRouteTab } from '../datagit-common';
+import { askStaleSave, usePageHeadTooltip, useRouteTab } from '../datagit-common';
 import { datagitApi, Versioned } from '../datagit-api';
 
 const KIND_HELP: Record<NotifyChannelDef['kind'], string> = {
@@ -35,7 +35,8 @@ type NotifyTab = typeof NOTIFY_TABS[number];
 const newId = () => Math.random().toString(36).slice(2, 10).padEnd(8, '0');
 
 export function Notifications() {
-    const { message } = App.useApp();
+    const app = App.useApp();
+    const { message } = app;
     const { env } = useStudio();
     const [d, setD] = React.useState<Versioned<NotifyDef> | null>(null);
     const [chans, setChans] = React.useState<NotifyChannelDef[]>([]);
@@ -56,11 +57,17 @@ export function Notifications() {
     const dirty = !!d && (JSON.stringify(chans) !== JSON.stringify(d.channels) || Object.values(hooks).some(Boolean));
     // The draft outlives this screen; reloading from any screen asks while it exists.
     React.useEffect(() => { if (d) { draft = dirty ? { chans, hooks, version: d.version } : null; markUnsaved('notifications-draft', dirty ? 'notification channels' : null); } }, [d, dirty, chans, hooks]);
-    const save = async () => {
+    const save = async (force = false) => {
         setBusy('save');
         // The version this tab read: a save over channels changed since (another tab) is refused, never silently merged away.
-        try { const r = await datagitApi.saveNotifications(chans.map(({ hasWebhook: _h, ...c }) => c), hooks, d?.version); setD(r); setChans(r.channels); setHooks({}); message.success('Saved'); }
-        catch (e) { saveErrorToast(message, e, () => load(false)); } finally { setBusy(null); }
+        try { const r = await datagitApi.saveNotifications(chans.map(({ hasWebhook: _h, ...c }) => c), hooks, d?.version, force); setD(r); setChans(r.channels); setHooks({}); message.success('Saved'); }
+        catch (e) {
+            askStaleSave(app, e, 'The notification channels', {
+                reload: () => load(false), overwrite: () => save(true),
+                // Keep editing: the next Save goes over the version saved now (the person has seen the question).
+                keep: (v) => setD((x) => (x ? { ...x, version: v } : x)),
+            });
+        } finally { setBusy(null); }
     };
     const test = async (id: string) => {
         setBusy(id);

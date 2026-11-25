@@ -9,7 +9,8 @@ import { CheckCircleFilled, CloseCircleFilled, InfoCircleOutlined } from '@ant-d
 import { api, ClientCert, ConnectionCheck, GitConnectionCheck, GitNetworkChange, GitNetworkState, NetworkSettings, StudioSettings } from '../api';
 import { errText } from '../state';
 import { datagitApi } from '../datagit-api';
-import { saveErrorToast } from '../datagit-common';
+import { askStaleSave } from '../datagit-common';
+import { useUnsaved } from '../unsaved';
 
 function Result({ r }: { r: { ok: boolean; message: string; detail?: string; certificateChain?: ConnectionCheck['certificateChain'] } }) {
     return (
@@ -88,7 +89,10 @@ export function networkToSave(n: NetworkSettings, saved: NetworkSettings): Netwo
 }
 
 export function StudioNetworkCard({ s, onChange }: { s: StudioSettings; onChange: (s: StudioSettings) => void }) {
-    const { message } = App.useApp();
+    const app = App.useApp();
+    const { message } = app;
+    /** Keep editing after a refusal: the version saved now, so the next Save goes over it. */
+    const [kept, setKept] = React.useState<{ version: string | undefined } | null>(null);
     const [n, setN] = React.useState<NetworkSettings>(s.network);
     const [pw, setPw] = React.useState('');
     const [busy, setBusy] = React.useState<string | null>(null);
@@ -106,14 +110,24 @@ export function StudioNetworkCard({ s, onChange }: { s: StudioSettings; onChange
     const userProblem = loginShown && (/[\s:]/.test(n.proxyUser) || n.proxyUser.length > 200) ? 'The user name cannot contain spaces or ":" (at most 200 characters).' : null;
     const domainProblem = loginShown && n.proxyAuth === 'ntlm' && ((n.proxyDomain ?? '').length > 100 || /[\s\\/@:]/.test(n.proxyDomain ?? '')) ? 'The Windows domain is a name such as CORP (no spaces, \\ / @ or :).' : null;
     const problem = urlProblem ?? pacProblem ?? userProblem ?? domainProblem;
-    const save = async () => {
-        if (problem) return;
+    /** true when saved (also for "Leave without saving?" → Save). */
+    const save = async (force = false): Promise<boolean> => {
+        if (problem) return false;
         setBusy('save');
         // The version this tab read: a save over network settings changed since (another tab) is refused, not merged away.
-        try { onChange(await datagitApi.saveNetwork(networkToSave(n, s.network), (s as StudioSettings & { networkVersion?: string }).networkVersion)); message.success('Network settings saved'); setCheck(null); }
-        catch (e) { saveErrorToast(message, e, () => { void api.settings().then((x) => { onChange(x); setN(x.network); }).catch((x) => message.error(errText(x))); }); }
-        finally { setBusy(null); }
+        const version = kept ? kept.version : (s as StudioSettings & { networkVersion?: string }).networkVersion;
+        try { onChange(await datagitApi.saveNetwork(networkToSave(n, s.network), version, force)); setKept(null); message.success('Network settings saved'); setCheck(null); return true; }
+        catch (e) {
+            askStaleSave(app, e, 'The network settings', {
+                reload: () => { setKept(null); void api.settings().then((x) => { onChange(x); setN(x.network); }).catch((x) => message.error(errText(x))); },
+                overwrite: () => { setBusy(null); return save(true); },
+                keep: (v) => setKept({ version: v }),
+            });
+            return false;
+        } finally { setBusy(null); }
     };
+    // Network settings changed but not saved: leaving the screen (menu, Back, a typed address) asks first.
+    useUnsaved('settings-network', dirty, 'the network settings', { lostOnLeave: true, save: () => save(), discard: () => setN(s.network) });
     return (
         <Card size="small" title={<span>Studio connections <Typography.Text type="secondary" style={{ fontWeight: 400, fontSize: 12 }}>Azure DevOps, API requests, load tests</Typography.Text>{' '}
             <Tooltip title="Off by default. Set this on a company network (VDI). Git and the framework's own test runs have their own settings (the Git view, and ADO_PROXY_* in the project's config)."><InfoCircleOutlined style={{ color: 'var(--ant-color-text-tertiary, #999)' }} /></Tooltip></span>}>
@@ -184,7 +198,7 @@ export function StudioNetworkCard({ s, onChange }: { s: StudioSettings; onChange
                 </Form.Item>
                     </> }]} />
                 <Space>
-                    <Button type="primary" disabled={!dirty || !!problem} title={problem ?? undefined} loading={busy === 'save'} onClick={save}>Save network settings</Button>
+                    <Button type="primary" disabled={!dirty || !!problem} title={problem ?? undefined} loading={busy === 'save'} onClick={() => void save()}>Save network settings</Button>
                     <Button loading={busy === 'test'} disabled={dirty} title={dirty ? 'Save first' : undefined}
                         onClick={async () => { setBusy('test'); setCheck(null); try { setCheck(await api.testNetwork()); } catch (e) { message.error(errText(e)); } finally { setBusy(null); } }}>Test connection</Button>
                     {check && !check.tokenChecked && check.ok && <Typography.Text type="secondary" style={{ fontSize: 12 }}>(network only: no Azure DevOps token or project config to check)</Typography.Text>}
@@ -208,6 +222,9 @@ export function GitNetworkCard({ studioProxy }: { studioProxy: string }) {
         catch (e) { setErr(errText(e)); }
     }, []);
     React.useEffect(() => { void load(); }, [load]);
+    // A Git proxy or certificate file typed but not applied: leaving the screen asks first.
+    const gitDirty = !!st && (proxy.trim() !== (st.global['http.proxy'] ?? '') || caInfo.trim() !== (st.global['http.sslCAInfo'] ?? ''));
+    useUnsaved('settings-git-network', gitDirty, 'the Git network settings (not applied)', { lostOnLeave: true, discard: () => { if (st) { setProxy(st.global['http.proxy'] ?? ''); setCaInfo(st.global['http.sslCAInfo'] ?? ''); } } });
     if (err) return <Alert type="error" showIcon message="Git network settings" description={err} />;
     if (!st) return null;
 

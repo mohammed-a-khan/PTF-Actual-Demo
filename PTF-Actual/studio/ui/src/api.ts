@@ -319,7 +319,7 @@ export interface ApiRunStep { iteration: number; requestId: string; name: string
 export type ApiRunChange = 'fixed' | 'broke' | 'same' | 'still failing' | 'new' | 'gone';
 export interface ApiRunComparison {
     a: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>; b: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;
-    rows: Array<{ key: string; name: string; iteration: number; change: ApiRunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;
+    rows: Array<{ key: string; name: string; requestId?: string; method?: string; url?: string; position?: number; iteration: number; change: ApiRunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;
     counts: Record<ApiRunChange, number>; avgDelta: number;
 }
 export interface ApiMonitorDef { id: string; name: string; file: string; env: string; everyMinutes: number; enabled: boolean; webhookSecret?: string; alertOn: 'failure' | 'change'; last?: { at: string; runId: string; passed: boolean; failed: number; requests: number; alert?: string } }
@@ -365,7 +365,7 @@ export interface LoadExplainDef { status: 'green' | 'amber' | 'red'; headline: s
 export interface LoadCompareDef {
     a: { id: string; name: string; env: string; startedAt: string; passed: boolean; maxUsers: number; duration: number }; b: LoadCompareDef['a'];
     comparison: { status: 'green' | 'amber' | 'red'; headline: string; answer: string; metrics: Array<{ label: string; a: string; b: string; change: string; verdict: string; meaning: string }>;
-        transactions: Array<{ name: string; aP95: number; bP95: number; changePct: number; verdict: string }>; findings: string[]; notes: string[] };
+        transactions: Array<{ id?: string; name: string; aP95: number; bP95: number; changePct: number; aErrorRate?: number; bErrorRate?: number; verdict: string; why?: string }>; findings: string[]; notes: string[] };
     series: Array<{ id: string; label: string; points: Array<{ t: number; v: number }> }>; throughput: LoadCompareDef['series'];
 }
 export interface BugActionDef { kind: 'file' | 'update' | 'reopen' | 'resolve'; tag: string; bug?: number; title?: string; from?: string; to?: string; comment?: string; why: string }
@@ -539,6 +539,8 @@ export interface QualityReport {
     gate: { ok: boolean; run: string | null; rules: Array<{ name: string; ok: boolean; detail: string }> };
     counts: Record<QualityClass | 'quarantined', number>;
     projects: string[]; project: string | null; settings: GateSettings;
+    /** The version of the gate shown (sent back on save: a gate changed since, in another tab, is refused). */
+    settingsVersion?: string;
     quarantine: { excludeTags: string; from: string; skipsQuarantined: boolean; frameworkSupports: boolean | null };
 }
 export type HealStatus = 'review' | 'applied' | 'confirmed' | 'dismissed';
@@ -948,13 +950,13 @@ export const api = {
     dbObjects: (project: string, env: string, alias: string) => request<{ objects: DbObject[]; type: string; unsupported?: boolean }>('GET', '/api/db/objects' + q({ project, env, alias })),
     dbColumns: (project: string, env: string, alias: string, schema: string, table: string) => request<{ columns: DbColumnInfo[] }>('GET', '/api/db/columns' + q({ project, env, alias, schema, table })),
     mocks: (project: string) => request<{ mocks: MockInfo[] }>('GET', `/api/mocks?project=${encodeURIComponent(project)}`),
-    mockGet: (project: string, file: string) => request<{ file: string; mock: MockDef; url?: string }>('GET', `/api/mocks/file?project=${encodeURIComponent(project)}&file=${encodeURIComponent(file)}`),
+    mockGet: (project: string, file: string) => request<{ file: string; mock: MockDef; url?: string; version?: string }>('GET', `/api/mocks/file?project=${encodeURIComponent(project)}&file=${encodeURIComponent(file)}`),
     mockFromCollection: (file: string, name?: string) => request<{ mock: MockDef; warnings: string[] }>('POST', '/api/mocks/from-collection', { file, ...(name ? { name } : {}) }),
     mockRecordStart: (target: string) => request<{ url: string; target: string }>('POST', '/api/mocks/record/start', { target }),
     mockRecordStatus: () => request<{ url: string | null; target?: string; count?: number }>('GET', '/api/mocks/record'),
     mockRecordStop: (name?: string) => request<{ mock: MockDef; warnings: string[] }>('POST', '/api/mocks/record/stop', { ...(name ? { name } : {}) }),
     mockFromOpenApi: (b: { text?: string; specFile?: string; name?: string }) => request<{ mock: MockDef; warnings: string[] }>('POST', '/api/mocks/from-openapi', b),
-    mockSave: (project: string, file: string, mock: MockDef) => request<{ file: string; saved: boolean; applied?: boolean; restartForPort?: boolean }>('PUT', '/api/mocks/file', { project, file, mock }),
+    mockSave: (project: string, file: string, mock: MockDef) => request<{ file: string; saved: boolean; version?: string; applied?: boolean; restartForPort?: boolean }>('PUT', '/api/mocks/file', { project, file, mock }),
     mockDelete: (project: string, file: string) => request<{ removed: boolean }>('DELETE', `/api/mocks/file?project=${encodeURIComponent(project)}&file=${encodeURIComponent(file)}`),
     mockStart: (project: string, file: string, port?: number) => request<{ url: string; port: number }>('POST', '/api/mocks/start', { project, file, ...(port !== undefined ? { port } : {}) }),
     mockStop: (project: string, file: string) => request<{ stopped: boolean }>('POST', '/api/mocks/stop', { project, file }),
@@ -1107,7 +1109,7 @@ export const api = {
     readKnowledge: (id: string) => request<{ id: string; path: string; title: string; source: string; url?: string; lines?: [number, number]; text: string }>('GET', '/api/knowledge/read' + q({ id })),
     doctorFix: (action: string) => request<{ done: string }>('POST', '/api/doctor/fix', { action }),
     runConfigs: () => request<{ configs: RunConfigDef[]; file: string; version?: string }>('GET', '/api/run-configs'),
-    saveRunConfigs: (configs: RunConfigDef[], version?: string) => request<{ configs: RunConfigDef[]; file: string; version?: string }>('PUT', '/api/run-configs', { configs, ...(version ? { version } : {}) }),
+    saveRunConfigs: (configs: RunConfigDef[], version?: string, force = false) => request<{ configs: RunConfigDef[]; file: string; version?: string }>('PUT', '/api/run-configs', { configs, ...(version ? { version } : {}), ...(force ? { force: true } : {}) }),
     stopRun: (id: string) => request<{ ok: boolean }>('POST', `/api/runs/${encodeURIComponent(id)}/stop`),
     run: (id: string, from?: number) => request<RunInfo & { log: LogLine[] }>('GET', `/api/runs/${encodeURIComponent(id)}` + q({ from })),
     debugRun: (id: string, command: 'next' | 'into' | 'continue' | 'stop' | 'resume' | 'stepOver' | 'stepInto' | 'stepOut' | 'pause') => request<{ ok: true }>('POST', `/api/runs/${encodeURIComponent(id)}/debug`, { command }),
@@ -1117,7 +1119,7 @@ export const api = {
     breakpoints: () => request<{ breakpoints: Breakpoint[] }>('GET', '/api/breakpoints'),
     setBreakpoints: (breakpoints: Breakpoint[]) => request<{ breakpoints: Breakpoint[] }>('PUT', '/api/breakpoints', { breakpoints }),
     quality: (window: number, project?: string) => request<QualityReport>('GET', '/api/quality' + q({ window, project })),
-    qualityGate: (g: GateSettings) => request<GateSettings>('PUT', '/api/quality/gate', g),
+    qualityGate: (g: GateSettings, version?: string, force = false) => request<GateSettings & { version?: string }>('PUT', '/api/quality/gate', { ...g, ...(version ? { version } : {}), ...(force ? { force: true } : {}) }),
     quarantine: (b: { key: string; file: string; line: number; name: string; on: boolean; reason?: string }) => request<{ ok: true; changed: boolean }>('POST', '/api/quality/quarantine', b),
     excludeQuarantined: () => request<{ ok: true; file: string }>('POST', '/api/quality/exclude-quarantined'),
     agentPlanContext: (project: string, env?: string, story?: string) => request<PlanContext>('GET', '/api/agents/plan-context' + q({ project, env, story })),

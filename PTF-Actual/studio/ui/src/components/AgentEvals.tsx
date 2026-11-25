@@ -5,10 +5,15 @@
 import React from 'react';
 import { Alert, App, Button, Card, Collapse, Drawer, Empty, Input, InputNumber, List, Select, Space, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { CheckCircleFilled, CloseCircleFilled, DeleteOutlined, PlayCircleOutlined, PlusOutlined, QuestionCircleOutlined, StopOutlined } from '@ant-design/icons';
-import { api, EvalCaseDef, EvalCheckDef, EvalRunDef, EvalsDef, TeamAgentDef } from '../api';
+import { api, EvalCaseDef, EvalCheckDef, TeamAgentDef } from '../api';
 import { useUnsaved } from '../unsaved';
 import { errText } from '../state';
 import { Markdown } from './Markdown';
+import { agentsApi, EvalRunSummaryView, EvalRunView, EvalsView } from '../agents-api';
+import { askChangedElsewhere, isChangedElsewhere } from './ChangedElsewhere';
+
+/** The model a run used: as recorded (newer runs), else the agent's own model, else "not recorded" (older runs). */
+export const runModel = (r: EvalRunSummaryView): string => r.models?.length ? r.models.join(', ') : r.subject.model ?? 'not recorded';
 
 const CHECKS: Array<{ value: EvalCheckDef['kind']; label: string }> = [
     { value: 'contains', label: 'The answer contains' }, { value: 'not-contains', label: 'The answer does not contain' }, { value: 'matches', label: 'The answer matches a pattern' },
@@ -37,42 +42,71 @@ function CheckEditor({ c, onChange, onRemove }: { c: EvalCheckDef; onChange: (c:
 
 export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: () => void }) {
     const { message, modal } = App.useApp();
-    const [d, setD] = React.useState<EvalsDef | null>(null);
+    const [d, setD] = React.useState<EvalsView | null>(null);
     const [cases, setCases] = React.useState<EvalCaseDef[]>([]);
     const [dirty, setDirty] = React.useState(false);
-    useUnsaved('agent-evals', dirty, 'evaluation cases');
-    const [run, setRun] = React.useState<EvalRunDef | null>(null);
+    // The version of the cases file these cases came from: a save over a newer one (another tab) is refused.
+    const version = React.useRef<string | undefined>(undefined);
+    const [run, setRun] = React.useState<EvalRunView | null>(null);
     const [tab, setTab] = React.useState('cases');
     const load = React.useCallback(async () => {
         try {
-            const r = await api.evals(agent.id);
+            const r = await agentsApi.evals(agent.id);
             setD(r);
-            if (r.runs[0]) setRun(await api.evalRun(agent.id, r.runs[0].id));
+            if (r.runs[0]) setRun(await agentsApi.evalRun(agent.id, r.runs[0].id));
             return r;
         } catch (e) { message.error(errText(e)); return null; }
     }, [agent.id, message]);
-    React.useEffect(() => { void load().then((r) => { if (r) { setCases(r.suite.cases); if (r.runs.length) setTab('results'); } }); }, [load]);
+    /** The cases as saved now (after "Reload", and when the drawer opens). */
+    const reloadCases = React.useCallback(() => load().then((r) => { if (r) { setCases(r.suite.cases); version.current = r.version; setDirty(false); } return r; }), [load]);
+    React.useEffect(() => { void reloadCases().then((r) => { if (r?.runs.length) setTab('results'); }); }, [reloadCases]);
     // While it runs: the results as they come.
     React.useEffect(() => { if (!d?.running) return; const t = setInterval(() => { void load(); }, 2000); return () => clearInterval(t); }, [d?.running, load]);
     const up = (i: number, c: Partial<EvalCaseDef>) => { setCases((cs) => cs.map((x, k) => (k === i ? { ...x, ...c } : x))); setDirty(true); };
     // One save at a time (a double click saves once); a case without a name gets "Case N".
     const saving = React.useRef<Promise<boolean> | null>(null);
     const [savingNow, setSavingNow] = React.useState(false);
+    const put = async (force: boolean): Promise<boolean> => {
+        const r = await agentsApi.saveEvals(agent.id, { cases: cases.map((c, i) => ({ ...c, name: c.name.trim() || `Case ${i + 1}` })) }, version.current, force);
+        setCases(r.suite.cases); version.current = r.version; setDirty(false);
+        message.success({ content: `Saved ${d?.file}: commit it to share the cases`, key: 'agent-evals-save' });
+        return true;
+    };
     const save = (): Promise<boolean> => {
         if (saving.current) return saving.current;
         setSavingNow(true);
         saving.current = (async () => {
-            try { const r = await api.saveEvals(agent.id, { cases: cases.map((c, i) => ({ ...c, name: c.name.trim() || `Case ${i + 1}` })) }); setCases(r.suite.cases); setDirty(false); message.success({ content: `Saved ${d?.file}: commit it to share the cases`, key: 'agent-evals-save' }); return true; }
-            catch (e) { message.error({ content: errText(e), key: 'agent-evals-save' }); return false; }
-            finally { saving.current = null; setSavingNow(false); }
+            try { return await put(false); }
+            catch (e) {
+                // Saved in another tab (or by someone else, or a pull) since these cases were read: reload or overwrite on purpose.
+                if (isChangedElsewhere(e)) {
+                    return new Promise<boolean>((resolve) => askChangedElsewhere(modal, e, `The evaluation cases of ${agent.name}`, {
+                        reload: () => { void reloadCases(); resolve(false); },
+                        overwrite: () => put(true).then(resolve, (x) => { message.error({ content: errText(x), key: 'agent-evals-save' }); resolve(false); }),
+                        keepEditing: () => resolve(false),
+                    }));
+                }
+                message.error({ content: errText(e), key: 'agent-evals-save' }); return false;
+            } finally { saving.current = null; setSavingNow(false); }
         })();
         return saving.current;
     };
-    const start = async () => { if (dirty && !(await save())) return; try { await api.runEvals(agent.id); setTab('results'); await load(); } catch (e) { message.error(errText(e)); } };
+    // Unsaved cases: another screen (the menu, Back, an address typed) asks first: Save, Discard or Stay.
+    useUnsaved('agent-evals', dirty, `the evaluation cases of ${agent.name}`, { lostOnLeave: true, save, discard: onClose });
+    // One run at a time: a second click while the first is starting is ignored.
+    const starting = React.useRef(false);
+    const [startingNow, setStartingNow] = React.useState(false);
+    const start = async () => {
+        if (starting.current || d?.running) return;
+        starting.current = true; setStartingNow(true);
+        try { if (dirty && !(await save())) return; await api.runEvals(agent.id); setTab('results'); await load(); }
+        catch (e) { message.error(errText(e)); }
+        finally { starting.current = false; setStartingNow(false); }
+    };
     return (
         <Drawer open width="min(980px, calc(100vw - 32px))" title={`Evaluations: ${agent.name}`} onClose={() => (dirty ? modal.confirm({ title: 'Discard the changes to the cases?', okText: 'Discard', okButtonProps: { danger: true }, cancelText: 'Keep editing', onOk: onClose }) : onClose())}
             extra={<Space>{d?.running ? <Button icon={<StopOutlined />} onClick={() => { void api.stopEvals(agent.id).then(load).catch((e) => message.error(errText(e))); }}>Stop</Button>
-                : <Button type="primary" icon={<PlayCircleOutlined />} disabled={!cases.length} onClick={() => void start()}>Run all cases</Button>}</Space>}>
+                : <Button type="primary" icon={<PlayCircleOutlined />} disabled={!cases.length} loading={startingNow} onClick={() => void start()}>Run all cases</Button>}</Space>}>
             {d?.problem && <Alert type="warning" showIcon message={d.problem} style={{ marginBottom: 12 }} />}
             <Typography.Paragraph type="secondary" style={{ fontSize: 13 }}>Run the cases after changing the agent: a case that passed before and fails now is a regression. <Tooltip title="Each case is a fresh session with the agent's instructions, tools and knowledge that cannot change anything."><QuestionCircleOutlined /></Tooltip></Typography.Paragraph>
             <Tabs size="small" activeKey={tab} onChange={setTab} items={[
@@ -102,7 +136,7 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
                         <Space wrap>
                             <Tag color={run.state === 'running' ? 'processing' : run.passed === run.total ? 'green' : 'red'}>{run.state === 'running' ? 'running' : `${run.passed} of ${run.total} passed`}</Tag>
                             {run.compared && <Tag color={run.compared.regressions ? 'red' : 'default'}>{run.compared.regressions} regression(s), {run.compared.fixed} fixed since the run before</Tag>}
-                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{new Date(run.startedAt).toLocaleString()} · {run.by}{run.subject.model ? ` · ${run.subject.model}` : ''}</Typography.Text>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{new Date(run.startedAt).toLocaleString()} · {run.by} · model {runModel(run)}</Typography.Text>
                         </Space>
                         {run.error && <Alert type="error" showIcon message={run.error} />}
                         <Collapse items={run.cases.map((c) => ({
@@ -127,12 +161,12 @@ export function AgentEvals({ agent, onClose }: { agent: TeamAgentDef; onClose: (
                     </Space>
                 ) },
                 { key: 'history', label: `History (${d?.runs.length ?? 0})`, children: (
-                    <Table size="small" rowKey="id" dataSource={d?.runs ?? []} pagination={{ pageSize: 15 }} onRow={(r) => ({ onClick: () => { void api.evalRun(agent.id, r.id).then((x) => { setRun(x); setTab('results'); }).catch((e) => message.error(errText(e))); }, style: { cursor: 'pointer' } })} columns={[
+                    <Table size="small" rowKey="id" dataSource={d?.runs ?? []} pagination={{ pageSize: 15 }} onRow={(r) => ({ onClick: () => { void agentsApi.evalRun(agent.id, r.id).then((x) => { setRun(x); setTab('results'); }).catch((e) => message.error(errText(e))); }, style: { cursor: 'pointer' } })} columns={[
                         { title: 'When', dataIndex: 'startedAt', render: (x: string) => new Date(x).toLocaleString() },
                         { title: 'By', dataIndex: 'by', width: 140 },
                         { title: 'Passed', width: 110, render: (_: unknown, r) => <Tag color={r.state === 'running' ? 'processing' : r.passed === r.total ? 'green' : 'red'}>{r.state === 'running' ? 'running' : `${r.passed} / ${r.total}`}</Tag> },
                         { title: 'Against the run before', render: (_: unknown, r) => (r.compared ? <Space>{r.compared.regressions ? <Tag color="red">{r.compared.regressions} regression(s)</Tag> : null}{r.compared.fixed ? <Tag color="green">{r.compared.fixed} fixed</Tag> : null}{!r.compared.regressions && !r.compared.fixed ? 'no change' : null}</Space> : '—') },
-                        { title: 'Model', width: 140, render: (_: unknown, r) => r.subject.model ?? 'setting' },
+                        { title: 'Model', width: 160, render: (_: unknown, r) => { const m = runModel(r); return m === 'not recorded' ? <Tooltip title="This run is older than the record of the model used"><Typography.Text type="secondary">not recorded</Typography.Text></Tooltip> : <Typography.Text className="mono" style={{ fontSize: 12 }}>{m}</Typography.Text>; } },
                     ]} />
                 ) },
             ]} />

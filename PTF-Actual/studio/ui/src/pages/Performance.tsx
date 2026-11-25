@@ -18,7 +18,7 @@ import { curveFromCsv, curveProblems, policyCurve, validPolicy } from '../../../
 import { ago } from '../format';
 import { LogicEditor } from '../components/LogicEditor';
 import { RecordPathModal } from '../components/RecordPathModal';
-import { askChangedElsewhere, askUnsaved, isChangedElsewhere, nameProblem, SectionTitle, shownTab, useEscapeCloses, useRememberedTab, versionOf, withBase } from '../apiperf-ui';
+import { askChangedElsewhere, askUnsaved, FieldProblems, isChangedElsewhere, nameProblem, NumField, SectionTitle, shownTab, useEscapeCloses, useFieldProblems, useNestedFieldProblems, useRememberedTab, verdictWords, versionOf, withBase } from '../apiperf-ui';
 
 const C = { users: '#8250df', rps: '#0969da', avg: '#1a7f37', p95: '#bf8700', errors: '#cf222e' };
 const dur = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s >= 60 ? `${Math.floor(s / 60)} min${s % 60 ? ` ${Math.round(s % 60)} s` : ''}` : `${Math.round(s)} s`);
@@ -62,13 +62,13 @@ function PopulationRow({ p, index, onChange, onRemove, collections, browserPaths
                 : <Select size="small" style={{ width: 260 }} value={p.collection || undefined} onChange={(v) => onChange({ ...p, collection: v, requests: [] })} aria-label="Collection" options={collections.map((c) => ({ value: c.file, label: `${c.name} (${c.requests})` }))} />}
             {!browser && <Select size="small" mode="multiple" maxTagCount="responsive" style={{ width: 260 }} placeholder="All requests, in order" value={p.requests} loading={reqs === null} onChange={(v) => onChange({ ...p, requests: (reqs ?? []).map((r) => r.id).filter((id) => v.includes(id)) })} aria-label="Requests"
                 options={(reqs ?? []).map((r, i) => ({ value: r.id, label: `${i + 1}. ${r.method} ${r.name}` }))} />}
-            {!p.policy && <InputNumber size="small" min={1} max={99} value={p.share} onChange={(v) => onChange({ ...p, share: Math.round(v ?? 10) })} addonAfter="% of users" style={{ width: 150 }} aria-label="Share of users" />}
+            {!p.policy && <NumField size="small" min={1} max={99} value={p.share} onChange={(v) => v !== undefined && onChange({ ...p, share: v })} addonAfter="% of users" width={150} label="Share of users" />}
             <Tooltip title="Its own users over time (and start / stop), instead of a share of the scenario's"><Checkbox checked={!!p.policy} onChange={(e) => onChange({ ...p, policy: e.target.checked ? { type: 'constant', users: 5, duration: 300 } : undefined })}>Own load</Checkbox></Tooltip>
             <Button size="small" type="text" icon={<DeleteOutlined />} onClick={onRemove} aria-label="Remove user path" />
             {p.policy && <div style={{ width: '100%', paddingInlineStart: 12, borderInlineStart: '2px solid var(--panel-border)' }}>
                 <Space wrap style={{ marginBottom: 6 }}>
-                    <InputNumber size="small" min={0} value={p.startDelay} placeholder="0" addonBefore="Start after" addonAfter="s" onChange={(v) => onChange({ ...p, startDelay: v ?? undefined })} style={{ width: 180 }} aria-label="Start after" />
-                    <InputNumber size="small" min={1} value={p.stopAfter} placeholder="the end" addonBefore="Stop at" addonAfter="s" onChange={(v) => onChange({ ...p, stopAfter: v ?? undefined })} style={{ width: 190 }} aria-label="Stop at" />
+                    <NumField size="small" min={0} max={604800} optional value={p.startDelay} placeholder="0" addonBefore="Start after" addonAfter="s" onChange={(v) => onChange({ ...p, startDelay: v })} width={180} label="Start after" />
+                    <NumField size="small" min={1} max={604800} optional value={p.stopAfter} placeholder="the end" addonBefore="Stop at" addonAfter="s" onChange={(v) => onChange({ ...p, stopAfter: v })} width={190} label="Stop at" />
                 </Space>
                 <PolicyEditor p={p.policy} onChange={(policy) => onChange({ ...p, policy })} />
             </div>}
@@ -84,9 +84,9 @@ function WanEditor({ value, onChange }: { value?: LoadWanDef; onChange: (w: Load
     return (
         <Space wrap size={4}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>Network</Typography.Text>
-            <InputNumber size="small" min={0} value={value?.latencyMs} placeholder="0" addonBefore="+" addonAfter="ms" onChange={(v) => set({ latencyMs: v ?? undefined })} style={{ width: 130 }} aria-label="Added latency" />
-            <InputNumber size="small" min={0} value={value?.bandwidthKbps} placeholder="no limit" addonAfter="kbit/s" onChange={(v) => set({ bandwidthKbps: v ?? undefined })} style={{ width: 160 }} aria-label="Bandwidth" />
-            <InputNumber size="small" min={0} max={100} value={value?.lossPercent} placeholder="0" addonAfter="% lost" onChange={(v) => set({ lossPercent: v ?? undefined })} style={{ width: 130 }} aria-label="Requests lost" />
+            <NumField size="small" min={0} max={600000} optional value={value?.latencyMs} placeholder="0" addonBefore="+" addonAfter="ms" onChange={(v) => set({ latencyMs: v })} width={150} label="Added latency" />
+            <NumField size="small" min={0} max={10000000} optional value={value?.bandwidthKbps} placeholder="no limit" addonAfter="kbit/s" onChange={(v) => set({ bandwidthKbps: v })} width={170} label="Bandwidth" />
+            <NumField size="small" min={0} max={100} decimals={2} optional value={value?.lossPercent} placeholder="0" addonAfter="% lost" onChange={(v) => set({ lossPercent: v })} width={140} label="Requests lost" />
             <Button size="small" type="link" onClick={preset({ latencyMs: 150, bandwidthKbps: 1600, lossPercent: 1 })}>3G</Button>
             <Button size="small" type="link" onClick={preset({ latencyMs: 50, bandwidthKbps: 12000 })}>4G</Button>
             <Button size="small" type="link" onClick={preset({ latencyMs: 120 })}>Other continent</Button>
@@ -96,36 +96,39 @@ function WanEditor({ value, onChange }: { value?: LoadWanDef; onChange: (w: Load
 }
 
 function PolicyEditor({ p, onChange }: { p: LoadPolicyDef; onChange: (p: LoadPolicyDef) => void }) {
-    const num = (label: string, key: keyof LoadPolicyDef, o: { min?: number; max?: number; suffix?: string; tip?: string } = {}) => (
+    // Users and seconds are whole numbers (rates may have decimals): what is typed stays, with the reason under it.
+    const num = (label: string, key: keyof LoadPolicyDef, o: { min?: number; max?: number; suffix?: string; tip?: string; decimals?: number; required?: boolean } = {}) => (
         <Form.Item label={label} tooltip={o.tip} className="field">
-            <InputNumber size="small" min={o.min ?? 0} max={o.max} value={p[key] as number | undefined} onChange={(v) => onChange({ ...p, [key]: v ?? undefined })} style={{ width: 120 }} aria-label={label} addonAfter={o.suffix} />
+            <NumField size="small" min={o.min ?? 0} max={o.max ?? (o.suffix === 's' ? 604800 : 100000)} decimals={o.decimals} optional={!o.required} value={p[key] as number | undefined} onChange={(v) => onChange({ ...p, [key]: v })} width={130} label={label} addonAfter={o.suffix} />
         </Form.Item>
     );
     const err = validPolicy(p);
     const curve = err ? [] : policyCurve(p);
+    // A number in error is said under its field: the same reason is not repeated below.
+    const fields = useNestedFieldProblems();
     const shape: Record<LoadPolicyDef['type'], string> = { constant: 'Constant', ramp: 'Ramp up / down', steps: 'Steps', peaks: 'Peaks', wave: 'Wave', arrival: 'Arrival rate', custom: 'Custom curve' };
     const arrival = p.type === 'arrival';
     return (
         <Space direction="vertical" style={{ width: '100%' }} size={8}>
             <Segmented size="small" className="ap-seg-wrap" style={{ maxWidth: '100%' }} value={p.type} onChange={(t) => onChange({ ...p, type: t as LoadPolicyDef['type'], ...(t === 'arrival' && !p.rate ? { rate: 10 } : {}), ...(t === 'custom' && !p.points?.length ? { points: [{ t: 0, users: 0 }, { t: Math.round(p.duration / 3), users: p.users }, { t: Math.round((2 * p.duration) / 3), users: p.users }, { t: p.duration, users: 0 }] } : {}) })} options={Object.entries(shape).map(([value, label]) => ({ value, label }))} />
-            <Form layout="vertical" size="small" className="field-row">
-                {p.type !== 'custom' && num('Run for', 'duration', { min: 1, suffix: 's' })}
-                {arrival && num('Rate', 'rate', { min: 0.1, max: 10000, suffix: '/ s', tip: 'Iterations started per second, however long each takes (open model)' })}
-                {p.type !== 'custom' && num(arrival ? 'Most users' : p.type === 'peaks' ? 'Base users' : p.type === 'steps' ? 'Up to users' : p.type === 'wave' ? 'Middle users' : 'Users', 'users', { min: 1, ...(arrival ? { tip: 'Users at most at once: an iteration due when all are busy is dropped (the system cannot keep the rate)' } : {}) })}
+            <FieldProblems value={fields.report}><Form layout="vertical" size="small" className="field-row ap-field-top">
+                {p.type !== 'custom' && num('Run for', 'duration', { min: 1, suffix: 's', required: true })}
+                {arrival && num('Rate', 'rate', { min: 0.1, max: 10000, suffix: '/ s', decimals: 2, required: true, tip: 'Iterations started per second, however long each takes (open model)' })}
+                {p.type !== 'custom' && num(arrival ? 'Most users' : p.type === 'peaks' ? 'Base users' : p.type === 'steps' ? 'Up to users' : p.type === 'wave' ? 'Middle users' : 'Users', 'users', { min: 1, required: true, ...(arrival ? { tip: 'Users at most at once: an iteration due when all are busy is dropped (the system cannot keep the rate)' } : {}) })}
                 {p.type !== 'custom' && num('Ramp up', 'rampUp', { suffix: 's', tip: arrival ? 'Seconds to reach the rate at the start' : 'Seconds to reach the users at the start' })}
                 {p.type !== 'custom' && num('Ramp down', 'rampDown', { suffix: 's', tip: 'Seconds to go back to 0 at the end' })}
-                {arrival && num('Start rate', 'startRate', { suffix: '/ s', tip: 'The rate at the start of the ramp-up' })}
+                {arrival && num('Start rate', 'startRate', { suffix: '/ s', max: 10000, decimals: 2, tip: 'The rate at the start of the ramp-up' })}
                 {(p.type === 'ramp' || p.type === 'steps' || p.type === 'wave') && num('Start with', 'startUsers', { tip: 'Users at the very start' })}
                 {p.type === 'steps' && <>{num('Add', 'stepUsers', { min: 1, suffix: 'users' })}{num('Every', 'stepEvery', { min: 1, suffix: 's' })}</>}
                 {p.type === 'peaks' && <>{num('Peak users', 'peakUsers', { min: 1 })}{num('Every', 'peakEvery', { min: 1, suffix: 's' })}{num('For', 'peakLength', { min: 1, suffix: 's' })}</>}
                 {p.type === 'wave' && <>{num('Plus/minus', 'amplitude', { suffix: 'users' })}{num('Period', 'period', { min: 1, suffix: 's' })}</>}
-            </Form>
+            </Form></FieldProblems>
             {p.type === 'custom' && <Space direction="vertical" style={{ width: '100%' }}>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>Users at given seconds, one point per line ("second,users"), straight lines between: paste a CSV (from production traffic, a spreadsheet) or type it.</Typography.Text>
                 <CurveInput initial={(p.points ?? []).map((x) => `${x.t},${x.users}`).join('\n')}
                     onPoints={(pts) => onChange({ ...p, points: pts, users: Math.max(1, ...pts.map((x) => x.users)), duration: Math.max(1, pts.at(-1)?.t ?? 1), rampUp: 0, rampDown: 0 })} />
             </Space>}
-            {err ? <Alert type="warning" showIcon message={err} /> : arrival
+            {err ? (fields.problem ? null : <Alert type="warning" showIcon message={err} />) : arrival
                 ? <LineChart height={120} x={curve.map((c) => c.t)} series={[{ name: 'Iterations per second', color: C.users, values: curve.map((c) => c.rate ?? 0), area: true }]} />
                 : <LineChart height={120} x={curve.map((c) => c.t)} series={[{ name: 'Users', color: C.users, values: curve.map((c) => c.users), area: true }]} />}
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>{err ? '' : arrival
@@ -183,9 +186,9 @@ function ScenarioEditor({ sc, onChange, reqs, collections, onCollection, browser
             </div>}
             <Form layout="vertical" size="small" className="ap-form" style={{ maxWidth: 720 }}>
                 <Row gutter={16}>
-                    <Col xs={12} md={8}><Form.Item label="Think time from" tooltip="Pause after each step, chosen at random between the two values"><InputNumber min={0} value={sc.thinkTime.min} onChange={(v) => set({ thinkTime: { min: v ?? 0, max: Math.max(v ?? 0, sc.thinkTime.max) } })} aria-label="Think time from" addonAfter="ms" /></Form.Item></Col>
-                    <Col xs={12} md={8}><Form.Item label="Think time to"><InputNumber min={0} value={sc.thinkTime.max} onChange={(v) => set({ thinkTime: { ...sc.thinkTime, max: Math.max(v ?? 0, sc.thinkTime.min) } })} aria-label="Think time to" addonAfter="ms" /></Form.Item></Col>
-                    <Col xs={12} md={8}><Form.Item label="Pacing" tooltip="Minimum time one pass through the steps takes; 0: none"><InputNumber min={0} value={sc.pacing} onChange={(v) => set({ pacing: v ?? 0 })} aria-label="Pacing" addonAfter="ms" /></Form.Item></Col>
+                    <Col xs={12} md={8}><Form.Item label="Think time from" tooltip="Pause after each step, chosen at random between the two values"><NumField min={0} max={600000} value={sc.thinkTime.min} onChange={(v) => v !== undefined && set({ thinkTime: { ...sc.thinkTime, min: v } })} label="Think time from" addonAfter="ms" /></Form.Item></Col>
+                    <Col xs={12} md={8}><Form.Item label="Think time to"><NumField min={Math.min(sc.thinkTime.min, 600000)} max={600000} value={sc.thinkTime.max} onChange={(v) => v !== undefined && set({ thinkTime: { ...sc.thinkTime, max: v } })} label="Think time to" addonAfter="ms" /></Form.Item></Col>
+                    <Col xs={12} md={8}><Form.Item label="Pacing" tooltip="Minimum time one pass through the steps takes; 0: none"><NumField min={0} max={3600000} value={sc.pacing} onChange={(v) => v !== undefined && set({ pacing: v })} label="Pacing" addonAfter="ms" /></Form.Item></Col>
                 </Row>
             </Form>
             <div>
@@ -245,14 +248,14 @@ function ScenarioEditor({ sc, onChange, reqs, collections, onCollection, browser
                         </div>
                     </div>
                 ))}
-                {sc.slas.some((x) => x.per === 'interval') && <div style={{ marginTop: 8 }}><Tooltip title="Length of an interval; an interval missing a level raises an alert while running"><InputNumber size="small" min={1} max={3600} value={sc.slaInterval ?? 10} onChange={(v) => set({ slaInterval: v && v !== 10 ? v : undefined })} addonBefore="interval" addonAfter="s" style={{ width: 160 }} aria-label="Interval" /></Tooltip></div>}
+                {sc.slas.some((x) => x.per === 'interval') && <div style={{ marginTop: 8 }}><Tooltip title="Length of an interval; an interval missing a level raises an alert while running"><NumField size="small" min={1} max={3600} value={sc.slaInterval ?? 10} onChange={(v) => v !== undefined && set({ slaInterval: v !== 10 ? v : undefined })} addonBefore="interval" addonAfter="s" width={170} label="Interval" /></Tooltip></div>}
             </div>
             <div>
                 <SectionTitle help="Stop a run that is clearly failing, or fail a run that is worse than the scenario's baseline run (set a baseline on a run's page).">Gates</SectionTitle>
                 <Space direction="vertical" size={8}>
                     <Space wrap>
                         <Checkbox checked={sc.stopOnErrorRate !== undefined} onChange={(e) => set({ stopOnErrorRate: e.target.checked ? 20 : undefined })}>Stop early when errors exceed</Checkbox>
-                        {sc.stopOnErrorRate !== undefined && <InputNumber size="small" min={1} max={100} value={sc.stopOnErrorRate} onChange={(v) => set({ stopOnErrorRate: v ?? 20 })} addonAfter="%" style={{ width: 100 }} aria-label="Stop when errors exceed" />}
+                        {sc.stopOnErrorRate !== undefined && <NumField size="small" min={1} max={100} value={sc.stopOnErrorRate} onChange={(v) => v !== undefined && set({ stopOnErrorRate: v })} addonAfter="%" width={110} label="Stop when errors exceed" />}
                     </Space>
                     <Space wrap><RegressionGateInputs sc={sc} set={set} /></Space>
                 </Space>
@@ -263,8 +266,8 @@ function ScenarioEditor({ sc, onChange, reqs, collections, onCollection, browser
         <Space direction="vertical" style={{ width: '100%' }} size={14}>
             <Form layout="vertical" size="small" className="ap-form" style={{ maxWidth: 720 }}>
                 <Row gutter={16}>
-                    <Col xs={12} md={8}><Form.Item label="Timeout" tooltip="A step that takes longer fails"><InputNumber min={100} value={sc.timeout} onChange={(v) => set({ timeout: v ?? 30000 })} aria-label="Timeout" addonAfter="ms" /></Form.Item></Col>
-                    <Col xs={12} md={8}><Form.Item label="Iterations per user" tooltip="Each user does this many iterations, then stops; the run ends when all are done (the duration is then the longest it may take)"><InputNumber min={1} value={sc.iterationsPerUser} placeholder="until the end" onChange={(v) => set({ iterationsPerUser: v ?? undefined })} aria-label="Iterations per user" /></Form.Item></Col>
+                    <Col xs={12} md={8}><Form.Item label="Timeout" tooltip="A step that takes longer fails"><NumField min={100} max={600000} value={sc.timeout} onChange={(v) => v !== undefined && set({ timeout: v })} label="Timeout" addonAfter="ms" width={150} /></Form.Item></Col>
+                    <Col xs={12} md={8}><Form.Item label="Iterations per user" tooltip="Each user does this many iterations, then stops; the run ends when all are done (the duration is then the longest it may take)"><NumField min={1} max={1000000} optional value={sc.iterationsPerUser} placeholder="until the end" onChange={(v) => set({ iterationsPerUser: v })} label="Iterations per user" width={150} /></Form.Item></Col>
                 </Row>
             </Form>
             {!sc.browserPath && <div>
@@ -381,21 +384,24 @@ function PipelineButton({ file }: { file: string }) {
     const [open, setOpen] = React.useState(false);
     const [o, setO] = React.useState<{ generators: number; schedule: string; variableGroup: string; pool: string; teamFolder: string }>({ generators: 1, schedule: '0 2 * * 1-5', variableGroup: '', pool: '', teamFolder: '' });
     const [r, setR] = React.useState<{ yaml: string; file: string; secretNames: string[] } | null>(null);
+    const fields = useFieldProblems();
     const build = React.useCallback(async (save = false) => {
+        // A number in error (said under it) is not sent: the server would refuse it anyway.
+        if (fields.problem) return;
         try {
             const x = await api.loadPipeline({ file, generators: o.generators, ...(o.schedule.trim() ? { schedule: o.schedule.trim() } : {}), ...(o.variableGroup.trim() ? { variableGroup: o.variableGroup.trim() } : {}), ...(o.pool.trim() ? { pool: o.pool.trim() } : {}), ...(o.teamFolder.trim() ? { teamFolder: o.teamFolder.trim() } : {}), save });
             setR(x); if (save) message.success(`Wrote ${x.file}`);
         } catch (e) { message.error(errText(e)); }
-    }, [file, o, message]);
+    }, [file, o, message, fields.problem]);
     React.useEffect(() => { if (open) void build(); }, [open, build]);
     return (
         <>
             <Button size="small" onClick={() => setOpen(true)}>Pipeline</Button>
             <Modal open={open} title="Azure DevOps load-test pipeline" width={820} onCancel={() => setOpen(false)}
-                footer={[<Button key="c" onClick={() => { void navigator.clipboard.writeText(r?.yaml ?? ''); message.success('Copied'); }}>Copy</Button>, <Button key="s" type="primary" onClick={() => void build(true)}>Save to the repository</Button>]}>
-                <Space direction="vertical" style={{ width: '100%' }}>
+                footer={[<Button key="c" onClick={() => { void navigator.clipboard.writeText(r?.yaml ?? ''); message.success('Copied'); }}>Copy</Button>, <Button key="s" type="primary" disabled={!!fields.problem} title={fields.problem ?? undefined} onClick={() => void build(true)}>Save to the repository</Button>]}>
+                <FieldProblems value={fields.report}><Space direction="vertical" style={{ width: '100%' }}>
                     <Space wrap>
-                        <InputNumber size="small" min={1} max={50} value={o.generators} onChange={(v) => setO({ ...o, generators: v ?? 1 })} addonBefore="generators" style={{ width: 150 }} aria-label="Load generators" />
+                        <NumField size="small" min={1} max={50} value={o.generators} onChange={(v) => v !== undefined && setO((x) => ({ ...x, generators: v }))} addonBefore="generators" width={160} label="Load generators" />
                         <Tooltip title="Cron line in UTC; empty: run by hand only"><Input size="small" className="mono" style={{ width: 150 }} value={o.schedule} onChange={(e) => setO({ ...o, schedule: e.target.value })} placeholder="0 2 * * 1-5" aria-label="Schedule" /></Tooltip>
                         <Input size="small" style={{ width: 170 }} value={o.variableGroup} onChange={(e) => setO({ ...o, variableGroup: e.target.value })} placeholder="variable group (secrets)" aria-label="Variable group" />
                         <Tooltip title="An agent pool for the generators (e.g. a scale-set pool that starts agents on demand); empty: Microsoft-hosted"><Input size="small" style={{ width: 150 }} value={o.pool} onChange={(e) => setO({ ...o, pool: e.target.value })} placeholder="agent pool" aria-label="Agent pool" /></Tooltip>
@@ -404,7 +410,7 @@ function PipelineButton({ file }: { file: string }) {
                     {r?.secretNames.length ? <Typography.Text type="secondary" style={{ fontSize: 12 }}>Secrets it reads (put them in the variable group): {r.secretNames.join(', ')}</Typography.Text> : null}
                     <pre className="mono" style={{ maxHeight: 420, overflow: 'auto', fontSize: 11.5, background: 'var(--cs-code-bg, #f6f8fa)', padding: 10 }}>{r?.yaml ?? ''}</pre>
                     {r && <Typography.Text type="secondary" style={{ fontSize: 12 }}>Saved as {r.file}: commit it, then create the pipeline from it in Azure DevOps.</Typography.Text>}
-                </Space>
+                </Space></FieldProblems>
             </Modal>
         </>
     );
@@ -474,7 +480,7 @@ function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[
     const pick = (k: 'a' | 'b', v: string) => navigate(['perf-compare', ...file.split('/'), '@', k === 'a' ? v : ids.a!, k === 'b' ? v : ids.b!]);
     const opts = list.map((r) => ({ value: r.id, label: `${new Date(r.startedAt).toLocaleString()} · ${r.env} · p95 ${ms(r.summary!.p95)}${r.baseline ? ' · baseline' : ''}` }));
     const download = async (format: 'html' | 'pdf' | 'docx') => { try { const r = await api.loadReport(ids.a!, format, [ids.b!]); const el = document.createElement('a'); el.href = URL.createObjectURL(r.blob); el.download = r.name; el.click(); URL.revokeObjectURL(el.href); } catch (e) { message.error(errText(e)); } };
-    const vColor = (v: string) => (v === 'worse' ? '#cf222e' : v === 'better' ? '#1a7f37' : undefined);
+    const vColor = (v: string) => (v === 'worse' || v === 'failing' ? '#cf222e' : v === 'better' ? '#1a7f37' : undefined);
     const xs = c ? [...new Set([...c.series, ...c.throughput].flatMap((s) => s.points.map((p) => p.t)))].sort((p, q) => p - q) : [];
     const values = (s: LoadCompareDef['series'][number]) => { const m = new Map(s.points.map((p) => [p.t, p.v])); return xs.map((x) => m.get(x) ?? NaN); };
     return (
@@ -495,7 +501,7 @@ function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[
                             <Table size="small" rowKey="label" pagination={false} dataSource={c.comparison.metrics} scroll={{ x: 800 }} columns={[
                                 { title: 'Measure', dataIndex: 'label', width: 170 },
                                 { title: 'A', dataIndex: 'a', width: 110 }, { title: 'B', dataIndex: 'b', width: 110, render: (v: string) => <b>{v}</b> },
-                                { title: <Tooltip title={SAME_RULE}><span>Change <QuestionCircleOutlined style={{ fontSize: 11, opacity: 0.6 }} /></span></Tooltip>, width: 140, render: (_, m) => <span style={{ color: vColor(m.verdict), fontWeight: m.verdict === 'same' ? 400 : 600 }}>{m.change} {m.verdict === 'worse' ? '▲ worse' : m.verdict === 'better' ? '▼ better' : '≈ same'}</span> },
+                                { title: <Tooltip title={SAME_RULE}><span>Change <QuestionCircleOutlined style={{ fontSize: 11, opacity: 0.6 }} /></span></Tooltip>, width: 140, render: (_, m) => <span style={{ color: vColor(m.verdict), fontWeight: m.verdict === 'same' ? 400 : 600 }}>{m.change} {verdictWords(m.verdict, m.change)}</span> },
                                 { title: 'What it means', dataIndex: 'meaning', width: 300 },
                             ]} />
                             {c.comparison.findings.length > 0 && <Alert type={c.comparison.status === 'green' ? 'success' : 'warning'} showIcon message="What changed" description={<ul style={{ margin: 0, paddingLeft: 18 }}>{c.comparison.findings.map((f, k) => <li key={k}>{f}</li>)}</ul>} />}
@@ -504,11 +510,13 @@ function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[
                             <Col xs={24} xl={12}><LineChart title="95% response time (ms), seconds from the start" x={xs} series={c.series.map((s, k) => ({ name: `Run ${s.label}`, color: k ? C.p95 : C.avg, values: values(s), unit: ' ms' }))} xFormat={(v) => `${v} s`} /></Col>
                             <Col xs={24} xl={12}><LineChart title="Requests per second" x={xs} series={c.throughput.map((s, k) => ({ name: `Run ${s.label}`, color: k ? C.p95 : C.avg, values: values(s) }))} xFormat={(v) => `${v} s`} /></Col>
                         </Row> },
-                        { key: 'tx', label: <span>Transactions <Tag bordered={false}>{c.comparison.transactions.length}</Tag></span>, children: <Table size="small" rowKey="name" pagination={false} dataSource={c.comparison.transactions} columns={[
-                            { title: 'Transaction', dataIndex: 'name' },
+                        { key: 'tx', label: <span>Transactions <Tag bordered={false}>{c.comparison.transactions.length}</Tag></span>, children: <Table size="small" rowKey={(t) => t.id ?? t.name} pagination={false} dataSource={c.comparison.transactions} columns={[
+                            // Paired by the request (two requests may share a name: the number tells them apart).
+                            { title: 'Transaction', render: (_, t) => { const same = c.comparison.transactions.filter((x) => x.name === t.name); return same.length > 1 ? `${t.name} (${same.indexOf(t) + 1})` : t.name; } },
+                            { title: 'Errors A → B', width: 130, align: 'right', render: (_, t) => <span style={{ color: (t.bErrorRate ?? 0) > (t.aErrorRate ?? 0) ? '#cf222e' : undefined }}>{t.aErrorRate === undefined ? '—' : `${t.aErrorRate.toFixed(1)}%`} → {t.bErrorRate === undefined ? '—' : `${t.bErrorRate.toFixed(1)}%`}</span> },
                             { title: 'A: 95% within', width: 130, align: 'right', render: (_, t) => (t.verdict === 'new' ? '—' : ms(t.aP95)) },
                             { title: 'B: 95% within', width: 130, align: 'right', render: (_, t) => (t.verdict === 'gone' ? '—' : <b>{ms(t.bP95)}</b>) },
-                            { title: <Tooltip title={SAME_RULE}><span>Change <QuestionCircleOutlined style={{ fontSize: 11, opacity: 0.6 }} /></span></Tooltip>, width: 150, render: (_, t) => (t.verdict === 'new' ? 'new in B' : t.verdict === 'gone' ? 'not run in B' : <span style={{ color: vColor(t.verdict), fontWeight: t.verdict === 'same' ? 400 : 600 }}>{t.changePct >= 0 ? '+' : ''}{t.changePct}% {t.verdict === 'worse' ? '▲ worse' : t.verdict === 'better' ? '▼ better' : '≈ same'}</span>) },
+                            { title: <Tooltip title={SAME_RULE}><span>Change <QuestionCircleOutlined style={{ fontSize: 11, opacity: 0.6 }} /></span></Tooltip>, width: 150, render: (_, t) => (t.verdict === 'new' ? 'new in B' : t.verdict === 'gone' ? 'not run in B' : <Tooltip title={t.why}><span style={{ color: vColor(t.verdict), fontWeight: t.verdict === 'same' ? 400 : 600 }}>{t.changePct >= 0 ? '+' : ''}{t.changePct}% {t.verdict === 'failing' ? t.why : t.why ? `${t.verdict} (${t.why})` : verdictWords(t.verdict, `${t.changePct}`)}</span></Tooltip>) },
                         ]} /> },
                     ]} />
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>{c.comparison.notes.join(' ')}</Typography.Text>
@@ -667,7 +675,7 @@ function MonitorsEditor({ sc, set }: { sc: LoadScenarioDef; set: (p: Partial<Loa
         <Space direction="vertical" style={{ width: '100%' }} size={12}>
             <SectionTitle help="What the servers do while the users hit them, next to the response times. The load generator's own CPU and memory are always recorded. Over the warning level or the maximum, an alert is raised while running; a maximum also fails the run like a service level."
                 extra={<>
-                    {list.length > 0 && <InputNumber size="small" min={1} max={300} value={sc.monitorEvery ?? 5} onChange={(v) => set({ monitorEvery: v ?? undefined })} addonBefore="every" addonAfter="s" style={{ width: 150 }} aria-label="Monitor interval" />}
+                    {list.length > 0 && <NumField size="small" min={1} max={300} value={sc.monitorEvery ?? 5} onChange={(v) => v !== undefined && set({ monitorEvery: v })} addonBefore="every" addonAfter="s" width={160} label="Monitor interval" />}
                     <Button size="small" icon={<PlusOutlined />} disabled={list.length >= 20} onClick={() => put([...list, { name: `Monitor ${list.length + 1}`, kind: 'prometheus', url: '', metric: '' }])}>Add a monitor</Button>
                 </>}>Server monitors {list.length ? <Tag bordered={false}>{list.length}</Tag> : null}</SectionTitle>
             {!list.length && <Typography.Text type="secondary" className="ap-note">None: only the load generator's CPU and memory are recorded.</Typography.Text>}
@@ -1092,7 +1100,8 @@ export function Performance({ mode }: { mode: PerfMode }) {
     const setOpen: typeof setOpenRaw = (v) => { loadSeq.current++; setOpenRaw(v); };
     const loadFile = (f: string) => { const n = ++loadSeq.current; return api.loadScenario(f).then((r) => { if (n === loadSeq.current) setOpenRaw({ file: r.file, sc: r.scenario, dirty: false, version: versionOf(r) }); }).catch((e) => setErr(errText(e))); };
     // Why the scenario cannot be saved now (Save is then not offered in the prompts), or null.
-    const problem = !open ? null : curveInvalid ? 'the custom curve has mistakes (shown under it).' : !open.sc.name.trim() ? 'give the scenario a name.' : validPolicy(open.sc.policy);
+    const fields = useFieldProblems();
+    const problem = !open ? null : curveInvalid ? 'the custom curve has mistakes (shown under it).' : !open.sc.name.trim() ? 'give the scenario a name.' : fields.problem ?? validPolicy(open.sc.policy);
     /** Discard: the saved scenario again (no changes), or nothing for one never saved. */
     const discard = () => { const f = open?.file; if (f) { setOpenRaw((o) => (o ? { ...o, dirty: false } : o)); void loadFile(f); } else setOpen(null); };
     useUnsaved('load-scenario', !!open?.dirty, `the load scenario "${open?.sc.name ?? ''}"`, { lostOnLeave: true, save: problem ? undefined : async () => !!(await save()), discard });
@@ -1126,15 +1135,21 @@ export function Performance({ mode }: { mode: PerfMode }) {
     React.useEffect(() => { if (!here || !runs.some((r) => r.state === 'running' || r.state === 'stopping')) return; const t = setInterval(() => { void api.loadRuns().then((r) => setRuns(r.runs)).catch(() => {}); }, 3000); return () => clearInterval(t); }, [here, runs]);
     // The address → the scenario shown. Back to #/perf shows none (not the one left); another file with unsaved
     // changes (an address typed in) asks first, and Stay puts the address back.
+    // With unsaved changes the app asks (one "Unsaved changes" question for Back/Forward and typed addresses: Stay puts
+    // the address back, Discard and Save clean the scenario); this screen does not ask a second time: it follows the
+    // address once the scenario is clean.
     const prevScenarioFile = React.useRef(scenarioFile);
+    const movedWhileDirty = React.useRef(false);
     React.useEffect(() => {
         const prev = prevScenarioFile.current;
         prevScenarioFile.current = scenarioFile;
-        if (!scenarioFile) { if (here && prev && open?.file === prev && !open.dirty) setOpen(null); return; }
+        if (open?.dirty) { if (here && prev !== scenarioFile) movedWhileDirty.current = true; return; }
+        const moved = movedWhileDirty.current;
+        movedWhileDirty.current = false;
+        if (!scenarioFile) { if (here && ((prev && open?.file === prev) || moved)) setOpen(null); return; }
         if (open?.file === scenarioFile) return;
-        const back = open?.file;
-        leave(() => void loadFile(scenarioFile), () => navigate(back ? ['perf', ...back.split('/')] : ['perf'], true));
-    }, [scenarioFile]); // eslint-disable-line react-hooks/exhaustive-deps
+        void loadFile(scenarioFile);
+    }, [scenarioFile, open?.dirty]); // eslint-disable-line react-hooks/exhaustive-deps
     // Requests of the scenario's collection.
     React.useEffect(() => { setReqs(null); if (open?.sc.collection && !open.sc.browserPath) api.apiCollection(open.sc.collection).then((r) => setReqs(flatRequests(r.collection))).catch(() => setReqs([])); }, [open?.sc.collection, open?.sc.browserPath]);
     React.useEffect(() => { setBpath(null); if (open?.sc.browserPath) api.loadBrowserPath(open.sc.browserPath).then((r) => setBpath(r.path)).catch((e) => setErr(errText(e))); }, [open?.sc.browserPath]);
@@ -1152,6 +1167,7 @@ export function Performance({ mode }: { mode: PerfMode }) {
     const saveNow = async (force = false): Promise<string | null> => {
         if (!open) return null;
         if (curveInvalid) { message.error('The custom curve has mistakes (shown under it): fix them before saving.'); return null; }
+        if (fields.problem) { message.error(`Cannot be saved yet: ${fields.problem}`); return null; }
         try {
             const r = await api.loadSaveScenario(projectOf(open.sc), withBase(open.sc, open.version, force), open.file ?? undefined);
             setOpen({ ...open, file: r.file, dirty: false, version: versionOf(r) }); message.success('Saved'); await refresh();
@@ -1183,7 +1199,7 @@ export function Performance({ mode }: { mode: PerfMode }) {
             onOk: async () => {
                 const file = unsaved ? await save() : open.file;
                 if (!file) return;
-                try { const r = await api.loadStart(file, env); await refresh(); navigate(['perf-runs', r.id]); } catch (e) { message.error(errText(e)); }
+                try { const r = await api.loadStart(file, env ?? envs[0]); await refresh(); navigate(['perf-runs', r.id]); } catch (e) { message.error(errText(e)); }
             },
             afterClose: () => { starting.current = false; },
         });
@@ -1222,7 +1238,7 @@ export function Performance({ mode }: { mode: PerfMode }) {
                 <div className="toolbar" style={{ display: 'block' }}>
                     <div className="filter-row">
                         <Select size="small" style={{ flex: 1, minWidth: 110 }} value={project || undefined} placeholder="Project" onChange={setProject} options={(meta?.projects ?? []).map((p) => ({ value: p, label: p }))} aria-label="Project" />
-                        <Select size="small" style={{ width: 96 }} value={env} placeholder={envs[0] ?? 'env'} allowClear disabled={!envs.length} onChange={(v) => { setEnv(v); savePref('cs-studio-perf-env', v); }} options={envs.map((e) => ({ value: e, label: e }))} aria-label="Environment" />
+                        <Select size="small" style={{ width: 96 }} value={env ?? envs[0]} placeholder="env" disabled={!envs.length} onChange={(v) => { setEnv(v); savePref('cs-studio-perf-env', v); }} options={envs.map((e) => ({ value: e, label: e }))} aria-label="Environment" />
                     </div>
                     {mode === 'runs' && <div className="filter-row">
                         <Tooltip title="Results of a pipeline (cs-test-studio load … --json). Several files are the parts of one distributed run: they are merged.">
@@ -1251,8 +1267,8 @@ export function Performance({ mode }: { mode: PerfMode }) {
                     {mode === 'scenarios' && <div className="filter-row">
                         <Tooltip title={collections.length || paths.length ? undefined : 'Create an API collection first (API → Requests), or import a recorded browser path.'}>
                             <Button size="small" type="primary" icon={<PlusOutlined />} disabled={!collections.length && !paths.length} onClick={() => { setForm({ name: '', kind: collections.length ? 'api' : 'browser', coll: collections[0]?.file, bpath: paths[0]?.file }); setFormTouched(false); setCreating(true); }}>New scenario</Button>
-                            <Tooltip title="Record what an app, a browser or the BDD tests send, as a user path"><Button size="small" disabled={!project} onClick={() => setRecording(true)}>Record</Button></Tooltip>
                         </Tooltip>
+                        <Tooltip title="Record what an app, a browser or the BDD tests send, as a user path"><Button size="small" disabled={!project} onClick={() => setRecording(true)}>Record</Button></Tooltip>
                         <Tooltip title="Recorded browser scenarios (for example the performance app's scenarios.json) become browser paths"><Button size="small" icon={<ImportOutlined />} disabled={!project} onClick={() => { setImportText(''); setImporting(true); }}>Import recorded</Button></Tooltip>
                     </div>}
                 </div>
@@ -1285,13 +1301,13 @@ export function Performance({ mode }: { mode: PerfMode }) {
                     : open ? <>
                         <div className="toolbar">
                             <Typography.Text type="secondary" style={{ flex: 1, fontSize: 12 }} ellipsis>{open.file ?? `Not saved yet — will be test/${projectOf(open.sc)}/load/…`}{open.dirty && <span className="dirty-dot" title="Not saved" />}</Typography.Text>
-                            <Button size="small" icon={<SaveOutlined />} type={open.dirty ? 'primary' : 'default'} onClick={() => void save()}>Save</Button>
-                            <Tooltip title={running ? `"${running.name}" is running` : undefined}><Button size="small" type="primary" icon={<CaretRightOutlined />} disabled={!!running || !!validPolicy(open.sc.policy)} onClick={() => void run()}>Run</Button></Tooltip>
+                            <Tooltip title={problem ? `Cannot be saved yet: ${problem}` : undefined}><Button size="small" icon={<SaveOutlined />} type={open.dirty ? 'primary' : 'default'} disabled={!!problem} onClick={() => void save()}>Save</Button></Tooltip>
+                            <Tooltip title={running ? `"${running.name}" is running` : problem ? `Cannot run yet: ${problem}` : undefined}><Button size="small" type="primary" icon={<CaretRightOutlined />} disabled={!!running || !!problem} onClick={() => void run()}>Run</Button></Tooltip>
                             {open.file && <ScheduleButton file={open.file} env={env} />}
                             {open.file && <PipelineButton file={open.file} />}
                             {open.file && <Dropdown menu={{ items: [{ key: 'd', danger: true, label: 'Delete this scenario…' }], onClick: () => modal.confirm({ title: `Delete "${open.sc.name}"?`, okButtonProps: { danger: true }, onOk: async () => { try { await api.loadDeleteScenario(open.file!); setOpen(null); navigate(['perf']); await refresh(); } catch (e) { message.error(errText(e)); } } }) }}><Button size="small">⋯</Button></Dropdown>}
                         </div>
-                        <ScenarioEditor project={project} env={env} sc={open.sc} onChange={(sc) => setOpen({ ...open, sc, dirty: true })} reqs={reqs} collections={collections} onCollection={() => setReqs(null)} browserPaths={paths} bpath={bpath} />
+                        <FieldProblems value={fields.report}><ScenarioEditor project={project} env={env} sc={open.sc} onChange={(sc) => setOpen({ ...open, sc, dirty: true })} reqs={reqs} collections={collections} onCollection={() => setReqs(null)} browserPaths={paths} bpath={bpath} /></FieldProblems>
                     </>
                     : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description={<>Load-test your APIs: virtual users run the requests of an API collection<br />under a load policy, and the results are checked against your service levels.</>} />}
             </div>

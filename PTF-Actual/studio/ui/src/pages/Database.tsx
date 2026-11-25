@@ -11,7 +11,7 @@ import { CaretRightOutlined, CloseOutlined, CopyOutlined, DatabaseOutlined, Diff
 import { findingsSummary, PlanReview } from '../components/PlanReview';
 import { api, ApiError, baseHashesOf, DatePrecisionDef, DbCell, DbColumn, DbColumnInfo, DbCompareResponse, DbConnection, DbConnections, DbFeatureChecks, DbFeaturePreview, DbHistoryItem, DbObject, DbResult, DbSavedQuery } from '../api';
 import { useUnsaved } from '../unsaved';
-import { errText, openInEditor, showRun } from '../state';
+import { errText, filesChanged, openInEditor, showRun } from '../state';
 import { navigate, useRoute } from '../route';
 import { useAgentContext } from '../agentContext';
 import { Split } from '../components/Split';
@@ -21,7 +21,8 @@ import { selectSql } from '../../../src/db/schema';
 import { ago } from '../format';
 import { cellString, csvText } from '../dbFormat';
 import { insertScript, tableOfQuery } from '../../../src/db/inserts';
-import { plural, useStoredTab } from '../datagit-common';
+import { askStaleSave, plural, useStoredTab } from '../datagit-common';
+import { datagitApi } from '../datagit-api';
 import { useKept } from '../kept';
 
 const pref = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : d; } catch { return d; } };
@@ -209,7 +210,8 @@ function InsertModal({ open, onClose, result, sql, onEditor }: { open: boolean; 
     );
 }
 
-interface Editor { file: string | null; text: string; dirty: boolean }
+/** version: what the saved query held when it was opened or saved here (a save over a change made since is refused). */
+interface Editor { file: string | null; text: string; dirty: boolean; version?: string }
 
 
 /** A query name for the configuration: DB_QUERY_<NAME> (letters, digits, _). */
@@ -590,7 +592,7 @@ export function Database() {
     React.useEffect(() => {
         if (!fileInRoute || fileInRoute === ed.file) return;
         const asked = fileInRoute;
-        api.dbQueryFile(asked).then((r) => { setEd({ file: r.file, text: r.text, dirty: false }); if (r.connection) setAliasRaw(r.connection); setResult(null); setError(null); })
+        datagitApi.dbQueryFile(asked).then((r) => { setEd({ file: r.file, text: r.text, dirty: false, version: r.version }); if (r.connection) setAliasRaw(r.connection); setResult(null); setError(null); })
             .catch((e) => {
                 // A link to a query that is gone: the editor must not keep showing another query under its name.
                 setEd({ file: null, text: '', dirty: false }); setResult(null); setError(null);
@@ -657,16 +659,30 @@ export function Database() {
     const stop = async () => { if (environment) { await api.dbStop(project, environment).catch(() => {}); } };
     const save = async (asNew = false) => {
         if (!project) return;
-        const doSave = async (name?: string): Promise<string | null> => {
+        const doSave = async (name?: string, force = false, version = ed.version): Promise<string | null> => {
             try {
                 const text = !ed.file && conn && !/^--\s*connection:/im.test(ed.text) && !['mongodb', 'redis'].includes(conn.type) ? `-- connection: ${conn.alias}\n${ed.text}` : ed.text;
-                const r = await api.dbSaveQuery({ project, text, ...(asNew || !ed.file ? { name: name! } : { file: ed.file }) });
-                setEd({ file: r.file, text, dirty: false });
+                // An open saved query goes back with the version it was read at: changed since (another tab) → refused.
+                const r = await datagitApi.dbSaveQuery({ project, text, ...(asNew || !ed.file ? { name: name! } : { file: ed.file, version, ...(force ? { force: true } : {}) }) });
+                setEd({ file: r.file, text, dirty: false, version: r.version });
                 message.success(`Saved ${r.file}`);
                 navigate(['db', 'q', ...r.file.split('/')], true);
                 api.dbQueries(project).then((x) => setQueries(x.queries)).catch(() => {});
+                filesChanged();
                 return null;
-            } catch (e) { return errText(e); }
+            } catch (e) {
+                if (!asNew && ed.file) {
+                    const file = ed.file;
+                    askStaleSave({ message, modal }, e, `The query ${file}`, {
+                        reload: () => { datagitApi.dbQueryFile(file).then((r) => setEd({ file: r.file, text: r.text, dirty: false, version: r.version })).catch((x) => message.error(errText(x))); },
+                        overwrite: async () => { const err = await doSave(undefined, true); if (err) message.error(err); },
+                        // Keep editing: the next Save goes over what is saved now (the question was asked once).
+                        keep: (v) => setEd((x) => (x.file === file ? { ...x, version: v ?? '' } : x)),
+                    });
+                    return '';
+                }
+                return errText(e);
+            }
         };
         if (ed.file && !asNew) { const err = await doSave(); if (err) message.error(err); return; }
         // The name dialog stays open with the problem shown (a name in use, too long), keeping what was typed.
@@ -795,7 +811,7 @@ export function Database() {
                         onClick: ({ key }) => {
                             if (key === 'new') { const go = () => { setEd({ file: null, text: '', dirty: false }); setResult(null); setError(null); navigate(home(), true); }; if (ed.dirty) modal.confirm({ title: 'Discard the changes?', okText: 'Discard', onOk: go }); else go(); }
                             if (key === 'saveas') void save(true);
-                            if (key === 'del' && ed.file) modal.confirm({ title: `Delete ${ed.file}?`, okButtonProps: { danger: true }, okText: 'Delete', onOk: async () => { const f = ed.file!; try { await api.dbDeleteQuery(f); } catch (e) { message.error(errText(e)); return; } message.success(`Deleted ${f}. The text stays in the editor (not saved).`); setEd({ file: null, text: ed.text, dirty: true }); navigate(home(), true); api.dbQueries(project).then((x) => setQueries(x.queries)).catch(() => {}); } });
+                            if (key === 'del' && ed.file) modal.confirm({ title: `Delete ${ed.file}?`, okButtonProps: { danger: true }, okText: 'Delete', onOk: async () => { const f = ed.file!; try { await api.dbDeleteQuery(f); } catch (e) { message.error(errText(e)); return; } filesChanged(); message.success(`Deleted ${f}. The text stays in the editor (not saved).`); setEd({ file: null, text: ed.text, dirty: true }); navigate(home(), true); api.dbQueries(project).then((x) => setQueries(x.queries)).catch(() => {}); } });
                         } }}><Button size="small" aria-label="More">⋯</Button></Dropdown>
                 </div>
                 <Split id="db-editor" direction="column" sizeOf="second" initial={340} min={120} max={900} style={{ flex: 1, minHeight: 0 }}>

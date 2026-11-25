@@ -234,23 +234,27 @@ export type RunChange = 'fixed' | 'broke' | 'same' | 'still failing' | 'new' | '
 export interface RunComparison {
     a: Pick<RunnerJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;
     b: Pick<RunnerJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;
-    rows: Array<{ key: string; name: string; iteration: number; change: RunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;
+    /** requestId pairs the rows (names may repeat); method, url and position (1, 2… in the run) tell same names apart. */
+    rows: Array<{ key: string; name: string; requestId?: string; method?: string; url?: string; position?: number; iteration: number; change: RunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;
     counts: Record<RunChange, number>;
     avgDelta: number;
 }
 
-/** Two runs side by side: each request (by iteration and name) fixed, broken, still failing or the same, its time, the checks whose result changed. */
+/** Two runs side by side: each request (by iteration and request id, not its name) fixed, broken, still failing or the same, its time, the checks whose result changed. */
 export function compareRuns(a: RunnerJob, b: RunnerJob): RunComparison {
     const key = (s: RunnerStep, n: number) => `${s.iteration}|${s.requestId || s.name}|${n}`;
     const index = (j: RunnerJob) => { const seen = new Map<string, number>(); const m = new Map<string, RunnerStep>(); for (const s of j.steps) { const k0 = `${s.iteration}|${s.requestId || s.name}`; const n = seen.get(k0) ?? 0; seen.set(k0, n + 1); m.set(key(s, n), s); } return m; };
     const A = index(a), B = index(b);
     const keys = [...new Set([...A.keys(), ...B.keys()])];
+    // The request's place in the run (the later run's order first): two requests named alike are told apart.
+    const order = [...new Set([...b.steps, ...a.steps].map((s) => s.requestId || s.name))];
     const rows: RunComparison['rows'] = keys.map((k) => {
         const x = A.get(k), y = B.get(k);
         const v = (s?: RunnerStep) => (s ? { status: s.status, timeMs: s.timeMs, passed: s.passed } : undefined);
         const change: RunChange = !x ? 'new' : !y ? 'gone' : x.passed && y.passed ? 'same' : !x.passed && y.passed ? 'fixed' : x.passed && !y.passed ? 'broke' : 'still failing';
         const checksChanged = x && y ? y.checks.filter((c) => { const was = x.checks.find((d) => d.message === c.message); return was ? was.pass !== c.pass : false; }).map((c) => `${c.pass ? 'now passes' : 'now fails'}: ${c.message}`) : undefined;
-        return { key: k, name: (y ?? x)!.name, iteration: (y ?? x)!.iteration, change, a: v(x), b: v(y), ...(x?.timeMs !== undefined && y?.timeMs !== undefined ? { timeDelta: y.timeMs - x.timeMs } : {}), ...(checksChanged?.length ? { checksChanged } : {}) };
+        const s = (y ?? x)!;
+        return { key: k, name: s.name, ...(s.requestId ? { requestId: s.requestId } : {}), method: s.method, url: y?.url || x?.url || '', position: order.indexOf(s.requestId || s.name) + 1, iteration: s.iteration, change, a: v(x), b: v(y), ...(x?.timeMs !== undefined && y?.timeMs !== undefined ? { timeDelta: y.timeMs - x.timeMs } : {}), ...(checksChanged?.length ? { checksChanged } : {}) };
     });
     const counts = { fixed: 0, broke: 0, same: 0, 'still failing': 0, new: 0, gone: 0 } as Record<RunChange, number>;
     for (const r of rows) counts[r.change]++;

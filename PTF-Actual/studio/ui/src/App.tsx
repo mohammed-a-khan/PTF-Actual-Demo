@@ -141,9 +141,13 @@ function BranchMenu() {
     // The server takes branch names up to 255 characters; a longer one is refused here, with a message.
     const BRANCH_MAX = 255;
     const tooLong = finalName.length > BRANCH_MAX;
+    // A branch of that name exists already (Git compares names exactly; a second one that differs only in
+    // capitals clashes on Windows and macOS, so it is refused too).
+    const taken = !!finalName && local.some((b) => b.name.toLowerCase() === finalName.toLowerCase());
+    const blocked = !finalName || tooLong || taken;
     const shortName = finalName.length > 40 ? `${finalName.slice(0, 37)}…` : finalName;
     const createBranch = async () => {
-        if (!finalName || tooLong) return;
+        if (blocked) return;
         try { await api.createBranch(finalName); message.success(`Created ${finalName} and switched to it`); setDialog(null); await refresh(); } catch (e) { message.error(errText(e)); }
     };
     return (
@@ -166,11 +170,11 @@ function BranchMenu() {
             }}>
                 <Button icon={<BranchesOutlined />}>{status?.branch ?? (status?.head ? `detached at ${status.head.slice(0, 7)}` : 'no commits yet')} <DownOutlined /></Button>
             </Dropdown>
-            <Modal open={dialog === 'new'} title="New branch" okText={finalName && !tooLong ? <span title={finalName}>Create {shortName} and switch</span> : 'Create and switch'} onCancel={() => setDialog(null)} okButtonProps={{ disabled: !finalName || tooLong, style: { maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis' } }} destroyOnClose
+            <Modal open={dialog === 'new'} title="New branch" okText={!blocked ? <span title={finalName}>Create {shortName} and switch</span> : 'Create and switch'} onCancel={() => setDialog(null)} okButtonProps={{ disabled: blocked, style: { maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis' } }} destroyOnClose
                 afterOpenChange={(o) => { if (o) document.getElementById('cs-new-branch')?.focus(); }}
                 onOk={createBranch}>
-                <Form layout="vertical"><Form.Item label="Branch name" htmlFor="cs-new-branch" validateStatus={tooLong ? 'error' : undefined} help={<div style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{tooLong ? <><Typography.Text type="danger">Too long: at most {BRANCH_MAX} characters (it has {finalName.length}).</Typography.Text><br /></> : null}{finalName && !tooLong && finalName !== name.trim() ? <><Typography.Text type="warning">It will be created as <Typography.Text code style={{ wordBreak: 'break-all' }}>{finalName}</Typography.Text> (branch names have no spaces or {'~ ^ : ? * [ \\'}).</Typography.Text><br /></> : null}Starts from {status?.branch ?? 'the current commit'}. Example: feature/login-tests</div>}>
-                    <Input id="cs-new-branch" value={name} onChange={(e) => setName(e.target.value)} onPressEnter={() => { if (finalName && !tooLong) void createBranch(); }} /></Form.Item></Form>
+                <Form layout="vertical"><Form.Item label="Branch name" htmlFor="cs-new-branch" validateStatus={tooLong || taken ? 'error' : undefined} help={<div style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{taken ? <><Typography.Text type="danger">A branch named {local.find((b) => b.name.toLowerCase() === finalName.toLowerCase())?.name} exists already: choose another name, or switch to it from the branch list.</Typography.Text><br /></> : null}{tooLong ? <><Typography.Text type="danger">Too long: at most {BRANCH_MAX} characters (it has {finalName.length}).</Typography.Text><br /></> : null}{finalName && !tooLong && finalName !== name.trim() ? <><Typography.Text type="warning">It will be created as <Typography.Text code style={{ wordBreak: 'break-all' }}>{finalName}</Typography.Text> (branch names have no spaces or {'~ ^ : ? * [ \\'}).</Typography.Text><br /></> : null}Starts from {status?.branch ?? 'the current commit'}. Example: feature/login-tests</div>}>
+                    <Input id="cs-new-branch" value={name} onChange={(e) => setName(e.target.value)} onPressEnter={() => { if (!blocked) void createBranch(); }} /></Form.Item></Form>
             </Modal>
             <MergeDialog open={dialog === 'merge'} onClose={() => setDialog(null)} />
         </>
@@ -218,9 +222,9 @@ function SyncButtons() {
                     // A disabled button gets no hover: the badge around it shows why it is off.
                     style={!status?.upstream || status?.upstreamGone ? { pointerEvents: 'none' } : undefined}>Pull</Button></Badge>
             </Tooltip>
-            <Tooltip title={noUpstream ? 'First push: publishes this branch to the remote' : status?.ahead ? `${status.ahead} commit(s) to send` : 'Nothing to push'}>
+            <Tooltip title={remotes === 0 ? 'This repository has no remote to push to. Add one in Source control › Branches & tags › Remotes.' : noUpstream ? 'First push: publishes this branch to the remote' : status?.ahead ? `${status.ahead} commit(s) to send` : 'Nothing to push'}>
                 <Badge count={status?.ahead ?? 0} size="small" color="#93186C">
-                    <Dropdown.Button type="primary" buttonsRender={([main, more]) => [main, React.isValidElement(more) ? React.cloneElement(more as React.ReactElement<{ 'aria-label'?: string }>, { 'aria-label': 'More push and pull actions' }) : more]} loading={busy === 'push'} disabled={!noUpstream && !status?.ahead && !status?.behind} onClick={() => push()}
+                    <Dropdown.Button type="primary" buttonsRender={([main, more]) => [main, React.isValidElement(more) ? React.cloneElement(more as React.ReactElement<{ 'aria-label'?: string }>, { 'aria-label': 'More push and pull actions' }) : more]} loading={busy === 'push'} disabled={remotes === 0 || (!noUpstream && !status?.ahead && !status?.behind)} onClick={() => push()}
                         menu={{
                             items: [
                                 { key: 'tags', label: 'Push, including tags on these commits' },
@@ -322,7 +326,7 @@ function Shell({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => vo
         let last: Page = 'git';
         try { const p = localStorage.getItem('cs-studio-page') as Page; if (PAGES.includes(p)) last = p; } catch { /* ignore */ }
         // An address that is not a screen (an old bookmark, a typo): said, then the last screen is shown.
-        if (route[0]) shellMessage.warning(`"#/${route.join('/')}" is not a Studio screen: showing ${last} instead.`);
+        if (route[0]) shellMessage.warning(`"#/${route.join('/')}" is not a Studio screen: showing ${PAGE_INFO[last].title} instead.`);
         navigate([last], true);
     }, [route]);
     const go = (p: Page) => {

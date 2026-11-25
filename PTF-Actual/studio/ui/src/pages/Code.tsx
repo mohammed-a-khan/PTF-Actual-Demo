@@ -16,6 +16,7 @@ import { errText, loadRunTarget, saveRunTarget, showRun, unsavedFiles, useStudio
 import { CodeEditor, CodeEditorHandle } from '../editor/CodeEditor';
 import { DebugPanel, ExecLocation } from '../components/DebugPanel';
 import { useKept } from '../kept';
+import { codeTarget } from '../codeRoute';
 import { langOf } from '../editor/highlight';
 
 /** `content` / `savedContent` always use "\n"; `eol` is the file's own line ending, restored on save. */
@@ -219,8 +220,13 @@ export function Code() {
     React.useEffect(() => {
         if (routeKey === null || routeKey === lastRoute.current) return;
         lastRoute.current = routeKey;
-        const [p, l] = route.slice(1);
-        if (p) void open(p, l && /^\d+$/.test(l) ? Number(l) : undefined);
+        // A typed address with plain slashes (#/code/test/a/b.feature/12) is rewritten in place to its usual form.
+        const t = codeTarget(route.slice(1));
+        if (t.typed) {
+            lastRoute.current = [t.path, t.line ? String(t.line) : ''].filter(Boolean).join('\0');
+            navigate(['code', t.path, t.line], true);
+        }
+        if (t.path) void open(t.path, t.line);
     }, [routeKey]); // eslint-disable-line react-hooks/exhaustive-deps
     /** Go to a file (and line), as a new step in the browser history. */
     const goFile = React.useCallback((path: string, line?: number, column?: number, fromLine?: number) => {
@@ -304,26 +310,42 @@ export function Code() {
         } catch (e) {
             if (!/(changed|deleted) outside the editor/.test(errText(e))) { message.error(errText(e)); return false; }
             const disk = await api.readFile(path).catch(() => null);
+            // Esc, the close button and "Keep editing" all keep the edits in this tab (nothing is saved or loaded).
             return new Promise<boolean>((resolve) => {
-                if (!disk) {
-                    modal.confirm({
-                        title: `${path} was deleted outside the Studio`, content: 'Another program (or a pull, or a branch switch) deleted this file after you opened it.',
-                        okText: 'Save my version (recreate)', cancelText: 'Close the file',
-                        onOk: async () => resolve(await save(path, true)),
-                        onCancel: () => { forceClose(path); resolve(false); },
+                let done = false, picked = false;
+                const finish = (v: boolean) => { if (!done) { done = true; resolve(v); } };
+                const ask = (title: string, content: React.ReactNode, buttons: (close: () => void) => React.ReactNode) => {
+                    const m = modal.confirm({
+                        title, content, closable: true, maskClosable: false, keyboard: true,
+                        // Closed without a choice (Esc, ×): keep editing.
+                        afterClose: () => { if (!picked) finish(false); },
+                        onCancel: () => { if (!picked) finish(false); },
+                        footer: () => <Space style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }} wrap>{buttons(() => { picked = true; m.destroy(); })}</Space>,
                     });
+                };
+                const name = path.split('/').pop();
+                if (!disk) {
+                    ask(`${name} was deleted after you opened it`,
+                        <>It was deleted in another Studio tab, by another program, or by a pull or branch switch. Your edits are still here.<br /><br /><b>Save mine</b> recreates the file with your version. <b>Close the file</b> drops your edits.</>,
+                        (close) => <>
+                            <Button onClick={() => { close(); finish(false); }}>Keep editing</Button>
+                            <Button danger onClick={() => { close(); forceClose(path); finish(false); }}>Close the file</Button>
+                            <Button type="primary" onClick={async () => { close(); finish(await save(path, true)); }}>Save mine</Button>
+                        </>);
                     return;
                 }
-                modal.confirm({
-                    title: `${path} was changed outside the Studio`, content: 'Another program (or a pull) changed this file after you opened it.',
-                    okText: 'Keep my version', cancelText: 'Load the other version',
-                    onOk: async () => resolve(await save(path, true)),
-                    onCancel: () => {
-                        const d = fromDisk(disk.content);
-                        setTabs((ts) => ts.map((x) => x.path === path ? { ...x, content: d.content, savedContent: d.content, hash: disk.hash, eol: d.eol } : x));
-                        resolve(false);
-                    },
-                });
+                ask(`${name} changed after you opened it`,
+                    <>It was saved in another Studio tab, by another program, or by a pull. Your edits are still here.<br /><br /><b>Reload</b> shows the saved version (your edits here are dropped). <b>Overwrite</b> saves yours over it (the other change is lost).</>,
+                    (close) => <>
+                        <Button onClick={() => { close(); finish(false); }}>Keep editing</Button>
+                        <Button danger onClick={async () => { close(); finish(await save(path, true)); }}>Overwrite</Button>
+                        <Button type="primary" onClick={() => {
+                            close();
+                            const d = fromDisk(disk.content);
+                            setTabs((ts) => ts.map((x) => x.path === path ? { ...x, content: d.content, savedContent: d.content, hash: disk.hash, eol: d.eol } : x));
+                            finish(false);
+                        }}>Reload</Button>
+                    </>);
             });
         }
     };

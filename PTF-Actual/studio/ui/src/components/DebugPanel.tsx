@@ -88,6 +88,8 @@ export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints
         };
         const find = async () => {
             if (following || !live) return;
+            // Looked for only while the Code screen is shown in a visible tab (no polling of the runs from other screens).
+            if (typeof document !== 'undefined' && (document.hidden || !/^#\/?code(\/|$)/.test(window.location.hash))) return;
             try {
                 const r = (await api.runs()).find((x) => x.state === 'running' && x.request.debug);
                 if (!live || !r || following) { if (live && !r) setRun(null); return; }

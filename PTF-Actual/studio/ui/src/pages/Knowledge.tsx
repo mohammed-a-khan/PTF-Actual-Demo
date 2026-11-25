@@ -21,6 +21,8 @@ const KINDS: Record<KnowledgeKind, { label: string; about: string }> = {
     history: { label: 'Learned from runs', about: 'Failures of earlier runs, triage verdicts and notes, and what missions found and fixed.' },
     url: { label: 'Web pages', about: 'Documentation pages on the web or the intranet.' },
 };
+/** "1 document", "3 documents". */
+export const count = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const ago = (iso: string | null) => (!iso ? 'never' : new Date(iso).toLocaleString());
 
 export function Knowledge() {
@@ -79,7 +81,7 @@ export function Knowledge() {
                     { title: 'Source', render: (_: unknown, s) => <Space direction="vertical" size={0} style={{ minWidth: 0 }}><Typography.Text strong>{s.name}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 12, wordBreak: 'break-all' }}>{KINDS[s.kind].label}{s.path ? ` · ${s.path}` : ''}{s.include?.length ? ` · ${s.include.join(', ')}` : ''}{s.urls?.length ? ` · ${s.urls.length} page(s)` : ''}</Typography.Text>
                         {/* Only this source is affected: the others work and can be changed; fix its folder or remove it. */}
                         {s.warning && <Typography.Text type="warning" role="alert" style={{ fontSize: 12 }}><WarningFilled /> {s.warning} It cannot be indexed until its folder is fixed (or remove it).</Typography.Text>}</Space> },
-                    { title: 'Indexed', width: 220, render: (_: unknown, s) => s.warning && !s.builtAt ? <Tag color="warning">folder missing</Tag> : s.builtAt ? <Space direction="vertical" size={0}><span>{s.docs} documents · {s.chunks} passages</span><Typography.Text type="secondary" style={{ fontSize: 12 }}>{ago(s.builtAt)}</Typography.Text></Space> : <Typography.Text type="secondary">not yet</Typography.Text> },
+                    { title: 'Indexed', width: 220, render: (_: unknown, s) => s.warning && !s.builtAt ? <Tag color="warning">folder missing</Tag> : s.builtAt ? <Space direction="vertical" size={0}><span>{count(s.docs, 'document')} · {count(s.chunks, 'passage')}</span><Typography.Text type="secondary" style={{ fontSize: 12 }}>{ago(s.builtAt)}</Typography.Text></Space> : <Typography.Text type="secondary">not yet</Typography.Text> },
                     { title: '', width: 70, render: (_: unknown, s) => s.errors.length ? <Tooltip title={s.errors.join(' ')}><Tag color="error">problem</Tag></Tooltip> : null },
                     { title: 'On', width: 60, render: (_: unknown, s) => <Switch size="small" checked={s.enabled !== false} onChange={(v) => save(d.sources.map((x) => (x.id === s.id ? { ...plain(x), enabled: v } : plain(x))), v ? 'Source on' : 'Source off')} /> },
                     { title: '', width: 190, render: (_: unknown, s) => <Space>
@@ -90,7 +92,7 @@ export function Knowledge() {
                         </Popconfirm></Space> },
                 ]} />
             </Card>) }, { key: 'search', icon: <SearchOutlined />, label: <span>Try a search</span>, children: (
-            <Card size="small" title="Search the way an agent does" extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>{total} passages</Typography.Text>}>
+            <Card size="small" title="Search the way an agent does" extra={<Typography.Text type="secondary" style={{ fontSize: 12 }}>{count(total, 'passage')}</Typography.Text>}>
                 <Input.Search placeholder="Ask the way an agent would, e.g. how do we sign in as a buyer" enterButton={<><SearchOutlined /> Search</>} value={q} onChange={(e) => { setQ(e.target.value); if (searchErr) setSearchErr(null); }} onSearch={search} status={q.length > MAX_Q ? 'error' : undefined} />
                 {(searchErr || q.length > MAX_Q) && <Typography.Text type="danger" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>{searchErr ?? `At most ${MAX_Q} characters (${q.length} now).`}</Typography.Text>}
                 {hits && (hits.length === 0 ? <Empty style={{ marginTop: 16 }} description="Nothing found" /> : (
@@ -124,22 +126,25 @@ function AddSource({ s, existing, editing, onClose, onSave }: { s: KnowledgeSour
     for (const ch of base) { h ^= ch.codePointAt(0)!; h = Math.imul(h, 0x01000193) >>> 0; }
     const id = latin.length >= 2 ? latin : `source-${h.toString(36)}`;
     const clash = existing.includes(id);
-    const go = async () => { if (busy || !id || clash || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim())) return; setBusy(true); try { await onSave({ id, name: v.name.trim() || KINDS[v.kind].label, kind: v.kind, enabled: true,
+    // Sub-folders inside the folder only (the server says the same).
+    const outside = (v.includeText ?? '').split(/[,\n]/).map((x) => x.trim()).filter((x) => x.includes('..'));
+    const includeProblem = (v.kind === 'repo' || v.kind === 'folder') && outside.length ? `Only sub-folders inside it, without "..": ${outside.map((x) => `"${x}"`).join(', ')}.` : null;
+    const go = async () => { if (busy || !id || clash || includeProblem || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim())) return; setBusy(true); try { await onSave({ id, name: v.name.trim() || KINDS[v.kind].label, kind: v.kind, enabled: true,
         ...(v.kind === 'folder' && v.path ? { path: v.path.trim() } : {}),
         ...((v.kind === 'repo' || v.kind === 'folder') && v.includeText?.trim() ? { include: v.includeText.split(/[,\n]/).map((x) => x.trim()).filter(Boolean) } : {}),
         ...(v.kind === 'ado-workitems' && v.query?.trim() ? { query: v.query.trim() } : {}),
         ...(v.kind === 'ado-wiki' && v.wiki?.trim() ? { wiki: v.wiki.trim() } : {}),
         ...(v.kind === 'url' ? { urls: (v.urlsText ?? '').split(/\s+/).filter(Boolean) } : {}) }); } finally { setBusy(false); } };
     return (
-        <Modal open title={editing ? `Change ${s.name}` : 'Add a knowledge source'} onCancel={onClose} onOk={() => void go()} confirmLoading={busy} okText={editing ? 'Save and index' : 'Add and index'} okButtonProps={{ disabled: !id || clash || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim()) }} width={620}>
+        <Modal open title={editing ? `Change ${s.name}` : 'Add a knowledge source'} onCancel={onClose} onOk={() => void go()} confirmLoading={busy} okText={editing ? 'Save and index' : 'Add and index'} okButtonProps={{ disabled: !id || clash || !!includeProblem || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim()) }} width={620}>
             <Form layout="vertical" size="small">
                 <Form.Item label="Kind"><Select value={v.kind} disabled={editing} aria-label="Kind" onChange={(k) => setV({ ...v, kind: k })} options={(Object.keys(KINDS) as KnowledgeKind[]).map((k) => ({ value: k, label: KINDS[k].label }))} /><Typography.Text type="secondary" style={{ fontSize: 12 }}>{KINDS[v.kind].about}</Typography.Text></Form.Item>
-                <Form.Item label="Name" help={clash ? 'A source with this name exists.' : undefined} validateStatus={clash ? 'error' : undefined}><Input value={v.name} maxLength={80} placeholder={KINDS[v.kind].label} onPressEnter={() => void go()} onChange={(e) => setV({ ...v, name: e.target.value })} /></Form.Item>
-                {v.kind === 'folder' && <Form.Item label="Folder" tooltip="An absolute folder, or one relative to this repository"><Input value={v.path} placeholder="C:\work\shop-app  or  ../shop-app" onChange={(e) => setV({ ...v, path: e.target.value })} /></Form.Item>}
-                {(v.kind === 'repo' || v.kind === 'folder') && <Form.Item label="Only these sub-folders (optional)"><Input value={v.includeText} placeholder="docs, src/orders" onChange={(e) => setV({ ...v, includeText: e.target.value })} /></Form.Item>}
-                {v.kind === 'ado-workitems' && <Form.Item label="WIQL query (optional)"><Input.TextArea rows={3} value={v.query} placeholder="SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER 'Shop\\Checkout'" onChange={(e) => setV({ ...v, query: e.target.value })} /></Form.Item>}
-                {v.kind === 'ado-wiki' && <Form.Item label="Wiki name (optional)"><Input value={v.wiki} placeholder="the project wiki" onChange={(e) => setV({ ...v, wiki: e.target.value })} /></Form.Item>}
-                {v.kind === 'url' && <Form.Item label="Web addresses (one per line)"><Input.TextArea rows={4} value={v.urlsText} placeholder="https://wiki.example.com/shop/testing" onChange={(e) => setV({ ...v, urlsText: e.target.value })} /></Form.Item>}
+                <Form.Item label="Name" help={clash ? 'A source with this name exists.' : undefined} validateStatus={clash ? 'error' : undefined}><Input value={v.name} maxLength={80} aria-label="Name" placeholder={KINDS[v.kind].label} onPressEnter={() => void go()} onChange={(e) => setV({ ...v, name: e.target.value })} /></Form.Item>
+                {v.kind === 'folder' && <Form.Item label="Folder" tooltip="An absolute folder, or one relative to this repository"><Input value={v.path} aria-label="Folder" placeholder="C:\work\shop-app  or  ../shop-app" onChange={(e) => setV({ ...v, path: e.target.value })} /></Form.Item>}
+                {(v.kind === 'repo' || v.kind === 'folder') && <Form.Item label="Only these sub-folders (optional)" validateStatus={includeProblem ? 'error' : undefined} help={includeProblem ?? undefined}><Input value={v.includeText} aria-label="Only these sub-folders" placeholder="docs, src/orders" onChange={(e) => setV({ ...v, includeText: e.target.value })} /></Form.Item>}
+                {v.kind === 'ado-workitems' && <Form.Item label="WIQL query (optional)"><Input.TextArea rows={3} value={v.query} aria-label="WIQL query" placeholder="SELECT [System.Id] FROM WorkItems WHERE [System.AreaPath] UNDER 'Shop\\Checkout'" onChange={(e) => setV({ ...v, query: e.target.value })} /></Form.Item>}
+                {v.kind === 'ado-wiki' && <Form.Item label="Wiki name (optional)"><Input value={v.wiki} aria-label="Wiki name" placeholder="the project wiki" onChange={(e) => setV({ ...v, wiki: e.target.value })} /></Form.Item>}
+                {v.kind === 'url' && <Form.Item label="Web addresses (one per line)"><Input.TextArea rows={4} value={v.urlsText} aria-label="Web addresses" placeholder="https://wiki.example.com/shop/testing" onChange={(e) => setV({ ...v, urlsText: e.target.value })} /></Form.Item>}
             </Form>
         </Modal>
     );

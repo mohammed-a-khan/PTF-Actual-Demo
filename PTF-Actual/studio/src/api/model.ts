@@ -403,7 +403,13 @@ export function validCollection(x: unknown): ApiCollection {
             if (!Array.isArray(it.query) || !Array.isArray(it.headers) || !Array.isArray(it.checks) || !Array.isArray(it.extract)) fail(`request "${it.name}"`);
             if (it.body?.text && it.body.text.length > 5 * 1024 * 1024) fail('body larger than 5 MB');
             if (it.comments !== undefined && (!Array.isArray(it.comments) || it.comments.length > 500 || it.comments.some((m) => !m || typeof m.text !== 'string' || m.text.length > 10_000 || typeof m.author !== 'string'))) fail(`comments of "${it.name}"`);
-            if (it.settings !== undefined && (typeof it.settings !== 'object' || it.settings === null || (it.settings.timeoutMs !== undefined && !(Number(it.settings.timeoutMs) >= 100 && Number(it.settings.timeoutMs) <= 600_000)) || (it.settings.retries !== undefined && !(Number.isInteger(it.settings.retries) && it.settings.retries >= 0 && it.settings.retries <= 10)))) fail(`settings of "${it.name}"`);
+            if (it.settings !== undefined && (typeof it.settings !== 'object' || it.settings === null)) fail(`settings of "${it.name}"`);
+            // Whole numbers (milliseconds, times): a decimal is refused, not rounded.
+            const st = it.settings ?? {};
+            const whole = (v: unknown, min: number, max: number) => typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+            if (st.timeoutMs !== undefined && !whole(st.timeoutMs, 100, 600_000)) fail(`settings of "${it.name}": the timeout is 0.1 to 600 seconds, in whole milliseconds (not ${st.timeoutMs} ms)`);
+            if (st.retries !== undefined && !whole(st.retries, 0, 10)) fail(`settings of "${it.name}": retries are a whole number from 0 to 10 (not ${st.retries})`);
+            if (st.retryDelayMs !== undefined && !whole(st.retryDelayMs, 0, 60_000)) fail(`settings of "${it.name}": the retry delay is a whole number of ms from 0 to 60000 (not ${st.retryDelayMs})`);
             if (it.examples !== undefined && (!Array.isArray(it.examples) || it.examples.length > 100 || it.examples.some((e) => !e || typeof e.name !== 'string' || !Number.isInteger(e.status) || (e.body !== undefined && (typeof e.body !== 'string' || e.body.length > 1024 * 1024))))) fail(`examples of "${it.name}"`);
             if (it.body?.mode === 'graphql' && (!it.body.graphql || typeof it.body.graphql.query !== 'string' || it.body.graphql.query.length > 1024 * 1024)) fail(`GraphQL query of "${it.name}"`);
             if (it.ws !== undefined && (!it.ws || !Array.isArray(it.ws.steps) || it.ws.steps.length > 200 || it.ws.steps.some((s) => !s || (s.kind !== 'send' && s.kind !== 'expect') || typeof s.text !== 'string'))) fail(`WebSocket steps of "${it.name}"`);

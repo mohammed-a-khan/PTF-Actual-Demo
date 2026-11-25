@@ -483,17 +483,19 @@ export function validateSources(list: unknown): KnowledgeSource[] {
         if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(String(s.id))) throw new Error(`Source id "${s.id ?? ''}": lower-case letters, digits and -.`);
         if (ids.has(s.id)) throw new Error(`Two sources have the id "${s.id}".`);
         ids.add(s.id);
-        if (!kinds.includes(s.kind)) throw new Error(`Source "${s.id}": kind is one of ${kinds.join(', ')}.`);
-        if (s.kind === 'folder' && !s.path?.trim()) throw new Error(`Source "${s.id}": the folder.`);
+        // Messages name the source as the person named it (its id is made from the name).
+        const who = String(s.name || s.id).slice(0, 80);
+        if (!kinds.includes(s.kind)) throw new Error(`Source "${who}": kind is one of ${kinds.join(', ')}.`);
+        if (s.kind === 'folder' && !s.path?.trim()) throw new Error(`Source "${who}": the folder.`);
         if (s.kind === 'url') {
-            if (!s.urls?.length) throw new Error(`Source "${s.id}": at least one web address.`);
-            for (const u of s.urls) if (!/^https?:\/\/\S+$/.test(u)) throw new Error(`Source "${s.id}": not a web address: ${u}`);
+            if (!s.urls?.length) throw new Error(`Source "${who}": at least one web address.`);
+            for (const u of s.urls) if (!/^https?:\/\/\S+$/.test(u)) throw new Error(`Source "${who}": not a web address: ${u}`);
         }
         // The same thing twice gives every result twice.
         const same = seenKinds.get(s.kind === 'folder' ? `folder:${String(s.path ?? '').trim()}` : s.kind === 'url' ? `url:${[...(s.urls ?? [])].sort().join(' ')}` : s.kind === 'ado-wiki' ? `wiki:${s.project ?? ''}:${s.wiki ?? ''}` : s.kind === 'ado-workitems' ? `wi:${s.project ?? ''}:${s.query ?? ''}` : s.kind);
         if (same) throw new Error(`"${s.name || s.id}" is the same as "${same}": each source once.`);
         seenKinds.set(s.kind === 'folder' ? `folder:${String(s.path ?? '').trim()}` : s.kind === 'url' ? `url:${[...(s.urls ?? [])].sort().join(' ')}` : s.kind === 'ado-wiki' ? `wiki:${s.project ?? ''}:${s.wiki ?? ''}` : s.kind === 'ado-workitems' ? `wi:${s.project ?? ''}:${s.query ?? ''}` : s.kind, s.name || s.id);
-        if (s.include && (!Array.isArray(s.include) || s.include.some((p) => typeof p !== 'string' || p.includes('..')))) throw new Error(`Source "${s.id}": include is a list of sub-folders.`);
+        if (s.include && (!Array.isArray(s.include) || s.include.some((p) => typeof p !== 'string' || p.includes('..')))) throw new Error(`Source "${who}": only sub-folders inside it, without "..": ${Array.isArray(s.include) ? s.include.filter((p) => typeof p !== 'string' || p.includes('..')).map((p) => `"${String(p)}"`).join(', ') : 'a list of sub-folders'}.`);
         return { id: s.id, name: String(s.name || s.id).slice(0, 80), kind: s.kind, enabled: s.enabled !== false,
             ...(s.path ? { path: String(s.path) } : {}), ...(s.include?.length ? { include: s.include.map(String) } : {}), ...(s.query ? { query: String(s.query).slice(0, 4000) } : {}),
             ...(s.wiki ? { wiki: String(s.wiki).slice(0, 200) } : {}), ...(s.urls?.length ? { urls: s.urls.slice(0, 50).map(String) } : {}), ...(s.project ? { project: String(s.project) } : {}) };

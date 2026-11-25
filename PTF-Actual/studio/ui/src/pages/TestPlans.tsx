@@ -93,6 +93,8 @@ export function TestPlans() {
         try { const r = await api.testPlans(scope); setPlans(r); if (!scope.project) setScope((s) => ({ ...s, project: r.project, env: r.env })); } catch (e) { setErr(errText(e)); }
     }, [scope]);
     React.useEffect(() => { if (here) void loadPlans(); }, [here, scope.project, scope.env, scope.adoProject]); // eslint-disable-line react-hooks/exhaustive-deps
+    // An address that is not a plan (#/testplans/bogus) is rewritten in place to the screen's own (then its first plan).
+    React.useEffect(() => { if (here && route.length > 1 && (planId === null || (route.length > 2 && suiteId === null) || route.length > 3)) navigate(planId === null ? ['testplans'] : ['testplans', planId], true); }, [here, route, planId, suiteId]);
     React.useEffect(() => { if (here && plans?.plans.length && (planId === null || !plans.plans.some((p) => p.id === planId))) navigate(['testplans', plans.plans[0].id], true); }, [here, plans, planId]);
     const plan = plans?.plans.find((p) => p.id === planId) ?? null;
     React.useEffect(() => {

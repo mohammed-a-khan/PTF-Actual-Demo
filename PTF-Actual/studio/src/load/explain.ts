@@ -160,7 +160,8 @@ export interface ComparedMetric { label: string; a: string; b: string; change: s
 export interface Comparison {
     status: Status; headline: string; answer: string;
     metrics: ComparedMetric[];
-    transactions: Array<{ name: string; aP95: number; bP95: number; changePct: number; verdict: 'better' | 'worse' | 'same' | 'new' | 'gone' }>;
+    /** Paired by the request's id (two requests can have the same name); the error rates count in the verdict. */
+    transactions: Array<{ id: string; name: string; aP95: number; bP95: number; changePct: number; aErrorRate?: number; bErrorRate?: number; verdict: 'better' | 'worse' | 'same' | 'new' | 'gone' | 'failing'; why?: string }>;
     findings: string[]; notes: string[];
 }
 
@@ -185,19 +186,30 @@ export function compareRuns(a: RunResult, b: RunResult, names: { a: string; b: s
     const dErr = b.total.errorRate - a.total.errorRate;
     metrics.push({ label: 'Error rate', a: pct(a.total.errorRate), b: pct(b.total.errorRate), change: `${dErr >= 0 ? '+' : ''}${dErr.toFixed(2)} pts`, verdict: Math.abs(dErr) < 0.1 ? 'same' : dErr > 0 ? 'worse' : 'better', meaning: Math.abs(dErr) < 0.1 ? 'No meaningful change in failures.' : dErr > 0 ? 'More requests failed.' : 'Fewer requests failed.' });
     time('avg', 'Average response time'); time('p50', 'Median (p50)'); time('p90', '90th percentile (p90)'); time('p95', '95th percentile (p95)'); time('p99', '99th percentile (p99)');
-    // Transactions by name.
-    const names2 = [...new Set([...a.transactions, ...b.transactions].map((t) => t.name))];
-    const txs = names2.map((n) => {
-        const x = a.transactions.find((t) => t.name === n), y = b.transactions.find((t) => t.name === n);
-        if (!x) return { name: n, aP95: 0, bP95: y!.p95, changePct: 0, verdict: 'new' as const };
-        if (!y) return { name: n, aP95: x.p95, bP95: 0, changePct: 0, verdict: 'gone' as const };
+    // Transactions by the request's id (not its name: two requests may share one), with their errors: a request
+    // that failed more is worse whatever its times (a request failing every time answers fast).
+    const txKey = (t: { id?: string; name: string }) => t.id || `name:${t.name}`;
+    const keys2 = [...new Set([...a.transactions, ...b.transactions].map(txKey))];
+    const ERR_PTS = 1;
+    const txs: Comparison['transactions'] = keys2.map((k): Comparison['transactions'][number] => {
+        const x = a.transactions.find((t) => txKey(t) === k), y = b.transactions.find((t) => txKey(t) === k);
+        const id = (y ?? x)!.id ?? k, n = (y ?? x)!.name;
+        if (!x) return { id, name: n, aP95: 0, bP95: y!.p95, changePct: 0, bErrorRate: y!.errorRate, verdict: 'new' as const };
+        if (!y) return { id, name: n, aP95: x.p95, bP95: 0, changePct: 0, aErrorRate: x.errorRate, verdict: 'gone' as const };
         const c = ch(x.p95, y.p95);
-        return { name: n, aP95: x.p95, bP95: y.p95, changePct: Math.round(c), verdict: (Math.abs(c) < NOISE || Math.abs(y.p95 - x.p95) < MIN_MS ? 'same' : c > 0 ? 'worse' : 'better') as 'same' | 'worse' | 'better' };
+        const dE = (y.errorRate ?? 0) - (x.errorRate ?? 0);
+        const timeV = (Math.abs(c) < NOISE || Math.abs(y.p95 - x.p95) < MIN_MS ? 'same' : c > 0 ? 'worse' : 'better') as 'same' | 'worse' | 'better';
+        // Failing (most of its requests) in both runs: never "the same" as a request that works (its times are the errors').
+        const failing = dE < ERR_PTS && dE > -ERR_PTS && y.errorRate >= 50;
+        const verdict: 'same' | 'worse' | 'better' | 'failing' = dE >= ERR_PTS ? 'worse' : dE <= -ERR_PTS ? (timeV === 'worse' ? 'worse' : 'better') : failing ? 'failing' : timeV;
+        const why = dE >= ERR_PTS || dE <= -ERR_PTS ? `errors ${pct(x.errorRate)} → ${pct(y.errorRate)}` : failing ? `fails in both runs: ${pct(y.errorRate)} errors` : undefined;
+        return { id, name: n, aP95: x.p95, bP95: y.p95, changePct: Math.round(c), aErrorRate: x.errorRate, bErrorRate: y.errorRate, verdict, ...(why ? { why } : {}) };
     }).sort((p, q) => (q.verdict === 'worse' ? 1 : 0) - (p.verdict === 'worse' ? 1 : 0) || Math.abs(q.changePct) - Math.abs(p.changePct));
     const worse = txs.filter((t) => t.verdict === 'worse'), better = txs.filter((t) => t.verdict === 'better');
     const findings: string[] = [];
-    for (const t of worse.slice(0, 5)) findings.push(`${t.name} got slower: 95% within ${sec(t.bP95)} instead of ${sec(t.aP95)} (${t.changePct > 0 ? '+' : ''}${t.changePct}%).`);
-    for (const t of better.slice(0, 3)) findings.push(`${t.name} got faster: 95% within ${sec(t.bP95)} instead of ${sec(t.aP95)} (${t.changePct}%).`);
+    for (const t of worse.slice(0, 5)) findings.push(t.why && (t.bErrorRate ?? 0) > (t.aErrorRate ?? 0) ? `${t.name} failed more: ${t.why}.` : `${t.name} got slower: 95% within ${sec(t.bP95)} instead of ${sec(t.aP95)} (${t.changePct > 0 ? '+' : ''}${t.changePct}%).`);
+    for (const t of better.slice(0, 3)) findings.push(t.why ? `${t.name} failed less: ${t.why}.` : `${t.name} got faster: 95% within ${sec(t.bP95)} instead of ${sec(t.aP95)} (${t.changePct}%).`);
+    for (const t of txs.filter((x) => x.verdict === 'failing').slice(0, 3)) findings.push(`${t.name} ${t.why}.`);
     for (const t of txs.filter((x) => x.verdict === 'new').slice(0, 3)) findings.push(`${t.name} is new in ${names.b}.`);
     for (const t of txs.filter((x) => x.verdict === 'gone').slice(0, 3)) findings.push(`${t.name} did not run in ${names.b}.`);
     const notes: string[] = [];

@@ -2,7 +2,7 @@
  * The few calls of the Agents group's screens that api.ts does not have (yet): the same request, with the tab's
  * Studio key, and the same errors (ApiError with the server's message).
  */
-import { AgentBuilderDef, AgentSettingsDef, AgentStatus, AgentTriggerDef, ApiError, KnowledgeSourceDef, KnowledgeStatusDef, MissionsDef, TeamAgentDef, ToolServerDef, ToolServerRow, ToolServersView } from './api';
+import { AgentBuilderDef, AgentSettingsDef, AgentStatus, AgentTriggerDef, ApiError, EvalCaseDef, EvalRunDef, EvalRunSummaryDef, EvalsDef, KnowledgeSourceDef, KnowledgeStatusDef, MissionsDef, TeamAgentDef, ToolServerDef, ToolServerRow, ToolServersView } from './api';
 
 /** The Studio key as api.ts keeps it: this browser's localStorage, else this tab's sessionStorage. */
 const token = () => {
@@ -31,6 +31,11 @@ export type KnowledgeStatusView = KnowledgeStatusDef & { warning?: string };
 /** A mission agent's own trigger (set in Agent builder), listed under Missions › Triggers. */
 export type AgentTriggerView = AgentTriggerDef & { agent: string; name: string };
 export type MissionsView = MissionsDef & { agentTriggers?: AgentTriggerView[] };
+/** An evaluation run with the models that actually answered (older runs: not recorded). */
+export type EvalRunSummaryView = EvalRunSummaryDef & { models?: string[] };
+export type EvalRunView = EvalRunDef & { models?: string[] };
+/** An agent's evaluations with the version of its cases file (a save over a newer one is refused: 409). */
+export type EvalsView = Omit<EvalsDef, 'runs'> & { runs: EvalRunSummaryView[]; version?: string };
 /** A save made on purpose over a version changed elsewhere (after "Overwrite"). */
 const v = (version: string | undefined, force?: boolean) => ({ ...(version !== undefined ? { version } : {}), ...(force ? { force: true } : {}) });
 
@@ -46,6 +51,10 @@ export const agentsApi = {
     saveToolServer: (b: { scope: 'team' | 'personal'; name: string; from?: string; values?: Record<string, string>; server?: ToolServerDef; editing?: string }, version?: string, force = false) =>
         call<ToolServersView>('PUT', '/api/agents/tool-servers', { ...b, ...v(b.editing ? version : undefined, force) }),
     missions: () => call<MissionsView>('GET', '/api/missions'),
+    evals: (agent: string) => call<EvalsView>('GET', `/api/evals/${encodeURIComponent(agent)}`),
+    saveEvals: (agent: string, suite: { cases: EvalCaseDef[] }, version?: string, force = false) =>
+        call<{ suite: { cases: EvalCaseDef[] }; version: string }>('PUT', `/api/evals/${encodeURIComponent(agent)}`, { suite, ...v(version, force) }),
+    evalRun: (agent: string, id: string) => call<EvalRunView>('GET', `/api/evals/${encodeURIComponent(agent)}/runs/${encodeURIComponent(id)}`),
     /** Delete a finished mission (its copy, screenshots and branch too, unless a pull request uses the branch). */
     deleteMission: (id: string) => call<{ ok: boolean }>('DELETE', `/api/missions/${encodeURIComponent(id)}`, { confirm: true }),
     /** Remove an entry of the knowledge file that is not right; the other entries stay as written. */

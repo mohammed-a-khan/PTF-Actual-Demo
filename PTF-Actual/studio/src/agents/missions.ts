@@ -27,7 +27,7 @@ import type { RunInfo, RunRequest, RunSummary } from '../run/runner';
 import type { AgentEvent, MissionSessionOptions, Usage } from './host';
 import type { ToolDef } from './tools';
 import type { StudioBrowser } from './browser';
-import { asTeamMission, listAgents, profileOf, simpleTriggers, teamMember, type AgentProfile, type ToolGroup } from './builder';
+import { asTeamMission, BUDGET_LIMITS, listAgents, profileOf, simpleTriggers, teamMember, wholeProblem, type AgentProfile, type ToolGroup } from './builder';
 
 // ---------------------------------------------------------------------------------------------- definitions
 
@@ -413,6 +413,11 @@ export class MissionEngine {
     async start(key: string, inputs: Record<string, string>, o: { trigger?: MissionRun['trigger']; autonomy?: Autonomy; budget?: Partial<Budget>; queue?: boolean; unattended?: boolean } = {}): Promise<MissionRun> {
         const t = this.template(key);
         if (!t) throw new Error(`No mission "${key}".`);
+        // A budget given for this mission (the Start dialog): whole numbers in range, refused as sent, never rounded or clamped.
+        for (const [k, label, min, max] of BUDGET_LIMITS) {
+            const x = o.budget?.[k];
+            if (x !== undefined && x !== null) { const p = wholeProblem(x, label, min, max); if (p) throw new Error(p); }
+        }
         const busy = this.running().filter((x) => x.state !== 'queued');
         if (busy.length && !o.queue) throw new Error(`A mission is already working (${busy[0].title}): wait for it, stop it, or queue this one.`);
         if (this.runs.filter((x) => x.state === 'queued').length >= 10) throw new Error('Ten missions are already queued.');

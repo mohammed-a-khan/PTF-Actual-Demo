@@ -3,13 +3,14 @@
  * cannot change who the Studio sends your Azure DevOps token to.
  */
 import React from 'react';
-import { Alert, App, Button, Card, Col, Form, Input, InputNumber, Radio, Row, Segmented, Select, Space, Switch, Tabs, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Card, Col, Form, Input, Radio, Row, Segmented, Select, Space, Switch, Tabs, Tooltip, Typography } from 'antd';
 import { InfoCircleOutlined } from '@ant-design/icons';
 import { api, McpSettings, StudioSettings } from '../api';
 import { errText } from '../state';
 import { GitNetworkCard, StudioNetworkCard } from './NetworkSettings';
 import { navigate, useRoute } from '../route';
 import { asciiDigits, charCount, useStoredTab } from '../datagit-common';
+import { useUnsaved } from '../unsaved';
 
 /** The same limits as the server (src/git/identity.ts): what Git is given as your name and email. */
 export const IDENTITY_NAME_MAX = 100;
@@ -30,6 +31,39 @@ export function identityEmailProblem(email: string): string | null {
     if (HIDDEN.test(e) || !/^[^\s@<>]+@[^\s@<>]+$/.test(e)) return 'Enter an email address, such as name@company.com.';
     return null;
 }
+/** Why a typed port is not allowed (0: any free port; otherwise 1024–65535), or null. Digits of other scripts count. */
+export function portProblem(typed: string): string | null {
+    const raw = asciiDigits(typed).replace(/[\s,]/g, '');
+    if (raw === '') return 'Give a port: 0 (any free port) or 1024–65535.';
+    if (!/^\d+$/.test(raw)) return 'Digits only: 0 (any free port) or 1024–65535.';
+    const v = Number(raw);
+    if (v !== 0 && (v < 1024 || v > 65535)) return v < 1024 ? 'Ports below 1024 need administrator rights: use 0 (any free port) or 1024–65535.' : 'At most 65535: use 0 (any free port) or 1024–65535.';
+    return null;
+}
+
+/** The port field: what is wrong is said under it as you type; a port that is allowed is saved when the field is left. */
+function PortField({ saved, onSave }: { saved: number; onSave: (v: number) => void }) {
+    const [text, setText] = React.useState(String(saved));
+    const [left, setLeft] = React.useState<string | null>(null);
+    React.useEffect(() => { setText(String(saved)); }, [saved]);
+    const problem = portProblem(text);
+    const commit = () => {
+        if (problem) { setLeft(`${problem} Still ${saved}.`); setText(String(saved)); return; }
+        setLeft(null);
+        const v = Number(asciiDigits(text).replace(/[\s,]/g, ''));
+        setText(String(v));
+        if (v !== saved) onSave(v);
+    };
+    const msg = problem ?? left;
+    return (
+        <>
+            <Input id="cs-settings-port" inputMode="numeric" value={text} aria-invalid={!!problem} status={problem ? 'error' : undefined} addonAfter={saved === 0 ? 'any free port' : undefined}
+                onChange={(e) => { setLeft(null); setText(e.target.value); }} onPressEnter={(e) => (e.target as HTMLInputElement).blur()} onBlur={commit} />
+            {msg && <Typography.Text type={problem ? 'danger' : 'warning'} role="alert" style={{ fontSize: 12, display: 'block' }}>Port: {msg}</Typography.Text>}
+        </>
+    );
+}
+
 /** A secret name, as the server keeps it. */
 export const SECRET_NAME_MAX = 64;
 
@@ -44,9 +78,17 @@ export function Settings() {
     const [email, setEmail] = React.useState('');
     const [scope, setScope] = React.useState<'repository' | 'global'>('repository');
     const [busy, setBusy] = React.useState<string | null>(null);
-    const [netPart, setNetPart] = useStoredTab<'studio' | 'git'>('settings-network', ['studio', 'git'], 'studio');
+    const [storedNetPart, storeNetPart] = useStoredTab<'studio' | 'git'>('settings-network', ['studio', 'git'], 'studio');
     // The tab is in the address (#/settings/ado), so other screens can open it; the last one is remembered.
     const route = useRoute();
+    // Network's part is in the address too (#/settings/network/git): Back and Forward move between them.
+    const netPart: 'studio' | 'git' = route[1] === 'network' && (route[2] === 'studio' || route[2] === 'git') ? route[2] : storedNetPart;
+    const setNetPart = (v: 'studio' | 'git') => { storeNetPart(v); navigate(['settings', 'network', v]); };
+    React.useEffect(() => {
+        if (route[0] !== 'settings' || route[1] !== 'network') return;
+        if (route[2] !== netPart) navigate(['settings', 'network', netPart], true);
+        else if (netPart !== storedNetPart) storeNetPart(netPart);
+    }, [route.join('/')]); // eslint-disable-line react-hooks/exhaustive-deps
     const [storedTab, storeTab] = useStoredTab<SettingsTab>('settings', SETTINGS_TABS, 'general');
     // No tab in the address: the one used last; a wrong one (#/settings/bogus): General.
     const tab: SettingsTab = SETTINGS_TABS.includes(route[1] as SettingsTab) ? route[1] as SettingsTab : route[1] ? 'general' : storedTab;
@@ -77,13 +119,20 @@ export function Settings() {
     const nameProblem = identityNameProblem(name);
     const emailProblem = identityEmailProblem(email);
     const idOk = !nameProblem && !emailProblem;
-    const saveIdentity = async () => {
-        if (!s || !idOk || busy === 'git') return;
+    /** true when saved (also for "Leave without saving?" → Save). */
+    const saveIdentity = async (): Promise<boolean> => {
+        if (!s || !idOk || busy === 'git') return false;
         setBusy('git');
-        try { const g = await api.setGitIdentity(name.trim(), email.trim(), scope); setS({ ...s, git: g }); message.success('Saved'); }
-        catch (e) { message.error(errText(e)); }
+        try { const g = await api.setGitIdentity(name.trim(), email.trim(), scope); setS({ ...s, git: g }); setName(g.name); setEmail(g.email); setScope(g.scope === 'global' ? 'global' : 'repository'); message.success('Saved'); return true; }
+        catch (e) { message.error(errText(e)); return false; }
         finally { setBusy(null); }
     };
+    // A name or email typed but not saved: leaving the screen (menu, Back, a typed address) asks first.
+    const idDirty = !!s && (name !== s.git.name || email !== s.git.email || (s.git.scope !== 'none' && scope !== (s.git.scope === 'global' ? 'global' : 'repository')));
+    useUnsaved('settings-identity', idDirty, 'your name and email for commits', {
+        lostOnLeave: true, save: saveIdentity,
+        discard: () => { if (s) { setName(s.git.name); setEmail(s.git.email); setScope(s.git.scope === 'global' ? 'global' : 'repository'); } },
+    });
 
     if (loadError) return <Alert type="error" showIcon message="Could not load settings" description={loadError} />;
     if (!s) return null;
@@ -119,19 +168,8 @@ export function Settings() {
                         <Row gutter={16}>
                             <Col xs={24} md={12}>
                                 <Form.Item label="Port" htmlFor="cs-settings-port" tooltip="A fixed port keeps your bookmark working. If it is busy, the next free one is used. Takes effect the next time you start the Studio.">
-                                    <InputNumber id="cs-settings-port" precision={0} style={{ width: '100%' }} defaultValue={s.port} key={`${s.port}-${rev}`} addonAfter={s.port === 0 ? 'any free port' : undefined}
-                                        parser={(t) => Number(asciiDigits(t ?? '').replace(/[\s,]/g, ''))}
-                                        onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
-                                        onBlur={(e) => {
-                                            // Digits of other scripts (١٢٣٤) count as 0-9; anything else is said, never dropped silently.
-                                            const raw = asciiDigits(String(e.target.value)).replace(/[\s,]/g, ''), v = Number(raw);
-                                            if (raw === '') { reset(); return; }
-                                            if (!/^\d+$/.test(raw)) { message.error(`Port: digits only, 0 (any free port) or 1024–65535: still ${s.port}.`); reset(); return; }
-                                            if (v === s.port) return;
-                                            // 0: any free port; otherwise 1024–65535 (lower ports need administrator rights).
-                                            if (!Number.isInteger(v) || (v !== 0 && (v < 1024 || v > 65535))) { message.error(`Port: 0 (any free port) or 1024–65535: still ${s.port}.`); reset(); return; }
-                                            void save('port', { port: v });
-                                        }} />
+                                    {/* Digits of other scripts (٤٧١٩) count as 0-9; anything else is said under the field as it is typed. */}
+                                    <PortField key={rev} saved={s.port} onSave={(v) => void save('port', { port: v })} />
                                 </Form.Item>
                             </Col>
                             <Col xs={24} md={12}>
@@ -210,7 +248,9 @@ export function Settings() {
             key: 'network', label: 'Network', children: <div className="dg-settings-col">
                 <Segmented value={netPart} onChange={(v) => setNetPart(v as 'studio' | 'git')} style={{ alignSelf: 'flex-start' }}
                     options={[{ value: 'studio', label: 'Studio connections' }, { value: 'git', label: 'Git (Fetch, Pull, Push)' }]} />
-                {netPart === 'studio' ? <StudioNetworkCard s={s} onChange={setS} /> : <GitNetworkCard studioProxy={s.network.proxyMode === 'manual' ? s.network.proxyUrl : ''} />}
+                {/* Both stay mounted: what is typed in one part is kept while the other is shown. */}
+                <div hidden={netPart !== 'studio'}><StudioNetworkCard s={s} onChange={setS} /></div>
+                <div hidden={netPart !== 'git'}><GitNetworkCard studioProxy={s.network.proxyMode === 'manual' ? s.network.proxyUrl : ''} /></div>
             </div>,
         },
         { key: 'assistants', label: 'Assistants & tools', children: <div className="dg-settings-col"><McpCard /></div> },

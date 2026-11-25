@@ -57,6 +57,9 @@ const NOQ = ['-c', 'core.quotePath=false'];
 const ZERO_OID = '0000000000000000000000000000000000000000';
 export const STALE_HUNK_MESSAGE = 'This change was modified since you looked at it. Refresh and try again.';
 
+/** Push (a branch or a tag) in a repository without a remote. */
+export const NO_REMOTE_TO_PUSH = 'This repository has no remote to push to. Add one in Source control › Branches & tags › Remotes.';
+
 export class GitService {
     constructor(public readonly repoRoot: string, private readonly opts: GitServiceOptions = {}) {}
 
@@ -243,6 +246,8 @@ export class GitService {
     async push(override?: Override, opts: { forceWithLease?: boolean; tags?: boolean } = {}): Promise<GateResult> {
         const st = await this.status();
         if (!st.branch) return { status: 'rejected', message: 'You are not on a branch (detached HEAD). Create or switch to a branch first.' };
+        // No remote: said first (not a secret scan of commits that cannot go anywhere).
+        if (!(await this.defaultRemote())) return { status: 'rejected', message: NO_REMOTE_TO_PUSH };
 
         const policy = readPolicy(this.repoRoot);
         let overridden = false;
@@ -265,7 +270,7 @@ export class GitService {
         const up = await this.upstreamConfig(st.branch);
         if (!st.upstream || !up || up.remote === '.') {
             const remote = await this.defaultRemote();
-            if (!remote) return { status: 'rejected', message: 'This repository has no remote to push to.' };
+            if (!remote) return { status: 'rejected', message: NO_REMOTE_TO_PUSH };
             args.push('--set-upstream', remote, `HEAD:refs/heads/${st.branch}`);
         } else if (up.merge !== `refs/heads/${st.branch}`) {
             // The upstream has another name (branch created from origin/main, say): a plain push
@@ -550,7 +555,7 @@ export class GitService {
 
     async renameBranch(from: string, to: string): Promise<void> {
         assertRev(from);
-        await this.assertBranchName(to);
+        await this.assertBranchName(to, 'rename');
         await this.git(['branch', '-m', '--', from, to]);
     }
 
@@ -1152,7 +1157,7 @@ export class GitService {
     async pushTag(name: string): Promise<void> {
         assertRev(name);
         const remote = await this.defaultRemote();
-        if (!remote) throw new UserError('This repository has no remote.');
+        if (!remote) throw new UserError(NO_REMOTE_TO_PUSH);
         const r = await this.git(['push', remote, `refs/tags/${name}`], { allowFailure: true, timeoutMs: 600_000 });
         if (r.code !== 0) throw new GitError(explainGitFailure(r.stderr), ['push', 'tag'], r.code, r.stderr);
     }
@@ -1237,12 +1242,12 @@ export class GitService {
         return remotes[0] ?? null;
     }
 
-    private async assertBranchName(name: string): Promise<void> {
+    private async assertBranchName(name: string, what: 'create' | 'rename' = 'create'): Promise<void> {
         if (!name.trim()) throw new UserError('Give the branch a name.');
         const r = await this.git(['check-ref-format', '--branch', name], { allowFailure: true });
         if (r.code !== 0 || name.startsWith('-')) throw new UserError(`"${name}" is not a valid branch name: no spaces, ~ ^ : ? * [ \\, "..", or a name starting with "-" or ending with "." or ".lock".`);
         const exists = await this.git(['show-ref', '--verify', '--quiet', `refs/heads/${name}`], { allowFailure: true });
-        if (exists.code === 0) throw new UserError(`A branch named "${name}" exists already: choose another name, or switch to it.`);
+        if (exists.code === 0) throw new UserError(what === 'rename' ? `A branch named "${name}" exists already: choose another name.` : `A branch named "${name}" exists already: choose another name, or switch to it.`);
     }
 
     /** Resolve a repo-relative path and refuse anything outside the repository. */

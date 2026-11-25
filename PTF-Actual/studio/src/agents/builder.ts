@@ -68,6 +68,18 @@ export const profileOf = (a: TeamAgent): AgentProfile => ({ id: a.id, name: a.na
 export const AGENTS_DIR = '.cs-studio/agents';
 const ID = /^[a-z0-9][a-z0-9-]{1,39}$/;
 
+/** A mission's budget: its limits (the screens say the same). */
+export const BUDGET_LIMITS: Array<[keyof Budget, string, number, number]> = [['minutes', 'Minutes', 5, 480], ['modelCalls', 'Model calls', 10, 2000], ['attempts', 'Attempts', 1, 10]];
+const TRIGGER_NAMES: Record<string, string> = { 'run-failed': 'when a run fails', schedule: 'on a schedule', 'work-item': 'new work items', 'pull-request': 'new pull requests' };
+/** Why a value sent for a whole-number field is not right (a decimal, a negative number, text, out of range), or null. */
+export function wholeProblem(v: unknown, label: string, min: number, max: number): string | null {
+    const t = typeof v === 'number' ? String(v) : typeof v === 'string' ? v.trim() : '';
+    const range = `a whole number from ${min} to ${max}`;
+    if (!/^\d{1,9}$/.test(t)) return `${label}: ${/^-/.test(t) ? 'no negative numbers' : /^-?\d*[.,]\d+$|^\d+[.,]$/.test(t) || (typeof v === 'number' && !Number.isInteger(v)) ? 'no decimals' : 'numbers only'}; give ${range} (not "${String(v).slice(0, 20)}").`;
+    const n = Number(t);
+    return n < min || n > max ? `${label}: ${range} (not ${n}).` : null;
+}
+
 export function validateAgent(v: unknown, o: { knowledgeIds?: string[] } = {}): TeamAgent {
     const a = (v ?? {}) as TeamAgent;
     const err = (m: string) => { throw new Error(m); };
@@ -91,6 +103,12 @@ export function validateAgent(v: unknown, o: { knowledgeIds?: string[] } = {}): 
         for (const m of String(a.goal).matchAll(/\{(\w+)\}/g)) if (!inputs.some((i) => i.key === m[1])) err(`The goal uses {${m[1]}}: add that input.`);
         if (a.writes !== false && !a.tools.includes('files')) err('A mission that changes files needs the "Change files" tools (or set it to read only).');
         if (a.verify && !['tests', 'report'].includes(a.verify.kind)) err('Proof: tests or report.');
+        // The budget: whole numbers in range, refused as sent (never rounded or clamped: 1.5 is not 15 or 2).
+        if (a.budget !== undefined && (a.budget === null || typeof a.budget !== 'object')) err('Budget: minutes, model calls and attempts.');
+        for (const [k, label, min, max] of BUDGET_LIMITS) {
+            const x = (a.budget as Record<string, unknown> | undefined)?.[k];
+            if (x !== undefined) { const p = wholeProblem(x, label, min, max); if (p) err(p); }
+        }
     }
     const team = [...new Set((a.team ?? []).map(String))];
     if (team.length && a.mode !== 'mission') err('Only a mission agent leads a team.');
@@ -99,6 +117,7 @@ export function validateAgent(v: unknown, o: { knowledgeIds?: string[] } = {}): 
     const triggers = (a.triggers ?? []).map((t) => {
         if (a.mode !== 'mission') err('Only mission agents start by themselves.');
         if (!['run-failed', 'schedule', 'work-item', 'pull-request'].includes(t.on)) err(`Unknown trigger "${(t as { on: string }).on}".`);
+        if (t.maxPerDay !== undefined) { const p = wholeProblem(t.maxPerDay, `Trigger "${TRIGGER_NAMES[t.on] ?? t.on}": at most, a day`, 1, 50); if (p) err(p); }
         if (t.on === 'schedule' && !parseCron(String(t.cron ?? ''))) err(`"${String(t.cron ?? '').trim()}" is not a schedule: five fields (minute 0-59, hour 0-23, day 1-31, month 1-12, weekday 0-7), e.g. "0 2 * * 1-5" for 02:00 on weekdays.`);
         // A schedule starts the mission with the values it gives: its required inputs must be given (a failed run gives the run).
         if (t.on === 'schedule' && t.enabled !== false) {

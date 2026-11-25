@@ -4,6 +4,11 @@
  */
 import React from 'react';
 import { api, BranchInfo, Discover, RepoStatus } from './api';
+import { useRoute } from './route';
+
+const FILES_CHANGED = 'cs-studio:files-changed';
+/** A screen wrote or deleted files in the repository (a saved query, a setting): the repository's status is read again. */
+export function filesChanged(): void { window.dispatchEvent(new Event(FILES_CHANGED)); }
 
 export interface StudioState {
     repoRoot: string;
@@ -36,11 +41,23 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
 
     React.useEffect(() => {
         void refresh();
-        // Pick up changes made outside the Studio (editor saves, command-line git) when the tab regains focus.
-        const onFocus = () => void refresh();
-        window.addEventListener('focus', onFocus);
-        return () => window.removeEventListener('focus', onFocus);
+        // Pick up changes made outside the Studio (editor saves, command-line git) when the tab regains focus or is
+        // shown again, and files a screen wrote (a saved query, a setting): Source control's lists and badges follow.
+        let timer: number | undefined;
+        const soon = () => { window.clearTimeout(timer); timer = window.setTimeout(() => void refresh(), 150); };
+        const onShown = () => { if (document.visibilityState === 'visible') soon(); };
+        window.addEventListener('focus', soon);
+        window.addEventListener(FILES_CHANGED, soon);
+        document.addEventListener('visibilitychange', onShown);
+        return () => { window.clearTimeout(timer); window.removeEventListener('focus', soon); window.removeEventListener(FILES_CHANGED, soon); document.removeEventListener('visibilitychange', onShown); };
     }, [refresh]);
+    // Another screen opened (the menu, Back, a link): what it shows of the repository is read again.
+    const screen = useRoute()[0];
+    const firstScreen = React.useRef(true);
+    React.useEffect(() => {
+        if (firstScreen.current) { firstScreen.current = false; return; }
+        void refresh();
+    }, [screen, refresh]);
 
     return <Ctx.Provider value={{ repoRoot, projectId, status, branches, env, error, refresh }}>{children}</Ctx.Provider>;
 }

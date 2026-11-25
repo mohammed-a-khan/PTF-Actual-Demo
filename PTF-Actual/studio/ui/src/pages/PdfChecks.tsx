@@ -61,20 +61,40 @@ function SaveTest({ open, onClose, body, project, env }: { open: boolean; onClos
     );
 }
 
+const PDF_TABS = ['compare', 'read', 'view'] as const;
+type PdfTab = typeof PDF_TABS[number];
+/**
+ * #/pdf/<path> or #/pdf/<path>/<tab>: the PDF (one encoded segment, or older links with its folders as segments) and
+ * the tab shown. A last segment that is a tab name follows a segment ending in .pdf.
+ */
+export function parsePdfRoute(route: string[]): { file: string | null; tab: PdfTab | null } {
+    if (route[0] !== 'pdf' || route.length < 2) return { file: null, tab: null };
+    const parts = route.slice(1);
+    const last = parts[parts.length - 1];
+    const tab = parts.length > 1 && (PDF_TABS as readonly string[]).includes(last) && /\.pdf$/i.test(parts[parts.length - 2]) ? last as PdfTab : null;
+    return { file: (tab ? parts.slice(0, -1) : parts).join('/'), tab };
+}
+
 export function PdfChecks() {
     const { message, modal } = App.useApp();
     const [files, setFiles] = React.useState<PdfFileDef[] | null>(null);
     const [engine, setEngine] = React.useState<'project' | 'studio' | null>(null);
     const [filter, setFilter] = React.useState('');
     // The chosen PDF is in the address (#/pdf/<path>): a link opens it, Back returns to the PDF before.
+    // The tab (Compare / Read / View) follows it (#/pdf/<path>/read), so Back and Forward move between tabs too.
     const route = useRoute();
-    const routeFile = route[0] === 'pdf' && route.length > 1 ? route.slice(1).join('/') : null;
+    const { file: routeFile, tab: routeTab } = parsePdfRoute(route);
     const [sel, setSelState] = React.useState<string | null>(() => routeFile ?? pref('cs-studio-pdf-file', null));
-    const setSel = (p: string) => { setSelState(p); navigate(['pdf', p]); };
+    const [detailTab, storeDetailTab] = useStoredTab<PdfTab>('pdf-detail', PDF_TABS, 'compare');
+    const shownTab: PdfTab = routeTab ?? detailTab;
+    const setSel = (p: string) => { setSelState(p); navigate(['pdf', p, shownTab]); };
+    const setDetailTab = (t: PdfTab) => { storeDetailTab(t); if (sel) navigate(['pdf', sel, t]); };
     React.useEffect(() => {
         if (route[0] !== 'pdf') return;
-        if (!routeFile) { if (sel) navigate(['pdf', sel], true); return; } // #/pdf: the PDF shown last
+        if (!routeFile) { if (sel) navigate(['pdf', sel, shownTab], true); return; } // #/pdf: the PDF shown last
         if (routeFile !== sel) setSelState(routeFile);
+        if (!routeTab) navigate(['pdf', routeFile, detailTab], true); // the address says which tab is shown
+        else if (routeTab !== detailTab) storeDetailTab(routeTab);
     }, [route.join('/')]); // eslint-disable-line react-hooks/exhaustive-deps
     // The chosen PDF as an object URL (fetched with the token), for View and Open PDF.
     const [pdfUrl, setPdfUrl] = React.useState<string | null>(null);
@@ -107,7 +127,6 @@ export function PdfChecks() {
     const [saveOpen, setSaveOpen] = React.useState(false);
     const [showMatched, setShowMatched] = React.useState(false);
     usePageHeadTooltip();
-    const [detailTab, setDetailTab] = useStoredTab<'compare' | 'read' | 'view'>('pdf-detail', ['compare', 'read', 'view'], 'compare');
 
     const refresh = React.useCallback(() => api.pdfList().then((r) => { setFiles(r.files); setEngine(r.engine); }).catch((e) => message.error(errText(e))), [message]);
     React.useEffect(() => { void refresh(); }, [refresh]);
@@ -119,7 +138,7 @@ export function PdfChecks() {
         const fallback = lastGood.current && files.some((f) => f.path === lastGood.current) ? lastGood.current : files[0]?.path ?? null;
         message.error({ key: 'pdf-missing', content: `There is no PDF ${sel} in this repository${fallback ? `: showing ${fallback.split('/').pop()}` : ''}.` });
         setSelState(fallback);
-        if (route[0] === 'pdf') navigate(fallback ? ['pdf', fallback] : ['pdf'], true);
+        if (route[0] === 'pdf') navigate(fallback ? ['pdf', fallback, shownTab] : ['pdf'], true);
     }, [files, sel]); // eslint-disable-line react-hooks/exhaustive-deps
     React.useEffect(() => {
         api.dbConnections(project || undefined, env).then((m) => {
@@ -214,14 +233,15 @@ export function PdfChecks() {
                         }}>Open PDF</Button>
                     </div>
                     {infoErr && !(engine === null && /framework/i.test(infoErr)) && <Alert type="error" showIcon message={infoErr} style={{ marginBottom: 8 }} />}
-                    <Tabs size="small" activeKey={detailTab} onChange={(k) => setDetailTab(k as 'compare' | 'read' | 'view')} items={[
+                    <Tabs size="small" activeKey={shownTab} onChange={(k) => setDetailTab(k as PdfTab)} items={[
                         { key: 'compare', label: 'Compare', children: (
                             <Space direction="vertical" style={{ width: '100%' }} size={10}>
                                 <Form layout="vertical" size="small" className="dg-compact-form" style={{ maxWidth: 820 }}>
                                     <Row gutter={12}>
                                         <Col xs={12} md={6}><Form.Item label="Project"><Select value={project || undefined} placeholder="Project" onChange={(p) => { setProject(p); setEnv(undefined); }} options={(meta?.projects ?? []).map((p) => ({ value: p, label: p }))} aria-label="Project" /></Form.Item></Col>
                                         <Col xs={12} md={6}><Form.Item label="Environment"><Select value={env} placeholder="env" onChange={setEnv} options={(meta?.environments[project] ?? []).map((e) => ({ value: e, label: e }))} aria-label="Environment" /></Form.Item></Col>
-                                        <Col xs={24} md={12}><Form.Item label="Compare with"><Segmented value={kind} onChange={(v) => setKind(v as Kind)} options={[{ value: 'file', label: 'Data file' }, { value: 'query', label: 'Database' }, { value: 'pdf', label: 'Another PDF' }, { value: 'values', label: 'Values' }]} /></Form.Item></Col>
+                                        {/* Its own row: the four choices stay whole on a narrow window (1024 wide). */}
+                                        <Col xs={24}><Form.Item label="Compare with"><Segmented style={{ maxWidth: '100%', overflowX: 'auto' }} value={kind} onChange={(v) => setKind(v as Kind)} options={[{ value: 'file', label: 'Data file' }, { value: 'query', label: 'Database' }, { value: 'pdf', label: 'Another PDF' }, { value: 'values', label: 'Values' }]} /></Form.Item></Col>
                                     </Row>
                                     {kind === 'file' && <Row gutter={12}>
                                         <Col xs={24} md={18}><Form.Item label="Data file" tooltip=".json, .yaml, .csv, .xlsx or .xml, path from the repository root"><Input value={file} maxLength={500} onChange={(e) => setFile(e.target.value)} placeholder={`test/${project || '<project>'}/data/expected.json`} aria-label="Data file" className="mono" /></Form.Item></Col>

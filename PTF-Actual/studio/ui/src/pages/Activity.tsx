@@ -43,6 +43,12 @@ export function Activity() {
         api.activity(300).then(setRows).catch((e) => message.error(errText(e))).finally(() => setLoading(false));
     }, [message]);
     React.useEffect(load, [load]);
+    // An unknown tab in the address (#/activity/bogus) is rewritten in place to the tab shown (All).
+    React.useEffect(() => {
+        if (!rows || route[0] !== 'activity' || route.length < 2) return;
+        const want = route[1] === 'all' || rows.some((r) => kindOf(r.action) === route[1]) ? route[1] : 'all';
+        if (route.length > 2 || want !== route[1]) navigate(['activity', want], true);
+    }, [rows, route]);
     if (!rows) return <Spin style={{ marginTop: 40 }} />;
     if (rows.length === 0) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Nothing yet. Commits, pushes, test runs, secret and environment changes appear here." style={{ marginTop: 80 }} />;
 

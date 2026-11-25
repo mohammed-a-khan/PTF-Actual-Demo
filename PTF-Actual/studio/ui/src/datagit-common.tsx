@@ -8,7 +8,8 @@ import { App, Button, Result, Space, Typography } from 'antd';
 import { CloudServerOutlined, LockOutlined, ReloadOutlined, SettingOutlined } from '@ant-design/icons';
 import { navigate, useRoute } from './route';
 import { errText } from './state';
-import { isStale } from './datagit-api';
+import { isStale, staleVersion } from './datagit-api';
+import { askChangedElsewhere } from './components/ChangedElsewhere';
 import './styles-datagit.css';
 
 const STORED_TAB_EVENT = 'cs-stored-tab';
@@ -111,6 +112,18 @@ export function saveErrorToast(message: ReturnType<typeof App.useApp>['message']
             <Button size="small" type="primary" onClick={() => { message.destroy(key); reload(); }}>Reload</Button>{' '}
             <Button size="small" type="text" aria-label="Close" onClick={() => message.destroy(key)}>Close</Button></span>,
     });
+}
+
+/**
+ * A save refused because another tab (or someone else) changed the same thing since this screen read it: the person
+ * chooses Reload (see the saved version), Overwrite (save theirs over it) or Keep editing. Keep editing hands over the
+ * version saved now (when the server said it), so the next Save goes through instead of being refused again.
+ * Other errors: the usual toast.
+ */
+export function askStaleSave(a: { message: ReturnType<typeof App.useApp>['message']; modal: ReturnType<typeof App.useApp>['modal'] }, e: unknown, what: string,
+    o: { reload: () => void; overwrite: () => Promise<unknown> | void; keep: (current: string | undefined) => void }): void {
+    if (!isStale(e)) { a.message.error(errText(e)); return; }
+    askChangedElsewhere(a.modal, e, what, { reload: o.reload, overwrite: o.overwrite, keepEditing: () => o.keep(staleVersion(e)) });
 }
 
 /**

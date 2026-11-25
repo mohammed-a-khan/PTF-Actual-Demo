@@ -17,6 +17,18 @@ import { errText } from '../state';
 import { agentsApi, ToolServerRowView } from '../agents-api';
 import { askChangedElsewhere, isChangedElsewhere } from './ChangedElsewhere';
 import { ago } from '../format';
+import { useUnsaved } from '../unsaved';
+
+/** The longest server name (the server says the same). */
+const NAME_MAX = 40;
+/** Why a server name is not right (the server checks the same), or null. */
+export function serverNameProblem(n: string): string | null {
+    const t = n.trim();
+    if (!t) return 'Name: give the server a name.';
+    if (t.length > NAME_MAX) return `Name: at most ${NAME_MAX} characters (it has ${t.length}).`;
+    if (!/^[a-z][a-z0-9-]{1,39}$/.test(t)) return 'Name: lower-case letters, digits and -, starting with a letter (2–40).';
+    return null;
+}
 
 type Scope = 'team' | 'personal';
 const CUSTOM = 'custom';
@@ -50,9 +62,19 @@ function ServerForm({ view, editing, onClose, onSaved, onReload }: { view: ToolS
     const [values, setValues] = React.useState<Record<string, string>>({});
     const [custom, setCustom] = React.useState<Custom>(customOf(editing?.server));
     const [saving, setSaving] = React.useState(false);
+    // What the server refused, shown in the dialog (one message, replaced by the next: not a pile of toasts).
+    const [saveErr, setSaveErr] = React.useState<string | null>(null);
     const entry = editing ? undefined : view.catalog.find((c) => c.id === from);
     const pick = (id: string) => { setFrom(id); setValues({}); if (!name || view.catalog.some((c) => c.id === name)) setName(id === CUSTOM ? '' : id); };
-    const save = async (force = false) => {
+    // Unsaved: what the dialog started with differs from what it shows now.
+    const start = React.useRef(JSON.stringify({ from, name, scope, values, custom }));
+    const dirty = JSON.stringify({ from, name, scope, values, custom }) !== start.current;
+    const nameProblem = serverNameProblem(name);
+    const busy = React.useRef(false);
+    const save = async (force = false): Promise<boolean> => {
+        if (busy.current && !force) return false;
+        if (nameProblem) { setSaveErr(nameProblem); return false; }
+        busy.current = true;
         setSaving(true);
         try {
             let server: ToolServerDef | undefined;
@@ -69,14 +91,26 @@ function ServerForm({ view, editing, onClose, onSaved, onReload }: { view: ToolS
             // An edit sends the version of the server it started from: one changed meanwhile (another tab) is not replaced silently.
             onSaved(await agentsApi.saveToolServer(entry ? { scope, name: name.trim(), from: entry.id, values } : { scope, name: name.trim(), server, ...(editing ? { editing: editing.name } : {}) }, editing?.version, force));
             message.success(`${editing ? 'Saved' : 'Added'} ${name.trim()}`);
+            setSaveErr(null);
             onClose();
+            return true;
         } catch (e) {
-            if (editing && isChangedElsewhere(e)) askChangedElsewhere(modal, e, `The tool server ${editing.name}`, { reload: () => onReload(editing.name, editing.scope), overwrite: () => save(true) });
-            else message.error(errText(e));
-        } finally { setSaving(false); }
+            if (editing && isChangedElsewhere(e)) {
+                busy.current = false;
+                return new Promise<boolean>((resolve) => askChangedElsewhere(modal, e, `The tool server ${editing.name}`, { reload: () => { resolve(false); onReload(editing.name, editing.scope); }, overwrite: () => save(true).then(resolve), keepEditing: () => resolve(false) }));
+            }
+            setSaveErr(errText(e));
+            return false;
+        } finally { busy.current = false; setSaving(false); }
+    };
+    // Another screen (the menu, Back, an address typed) asks first; so do Esc and Cancel here.
+    useUnsaved('tool-server-form', dirty, editing ? `the tool server ${editing.name}` : 'the new tool server', { lostOnLeave: true, save: () => save(), discard: onClose });
+    const cancel = () => {
+        if (!dirty) { onClose(); return; }
+        modal.confirm({ title: 'Leave without saving?', content: `Your changes to ${editing ? editing.name : 'the new tool server'} are lost.`, okText: 'Discard', okButtonProps: { danger: true }, cancelText: 'Keep editing', onOk: onClose });
     };
     return (
-        <Modal open title={editing ? `Edit ${editing.name}` : 'Add a tool server'} onCancel={onClose} onOk={() => void save()} okText={editing ? 'Save' : 'Add'} confirmLoading={saving} width={620} destroyOnClose>
+        <Modal open title={editing ? `Edit ${editing.name}` : 'Add a tool server'} onCancel={cancel} maskClosable={!dirty} onOk={() => void save()} okText={editing ? 'Save' : 'Add'} confirmLoading={saving} okButtonProps={{ disabled: !!nameProblem }} width={620} destroyOnClose>
             <Form layout="vertical" size="small">
                 {!editing && <Form.Item label="Server">
                     <Select value={from} onChange={pick} aria-label="Server"
@@ -84,8 +118,8 @@ function ServerForm({ view, editing, onClose, onSaved, onReload }: { view: ToolS
                     {entry && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{entry.description}</Typography.Text>}
                 </Form.Item>}
                 <Row gutter={12}>
-                    <Col span={12}><Form.Item label="Name" required tooltip="Lower-case letters, digits and -. Shown to the agent before its tools.">
-                        <Input value={name} onChange={(e) => setName(e.target.value)} onPressEnter={() => { if (!saving) void save(); }} placeholder="my-server" aria-label="Name" />
+                    <Col span={12}><Form.Item label="Name" required tooltip="Lower-case letters, digits and -. Shown to the agent before its tools." validateStatus={nameProblem && name !== '' ? 'error' : undefined} help={nameProblem && name !== '' ? nameProblem : undefined}>
+                        <Input value={name} count={{ show: true, max: NAME_MAX }} onChange={(e) => { setName(e.target.value); setSaveErr(null); }} onPressEnter={() => { if (!saving) void save(); }} placeholder="my-server" aria-label="Name" />
                     </Form.Item></Col>
                     {!editing && <Col span={12}><Form.Item label="For">
                         <Radio.Group value={scope} onChange={(e) => setScope(e.target.value)} optionType="button" buttonStyle="solid"
@@ -132,6 +166,7 @@ function ServerForm({ view, editing, onClose, onSaved, onReload }: { view: ToolS
                             <span>Can make changes: every call asks first</span></Space>
                     </Form.Item>
                 </>}
+                {saveErr && <Alert type="error" showIcon role="alert" style={{ marginBottom: 8 }} message={saveErr} closable onClose={() => setSaveErr(null)} />}
                 {scope === 'team' && <Alert type="info" showIcon message={<span>Saved in <span className="mono">{view.teamFile}</span>: commit it so the team gets it. Secrets stay with each person.</span>} />}
             </Form>
         </Modal>

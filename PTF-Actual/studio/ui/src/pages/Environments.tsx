@@ -2,9 +2,10 @@ import React from 'react';
 import { Alert, App, Badge, Button, Drawer, Dropdown, Empty, Form, Input, List, Modal, Popover, Radio, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { DiffOutlined, DownOutlined, EditOutlined, SearchOutlined, LockOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api, EffectiveEntry, Problem, ResolveResult } from '../api';
-import { errText, useStudio } from '../state';
+import { errText, filesChanged, useStudio } from '../state';
 import { NewProjectWizard } from '../components/NewProjectWizard';
-import { useRouteTab } from '../datagit-common';
+import { askStaleSave, useRouteTab } from '../datagit-common';
+import { datagitApi } from '../datagit-api';
 
 const SEV_COLOR = { error: 'red', warning: 'gold', info: 'default' } as const;
 
@@ -38,6 +39,8 @@ function EditModal({ project, env, entry, keyName, existing = [], onClose, onSav
     const existingRef = entry ? /^\{env:([A-Za-z_][A-Za-z0-9_]*)\}$/.exec(entry.from.raw)?.[1] : undefined;
     const [secretName, setSecretName] = React.useState(existingRef ?? (key ? key.toUpperCase().replace(/[^A-Z0-9_]/g, '_') : ''));
     const [busy, setBusy] = React.useState(false);
+    // "Keep editing" after a refusal: the next Save goes over what the file holds now.
+    const [force, setForce] = React.useState(false);
     React.useEffect(() => { if (sensitiveGuess) setMode('secret'); }, [sensitiveGuess]);
 
     const files = React.useMemo(() => {
@@ -49,8 +52,8 @@ function EditModal({ project, env, entry, keyName, existing = [], onClose, onSav
     const keyProblem = entry ? null : settingNameProblem(key);
     const nameProblem = mode === 'secret' ? secretNameProblem(secretName) : null;
     const canSave = !!key.trim() && !!file && !keyProblem && !(mode === 'secret' && (!secretName || !value || nameProblem));
-    const save = async (confirmed = false) => {
-        if (!canSave || busy) return;
+    const save = async (confirmed = false, overwrite = false): Promise<void> => {
+        if (!canSave || (busy && !overwrite)) return;
         // A new setting whose name is set already: say where, and replace or override only when asked.
         const there = !entry && existing.find((x) => x.key === key.trim());
         const caseTwin = !entry && !there && existing.find((x) => x.key.toLowerCase() === key.trim().toLowerCase());
@@ -69,16 +72,28 @@ function EditModal({ project, env, entry, keyName, existing = [], onClose, onSav
         }
         setBusy(true);
         const key2 = key.trim();
+        // What this screen showed for the setting in that file (null: not set there). The file holding something else
+        // now (another tab, someone else) → the save is refused and asked about, never silently replaced.
+        const shown = entry ?? existing.find((x) => x.key === key2);
+        const was = shown ? ([shown.from, ...shown.overrides].find((d) => d.source === file)?.raw ?? null) : null;
+        const go = force || overwrite;
         try {
             if (mode === 'secret') {
-                const r = await api.envSecret({ file, key: key2, secretName, value, env });
+                const r = await datagitApi.envSecret({ file, key: key2, secretName, value, env, was, ...(go ? { force: true } : {}) });
                 message.success(`${key} now uses ${r.reference}; the value is in your secret store`);
             } else {
-                await api.envSet(file, key2, value);
+                await datagitApi.envSet(file, key2, value, was, go);
                 message.success(`${key} saved in ${file}`);
             }
+            filesChanged();
             onSaved();
-        } catch (e) { message.error(errText(e)); }
+        } catch (e) {
+            askStaleSave({ message, modal }, e, `${key2} in ${file}`, {
+                reload: onSaved,
+                overwrite: () => { setBusy(false); return save(true, true); },
+                keep: () => setForce(true),
+            });
+        }
         finally { setBusy(false); }
     };
 
@@ -88,7 +103,11 @@ function EditModal({ project, env, entry, keyName, existing = [], onClose, onSav
                 {entry && entry.from.source.startsWith('config/') && <Button danger style={{ float: 'left' }} onClick={() => modal.confirm({
                     title: `Delete ${entry.key} from ${entry.from.source}?`, okText: 'Delete', okButtonProps: { danger: true },
                     content: entry.overrides.length ? `Then ${entry.overrides[entry.overrides.length - 1].source} gives its value.` : 'Nothing else sets it: tests that read it get no value.',
-                    onOk: async () => { try { await api.envRemove(entry.from.source, entry.key); message.success(`Deleted ${entry.key} from ${entry.from.source}`); onSaved(); } catch (e) { message.error(errText(e)); } },
+                    onOk: async () => {
+                        const del = async (force: boolean) => { await datagitApi.envRemove(entry.from.source, entry.key, entry.from.raw, force); filesChanged(); message.success(`Deleted ${entry.key} from ${entry.from.source}`); onSaved(); };
+                        try { await del(false); }
+                        catch (e) { askStaleSave({ message, modal }, e, `${entry.key} in ${entry.from.source}`, { reload: onSaved, overwrite: () => del(true).catch((x) => message.error(errText(x))), keep: () => undefined }); }
+                    },
                 })}>Delete</Button>}
                 <CancelBtn /><OkBtn />
             </>}

@@ -15,7 +15,7 @@ const nice = (max: number) => {
 const fmt = (v: number) => (v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}k` : v >= 100 ? String(Math.round(v)) : v < 10 ? String(Math.round(v * 100) / 100) : String(Math.round(v * 10) / 10));
 const mmss = (s: number) => (s >= 60 ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}` : `${Math.round(s)}s`);
 
-export function LineChart({ x, series, height = 160, xMax, title, xFormat, xMin = 0 }: { x: number[]; series: Series[]; height?: number; xMax?: number; title?: string; xFormat?: (v: number) => string; xMin?: number }) {
+export function LineChart({ x, series, height = 160, xMax, title, xFormat, xMin = 0, yMax }: { x: number[]; series: Series[]; height?: number; xMax?: number; title?: string; xFormat?: (v: number) => string; xMin?: number; /** A fixed top for the left axis (100 for a percentage), so a steady 50 % is drawn half way up. */ yMax?: number }) {
     const box = React.useRef<HTMLDivElement>(null);
     const [w, setW] = React.useState(600);
     const [hover, setHover] = React.useState<number | null>(null);
@@ -27,7 +27,8 @@ export function LineChart({ x, series, height = 160, xMax, title, xFormat, xMin 
     const pad = { l: 40, r: series.some((s) => s.right) ? 40 : 10, t: title ? 22 : 8, b: 20 };
     const iw = Math.max(10, w - pad.l - pad.r), ih = height - pad.t - pad.b;
     const x1 = Math.max(xMax ?? 0, x.length ? x[x.length - 1] : 1, xMin + 1);
-    const leftMax = nice(Math.max(0, ...series.filter((s) => !s.right).flatMap((s) => s.values).filter(Number.isFinite)));
+    const leftRaw = Math.max(0, ...series.filter((s) => !s.right).flatMap((s) => s.values).filter(Number.isFinite));
+    const leftMax = yMax !== undefined && yMax >= leftRaw ? yMax : nice(leftRaw);
     // A count on the right axis: a top that is a multiple of 4, so the quarter ticks are whole numbers.
     const rightRaw = Math.max(0, ...series.filter((s) => s.right).flatMap((s) => s.values).filter(Number.isFinite));
     const rightMax = series.some((s) => s.right && s.integer) ? Math.max(4, Math.ceil(rightRaw / 4) * 4) : nice(rightRaw);

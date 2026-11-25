@@ -1815,7 +1815,7 @@ export const CALLS: CatalogCall[] = [
   "method": "GET",
   "path": "/api/mocks/file?project=:project&file=:file",
   "args": "project: string, file: string",
-  "result": "{ file: string; mock: MockDef; url?: string }"
+  "result": "{ file: string; mock: MockDef; url?: string; version?: string }"
  },
  {
   "name": "mockFromCollection",
@@ -1868,7 +1868,7 @@ export const CALLS: CatalogCall[] = [
   "path": "/api/mocks/file",
   "args": "project: string, file: string, mock: MockDef",
   "body": "{ project, file, mock }",
-  "result": "{ file: string; saved: boolean; applied?: boolean; restartForPort?: boolean }"
+  "result": "{ file: string; saved: boolean; version?: string; applied?: boolean; restartForPort?: boolean }"
  },
  {
   "name": "mockDelete",
@@ -2778,8 +2778,8 @@ export const CALLS: CatalogCall[] = [
   "area": "run-configs",
   "method": "PUT",
   "path": "/api/run-configs",
-  "args": "configs: RunConfigDef[], version?: string",
-  "body": "{ configs, ...(version ? { version } : {}) }",
+  "args": "configs: RunConfigDef[], version?: string, force = false",
+  "body": "{ configs, ...(version ? { version } : {}), ...(force ? { force: true } : {}) }",
   "result": "{ configs: RunConfigDef[]; file: string; version?: string }"
  },
  {
@@ -2866,9 +2866,9 @@ export const CALLS: CatalogCall[] = [
   "area": "quality",
   "method": "PUT",
   "path": "/api/quality/gate",
-  "args": "g: GateSettings",
-  "body": "g",
-  "result": "GateSettings"
+  "args": "g: GateSettings, version?: string, force = false",
+  "body": "{ ...g, ...(version ? { version } : {}), ...(force ? { force: true } : {}) }",
+  "result": "GateSettings & { version?: string }"
  },
  {
   "name": "quarantine",
@@ -3205,7 +3205,7 @@ export const TYPES: Record<string, string> = {
  "ApiSendResult": "export interface ApiSendResult {\n    prepared: { method: string; url: string; headers: Record<string, string>; body?: string; missing: string[] };\n    error?: string;\n    response?: { status: number; statusText: string; headers: Record<string, string>; body: string; truncated: boolean; size: number; timeMs: number; redirects: string[]; timings?: ApiTimings; bodyBase64?: string; remote?: string; tls?: ApiTlsInfo };\n    checks?: ApiCheckResult[];\n    extracted?: Array<{ variable: string; value?: string; found: boolean }>;\n    /** Test data values that took their defaults (the row left them empty); a body that is not valid JSON. */\n    notes?: string[];\n    /** The cookies Send keeps for this collection (after this response). */\n    cookies?: ApiCookie[];\n    /** console.log of the request's scripts. */\n    logs?: Array<{ level: 'log' | 'info' | 'warn' | 'error'; text: string }>;\n    /** Values the scripts set (pm.environment / pm.collectionVariables / pm.variables). */\n    scriptVars?: Record<string, string>;\n    /** pm.visualizer.set: the page the template made (shown in a sandboxed frame). */\n    visualizer?: string;\n}",
  "ApiRunStep": "export interface ApiRunStep { iteration: number; requestId: string; name: string; method: string; url: string; status?: number; timeMs?: number; size?: number; passed: boolean; error?: string; checks: Array<{ pass: boolean; message: string; actual?: string }>; logs?: string[] }",
  "ApiRunChange": "export type ApiRunChange = 'fixed' | 'broke' | 'same' | 'still failing' | 'new' | 'gone';",
- "ApiRunComparison": "export interface ApiRunComparison {\n    a: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>; b: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;\n    rows: Array<{ key: string; name: string; iteration: number; change: ApiRunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;\n    counts: Record<ApiRunChange, number>; avgDelta: number;\n}",
+ "ApiRunComparison": "export interface ApiRunComparison {\n    a: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>; b: Pick<ApiRunJob, 'id' | 'name' | 'env' | 'startedAt' | 'summary'>;\n    rows: Array<{ key: string; name: string; requestId?: string; method?: string; url?: string; position?: number; iteration: number; change: ApiRunChange; a?: { status?: number; timeMs?: number; passed: boolean }; b?: { status?: number; timeMs?: number; passed: boolean }; timeDelta?: number; checksChanged?: string[] }>;\n    counts: Record<ApiRunChange, number>; avgDelta: number;\n}",
  "ApiMonitorDef": "export interface ApiMonitorDef { id: string; name: string; file: string; env: string; everyMinutes: number; enabled: boolean; webhookSecret?: string; alertOn: 'failure' | 'change'; last?: { at: string; runId: string; passed: boolean; failed: number; requests: number; alert?: string } }",
  "ApiFlow": "export interface ApiFlow {\n    nodes: Array<{ id: string; name: string; method: string; folder: string; scenario: number; column: number; row: number; saves: string[]; uses: string[] }>;\n    edges: Array<{ from: string; to: string; kind: 'value' | 'jump' | 'order'; label: string }>;\n    scenarios: Array<{ index: number; name: string; requests: string[] }>;\n    unresolved: Array<{ request: string; name: string }>;\n}",
  "ApiRunJob": "export interface ApiRunJob { id: string; collection: string; name: string; project: string; env: string; startedAt: string; endedAt?: string; state: 'running' | 'stopped' | 'finished'; iterations: number; total: number; steps: ApiRunStep[]; summary: { requests: number; passed: number; failed: number; checks: number; checksPassed: number; avgMs: number } }",
@@ -3229,7 +3229,7 @@ export const TYPES: Record<string, string> = {
  "LoadInsightsDef": "export interface LoadInsightsDef { summary: string; insights: Array<{ kind: 'anomaly' | 'capacity' | 'cause' | 'note'; severity: 'info' | 'warning' | 'critical'; title: string; detail: string; at?: { from: number; to: number } }> }",
  "LoadRating": "export type LoadRating = 'good' | 'acceptable' | 'poor' | 'critical' | 'info';",
  "LoadExplainDef": "export interface LoadExplainDef { status: 'green' | 'amber' | 'red'; headline: string; answer: string; metrics: Array<{ key: string; label: string; value: string; meaning: string; rating: LoadRating; basis: string }>;\n    behaviour: { verdict: string; text: string }; risks: string[]; recommendations: string[]; glossary: Array<{ term: string; text: string }> }",
- "LoadCompareDef": "export interface LoadCompareDef {\n    a: { id: string; name: string; env: string; startedAt: string; passed: boolean; maxUsers: number; duration: number }; b: LoadCompareDef['a'];\n    comparison: { status: 'green' | 'amber' | 'red'; headline: string; answer: string; metrics: Array<{ label: string; a: string; b: string; change: string; verdict: string; meaning: string }>;\n        transactions: Array<{ name: string; aP95: number; bP95: number; changePct: number; verdict: string }>; findings: string[]; notes: string[] };\n    series: Array<{ id: string; label: string; points: Array<{ t: number; v: number }> }>; throughput: LoadCompareDef['series'];\n}",
+ "LoadCompareDef": "export interface LoadCompareDef {\n    a: { id: string; name: string; env: string; startedAt: string; passed: boolean; maxUsers: number; duration: number }; b: LoadCompareDef['a'];\n    comparison: { status: 'green' | 'amber' | 'red'; headline: string; answer: string; metrics: Array<{ label: string; a: string; b: string; change: string; verdict: string; meaning: string }>;\n        transactions: Array<{ id?: string; name: string; aP95: number; bP95: number; changePct: number; aErrorRate?: number; bErrorRate?: number; verdict: string; why?: string }>; findings: string[]; notes: string[] };\n    series: Array<{ id: string; label: string; points: Array<{ t: number; v: number }> }>; throughput: LoadCompareDef['series'];\n}",
  "BugActionDef": "export interface BugActionDef { kind: 'file' | 'update' | 'reopen' | 'resolve'; tag: string; bug?: number; title?: string; from?: string; to?: string; comment?: string; why: string }",
  "PrNewDef": "export interface PrNewDef { branch: string; repositories: Array<{ id: string; name: string; defaultBranch?: string }>; repository: string | null; target?: string; commits?: number; pushed?: boolean; title?: string; description?: string; workItems?: number[]; reviewers?: Array<{ id: string; name: string; email?: string; team: string }>; problem?: string }",
  "LoadSlaProfileInfo": "export interface LoadSlaProfileInfo { file: string; name: string; description?: string; slas: number; interval?: number; error?: string }",
@@ -3326,7 +3326,7 @@ export const TYPES: Record<string, string> = {
  "LoadGeneratorDef": "export interface LoadGeneratorDef { name: string; url: string; zone?: string; token: string }",
  "LoadGeneratorHealth": "export interface LoadGeneratorHealth { name: string; zone?: string; url: string; state: string; users?: number; requests?: number; errors?: number; cpu?: number; memory?: number; error?: string; lastSeen?: string }",
  "LoadRunDetailDef": "export interface LoadRunDetailDef extends LoadRunInfoDef { live?: LoadSnapshot; result?: LoadResult; definition: LoadScenarioDef; generators?: LoadGeneratorHealth[] }",
- "RunRequest": "export interface RunRequest { project: string; env: string; features?: string[]; tags?: string; scenario?: string; scenarios?: string[]; headless?: boolean; browser?: string; workers?: number;\n    retries?: number; device?: string; viewport?: { width: number; height: number }; variables?: Record<string, string>;\n    /** A debug run: pause before each step and/or on a failure, browser shown, one scenario at a time. */\n    debug?: { steps?: boolean; pauseOnFailure?: boolean; slowMo?: number; exceptions?: boolean } }",
+ "RunRequest": "export interface RunRequest { project: string; env: string; features?: string[]; tags?: string; scenario?: string; scenarios?: string[]; headless?: boolean; browser?: string; workers?: number;\n    retries?: number; device?: string; viewport?: { width: number; height: number }; variables?: Record<string, string>;\n    /** Send results to Azure DevOps for this run; not set: as the project is configured. */\n    ado?: boolean;\n    /** A debug run: pause before each step and/or on a failure, browser shown, one scenario at a time. */\n    debug?: { steps?: boolean; pauseOnFailure?: boolean; slowMo?: number; exceptions?: boolean } }",
  "DebugPause": "export interface DebugPause { kind: 'before-step' | 'after-failure'; step: string; scenario?: string; error?: string; file?: string; line?: number; reason?: 'breakpoint' | 'step' }",
  "CodeFrame": "export interface CodeFrame { index: number; name: string; file?: string; line?: number; external: boolean }",
  "CodePause": "export interface CodePause { seq: number; reason: string; frames: CodeFrame[]; exception?: string }",
@@ -3352,7 +3352,7 @@ export const TYPES: Record<string, string> = {
  "PlanCoverage": "export interface PlanCoverage {\n    feature: string; background: PlanStep[];\n    scenarios: Array<{ line: number; name: string; outline: boolean; examples: number; tags: string[]; steps: PlanStep[] }>;\n    counts: { scenarios: number; steps: number; reused: number; new: number; notLoaded: number };\n}",
  "FailureGroup": "export interface FailureGroup { signature: string; category: FailureCategory; sample: string; failures: number; runs: number; inLatest: boolean; firstSeen: string; lastSeen: string; scenarios: Array<{ key: string; name: string; feature: string }>; tag: string; triage?: TriageEntry }",
  "GateSettings": "export interface GateSettings { minPassRate: number; noNewFailures: boolean; maxFlaky: number | null; ignoreQuarantined: boolean }",
- "QualityReport": "export interface QualityReport {\n    runs: QualityRun[]; scenarios: QualityScenario[]; groups: FailureGroup[];\n    gate: { ok: boolean; run: string | null; rules: Array<{ name: string; ok: boolean; detail: string }> };\n    counts: Record<QualityClass | 'quarantined', number>;\n    projects: string[]; project: string | null; settings: GateSettings;\n    quarantine: { excludeTags: string; from: string; skipsQuarantined: boolean; frameworkSupports: boolean | null };\n}",
+ "QualityReport": "export interface QualityReport {\n    runs: QualityRun[]; scenarios: QualityScenario[]; groups: FailureGroup[];\n    gate: { ok: boolean; run: string | null; rules: Array<{ name: string; ok: boolean; detail: string }> };\n    counts: Record<QualityClass | 'quarantined', number>;\n    projects: string[]; project: string | null; settings: GateSettings;\n    /** The version of the gate shown (sent back on save: a gate changed since, in another tab, is refused). */\n    settingsVersion?: string;\n    quarantine: { excludeTags: string; from: string; skipsQuarantined: boolean; frameworkSupports: boolean | null };\n}",
  "HealStatus": "export type HealStatus = 'review' | 'applied' | 'confirmed' | 'dismissed';",
  "HealEvent": "export interface HealEvent { run: string; at: string; scenario: string; feature: string; step: string; element: string; pageClass?: string; property?: string; original: string; healed: string; strategy: string; confidence: number }",
  "VisualStatus": "export type VisualStatus = 'new' | 'changed' | 'cosmetic' | 'same';",

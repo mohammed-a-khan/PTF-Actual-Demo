@@ -13,17 +13,23 @@ export const isChangedElsewhere = (e: unknown): boolean => e instanceof ApiError
 type Modal = ReturnType<typeof App.useApp>['modal'];
 
 /** Ask what to do; `what` names the thing ("The agent "Checkout reviewer"", "The knowledge sources"). */
-export function askChangedElsewhere(modal: Modal, e: unknown, what: string, o: { reload: () => void; overwrite: () => Promise<unknown> | void }): void {
+export function askChangedElsewhere(modal: Modal, e: unknown, what: string, o: {
+    reload: () => void; overwrite: () => Promise<unknown> | void;
+    /** Optional: called on "Keep editing" (and on closing the question), e.g. so the next save goes through. */
+    keepEditing?: () => void;
+}): void {
     let busy = false;
+    let decided = false;
     const m = modal.confirm({
+        afterClose: () => { if (!decided) o.keepEditing?.(); },
         title: `${what} changed in another tab or by someone else`,
         content: <>{errText(e)}<br /><br /><b>Reload</b> shows the saved version (your changes here are dropped). <b>Overwrite</b> saves yours over it (the other change is lost).</>,
         closable: true, maskClosable: false,
         footer: () => (
             <Space style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }} wrap>
                 <Button onClick={() => m.destroy()}>Keep editing</Button>
-                <Button danger onClick={async () => { if (busy) return; busy = true; try { await o.overwrite(); } finally { busy = false; m.destroy(); } }}>Overwrite</Button>
-                <Button type="primary" onClick={() => { m.destroy(); o.reload(); }}>Reload</Button>
+                <Button danger onClick={async () => { if (busy) return; busy = true; decided = true; try { await o.overwrite(); } finally { busy = false; m.destroy(); } }}>Overwrite</Button>
+                <Button type="primary" onClick={() => { decided = true; m.destroy(); o.reload(); }}>Reload</Button>
             </Space>
         ),
     });

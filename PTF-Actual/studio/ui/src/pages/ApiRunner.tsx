@@ -4,7 +4,7 @@
  * with their checks and saved values, and get a report.
  */
 import React from 'react';
-import { Alert, App, Button, Checkbox, Col, Drawer, Dropdown, Empty, Form, InputNumber, Progress, Row, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Checkbox, Col, Drawer, Dropdown, Empty, Form, Progress, Row, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, CaretRightOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, DownloadOutlined, DiffOutlined, StopOutlined } from '@ant-design/icons';
 import { api, ApiCollectionDef, ApiCollectionInfo, ApiRunChange, ApiRunComparison, ApiRunJob, ApiRunStep, DataSourceDef } from '../api';
 import { DataSourceEditor } from '../components/DataSourceEditor';
@@ -13,7 +13,7 @@ import { errText } from '../state';
 import { navigate, useRoute } from '../route';
 import { Split } from '../components/Split';
 import { ago } from '../format';
-import { shownTab, useRememberedTab } from '../apiperf-ui';
+import { FieldProblems, NumField, runnerRoute, RunnerTab, useFieldProblems, useRememberedTab } from '../apiperf-ui';
 
 /** A step with its exchange (kept by the Studio for the first steps of a run). */
 type StepDetail = { request: { headers: Record<string, string>; body?: string }; response?: { statusText: string; headers: Record<string, string>; body: string; cut: boolean } };
@@ -50,8 +50,10 @@ export function ApiRunner() {
     const { message } = App.useApp();
     const route = useRoute();
     const here = route[0] === 'api-runner';
-    const fileInRoute = here && route[1] && route[1] !== 'run' ? decodeURIComponent(route.slice(1).join('/')) : null;
-    const runIdInRoute = here && route[1] === 'run' ? route[2] : null;
+    // #/api-runner/<collection file> (Run), #/api-runner/monitors, #/api-runner/runs, #/api-runner/run/<id> (Past runs, that run shown).
+    const rr = runnerRoute(here ? route : []);
+    const fileInRoute = rr.file;
+    const runIdInRoute = rr.runId;
     const [meta, setMeta] = React.useState<{ projects: string[]; environments: Record<string, string[]>; collections: ApiCollectionInfo[] } | null>(null);
     const [file, setFile] = React.useState<string | null>(null);
     const [coll, setColl] = React.useState<ApiCollectionDef | null>(null);
@@ -65,7 +67,15 @@ export function ApiRunner() {
     const [order, setOrder] = React.useState<string[]>([]);
     const [cmpWith, setCmpWith] = React.useState<string | null>(null);
     const [cmp, setCmp] = React.useState<ApiRunComparison | null>(null);
-    const [tab, setTab] = useRememberedTab('api-runner', 'run');
+    const [kept, keepTab] = useRememberedTab('api-runner', 'run');
+    // The inner tab is the address's (a link opens it); a bare #/api-runner shows the one used last.
+    const tab: RunnerTab = rr.tab ?? (['run', 'monitors', 'runs'].includes(kept) ? kept as RunnerTab : 'run');
+    React.useEffect(() => { if (rr.tab) keepTab(rr.tab); }, [rr.tab]); // eslint-disable-line react-hooks/exhaustive-deps
+    const tabRoute = (t: RunnerTab, f = file, j = job?.id) => (t === 'monitors' ? ['api-runner', 'monitors'] : t === 'runs' ? (j ? ['api-runner', 'run', j] : ['api-runner', 'runs']) : f ? ['api-runner', ...f.split('/')] : ['api-runner']);
+    const setTab = (k: string) => { keepTab(k); navigate(tabRoute(k as RunnerTab)); };
+    // A bare address gets the tab shown written into it (in place), so a copied link opens the same tab.
+    React.useEffect(() => { if (here && route.length === 1 && (tab !== 'run' || file)) navigate(tabRoute(tab), true); }, [here, route.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    const fields = useFieldProblems();
 
     React.useEffect(() => { if (here && !meta) api.apiCollections().then(setMeta).catch((e) => setErr(errText(e))); }, [here, meta]);
     React.useEffect(() => { if (here) api.apiRuns().then((r) => setRuns(r.runs)).catch(() => {}); }, [here, job?.state]);
@@ -88,10 +98,10 @@ export function ApiRunner() {
     const [starting, setStarting] = React.useState(false);
     const startingRef = React.useRef(false);
     const start = async () => {
-        if (!coll || !file || startingRef.current) return;
+        if (!coll || !file || startingRef.current || fields.problem) return;
         startingRef.current = true; setStarting(true);
         try {
-            const j = await api.apiStartRun({ project, env: opts.env, file, collection: coll, requests: chosen.length === reqs.length && !reordered ? [] : reqs.filter((r) => chosen.includes(r.id)).map((r) => r.id), iterations: opts.iterations, data: opts.data, delayMs: opts.delayMs, stopOnFailure: opts.stopOnFailure });
+            const j = await api.apiStartRun({ project, env: opts.env ?? envs[0], file, collection: coll, requests: chosen.length === reqs.length && !reordered ? [] : reqs.filter((r) => chosen.includes(r.id)).map((r) => r.id), iterations: opts.iterations, data: opts.data, delayMs: opts.delayMs, stopOnFailure: opts.stopOnFailure });
             setJob(j); navigate(['api-runner', 'run', j.id]);
         } catch (e) { message.error(errText(e)); }
         finally { startingRef.current = false; setStarting(false); }
@@ -111,9 +121,9 @@ export function ApiRunner() {
         <Split id="api-runner" initial={380} min={300} max={600} style={{ height: 'calc(100vh - var(--chrome))' }}>
             <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                 {err && <Alert type="error" showIcon closable onClose={() => setErr(null)} style={{ margin: 8 }} message={err} />}
-                <Tabs size="small" className="ap-tabs fill-tabs" style={{ flex: 1, minHeight: 0, paddingInline: 12 }} activeKey={shownTab(tab, ['run', 'monitors', 'runs'])} onChange={setTab} items={[
+                <Tabs size="small" className="ap-tabs fill-tabs" style={{ flex: 1, minHeight: 0, paddingInline: 12 }} activeKey={tab} onChange={setTab} items={[
                     { key: 'run', label: 'Run', children: <div style={{ height: '100%', overflow: 'auto', paddingBottom: 12 }}>
-                    <Form layout="vertical" size="small">
+                    <FieldProblems value={fields.report}><Form layout="vertical" size="small">
                         <Form.Item label="Collection">
                             <Select showSearch value={file ?? undefined} placeholder="Choose a collection" onChange={(v) => navigate(['api-runner', ...v.split('/')])} aria-label="Collection"
                                 options={(meta?.collections ?? []).map((c) => ({ value: c.file, label: `${c.name} · ${c.project} (${c.requests})` }))} />
@@ -128,15 +138,15 @@ export function ApiRunner() {
                                 {reordered && <Typography.Link style={{ fontSize: 12 }} onClick={() => coll && setOrder(flat(coll).map((x) => x.id))}>Back to the collection's order</Typography.Link>}
                             </Form.Item>
                             <Row gutter={12}>
-                                <Col span={8}><Form.Item label="Environment"><Select style={{ width: '100%' }} value={opts.env} placeholder={envs[0] ?? 'default'} allowClear disabled={!envs.length} onChange={(v) => setOpts({ ...opts, env: v })} options={envs.map((e) => ({ value: e, label: e }))} aria-label="Environment" /></Form.Item></Col>
-                                <Col span={8}><Form.Item label="Iterations" tooltip="How many times to run the requests (ignored with test data: one iteration per row)"><InputNumber min={1} max={1000} value={opts.iterations} disabled={!!opts.data} onChange={(v) => setOpts({ ...opts, iterations: v ?? 1 })} style={{ width: '100%' }} aria-label="Iterations" /></Form.Item></Col>
-                                <Col span={8}><Form.Item label="Delay" tooltip="Pause between requests"><InputNumber min={0} max={60000} value={opts.delayMs} onChange={(v) => setOpts({ ...opts, delayMs: v ?? 0 })} addonAfter="ms" style={{ width: '100%' }} aria-label="Delay" /></Form.Item></Col>
+                                <Col span={8}><Form.Item label="Environment"><Select style={{ width: '100%' }} value={opts.env ?? envs[0]} placeholder="default" disabled={!envs.length} onChange={(v) => setOpts({ ...opts, env: v })} options={envs.map((e) => ({ value: e, label: e }))} aria-label="Environment" /></Form.Item></Col>
+                                <Col span={8}><Form.Item label="Iterations" tooltip="How many times to run the requests (ignored with test data: one iteration per row)"><NumField min={1} max={1000} value={opts.iterations} disabled={!!opts.data} onChange={(v) => setOpts((o) => ({ ...o, iterations: v ?? 1 }))} width="100%" label="Iterations" /></Form.Item></Col>
+                                <Col span={8}><Form.Item label="Delay" tooltip="Pause between requests"><NumField min={0} max={60000} value={opts.delayMs} onChange={(v) => setOpts((o) => ({ ...o, delayMs: v ?? 0 }))} addonAfter="ms" width="100%" label="Delay" /></Form.Item></Col>
                             </Row>
                             <Form.Item label="Test data (optional)" tooltip="One iteration per row; each column is {{column}} in the requests (values saved by a request are used by the next ones)"><DataSourceEditor project={project} env={opts.env ?? envs[0]} value={opts.data} onChange={(d) => setOpts({ ...opts, data: d })} collections={meta?.collections} /></Form.Item>
                             <Checkbox checked={opts.stopOnFailure} onChange={(e) => setOpts({ ...opts, stopOnFailure: e.target.checked })}>Stop at the first failure</Checkbox>
-                            <div style={{ marginTop: 12 }}><Button type="primary" icon={<CaretRightOutlined />} loading={starting} disabled={!chosen.length || job?.state === 'running'} onClick={() => void start()}>Run {chosen.length} request{chosen.length === 1 ? '' : 's'}{opts.data ? ' per data row' : opts.iterations > 1 ? ` × ${opts.iterations}` : ''}</Button></div>
+                            <div style={{ marginTop: 12 }}><Tooltip title={fields.problem ?? undefined}><Button type="primary" icon={<CaretRightOutlined />} loading={starting} disabled={!chosen.length || job?.state === 'running' || !!fields.problem} onClick={() => void start()}>Run {chosen.length} request{chosen.length === 1 ? '' : 's'}{opts.data ? ' per data row' : opts.iterations > 1 && Number.isInteger(opts.iterations) ? ` × ${opts.iterations}` : ''}</Button></Tooltip></div>
                         </>}
-                    </Form>
+                    </Form></FieldProblems>
                     </div> },
                     { key: 'monitors', label: 'Monitors', children: <div style={{ height: '100%', overflow: 'auto', marginInline: -12 }}><MonitorsPanel collections={meta?.collections ?? []} environments={meta?.environments ?? {}} file={file} /></div> },
                     { key: 'runs', label: <span>Past runs{runs.length ? <Tag bordered={false} style={{ marginInlineStart: 4 }}>{runs.length}</Tag> : null}</span>, children: <div style={{ height: '100%', overflow: 'auto', marginInline: -12 }}>
@@ -195,7 +205,11 @@ export function ApiRunner() {
                         expandable={{ rowExpandable: (r) => !!r.checksChanged?.length, expandedRowRender: (r) => <Space direction="vertical" size={2}>{r.checksChanged!.map((c, i) => <Typography.Text key={i} type={c.startsWith('now fails') ? 'danger' : 'success'}>{c}</Typography.Text>)}</Space> }}
                         columns={[
                             { title: '#', dataIndex: 'iteration', width: 46 },
-                            { title: 'Request', dataIndex: 'name', ellipsis: true },
+                            // Paired by the request (not its name): its place in the run and its method and URL tell two "New request"s apart.
+                            { title: 'Request', dataIndex: 'name', render: (n: string, r) => <div style={{ minWidth: 0 }}>
+                                <div>{r.position ? <span className="item-id">{r.position}.</span> : null} {n}</div>
+                                {(r.method || r.url) && <Typography.Text type="secondary" className="mono" style={{ fontSize: 11, wordBreak: 'break-all' }}>{r.method} {r.url || '(not sent)'}</Typography.Text>}
+                            </div> },
                             { title: 'Change', width: 120, render: (_, r) => <Tag color={CHANGE_COLOR[r.change]}>{r.change}</Tag> },
                             { title: 'Before', width: 120, render: (_, r) => (r.a ? (r.a.status === undefined && r.a.timeMs === undefined ? <span>{r.a.passed ? 'passed' : 'not sent'}</span> : <span>{r.a.status ?? 'no answer'}{r.a.timeMs !== undefined ? ` · ${r.a.timeMs} ms` : ''}</span>) : '—') },
                             { title: 'Now', width: 120, render: (_, r) => (r.b ? (r.b.status === undefined && r.b.timeMs === undefined ? <span>{r.b.passed ? 'passed' : 'not sent'}</span> : <span>{r.b.status ?? 'no answer'}{r.b.timeMs !== undefined ? ` · ${r.b.timeMs} ms` : ''}</span>) : '—') },

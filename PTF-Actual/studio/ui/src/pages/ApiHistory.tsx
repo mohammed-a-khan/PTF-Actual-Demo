@@ -23,11 +23,23 @@ export function ApiHistory() {
     const [find, setFind] = React.useState('');
     const [result, setResult] = React.useState<'all' | 'failed' | 'passed'>('all');
     const [detail, setDetail] = React.useState<{ item: ApiHistoryItem; entry: ApiHistoryEntry | null; error?: string } | null>(null);
+    // The open entry is in the address (#/api-history/<id>): a link, a reload, Back and "Back to Request history" reopen it.
+    const idInRoute = here && route[1] ? route[1] : null;
     const openDetail = (h: ApiHistoryItem) => {
         if (!h.id) { if (h.file) navigate(['api', ...h.file.split('/')]); return; }
-        setDetail({ item: h, entry: null });
-        api.apiHistoryEntry(h.id).then((entry) => setDetail({ item: h, entry })).catch((e) => setDetail({ item: h, entry: null, error: errText(e) }));
+        navigate(['api-history', h.id]);
     };
+    const closeDetail = () => { setDetail(null); if (idInRoute) navigate(['api-history'], true); };
+    const shownId = detail?.item.id ?? null;
+    React.useEffect(() => {
+        if (!here) return;
+        if (!idInRoute) { setDetail(null); return; }
+        if (idInRoute === shownId || !items) return;
+        const h = items.find((x) => x.id === idInRoute);
+        if (!h) { message.warning(`No request "${idInRoute}" in the history (it was cleared, or the link is wrong).`); navigate(['api-history'], true); return; }
+        setDetail({ item: h, entry: null });
+        api.apiHistoryEntry(idInRoute).then((entry) => setDetail((d) => (d?.item.id === idInRoute ? { item: h, entry } : d))).catch((e) => setDetail((d) => (d?.item.id === idInRoute ? { item: h, entry: null, error: errText(e) } : d)));
+    }, [here, idInRoute, items]); // eslint-disable-line react-hooks/exhaustive-deps
     // Once per click: the drawer closes as the request opens, so a second click of a double click must not land on what
     // is under the button (the top bar's Copilot); clicks are ignored for a moment.
     const restoring = React.useRef(false);
@@ -66,7 +78,7 @@ export function ApiHistory() {
                             { title: 'Checks', width: 80, render: (_, h) => <span style={{ color: h.passed === h.checks ? undefined : '#cf222e' }}>{h.passed}/{h.checks}</span> },
                         ]} />)}
             </div>
-            <Drawer open={!!detail} onClose={() => setDetail(null)} width={900} destroyOnClose
+            <Drawer open={!!detail} onClose={closeDetail} width={900} destroyOnClose
                 title={detail ? <Space><b style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>{detail.item.method}</b>{detail.item.request}<Typography.Text type="secondary" style={{ fontSize: 12 }}>{new Date(detail.item.at).toLocaleString()} · {detail.item.collection} · {detail.item.env}</Typography.Text></Space> : ''}
                 extra={detail?.item.file ? <Space>
                     <Button size="small" onClick={() => navigate(['api', ...detail.item.file!.split('/')])}>Open the collection</Button>

@@ -3,7 +3,7 @@
  * private mode tolerated), and a section title with its help in a tooltip instead of a paragraph.
  */
 import React from 'react';
-import { App, Button, Space, Tooltip, Typography } from 'antd';
+import { App, Button, Input, Space, Tooltip, Typography } from 'antd';
 import { QuestionCircleOutlined } from '@ant-design/icons';
 import './styles-apiperf.css';
 
@@ -112,7 +112,7 @@ export const versionOf = (r: unknown): string | undefined => {
     const v = r && typeof r === 'object' ? (r as { version?: unknown }).version : undefined;
     return typeof v === 'string' ? v : undefined;
 };
-/** "Changed in another tab or by someone else": Reload (that version, these edits dropped), Overwrite (these edits over it), or Cancel. */
+/** "Changed in another tab or by someone else": Reload (that version, these edits dropped), Overwrite (these edits over it), or Keep editing. */
 export function askChangedElsewhere(modal: ModalApi, what: string): Promise<'reload' | 'overwrite' | null> {
     return new Promise((resolve) => {
         const h: { inst?: { destroy: () => void } } = {};
@@ -121,10 +121,122 @@ export function askChangedElsewhere(modal: ModalApi, what: string): Promise<'rel
             title: 'Changed in another tab or by someone else', closable: true, onCancel: () => resolve(null),
             content: `${what} was saved somewhere else after you opened it here. Reload shows that version (your changes here are dropped); Overwrite saves your version over it.`,
             footer: () => <Space style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
-                <Button onClick={() => done(null)}>Cancel</Button>
+                <Button onClick={() => done(null)}>Keep editing</Button>
                 <Button onClick={() => done('reload')}>Reload</Button>
                 <Button type="primary" danger onClick={() => done('overwrite')}>Overwrite</Button>
             </Space>,
         });
     });
+}
+
+/**
+ * Why a number typed in a field cannot be used, or null: whole numbers (or up to `decimals` places) in min…max.
+ * Never rounded or clamped: 2.5, -1 or 99999 stay as typed, with this reason under the field.
+ */
+export function numProblem(text: string, o: { label: string; min: number; max: number; decimals?: number; optional?: boolean }): string | null {
+    const t = text.trim();
+    const dec = o.decimals ?? 0;
+    const range = `${dec ? 'a number' : 'a whole number'} from ${o.min} to ${o.max}`;
+    if (t === '') return o.optional ? null : `${o.label}: give ${range}.`;
+    if (!/^-?(\d+([.,]\d*)?|[.,]\d+)$/.test(t)) return `${o.label}: numbers only; give ${range}.`;
+    const n = Number(t.replace(',', '.'));
+    const places = (t.split(/[.,]/)[1] ?? '').replace(/0+$/, '').length;
+    if (n < 0 && o.min >= 0) return `${o.label}: no negative numbers; give ${range}.`;
+    if (places > dec) return dec ? `${o.label}: at most ${dec} decimal${dec === 1 ? '' : 's'}; give ${range}.` : `${o.label}: no decimals; give ${range}.`;
+    if (n < o.min || n > o.max) return `${o.label}: ${range} (not ${n}).`;
+    return null;
+}
+/** The number a field's text stands for (also one in error: the screen then refuses to save it), or undefined. */
+export function numOf(text: string): number | undefined {
+    const t = text.trim();
+    if (!/^-?(\d+([.,]\d*)?|[.,]\d+)$/.test(t)) return undefined;
+    const n = Number(t.replace(',', '.'));
+    return Number.isFinite(n) ? n : undefined;
+}
+
+type ReportProblem = (id: string, msg: string | null) => void;
+const FieldProblemCtx = React.createContext<ReportProblem | null>(null);
+/** Number fields inside report their problems to the screen (useFieldProblems), which keeps Save / Run off meanwhile. */
+export const FieldProblems = FieldProblemCtx.Provider;
+/** The first problem of the number fields under <FieldProblems value={report}>, or null. */
+export function useFieldProblems(): { problem: string | null; report: ReportProblem } {
+    const [map, setMap] = React.useState<Record<string, string>>({});
+    const report = React.useCallback<ReportProblem>((id, msg) => setMap((m) => {
+        if ((m[id] ?? null) === msg) return m;
+        const n = { ...m };
+        if (msg) n[id] = msg; else delete n[id];
+        return n;
+    }), []);
+    return { problem: Object.values(map)[0] ?? null, report };
+}
+/** The same for a part of a screen (its own message shown once), still telling the screen around it. */
+export function useNestedFieldProblems(): { problem: string | null; report: ReportProblem } {
+    const parent = React.useContext(FieldProblemCtx);
+    const own = useFieldProblems();
+    const ownReport = own.report;
+    const report = React.useCallback<ReportProblem>((id, msg) => { ownReport(id, msg); parent?.(id, msg); }, [ownReport, parent]);
+    return { problem: own.problem, report };
+}
+
+/**
+ * A number field of the API and Performance screens (users, seconds, ports, delays, iterations): what is typed stays
+ * as typed; a decimal (where whole numbers are meant), a negative number, text or a number out of range is said under
+ * the field (never rounded, clamped or replaced silently), and the screen keeps Save / Run off until it is put right.
+ */
+export function NumField({ value, onChange, min, max, label, decimals, optional, size, addonBefore, addonAfter, placeholder, disabled, width, id }: {
+    value: number | undefined | null; onChange: (v: number | undefined) => void; min: number; max: number;
+    /** The accessible name (also used in the message). */
+    label: string; decimals?: number;
+    /** Empty is allowed (onChange(undefined)); otherwise empty is an error. */
+    optional?: boolean;
+    size?: 'small' | 'middle'; addonBefore?: React.ReactNode; addonAfter?: React.ReactNode; placeholder?: string; disabled?: boolean; width?: number | string; id?: string;
+}) {
+    const report = React.useContext(FieldProblemCtx);
+    const key = React.useId();
+    const shown = (v: number | undefined | null) => (v === undefined || v === null ? '' : String(v));
+    const [text, setText] = React.useState(shown(value));
+    // A value changed from outside (a reload, Discard, a preset) is shown; the same number typed differently ("5.0") stays.
+    React.useEffect(() => { setText((t) => (numOf(t) === (value ?? undefined) && t.trim() !== '' ? t : shown(value))); }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+    const msg = disabled ? null : numProblem(text, { label, min, max, decimals, optional });
+    React.useEffect(() => { report?.(key, msg); }, [msg, report, key]);
+    React.useEffect(() => () => report?.(key, null), [report, key]);
+    return (
+        <div style={{ width: width ?? 130, maxWidth: '100%', display: 'inline-block', verticalAlign: 'top' }}>
+            <Input id={id} size={size} inputMode={decimals ? 'decimal' : 'numeric'} value={text} aria-label={label} aria-invalid={!!msg} status={msg ? 'error' : undefined}
+                addonBefore={addonBefore} addonAfter={addonAfter} placeholder={placeholder} disabled={disabled}
+                onChange={(e) => {
+                    const v = e.target.value;
+                    setText(v);
+                    if (v.trim() === '') { if (optional) onChange(undefined); return; }
+                    const n = numOf(v);
+                    if (n !== undefined) onChange(n);
+                }} />
+            {msg && <Typography.Text type="danger" role="alert" style={{ fontSize: 12, display: 'block', whiteSpace: 'normal' }}>{msg}</Typography.Text>}
+        </div>
+    );
+}
+
+/** A request restored from History again and again: its name keeps one "(from …)", not one more per restore. */
+export function restoredName(name: string, at: string): string {
+    const base = name.replace(/(\s*\(from [^()]*\))+\s*$/, '').trim() || name.trim();
+    return `${base} (from ${at})`;
+}
+
+/** #/api-runner addresses: the inner tab they show (a run is shown with Past runs, a collection with Run). */
+export type RunnerTab = 'run' | 'monitors' | 'runs';
+export function runnerRoute(route: string[]): { tab: RunnerTab | null; file: string | null; runId: string | null } {
+    if (route[0] !== 'api-runner') return { tab: null, file: null, runId: null };
+    if (route[1] === 'run' && route[2]) return { tab: 'runs', file: null, runId: route[2] };
+    if (route[1] === 'runs') return { tab: 'runs', file: null, runId: null };
+    if (route[1] === 'monitors') return { tab: 'monitors', file: null, runId: null };
+    if (route.length > 1) return { tab: 'run', file: route.slice(1).join('/'), runId: null };
+    return { tab: null, file: null, runId: null };
+}
+
+/** "▲ better": the arrow follows the number (went up / down), the word says whether that is good. */
+export function verdictWords(verdict: string, change: string): string {
+    if (verdict !== 'better' && verdict !== 'worse') return verdict === 'same' ? '≈ same' : '';
+    const m = /([+\-−])?\s*\d*\.?\d*[1-9]/.exec(change);
+    const arrow = m ? (m[1] === '-' || m[1] === '−' ? '▼ ' : '▲ ') : '';
+    return `${arrow}${verdict}`;
 }

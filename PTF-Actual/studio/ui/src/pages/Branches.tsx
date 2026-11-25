@@ -10,6 +10,7 @@ import { RemotesTable } from '../components/RemotesTable';
 import { DiffView, useDiffPrefs } from '../components/DiffView';
 import { DiffToolbar } from '../components/DiffToolbar';
 import { useStoredTab } from '../datagit-common';
+import { navigate, useRoute } from '../route';
 
 /** Why git would refuse this tag name (the same rules the server checks), or null. */
 export function tagNameProblem(name: string, branchNames: string[], tagNames: string[]): string | null {
@@ -26,6 +27,22 @@ export function tagNameProblem(name: string, branchNames: string[], tagNames: st
 }
 
 type BranchPart = 'local' | 'remote' | 'tags' | 'remotes';
+const PARTS: readonly BranchPart[] = ['local', 'remote', 'tags', 'remotes'];
+
+/** The name git gets for what was typed (the same clean-up as New branch): no spaces or ~ ^ : ? * [ \, no "..". */
+export function branchFinalName(typed: string): string {
+    return typed.trim().replace(/\s+/g, '-').replace(/[~^:?*[\\\x00-\x1f\x7f]+/g, '').replace(/\.{2,}/g, '.').replace(/\/{2,}/g, '/').replace(/@\{/g, '@').replace(/^[-./]+/, '').replace(/(\.lock|[./])+$/, '');
+}
+/** Why a branch cannot be renamed to this (typed) name, or null. */
+export function renameProblem(typed: string, from: string, localNames: string[]): string | null {
+    const to = branchFinalName(typed);
+    if (!typed.trim()) return null;
+    if (!to) return 'Give the branch a name with letters or digits.';
+    if (to.length > 255) return `Too long: at most 255 characters (it has ${to.length}).`;
+    if (to === from) return null;
+    if (localNames.includes(to)) return `A branch named "${to}" exists already: choose another name.`;
+    return null;
+}
 
 export function Branches() {
     const { message, modal } = App.useApp();
@@ -36,7 +53,21 @@ export function Branches() {
     const [newTag, setNewTag] = React.useState<{ name: string; rev: string; message: string } | null>(null);
     const [cmp, setCmp] = React.useState<{ a: string; b: string; files: NameStatus[]; file?: string; diff?: string } | null>(null);
     const [prefs, setPrefs] = useDiffPrefs();
-    const [part, setPart] = useStoredTab<BranchPart>('git-branches', ['local', 'remote', 'tags', 'remotes'], 'local');
+    const [storedPart, storePart] = useStoredTab<BranchPart>('git-branches', PARTS, 'local');
+    // The view is in the address (#/git/branches/tags): Back and Forward move between views, a link opens one.
+    const route = useRoute();
+    const here = route[0] === 'git' && route[1] === 'branches';
+    const part: BranchPart = here && PARTS.includes(route[2] as BranchPart) ? route[2] as BranchPart : storedPart;
+    const setPart = (v: BranchPart) => { storePart(v); navigate(['git', 'branches', v]); };
+    React.useEffect(() => {
+        if (!here) return;
+        if (route[2] !== part) navigate(['git', 'branches', part], true); // missing or wrong: the address says what is shown
+        else if (part !== storedPart) storePart(part);
+    }, [here, route.join('/')]); // eslint-disable-line react-hooks/exhaustive-deps
+    // How many remotes there are (none: the remote views say so, and pushing a tag is off).
+    const [remoteCount, setRemoteCount] = React.useState<number | null>(null);
+    const loadRemotes = React.useCallback(() => { api.remotes().then((r) => setRemoteCount(r.length)).catch(() => setRemoteCount(null)); }, []);
+    React.useEffect(loadRemotes, [loadRemotes, status?.upstream, part]);
     const [find, setFind] = React.useState('');
 
     const loadTags = React.useCallback(() => { api.tags().then(setTags).catch((e) => message.error(errText(e))); }, [message]);
@@ -57,10 +88,16 @@ export function Branches() {
 
     // Rename (button or Enter), once even when clicked twice; the dialog stays open if Git refuses.
     const [renameBusy, setRenameBusy] = React.useState(false);
-    const doRename = () => {
-        if (!rename || !rename.to.trim() || rename.to === rename.from || renameBusy) return;
+    // Git's refusal, shown in the dialog (not a second dialog on top of it).
+    const [renameErr, setRenameErr] = React.useState<string | null>(null);
+    const renameTo = rename ? branchFinalName(rename.to) : '';
+    const renameBad = rename ? renameProblem(rename.to, rename.from, branches.filter((b) => !b.remote).map((b) => b.name)) : null;
+    const doRename = async () => {
+        if (!rename || !renameTo || renameTo === rename.from || renameBad || renameBusy) return;
         setRenameBusy(true);
-        void run(`Renamed to ${rename.to}`, () => api.renameBranch(rename.from, rename.to.trim())).then((ok) => { setRenameBusy(false); if (ok) setRename(null); });
+        try { await api.renameBranch(rename.from, renameTo); message.success(`Renamed to ${renameTo}`); setRename(null); await refresh(); }
+        catch (e) { setRenameErr(errText(e)); }
+        finally { setRenameBusy(false); }
     };
     const del = (b: BranchInfo) => modal.confirm({
         title: `Delete branch ${b.name}?`, okText: 'Delete', okButtonProps: { danger: true },
@@ -114,7 +151,7 @@ export function Branches() {
             });
             if (key === 'compare' && status?.branch) void compare(status.branch, b.name);
             if (key === 'tag') setNewTag({ name: '', rev: b.name, message: '' });
-            if (key === 'rename') setRename({ from: b.name, to: b.name });
+            if (key === 'rename') { setRenameErr(null); setRename({ from: b.name, to: b.name }); }
             if (key === 'delete') del(b);
             if (key === 'upstream') {
                 const remotes = branches.filter((x) => x.remote);
@@ -163,7 +200,7 @@ export function Branches() {
             </>}
             {part === 'remote' && <>
             <Table<BranchInfo> size="small" rowKey="name" dataSource={remote.filter(match)} pagination={false}
-                locale={{ emptyText: q && remote.length ? 'No branch matches.' : 'No remote branches yet. Fetch to see your team’s branches.' }}
+                locale={{ emptyText: q && remote.length ? 'No branch matches.' : remoteCount === 0 ? <span>This repository has no remote, so there are no remote branches. <Typography.Link onClick={() => setPart('remotes')}>Add a remote</Typography.Link>, then Fetch to see your team’s branches.</span> : 'No remote branches yet. Fetch to see your team’s branches.' }}
                 columns={[
                     { title: 'Branch', dataIndex: 'name' },
                     { title: 'Last commit', dataIndex: 'sha', width: 120, render: (s: string) => <Typography.Text code>{s.slice(0, 7)}</Typography.Text> },
@@ -184,7 +221,7 @@ export function Branches() {
                 ]} />
 
             </>}
-            {part === 'remotes' && <RemotesTable onChanged={() => void refresh()} />}
+            {part === 'remotes' && <RemotesTable onChanged={() => { void refresh(); loadRemotes(); }} />}
             {part === 'tags' && <>
             <Table<TagInfo> size="small" rowKey="name" dataSource={tags.filter(match)} pagination={false}
                 locale={{ emptyText: q && tags.length ? 'No tag matches.' : 'No tags yet. Tags mark a version, e.g. the code a regression run used.' }}
@@ -194,7 +231,9 @@ export function Branches() {
                     { title: 'Created', dataIndex: 'date', width: 200, render: (d: string) => d ? new Date(d).toLocaleString() : '' },
                     { title: '', width: 230, render: (_: unknown, t) => (
                         <Space>
-                            <Button size="small" icon={<CloudUploadOutlined />} onClick={() => run(`Pushed tag ${t.name}`, () => api.pushTag(t.name))}>Push</Button>
+                            <Tooltip title={remoteCount === 0 ? 'This repository has no remote to push to: add one under Remotes.' : undefined}>
+                                <Button size="small" icon={<CloudUploadOutlined />} disabled={remoteCount === 0} onClick={() => run(`Pushed tag ${t.name}`, () => api.pushTag(t.name))}>Push</Button>
+                            </Tooltip>
                             <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={() => {
                                 let alsoRemote = false;
                                 // The remote option only when there is a remote (else the tag exists on this computer only).
@@ -210,10 +249,12 @@ export function Branches() {
             </>}
 
             <MergeDialog open={!!merge} initial={merge ?? undefined} onClose={() => setMerge(null)} />
-            <Modal open={!!rename} title={`Rename ${rename?.from}`} okText="Rename" onCancel={() => setRename(null)} okButtonProps={{ disabled: !rename?.to.trim() || rename?.to === rename?.from }}
-                confirmLoading={renameBusy} onOk={doRename} destroyOnClose>
-                <Form layout="vertical"><Form.Item label="New name" htmlFor="cs-branches-rename" style={{ marginBottom: 0 }} tooltip="Only the name on this computer changes. If the branch was published, publish it again under the new name and delete the old remote branch.">
-                    <Input id="cs-branches-rename" autoFocus value={rename?.to} maxLength={250} onPressEnter={doRename} onChange={(e) => rename && setRename({ ...rename, to: e.target.value.replace(/^\s+/, '').replace(/\s+/g, '-') })} />
+            <Modal open={!!rename} title={`Rename ${rename?.from}`} okText="Rename" onCancel={() => setRename(null)} okButtonProps={{ disabled: !renameTo || renameTo === rename?.from || !!renameBad }}
+                confirmLoading={renameBusy} onOk={() => void doRename()} destroyOnClose>
+                <Form layout="vertical"><Form.Item label="New name" htmlFor="cs-branches-rename" style={{ marginBottom: 0 }} tooltip="Only the name on this computer changes. If the branch was published, publish it again under the new name and delete the old remote branch."
+                    validateStatus={renameBad || renameErr ? 'error' : undefined}
+                    help={<div style={{ overflowWrap: 'anywhere' }}>{renameBad ?? renameErr ?? (rename && renameTo && renameTo !== rename.to.trim() ? <Typography.Text type="warning">It will be renamed to <Typography.Text code>{renameTo}</Typography.Text> (branch names have no spaces or {'~ ^ : ? * [ \\'}).</Typography.Text> : undefined)}</div>}>
+                    <Input id="cs-branches-rename" autoFocus value={rename?.to} maxLength={250} onPressEnter={() => void doRename()} onChange={(e) => { setRenameErr(null); if (rename) setRename({ ...rename, to: e.target.value.replace(/^\s+/, '') }); }} />
                 </Form.Item></Form>
             </Modal>
             <Modal open={!!newTag} title="New tag" okText="Create tag" onCancel={() => setNewTag(null)} okButtonProps={{ disabled: !newTag?.name.trim() || !!tagProblem }}

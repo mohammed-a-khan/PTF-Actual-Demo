@@ -18,6 +18,7 @@ import { randomBytes } from 'crypto';
 import type { AgentEvent, MissionSessionOptions } from './host';
 import type { MissionAgent } from './missions';
 import { profileOf, teamMember, type AgentProfile, type TeamAgent } from './builder';
+import { checkVersion, fileVersion } from './version';
 
 export type EvalCheck =
     | { kind: 'contains'; text: string }
@@ -33,13 +34,15 @@ export interface EvalCase { id: string; name: string; prompt: string; inputs?: R
 export interface EvalSuite { agent: string; cases: EvalCase[]; updatedAt?: string; updatedBy?: string }
 
 export interface CheckResult { check: EvalCheck; pass: boolean; detail: string }
-export interface Attempt { pass: boolean; answer: string; tools: Array<{ tool: string; args: string }>; calls: number; ms: number; checks: CheckResult[]; error?: string }
+export interface Attempt { pass: boolean; answer: string; tools: Array<{ tool: string; args: string }>; calls: number; ms: number; checks: CheckResult[]; error?: string; model?: string }
 export interface CaseResult { id: string; name: string; passRate: number; pass: boolean; attempts: Attempt[]; regression?: boolean; fixed?: boolean }
 export interface EvalRun {
     id: string; agent: string; agentName: string; startedAt: string; endedAt?: string; by: string;
     state: 'running' | 'done' | 'failed' | 'stopped';
     /** What was evaluated: the agent as it was (its model, tools and a fingerprint of its instructions). */
     subject: { model?: string; tools: string[]; instructions: string };
+    /** The models that actually answered (the agent's own, or each person's setting at the time). */
+    models?: string[];
     cases: CaseResult[]; passed: number; total: number; error?: string;
     /** Against the previous run: cases now failing that passed, and the reverse. */
     compared?: { run: string; regressions: number; fixed: number };
@@ -80,9 +83,16 @@ export function validateSuite(v: unknown, agent: string): EvalSuite {
 export function readSuite(repoRoot: string, agent: string): EvalSuite | null {
     try { return validateSuite(JSON.parse(fs.readFileSync(path.join(repoRoot, EVALS_DIR, `${agent}.json`), 'utf8')), agent); } catch { return null; }
 }
-export function saveSuite(repoRoot: string, agent: string, v: unknown, by: string): EvalSuite {
+/** The version of an agent's cases file ('' when there is none), sent back with a save. */
+export const suiteVersion = (repoRoot: string, agent: string) => fileVersion(path.join(repoRoot, EVALS_DIR, `${agent}.json`));
+/**
+ * Save the cases. `version`: the version the screen read; a file changed since (another tab, a pull) is refused
+ * (ChangedElsewhere) instead of being replaced silently. No version: not checked (a script, Overwrite on purpose).
+ */
+export function saveSuite(repoRoot: string, agent: string, v: unknown, by: string, o: { version?: string } = {}): EvalSuite {
     const s = { ...validateSuite(v, agent), updatedAt: new Date().toISOString(), updatedBy: by };
     const f = path.join(repoRoot, EVALS_DIR, `${agent}.json`);
+    checkVersion(fileVersion(f), o.version, `${EVALS_DIR}/${agent}.json`);
     fs.mkdirSync(path.dirname(f), { recursive: true });
     fs.writeFileSync(f, `${JSON.stringify(s, null, 2)}\n`);
     return s;
@@ -200,7 +210,9 @@ export class EvalRunner {
             const res: CaseResult = { id: c.id, name: c.name, passRate: 0, pass: false, attempts: [] };
             r.cases.push(res);
             for (let i = 0; i < (c.repeat ?? 1) && !ctl.stop; i++) {
-                res.attempts.push(await this.attempt(a, c, ctl));
+                const at = await this.attempt(a, c, ctl);
+                res.attempts.push(at);
+                if (at.model && !(r.models ?? []).includes(at.model)) r.models = [...(r.models ?? []), at.model];
                 this.save(r);
             }
             res.passRate = res.attempts.length ? res.attempts.filter((x) => x.pass).length / res.attempts.length : 0;
@@ -211,7 +223,7 @@ export class EvalRunner {
     }
 
     /** One fresh, safe session: the agent's instructions, tools and knowledge; nothing it does can change anything. */
-    private async session(title: string, workflow: string, profile: AgentProfile, ctl: { sessions: Set<string> }, message: string): Promise<{ answer: string; tools: Array<{ tool: string; args: string }>; calls: number; ms: number; error?: string }> {
+    private async session(title: string, workflow: string, profile: AgentProfile, ctl: { sessions: Set<string> }, message: string): Promise<{ answer: string; tools: Array<{ tool: string; args: string }>; calls: number; ms: number; error?: string; model?: string }> {
         const t0 = Date.now();
         const tools: Array<{ tool: string; args: string }> = [];
         let answer = '', error: string | undefined, id = '';
@@ -229,9 +241,12 @@ export class EvalRunner {
                 .catch((e) => { error = (e as Error).message; clearTimeout(timer); resolve(); });
         });
         await done;
-        const calls = id ? this.d.agent.usageOf(id)?.usage.calls ?? 0 : 0;
+        const used = id ? this.d.agent.usageOf(id) : null;
+        const calls = used?.usage.calls ?? 0;
+        // The model that answered (the agent's own, else the person's setting when the session ran).
+        const model = used?.usage.model ?? profile.model;
         if (id) { ctl.sessions.delete(id); await this.d.agent.abort(id).catch(() => undefined); }
-        return { answer, tools, calls, ms: Date.now() - t0, ...(error ? { error } : {}) };
+        return { answer, tools, calls, ms: Date.now() - t0, ...(error ? { error } : {}), ...(model ? { model } : {}) };
     }
 
     private async attempt(a: TeamAgent, c: EvalCase, ctl: { stop: boolean; sessions: Set<string> }): Promise<Attempt> {
@@ -249,7 +264,7 @@ export class EvalRunner {
                 checks.push({ check: k, pass: verdict === 'PASS', detail: verdict ? j.answer.replace(/^\s*\**\s*(PASS|FAIL)\**[:.\s-]*/i, '').trim().slice(0, 600) || verdict : `the grader gave no verdict${j.error ? ` (${j.error})` : ''}` });
             }
         }
-        return { pass: !s.error && checks.every((x) => x.pass), answer: s.answer.slice(0, 20000), tools: s.tools.slice(0, 200), calls: s.calls, ms: s.ms, checks, ...(s.error ? { error: s.error } : {}) };
+        return { pass: !s.error && checks.every((x) => x.pass), answer: s.answer.slice(0, 20000), tools: s.tools.slice(0, 200), calls: s.calls, ms: s.ms, checks, ...(s.error ? { error: s.error } : {}), ...(s.model ? { model: s.model } : {}) };
     }
 }
 

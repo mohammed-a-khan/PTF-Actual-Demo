@@ -986,7 +986,11 @@ How to work:
     /** What a session used so far (model calls, tokens, cost) and whether it is working. */
     usageOf(id: string): { usage: Usage; busy: boolean; pending: number } | null {
         const s = this.sessions.get(id);
-        return s ? { usage: { ...s.usage }, busy: s.busy, pending: s.pending.size } : null;
+        if (!s) return null;
+        // The model it ran on: as the provider reported it, else the one the session was started with.
+        const set = (s.mission?.profile ?? s.profile)?.model ?? (s.model && s.model !== 'auto' && s.model !== 'mcp' ? s.model : undefined);
+        const model = s.usage.model ?? set;
+        return { usage: { ...s.usage, ...(model ? { model } : {}) }, busy: s.busy, pending: s.pending.size };
     }
 
     /** A session of an earlier Studio run, resumed (its history is the SDK's). */

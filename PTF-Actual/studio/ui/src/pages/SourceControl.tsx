@@ -324,8 +324,10 @@ export function SourceControl() {
         const alias: Record<string, string> = { stashes: 'stash', branch: 'branches', tags: 'branches', log: 'history', commits: 'history' };
         if (route[0] !== 'git' || !route[1]) return;
         if (route[1] === 'tags') {
-            // Branches & tags, on its Tags view.
+            // Branches & tags, on its Tags view (the view is in the address: #/git/branches/tags).
             setStoredTab('git-branches', 'tags');
+            navigate(['git', 'branches', 'tags'], true);
+            return;
         }
         if (alias[route[1]]) navigate(['git', alias[route[1]], ...route.slice(2)], true);
         else if (!TABS.includes(route[1])) navigate(['git', 'changes'], true); // an unknown tab: the address says what is shown

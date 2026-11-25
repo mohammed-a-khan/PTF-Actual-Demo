@@ -29,7 +29,7 @@ import { secretsAsEnv } from '../secrets/store';
 import { DEFAULT_SETTINGS, SettingsStore } from '../core/settings';
 import { ROTATE_DAYS, secretUsage } from '../secrets/usage';
 import { collectInbox, InboxNotifier } from '../agents/inbox';
-import { EvalRunner, EVALS_DIR, readSuite, saveSuite, validateSuite, type EvalRun } from '../agents/evals';
+import { EvalRunner, EVALS_DIR, readSuite, saveSuite, suiteVersion, validateSuite, type EvalRun } from '../agents/evals';
 import { AGENT_TEMPLATES, deleteAgent, getAgent, listAgents, profileOf, saveAgent, TOOL_GROUPS, AGENTS_DIR, teamCandidates, teamMember } from '../agents/builder';
 import { FINISHED as MISSION_FINISHED, label as missionLabel, MissionAgent, MissionDeps, MissionEngine, MissionRun, MissionTriggers, MISSIONS_FILE, PolledTriggers, readMissionsFile, TEMPLATES as BUILT_IN_MISSIONS, templates as missionTemplates } from '../agents/missions';
 import { TEAM_MEMORY_FILE } from '../agents/host';
@@ -153,7 +153,7 @@ import { allowlistSet } from '../scanner/allowlist';
 import { ActivityLog } from '../core/activity';
 import { discover, fileLayerPaths, readFileLayer } from '../env/layers';
 import { compareEnvironments, resolveConfig } from '../env/resolve';
-import { createEnvironment, removeKey, setValue, storeSecret } from '../env/edit';
+import { checkUnchanged, createEnvironment, removeKey, setValue, storeSecret } from '../env/edit';
 import { AdoClient, AdoSettings } from '../ado/client';
 import { pipelineFile, testPipeline, TestPipelineOptions } from '../run/pipelineYaml';
 import { adoSettingsFor, checkInAdo, readPipelineSettings, requirements, syncToAdo, writePipelineSettings } from '../ado/pipelineSecrets';
@@ -202,7 +202,17 @@ function fileErrorText(e: NodeJS.ErrnoException, root: string): string | null {
 }
 /** The thing changed since the user looked at it (409). */
 class Conflict extends Error { statusCode = 409; }
+/** What the address names is not there (404): said in words, never with a path of this computer. */
+class NotFound extends Error { statusCode = 404; }
 
+/** A whole number a screen sent (iterations, minutes, generators): absent → `def`; a decimal, text or a number out of range is refused, never rounded or clamped. */
+function wholeParam(v: unknown, label: string, min: number, max: number, def?: number): number {
+    if ((v === undefined || v === null || v === '') && def !== undefined) return def;
+    const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+    if (Number.isInteger(n) && n >= min && n <= max) return n;
+    const why = Number.isFinite(n) && !Number.isInteger(n) ? 'no decimals' : Number.isFinite(n) ? `not ${n}` : 'numbers only';
+    throw new BadRequest(`${label}: a whole number from ${min} to ${max} (${why}).`);
+}
 /** A field's name in words for messages ("projectName" → "Project name", "id" → "The id"). */
 function fieldName(field: string): string {
     const w = field.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]+/g, ' ').toLowerCase();
@@ -257,6 +267,25 @@ const sendReportFile = (reply: FastifyReply, rel: string, root: string) => {
 };
 
 /** The repository's git directory (works in linked worktrees, where .git is a file). */
+/**
+ * What a save of the run configurations did, for the activity log ("Deleted the saved run "Smoke"", not "Saved 0").
+ * The list is saved whole, so the change is worked out from the names before and after.
+ */
+export function runConfigsChange<T extends { name: string }>(before: T[], after: T[]): string {
+    const key = (c: { name: string }) => c.name.toLowerCase();
+    const was = new Map(before.map((c) => [key(c), c]));
+    const now = new Map(after.map((c) => [key(c), c]));
+    const q = (l: T[]) => l.map((c) => `"${c.name}"`).join(', ');
+    const added = after.filter((c) => !was.has(key(c)));
+    const removed = before.filter((c) => !now.has(key(c)));
+    const changed = after.filter((c) => was.has(key(c)) && JSON.stringify(was.get(key(c))) !== JSON.stringify(c));
+    const parts: string[] = [];
+    if (added.length) parts.push(`Saved run${added.length === 1 ? '' : 's'} added: ${q(added)}`);
+    if (changed.length) parts.push(`Saved run${changed.length === 1 ? '' : 's'} replaced: ${q(changed)}`);
+    if (removed.length) parts.push(`Saved run${removed.length === 1 ? '' : 's'} deleted: ${q(removed)}`);
+    return parts.length ? parts.join('; ') : `Saved runs written again unchanged (${after.length})`;
+}
+
 function gitDirOf(root: string): string {
     const dotgit = path.join(root, '.git');
     try {
@@ -383,7 +412,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     // A few errors the UI offers a specific action for ("Refresh", "Remove the stale lock").
     const errorCode = (m: string) => m === STALE_HUNK_MESSAGE ? 'stale-hunk' : m.includes(INDEX_LOCK_MESSAGE) ? 'index-lock' : undefined;
     app.setErrorHandler((err: Error & { statusCode?: number }, _req, reply) => {
-        if (err instanceof StaleSaveError) return reply.code(409).send({ error: err.message, code: err.code });
+        if (err instanceof StaleSaveError) return reply.code(409).send({ error: err.message, code: err.code, ...(err.current ? { version: err.current } : {}) });
         if (err instanceof ConflictError) return reply.code(409).send({ error: err.message, conflict: true, ...(err.deleted ? { deleted: true, code: 'deleted' } : {}) });
         if (err instanceof BadRequest || err instanceof UserError) return reply.code(400).send({ error: err.message, code: errorCode(err.message) });
         if (err instanceof GitError) return reply.code(409).send({ error: err.message, code: errorCode(err.message) });
@@ -810,11 +839,20 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.get('/api/secrets/usage', async () => ({ ...secretUsage(opts.repoRoot, opts.store.exists ? opts.store.list({ project: projectId }) : []), rotateDays: ROTATE_DAYS }));
     app.put('/api/secrets', async (req) => {
         const b = body(req);
-        const meta = opts.store.set({
+        const key = {
             name: str(b.name, 'name', { max: 64 }),
             project: b.scope === 'all-projects' ? undefined : projectId,
             env: str(b.env, 'env', { optional: true, max: 32 }) || undefined,
-        }, str(b.value, 'value', { max: 65_536 }));
+        };
+        // expect: what the screen saw. "new" (Add) over a secret added since in another tab, or "existing" (Replace) of
+        // one deleted since, is refused (409) so it is asked about, never replaced or brought back silently.
+        if (b.expect === 'new' || b.expect === 'existing') {
+            const there = opts.store.exists && opts.store.list().some((x) => x.name === key.name && (x.project ?? '') === (key.project ?? '') && (x.env ?? '') === (key.env ?? ''));
+            const where = key.env ? ` for ${key.env}` : '';
+            if (b.expect === 'new' && there) throw new StaleSaveError(`${key.name}${where} was added in another tab or by someone else since this list was shown.`);
+            if (b.expect === 'existing' && !there) throw new StaleSaveError(`${key.name}${where} was deleted in another tab or by someone else since this list was shown.`);
+        }
+        const meta = opts.store.set(key, str(b.value, 'value', { max: 65_536 }));
         log('secret.set', `Saved secret ${meta.name}${meta.env ? ` (${meta.env})` : ''}`, { name: meta.name, env: meta.env ?? null });
         return meta;
     });
@@ -848,6 +886,8 @@ export function createServer(opts: ServerOptions): StudioServer {
         const b = body(req);
         const file = str(b.file, 'file', { max: 1024 });
         const key = envKey(b.key);
+        // was: the value the screen showed in this file; changed since (another tab) → refused, force = Overwrite.
+        checkUnchanged(opts.repoRoot, file, key, b.was, b.force);
         const line = setValue(opts.repoRoot, file, key, typeof b.value === 'string' ? b.value : str(b.value, 'value'), { allowLiteralSecret: b.allowLiteralSecret === true });
         log('env.set', `Set ${key} in ${file}`, { file, key, literalSecretConfirmed: b.allowLiteralSecret === true });
         return { file, key, line };
@@ -856,6 +896,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         const q = req.query as Record<string, string>;
         const file = str(q.file, 'file', { max: 1024 });
         const key = str(q.key, 'key', { max: 200 });
+        if (q.was !== undefined && q.force !== 'true') checkUnchanged(opts.repoRoot, file, key, q.was);
         const removed = removeKey(opts.repoRoot, file, key);
         if (removed) log('env.remove', `Removed ${key} from ${file}`, { file, key });
         return { removed };
@@ -866,6 +907,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         const key = envKey(b.key);
         const secretName = str(b.secretName, 'secretName', { max: 64 });
         const env = str(b.env, 'env', { optional: true, max: 32 }) || undefined;
+        checkUnchanged(opts.repoRoot, file, key, b.was, b.force);
         const line = storeSecret(opts.repoRoot, opts.store, {
             file, key, secretName, value: str(b.value, 'value', { max: 65_536 }),
             project: b.scope === 'all-projects' ? undefined : projectId, env,
@@ -898,7 +940,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         if (unknown.length) throw new BadRequest(`Only {project} and {env} are filled in: ${unknown[0]} is not a placeholder the Studio knows.`);
         if (/[{}]/.test(raw.replace(/\{(project|env)\}/g, ''))) throw new BadRequest('A { or } on its own: the only placeholders are {project} and {env}.');
         if (/[^\x00-\x7F]/.test(raw)) throw new BadRequest('Use Latin letters (A-Z), digits, spaces, - _ . and {project} / {env}: Azure DevOps pipelines refer to the group by this name.');
-        checkVersion(b.version, contentVersion(readPipelineSettings(opts.repoRoot)));
+        checkVersion(b.version, contentVersion(readPipelineSettings(opts.repoRoot)), b.force);
         writePipelineSettings(opts.repoRoot, { variableGroup: raw });
         log('pipeline.settings', 'Changed the pipeline variable group name', { variableGroup: raw });
         return pipelineSettingsView();
@@ -1698,7 +1740,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.put('/api/notifications', async (req) => {
         if (!notifyStore) throw new BadRequest('Notifications need the Studio\'s data folder.');
         const b = body(req);
-        checkVersion(b.version, contentVersion(notifyChannelsView()));
+        checkVersion(b.version, contentVersion(notifyChannelsView()), b.force);
         const channels = validateChannels(b.channels);
         const hooks = (b.webhooks && typeof b.webhooks === 'object' ? b.webhooks : {}) as Record<string, unknown>;
         for (const c of channels) {
@@ -1852,7 +1894,10 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.get('/api/run-configs', async () => { try { return { configs: JSON.parse(fs.readFileSync(runConfigsFile, 'utf8')), file: relPath(runConfigsFile), version: runConfigsVersion() }; } catch { return { configs: [], file: relPath(runConfigsFile), version: runConfigsVersion() }; } });
     app.put('/api/run-configs', async (req) => {
         const b = body(req);
-        checkVersion(b.version, runConfigsVersion());
+        // force: the person chose Overwrite after a refusal.
+        checkVersion(b.force === true ? undefined : b.version, runConfigsVersion());
+        let before: Array<{ name: string; [k: string]: unknown }> = [];
+        try { const j = JSON.parse(fs.readFileSync(runConfigsFile, 'utf8')); if (Array.isArray(j)) before = j.filter((x) => x && typeof x.name === 'string'); } catch { /* none yet */ }
         const list = Array.isArray(b.configs) ? (b.configs as unknown[]) : null;
         if (!list || list.length > 200) throw new BadRequest('At most 200 run configurations.');
         const names = new Set<string>();
@@ -1869,7 +1914,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         });
         fs.mkdirSync(path.dirname(runConfigsFile), { recursive: true });
         fs.writeFileSync(runConfigsFile, JSON.stringify(clean, null, 2) + '\n');
-        log('run.configs', `Saved ${clean.length} run configuration(s)`, { file: relPath(runConfigsFile) });
+        log('run.configs', runConfigsChange(before, clean), { file: relPath(runConfigsFile) });
         return { configs: clean, file: relPath(runConfigsFile), version: runConfigsVersion() };
     });
     // ---- Team test trends from Azure DevOps Analytics (every published result, not only this computer's runs).
@@ -2147,22 +2192,26 @@ export function createServer(opts: ServerOptions): StudioServer {
             projects: [...new Set(runs.map((r) => r.run.project).filter((p): p is string => !!p))].sort(),
             project: project ?? null,
             settings: st.gate,
+            settingsVersion: contentVersion(st.gate),
             quarantine: quarantineSetup(project ?? latest?.project, latest?.env),
         };
     });
     app.put('/api/quality/gate', async (req) => {
         const b = body(req);
-        const n = (v: unknown, lo: number, hi: number) => { const x = Number(v); if (!Number.isFinite(x) || x < lo || x > hi) throw new BadRequest(`A number from ${lo} to ${hi} is needed.`); return x; };
+        // Whole numbers only: 12.5 is refused (not rounded), so what is saved is what was typed.
+        const n = (v: unknown, lo: number, hi: number, what: string) => { const x = typeof v === 'string' && v.trim() !== '' ? Number(v) : v; if (typeof x !== 'number' || !Number.isInteger(x) || x < lo || x > hi) throw new BadRequest(`${what}: give a whole number from ${lo} to ${hi}.`); return x; };
         const gate: GateSettings = {
-            minPassRate: b.minPassRate === undefined ? DEFAULT_GATE.minPassRate : n(b.minPassRate, 0, 100),
+            minPassRate: b.minPassRate === undefined ? DEFAULT_GATE.minPassRate : n(b.minPassRate, 0, 100, 'The pass rate'),
             noNewFailures: b.noNewFailures !== false,
-            maxFlaky: b.maxFlaky === null || b.maxFlaky === undefined || b.maxFlaky === '' ? null : Math.floor(n(b.maxFlaky, 0, 100000)),
+            maxFlaky: b.maxFlaky === null || b.maxFlaky === undefined || b.maxFlaky === '' ? null : n(b.maxFlaky, 0, 100000, 'The most flaky scenarios'),
             ignoreQuarantined: b.ignoreQuarantined !== false,
         };
         const st = readQualityState();
+        // The gate this screen was shown: a save over one changed since (another tab) is refused; force = Overwrite.
+        checkVersion(b.force === true ? undefined : b.version, contentVersion(st.gate));
         writeQualityState({ ...st, gate });
         log('quality.gate', `Quality gate: pass rate ≥ ${gate.minPassRate}%${gate.noNewFailures ? ', no new failures' : ''}${gate.maxFlaky !== null ? `, at most ${gate.maxFlaky} flaky` : ''}`);
-        return gate;
+        return { ...gate, version: contentVersion(gate) };
     });
     app.post('/api/quality/quarantine', async (req) => {
         const b = body(req);
@@ -2903,7 +2952,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         if (!settings) throw new BadRequest('Settings are not available.');
         const b = body(req);
         const cur = personal().network;
-        checkVersion(b.version, contentVersion(cur));
+        checkVersion(b.version, contentVersion(cur), b.force);
         // Empty is a valid value here (no proxy address, no certificate file).
         const s2 = (v: unknown, f: string, d: string) => (v === undefined ? d : str(v, f, { optional: true, max: 2048 }) ?? '');
         const proxyMode = (['off', 'environment', 'manual', 'system', 'pac'] as const).find((m) => m === b.proxyMode) ?? cur.proxyMode;
@@ -3110,7 +3159,10 @@ export function createServer(opts: ServerOptions): StudioServer {
     };
     const readMock = (file: string): MockDefinition => {
         try { return JSON.parse(fs.readFileSync(path.join(opts.repoRoot, file), 'utf8')) as MockDefinition; }
-        catch (e) { throw new BadRequest(`${file}: ${(e as Error).message}`); }
+        catch (e) {
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new NotFound(`There is no mock ${file}: it was deleted or renamed, or the link is wrong.`);
+            throw new BadRequest(`${file}: ${(e as Error).message.replace(/\/[^\s'"]*\//g, '')}`);
+        }
     };
     app.get('/api/mocks', async (req) => {
         const project = apiProject((req.query as Record<string, string>).project);
@@ -3128,7 +3180,8 @@ export function createServer(opts: ServerOptions): StudioServer {
         const project = apiProject((req.query as Record<string, string>).project);
         const file = mockFile(project, (req.query as Record<string, string>).file);
         const run = mockRuns.get(file);
-        return { file, mock: readMock(file), ...(run ? { url: run.mock.url } : {}) };
+        // version: the file as read (a save from another tab over a later save is refused: Reload / Overwrite).
+        return { file, mock: readMock(file), version: fileVersion(path.join(opts.repoRoot, file)), ...(run ? { url: run.mock.url } : {}) };
     });
     // A definition from the saved examples of a collection of the repository: not saved yet.
     app.post('/api/mocks/from-collection', async (req) => {
@@ -3172,7 +3225,8 @@ export function createServer(opts: ServerOptions): StudioServer {
         const b = body(req);
         const project = apiProject(b.project);
         const file = mockFile(project, b.file);
-        const d = b.mock as MockDefinition;
+        const { item: mockItem, meta: mockMeta } = takeSaveMeta(b.mock);
+        const d = mockItem as MockDefinition;
         const problems = mockProblems(d);
         if (problems.length) throw new BadRequest(problems.join(' '));
         // The name tells mocks apart in the list: given, and not another mock's.
@@ -3185,15 +3239,19 @@ export function createServer(opts: ServerOptions): StudioServer {
         });
         if (clash) throw new BadRequest(`Another mock is already called "${d.name}" (${clash}): choose another name.`);
         const abs = path.join(opts.repoRoot, file);
+        // Saved over a version someone else changed meanwhile (another tab): refused, the UI offers Reload / Overwrite.
+        const mockStale = staleSave(abs, mockMeta);
+        if (mockStale) throw new Conflict(mockStale);
         fs.mkdirSync(path.dirname(abs), { recursive: true });
         fs.writeFileSync(abs, `${JSON.stringify(d, null, 2)}\n`);
         log('mock.save', `Saved the API mock ${file}`, { routes: d.routes.length });
+        const version = fileVersion(abs);
         // A running mock answers with the saved definition at once; a new port needs a restart.
         const run = mockRuns.get(file);
-        if (!run) return { file, saved: true };
+        if (!run) return { file, saved: true, version };
         run.mock.update(d);
         const restart = d.port !== undefined && d.port !== 0 && d.port !== run.mock.port;
-        return { file, saved: true, applied: true, ...(restart ? { restartForPort: true } : {}) };
+        return { file, saved: true, version, applied: true, ...(restart ? { restartForPort: true } : {}) };
     });
     app.delete('/api/mocks/file', async (req) => {
         const q = req.query as Record<string, string>;
@@ -3621,7 +3679,10 @@ export function createServer(opts: ServerOptions): StudioServer {
                 if (!rows.length) throw new BadRequest(`${d.source} has no rows${d.filter ? ` for ${d.filter}` : ''}.`);
             }
         }
-        const job = await startCollectionRun({ c, file: typeof b.file === 'string' ? b.file : '', project, env, requests, rows, iterations: Number(b.iterations) || 1, delayMs: Math.max(0, Math.min(Number(b.delayMs) || 0, 60_000)), stopOnFailure: b.stopOnFailure === true });
+        // Whole numbers in range, or refused (2.5 iterations is not run as 3, a delay is not cut silently).
+        const iterations = wholeParam(b.iterations, 'Iterations', 1, 1000, 1);
+        const delayMs = wholeParam(b.delayMs, 'Delay (ms)', 0, 60_000, 0);
+        const job = await startCollectionRun({ c, file: typeof b.file === 'string' ? b.file : '', project, env, requests, rows, iterations, delayMs, stopOnFailure: b.stopOnFailure === true });
         log('api.run', `Ran the API collection ${c.name} (${job.total} requests)`, { env });
         return job;
     });
@@ -3678,8 +3739,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         const b = body(req);
         const file = str(b.file, 'file', { max: 300 });
         try { readCollection(opts.repoRoot, file); } catch (e) { throw new BadRequest((e as Error).message); }
-        const every = Number(b.everyMinutes);
-        if (!Number.isInteger(every) || every < 5 || every > 7 * 24 * 60) throw new BadRequest('Every 5 minutes to every 7 days.');
+        const every = wholeParam(b.everyMinutes, 'Every (minutes)', 5, 7 * 24 * 60);
         const wh = typeof b.webhookSecret === 'string' && b.webhookSecret.trim() ? b.webhookSecret.trim() : undefined;
         if (wh && !/^[A-Za-z_][\w]{0,100}$/.test(wh)) throw new BadRequest('The alert is the name of a Studio secret (its value is the webhook address).');
         const list = readMonitors();
@@ -3891,7 +3951,14 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.get('/api/load/scenario', async (req) => {
         const file = str((req.query as Record<string, string>).file, 'file', { max: 300 });
         if (!scenarioFileOk(file)) throw new BadRequest('Not a load scenario file.');
-        try { return { file, scenario: validScenario(JSON.parse(fs.readFileSync(path.join(opts.repoRoot, file), 'utf8'))), version: fileVersion(path.join(opts.repoRoot, file)) }; } catch (e) { throw new BadRequest((e as Error).message); }
+        let text: string;
+        try { text = fs.readFileSync(path.join(opts.repoRoot, file), 'utf8'); }
+        catch (e) {
+            // A bad link (#/perf/<file that is not there>): said in words, without this computer's paths.
+            if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw new NotFound(`There is no load scenario ${file}: it was deleted or renamed, or the link is wrong.`);
+            throw new BadRequest(fileErrorText(e as NodeJS.ErrnoException, opts.repoRoot) ?? `${file} cannot be read.`);
+        }
+        try { return { file, scenario: validScenario(JSON.parse(text)), version: fileVersion(path.join(opts.repoRoot, file)) }; } catch (e) { throw new BadRequest(`${file}: ${(e as Error).message}`); }
     });
     app.put('/api/load/scenario', async (req) => {
         const b = body(req);
@@ -4188,8 +4255,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         const secretNames = [...new Set([...text.matchAll(/\{env:([A-Za-z_][\w]*)\}/g)].map((m) => m[1]))];
         const schedule = typeof b.schedule === 'string' && b.schedule.trim() ? b.schedule.trim() : undefined;
         if (schedule && !/^[\d*/,-]+( [\d*/,-]+){4}$/.test(schedule)) throw new BadRequest('The schedule is a cron line of five fields (UTC), e.g. 0 2 * * 1-5.');
-        const generators = Number(b.generators ?? 1);
-        if (!Number.isInteger(generators) || generators < 1 || generators > 50) throw new BadRequest('1 to 50 load generators.');
+        const generators = wholeParam(b.generators, 'Load generators', 1, 50, 1);
         const opt = (k: string, re: RegExp) => (typeof b[k] === 'string' && re.test(b[k] as string) ? b[k] as string : undefined);
         const yamlText = loadPipeline(file, { name: sc.name, envs, generators, schedule, secretNames, variableGroup: opt('variableGroup', /^[^\n']{1,120}$/), branch: opt('branch', /^[\w./-]{1,100}$/), pool: opt('pool', /^[^\n']{1,120}$/), teamFolder: opt('teamFolder', /^[^\n']{1,300}$/) });
         const target = `test/${project}/pipelines/${slug(sc.name)}.load-pipeline.yml`;
@@ -4584,7 +4650,8 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.get('/api/db/query-file', async (req) => {
         const file = str((req.query as Record<string, unknown>).file, 'file', { max: 300 });
         if (!queryFileOk(file)) throw new BadRequest('Not a saved query (test/<project>/queries/<name>.sql).');
-        try { const text = fs.readFileSync(path.join(opts.repoRoot, file), 'utf8'); return { file, text, connection: /^--\s*connection:\s*(\w+)/im.exec(text)?.[1]?.toUpperCase() ?? null }; }
+        // version: what the editor was shown; its save over a file changed since (another tab) is refused.
+        try { const text = fs.readFileSync(path.join(opts.repoRoot, file), 'utf8'); return { file, text, version: contentVersion(text), connection: /^--\s*connection:\s*(\w+)/im.exec(text)?.[1]?.toUpperCase() ?? null }; }
         catch { throw new BadRequest(`${file} does not exist.`); }
     });
     app.put('/api/db/query-file', async (req) => {
@@ -4595,10 +4662,12 @@ export function createServer(opts: ServerOptions): StudioServer {
         if (!queryFileOk(file) || !file.startsWith(`test/${project}/queries/`)) throw new BadRequest('Not a saved query file of this project.');
         const abs = path.join(opts.repoRoot, file);
         if (!b.file && fs.existsSync(abs) && b.overwrite !== true) throw new BadRequest(`${file} already exists.`);
+        // A saved query opened earlier: the version it was read at (a file deleted since reads as empty, so it is refused too).
+        if (b.file) { let now = ''; try { now = fs.readFileSync(abs, 'utf8'); } catch { /* deleted since */ } checkVersion(b.version, contentVersion(now), b.force); }
         fs.mkdirSync(path.dirname(abs), { recursive: true });
         fs.writeFileSync(abs, text);
         log('db.query.save', `Saved the query ${file}`, { file });
-        return { file };
+        return { file, version: contentVersion(text) };
     });
     app.delete('/api/db/query-file', async (req) => {
         const q = req.query as Record<string, unknown>;
@@ -5740,7 +5809,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     const triggerTimer = setInterval(() => { void triggers.tick().catch(() => undefined); }, 30_000);
     triggerTimer.unref?.();
     app.addHook('onClose', async () => { clearInterval(triggerTimer); for (const m of missions.running()) await missions.stop(m.id, 'the Studio closing').catch(() => undefined); });
-    const missionId = (req: FastifyRequest) => { const id = str((req.params as { id: string }).id, 'id', { max: 40 }); if (!missions.get(id)) throw new BadRequest('No such mission.'); return id; };
+    const missionId = (req: FastifyRequest) => { const id = str((req.params as { id: string }).id, 'id', { max: 40 }); if (!missions.get(id)) throw new NotFound('Mission not found: it may have been deleted.'); return id; };
     const missionSummary = (m: MissionRun) => ({ id: m.id, key: m.key, title: m.title, state: m.state, reason: m.reason, trigger: m.trigger, createdAt: m.createdAt, endedAt: m.endedAt, used: m.used, budget: m.budget, changes: m.changes.length, verified: !!m.verifications.at(-1)?.passed, waiting: m.checkpoints.some((c) => c.answer === undefined) && m.state === 'waiting', result: m.result?.kind });
     app.get('/api/missions', async () => {
         const f = readMissionsFile(opts.repoRoot);
@@ -5765,7 +5834,8 @@ export function createServer(opts: ServerOptions): StudioServer {
             const m = await missions.start(str(b.key, 'key', { max: 40 }), Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, String(v ?? '')])), {
                 autonomy: b.autonomy === 'supervised' ? 'supervised' : 'autonomous', queue: b.queue === true, unattended: b.unattended === true,
                 ...(b.unattended === true ? { trigger: { kind: 'pipeline' as const, by: opts.userName ?? 'pipeline' } } : {}),
-                budget: Object.fromEntries(Object.entries(budget).filter(([k, v]) => ['minutes', 'modelCalls', 'attempts'].includes(k) && Number.isFinite(Number(v))).map(([k, v]) => [k, Number(v)])),
+                // Passed as sent: a decimal, text or a number out of range is refused (missions.start), never dropped or rounded.
+                budget: Object.fromEntries(Object.entries(budget).filter(([k, v]) => ['minutes', 'modelCalls', 'attempts'].includes(k) && v !== undefined && v !== null)) as Record<string, number>,
             });
             return missionSummary(m);
         } catch (e) { throw new BadRequest((e as Error).message); }
@@ -5907,21 +5977,24 @@ export function createServer(opts: ServerOptions): StudioServer {
     // Evaluations: test cases for an agent, run in safe sessions, compared with the run before.
     const evals = new EvalRunner({ repoRoot: opts.repoRoot, gitDir: gitDirOf(opts.repoRoot), agent: missionAgent, userName: opts.userName, log: (a, t, d) => log(a, t, d) });
     const evalAgent = (req: FastifyRequest) => { const id = str((req.params as { agent: string }).agent, 'agent', { max: 40 }); if (!teamMember(opts.repoRoot, id)) throw new BadRequest(`No agent "${id}".`); return id; };
-    const evalSummary = (r: EvalRun) => ({ id: r.id, state: r.state, startedAt: r.startedAt, endedAt: r.endedAt, by: r.by, passed: r.passed, total: r.total, ...(r.compared ? { compared: r.compared } : {}), subject: r.subject });
+    const evalSummary = (r: EvalRun) => ({ id: r.id, state: r.state, startedAt: r.startedAt, endedAt: r.endedAt, by: r.by, passed: r.passed, total: r.total, ...(r.compared ? { compared: r.compared } : {}), subject: r.subject, ...(r.models?.length ? { models: r.models } : {}) });
     app.get('/api/evals/:agent', async (req) => {
         const id = evalAgent(req);
         const f = path.join(opts.repoRoot, EVALS_DIR, `${id}.json`);
         let problem: string | undefined;
         if (fs.existsSync(f)) { try { validateSuite(JSON.parse(fs.readFileSync(f, 'utf8')), id); } catch (e) { problem = `${EVALS_DIR}/${id}.json: ${(e as Error).message}`; } }
-        return { file: `${EVALS_DIR}/${id}.json`, suite: readSuite(opts.repoRoot, id) ?? { agent: id, cases: [] }, runs: evals.runs(id).map(evalSummary), running: evals.isRunning(id), ...(problem ? { problem } : {}) };
+        return { file: `${EVALS_DIR}/${id}.json`, suite: readSuite(opts.repoRoot, id) ?? { agent: id, cases: [] }, version: suiteVersion(opts.repoRoot, id), runs: evals.runs(id).map(evalSummary), running: evals.isRunning(id), ...(problem ? { problem } : {}) };
     });
+    // Saved with the version of the file the screen read: changed meanwhile (another tab, a pull) → 409, unless forced.
     app.put('/api/evals/:agent', async (req) => {
         const id = evalAgent(req);
+        const b = body(req);
         try {
-            const suite = saveSuite(opts.repoRoot, id, (body(req) as { suite?: unknown }).suite, opts.userName ?? 'unknown');
+            const v = sentVersion(b);
+            const suite = saveSuite(opts.repoRoot, id, (b as { suite?: unknown }).suite, opts.userName ?? 'unknown', typeof v === 'string' ? { version: v } : {});
             log('agent.eval', `Saved ${suite.cases.length} evaluation case(s) for ${id}`, { file: `${EVALS_DIR}/${id}.json` });
-            return { suite };
-        } catch (e) { throw new BadRequest((e as Error).message); }
+            return { suite, version: suiteVersion(opts.repoRoot, id) };
+        } catch (e) { const c = changedElsewhere(e); throw c instanceof Conflict ? c : new BadRequest((e as Error).message); }
     });
     app.post('/api/evals/:agent/run', async (req) => {
         const id = evalAgent(req);

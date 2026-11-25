@@ -126,6 +126,15 @@ For each screen: open it in the Studio browser, read it (snapshot, forms, tables
     },
 ];
 
+/** A workflow form kept by "Save" when leaving the screen (this browser tab only; gone when started or discarded). */
+const DRAFT = 'cs-studio-agents-workflow-draft';
+function readDraft(): { workflow: string; values: Record<string, string> } | null {
+    try { const v = JSON.parse(sessionStorage.getItem(DRAFT) ?? 'null'); return v && typeof v === 'object' && v.values && typeof v.values === 'object' ? v : null; } catch { return null; }
+}
+function writeDraft(d: { workflow: string; values: Record<string, string> } | null): void {
+    try { if (d) sessionStorage.setItem(DRAFT, JSON.stringify(d)); else sessionStorage.removeItem(DRAFT); } catch { /* storage off */ }
+}
+
 function SettingsCard({ status, onSaved, onReload }: { status: AgentStatusView | null; onSaved: (s: AgentStatus) => void; onReload: () => void }) {
     const { message, modal } = App.useApp();
     const [s, setS] = React.useState<AgentSettingsDef | null>(status?.settings ?? null);
@@ -135,7 +144,9 @@ function SettingsCard({ status, onSaved, onReload }: { status: AgentStatusView |
     React.useEffect(() => { if (status?.settings) setS(status.settings); }, [status?.settings]);
     const dirty = !!s && !!status?.settings && (JSON.stringify(s) !== JSON.stringify(status.settings) || !!keys.providerKey || !!keys.copilotToken);
     // Opening another screen (or another tab of the browser) asks first, like the agent editor.
-    useUnsaved('agent-settings', dirty, 'agent settings', { lostOnLeave: true, discard: () => { if (status?.settings) setS(status.settings); setKeys({ providerKey: '', copilotToken: '' }); } });
+    // Save from that question: the same Save as the button (true when saved).
+    const saveRef = React.useRef<() => Promise<boolean>>(async () => false);
+    useUnsaved('agent-settings', dirty, 'agent settings', { lostOnLeave: true, save: () => saveRef.current(), discard: () => { if (status?.settings) setS(status.settings); setKeys({ providerKey: '', copilotToken: '' }); } });
     if (!s) return null;
     // A model or deployment name: one word (the server says the same).
     const modelText = s.model === 'auto' ? '' : s.model;
@@ -151,20 +162,29 @@ function SettingsCard({ status, onSaved, onReload }: { status: AgentStatusView |
         return <Col xs={24} md={12} key={k}><Form.Item label={label} tooltip={min ? `The repository's policy: at least "${min === 'deny' ? 'Never' : 'Ask me'}"` : undefined}><Select size="small" style={{ width: '100%' }} value={value} aria-label={label} onChange={(v) => setS({ ...s, approvals: { ...s.approvals, [k]: v } })}
             options={[{ value: 'ask', label: 'Ask me' }, { value: 'auto', label: 'Allow' }, ...(deny || min === 'deny' ? [{ value: 'deny', label: 'Never' }] : [])].map((o) => ({ ...o, disabled: !!min && rank[o.value as keyof typeof rank] < rank[min] }))} /></Form.Item></Col>;
     };
-    const save = async (force = false) => {
-        if (saving) return;
-        if (modelProblem) { setSaveErr(`Not saved: ${modelProblem}`); return; }
-        if (urlProblem) { setSaveErr(`Not saved: Endpoint: ${urlProblem}`); return; }
+    const save = async (force = false): Promise<boolean> => {
+        if (saving && !force) return false;
+        if (modelProblem) { setSaveErr(`Not saved: ${modelProblem}`); return false; }
+        if (urlProblem) { setSaveErr(`Not saved: Endpoint: ${urlProblem}`); return false; }
         setSaving(true);
         try {
             onSaved(await agentsApi.saveAgentSettings({ ...s, model: s.model.trim() || s.model, ...(s.custom ? { custom: { ...s.custom, baseUrl: s.custom.baseUrl.trim() } } : {}) }, { ...(keys.providerKey ? { providerKey: keys.providerKey } : {}), ...(keys.copilotToken ? { copilotToken: keys.copilotToken } : {}) }, status?.settingsVersion, force));
             setKeys({ providerKey: '', copilotToken: '' }); setSaveErr(null); message.success('Saved.');
+            return true;
         } catch (e) {
             // Saved in another tab meanwhile: reload those settings, or overwrite them with these on purpose.
-            if (isChangedElsewhere(e)) askChangedElsewhere(modal, e, 'The agent settings', { reload: () => { setKeys({ providerKey: '', copilotToken: '' }); setSaveErr(null); onReload(); }, overwrite: () => { setSaving(false); return save(true); } });
-            else setSaveErr(`Not saved: ${errText(e)}`);
+            if (isChangedElsewhere(e)) {
+                return new Promise<boolean>((resolve) => askChangedElsewhere(modal, e, 'The agent settings', {
+                    reload: () => { setKeys({ providerKey: '', copilotToken: '' }); setSaveErr(null); onReload(); resolve(false); },
+                    overwrite: () => { setSaving(false); return save(true).then(resolve); },
+                    keepEditing: () => resolve(false),
+                }));
+            }
+            setSaveErr(`Not saved: ${errText(e)}`);
+            return false;
         } finally { setSaving(false); }
     };
+    saveRef.current = () => save();
     return (
         <Form layout="vertical" size="small">
             <Form.Item label="Model from">
@@ -203,7 +223,8 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
     const [sessions, setSessions] = React.useState<AgentSessionInfo[]>([]);
     // The workflow chosen stays chosen when the person comes back (Back, the menu, a reload of the tab).
     const [open, setOpen] = useKept<string | null>('agents-workflow', null);
-    const [values, setValues] = React.useState<Record<string, string>>({});
+    // What was typed, restored from a draft kept by "Save" in the leave question (this browser tab only).
+    const [values, setValues] = React.useState<Record<string, string>>(() => { const dr = readDraft(); return dr && dr.workflow === open ? dr.values : {}; });
     const [starting, setStarting] = React.useState(false);
     const [tab, setTab] = useRememberedTab('agents', 'workflows', ['workflows', 'conversations', 'tools', 'setup'], 'agents');
     const refresh = React.useCallback(() => { api.agentSessions().then((r) => setSessions(r.sessions)).catch(() => {}); }, []);
@@ -216,7 +237,14 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
     const wf = WORKFLOWS.find((w) => w.key === open);
     // What was typed into the workflow's form is not kept when another screen opens: leaving asks first.
     const typed = !!wf && Object.entries(values).some(([k, x]) => k !== 'project' && k !== 'env' && typeof x === 'string' && x.trim() !== '');
-    useUnsaved('agents-workflow-form', typed, `the "${wf?.title ?? 'workflow'}" form`, { lostOnLeave: true, discard: () => setValues((v) => ({ project: v.project ?? '', env: v.env ?? '' })) });
+    // "Save" keeps what was typed as a draft (in this browser tab): the form shows it again on the way back.
+    const [draftAt, setDraftAt] = React.useState(() => JSON.stringify(readDraft()?.values ?? null));
+    const unsaved = typed && JSON.stringify(values) !== draftAt;
+    useUnsaved('agents-workflow-form', unsaved, `the "${wf?.title ?? 'workflow'}" form`, {
+        lostOnLeave: true,
+        save: async () => { writeDraft({ workflow: open ?? '', values }); setDraftAt(JSON.stringify(values)); message.info(`Kept the "${wf?.title ?? 'workflow'}" form as a draft: it is here when you come back.`); return true; },
+        discard: () => { writeDraft(null); setValues((v) => ({ project: v.project ?? '', env: v.env ?? '' })); },
+    });
     // Plan first: the project's features (style example) and the story read from Azure DevOps.
     // Read for these values only (project | environment | story): a context read for other values is not used.
     const planKey = `${values.project ?? ''}|${values.env ?? ''}|${values.story?.trim() ?? ''}`;
@@ -254,6 +282,7 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
             const s = await api.agentCreate(`${wf.title}${v.project ? ` (${v.project})` : ''}`, wf.task(v));
             await api.agentSend(s.id, wf.prompt(v));
             setValues((x) => ({ project: x.project ?? '', env: x.env ?? '' }));
+            writeDraft(null);
             openPanel(s.id);
             refresh();
         } catch (e) { message.error(errText(e)); } finally { setStarting(false); startingRef.current = false; }

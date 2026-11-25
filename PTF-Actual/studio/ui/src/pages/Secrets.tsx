@@ -6,6 +6,7 @@ import { api, SecretMeta, SecretUsageDef } from '../api';
 import { errText, openInEditor, useStudio } from '../state';
 import { navigate, useRoute } from '../route';
 import { plural } from '../datagit-common';
+import { datagitApi, isStale } from '../datagit-api';
 
 export function Secrets() {
     const { message, modal } = App.useApp();
@@ -56,14 +57,25 @@ export function Secrets() {
         const same = rows.some((r) => r.name === adding.name && (r.env ?? '') === adding.env && (adding.scope === 'all-projects' ? !r.project : !!r.project));
         if (same && !adding.replace) {
             modal.confirm({ title: `${adding.name} exists`, content: `There is already a secret ${adding.name}${adding.env ? ` for ${adding.env}` : ''}. Replace its value?`, okText: 'Replace', okButtonProps: { danger: true },
-                onOk: async () => { try { await api.setSecret(adding.name, adding.value, adding.env || undefined, adding.scope === 'all-projects' ? 'all-projects' : undefined); message.success(`Replaced ${adding.name}`); setAdding(null); load(); } catch (e) { message.error(errText(e)); } } });
+                onOk: async () => { try { await datagitApi.setSecret(adding.name, adding.value, adding.env || undefined, adding.scope === 'all-projects' ? 'all-projects' : undefined, 'existing'); message.success(`Replaced ${adding.name}`); setAdding(null); load(); } catch (e) { message.error(errText(e)); load(); } } });
             return;
         }
+        const a = adding;
+        const put = (expect?: 'new' | 'existing') => datagitApi.setSecret(a.name, a.value, a.env || undefined, a.scope === 'all-projects' ? 'all-projects' : undefined, expect);
         try {
-            await api.setSecret(adding.name, adding.value, adding.env || undefined, adding.scope === 'all-projects' ? 'all-projects' : undefined);
-            message.success(`Saved ${adding.name}`);
+            // What the list showed: Add expects no such secret, Replace expects it still there (another tab may differ).
+            await put(a.replace ? 'existing' : 'new');
+            message.success(`Saved ${a.name}`);
             setAdding(null); load();
-        } catch (e) { message.error(errText(e)); }
+        } catch (e) {
+            if (!isStale(e)) { message.error(errText(e)); return; }
+            load();
+            modal.confirm({
+                title: a.replace ? `${a.name} was deleted elsewhere` : `${a.name} exists now`, content: `${errText(e)} ${a.replace ? 'Add it again with this value?' : 'Replace its value?'}`,
+                okText: a.replace ? 'Add it again' : 'Replace', okButtonProps: { danger: true }, cancelText: 'Keep editing',
+                onOk: async () => { try { await put(); message.success(`${a.replace ? 'Added' : 'Replaced'} ${a.name}`); setAdding(null); load(); } catch (x) { message.error(errText(x)); } },
+            });
+        }
     };
 
     const q = find.trim().toLowerCase();

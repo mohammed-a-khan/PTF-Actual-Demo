@@ -20,6 +20,8 @@ import { StepTimeline, parseTimeline } from '../components/StepTimeline';
 import { PublishToAdo } from '../components/PublishToAdo';
 import { BisectPanel, BisectStart } from '../components/Bisect';
 import { navigate, useRoute } from '../route';
+import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
+import { StrictWholeNumber } from '../components/StrictWholeNumber';
 import '../styles-tests.css';
 
 const STATE_TAG: Record<RunInfo['state'], { color: string; label: string }> = {
@@ -48,7 +50,7 @@ export function rerunFailed(run: RunInfo, ev: RunEvidence | null): RunRequest {
 const DEVICES = ['iPhone 15', 'iPhone 15 Pro Max', 'iPhone SE', 'iPad (gen 7)', 'iPad Pro 11', 'Pixel 7', 'Galaxy S9+', 'Galaxy Tab S4', 'Desktop Chrome', 'Desktop Edge', 'Desktop Firefox', 'Desktop Safari'];
 
 export function Runs() {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const { env: disc } = useStudio();
     const projects = disc?.projects ?? [];
     const saved = loadRunTarget();
@@ -57,12 +59,32 @@ export function Runs() {
     const [configs, setConfigs] = React.useState<RunConfigDef[]>([]);
     // The version read: saving over a newer file (another tab, a teammate's pull) is refused, and the screen offers to reload.
     const configsVersion = React.useRef<string | undefined>(undefined);
+    // The list as last read (the Save dialog's closure would otherwise keep the list from when it was opened).
+    const configsRef = React.useRef<RunConfigDef[]>([]);
+    configsRef.current = configs;
     const loadConfigs = React.useCallback(() => { api.runConfigs().then((r) => { setConfigs(r.configs); configsVersion.current = r.version; }).catch(() => undefined); }, []);
     React.useEffect(loadConfigs, [loadConfigs]);
-    const configsError = (e: unknown) => {
-        if ((e as { status?: number }).status === 409) message.warning({ key: 'run-configs-stale', content: <span>{errText(e)} <Button size="small" type="link" onClick={() => { message.destroy('run-configs-stale'); loadConfigs(); }}>Reload</Button></span>, duration: 8 });
-        else message.error(errText(e));
-    };
+    // Saved in another tab (or pulled): the list follows when this tab is shown again, so it is not stale.
+    React.useEffect(() => {
+        const onShown = () => { if (document.visibilityState === 'visible') loadConfigs(); };
+        window.addEventListener('focus', onShown);
+        document.addEventListener('visibilitychange', onShown);
+        return () => { window.removeEventListener('focus', onShown); document.removeEventListener('visibilitychange', onShown); };
+    }, [loadConfigs]);
+    /**
+     * Save the whole list; a refusal because it changed elsewhere asks Reload / Overwrite / Keep editing.
+     * Resolves true when saved, 'reloaded' when the person chose Reload (their change is dropped), false otherwise.
+     */
+    const writeConfigs = (next: RunConfigDef[], ok: string, force = false): Promise<boolean | 'reloaded'> => api.saveRunConfigs(next, configsVersion.current, force)
+        .then((r) => { setConfigs(r.configs); configsVersion.current = r.version; message.success(ok); return true; })
+        .catch((e) => {
+            if (!isChangedElsewhere(e)) { message.error(errText(e)); return false; }
+            return new Promise<boolean | 'reloaded'>((resolve) => askChangedElsewhere(modal, e, 'The saved runs', {
+                reload: () => { loadConfigs(); resolve('reloaded'); },
+                overwrite: async () => resolve(await writeConfigs(next, ok, true)),
+                keepEditing: () => resolve(false),
+            }));
+        });
     const [pick, setPick] = React.useState<Picked>(EMPTY_PICK);
     const [catalog, setCatalog] = React.useState<RunCatalog | null>(null);
     const loadCatalog = React.useCallback(() => api.runCatalog().then(setCatalog).catch(() => undefined), []);
@@ -159,8 +181,11 @@ export function Runs() {
     // Feature files may have changed while the user was on another screen.
     React.useEffect(() => { if (onPage) void loadCatalog(); }, [onPage, loadCatalog]);
 
-    const { modal } = App.useApp();
+    // Options typed wrong (2.5 workers, a width of 0): shown under the field, and Run / Save wait until they are put right.
+    const [badOpts, setBadOpts] = React.useState<string[]>([]);
+    const validity = React.useCallback((field: string) => (ok: boolean) => setBadOpts((b) => (ok ? b.filter((x) => x !== field) : b.includes(field) ? b : [...b, field])), []);
     const start = async (r: RunRequest) => {
+        if (badOpts.length) { message.error(`Put the options right first: ${badOpts.join(', ')}.`); setSetupTab('options'); return; }
         // The framework runs the files on disk: unsaved edits in the editor would not be tested.
         const unsaved = [...unsavedFiles].filter((f) => /\.(feature|ts|js|env|json|ya?ml)$/.test(f));
         if (unsaved.length) {
@@ -205,6 +230,7 @@ export function Runs() {
         ...requestOf(pick, catalog, target.project),
     });
     const saveConfig = () => {
+        if (badOpts.length) { message.error(`Put the options right first: ${badOpts.join(', ')}.`); setSetupTab('options'); return; }
         let name = '', saving = false;
         let nameInput: { focus: () => void } | null = null;
         const inst = modal.confirm({ title: 'Save this run for the team', icon: null, okText: 'Save', autoFocusButton: null,
@@ -213,6 +239,7 @@ export function Runs() {
             // The dialog closes itself only when saved (a missing name or a declined replace keeps it open, without errors).
             onOk: (close: () => void) => { void (async () => {
                 if (!name.trim()) { message.warning({ content: 'Give it a name.', key: 'save-run-name' }); return; }
+                const configs = configsRef.current;
                 if (configs.some((c) => c.name.toLowerCase() === name.trim().toLowerCase())
                     && !(await new Promise<boolean>((ok) => modal.confirm({ title: `A saved run named "${name.trim()}" exists`, content: 'Replace it with this run?', okText: 'Replace', onOk: () => ok(true), onCancel: () => ok(false),
                         // Focus goes back into the Save dialog under it, so Esc then closes that one too.
@@ -220,7 +247,7 @@ export function Runs() {
                 const next = [...configs.filter((c) => c.name.toLowerCase() !== name.trim().toLowerCase()), { name: name.trim(), request: request() }];
                 if (saving) return; // a double click saves once
                 saving = true; inst.update({ okButtonProps: { loading: true } });
-                try { const r = await api.saveRunConfigs(next, configsVersion.current); setConfigs(r.configs); configsVersion.current = r.version; message.success(`Saved "${name.trim()}"`); close(); } catch (e) { configsError(e); }
+                try { if (await writeConfigs(next, `Saved "${name.trim()}"`)) close(); } // saved, or Reload chosen (Keep editing stays here)
                 finally { saving = false; inst.update({ okButtonProps: { loading: false } }); }
             })(); } });
     };
@@ -239,11 +266,11 @@ export function Runs() {
         catch (e) { modal.error({ title: `Could not start "${c.name}"`, content: errText(e) }); }
         finally { setStarting(false); }
     };
-    const removeConfig = async (c: RunConfigDef) => { try { const r = await api.saveRunConfigs(configs.filter((x) => x !== c), configsVersion.current); setConfigs(r.configs); configsVersion.current = r.version; } catch (e) { configsError(e); } };
+    const removeConfig = async (c: RunConfigDef) => { await writeConfigs(configs.filter((x) => x !== c), `Deleted "${c.name}"`); };
     // The form's concerns, one per tab (remembered on this computer).
     type SetupTab = 'what' | 'options' | 'saved';
     const [setupTab, setSetupTabRaw] = React.useState<SetupTab>(() => { try { const v = localStorage.getItem('cs-studio-runs-setup-tab'); return (v === 'options' || v === 'saved' ? v : 'what'); } catch { return 'what'; } });
-    const setSetupTab = (v: SetupTab) => { setSetupTabRaw(v); try { localStorage.setItem('cs-studio-runs-setup-tab', v); } catch { /* ignore */ } };
+    const setSetupTab = (v: SetupTab) => { setSetupTabRaw(v); try { localStorage.setItem('cs-studio-runs-setup-tab', v); } catch { /* ignore */ } if (v === 'saved') loadConfigs(); };
     const optSummary = `${target.browser}${target.device ? ` · ${target.device}` : ''} · ${target.workers} worker${target.workers === 1 ? '' : 's'}${target.retries ? ` · ${target.retries} retr${target.retries === 1 ? 'y' : 'ies'}` : ''} · ${target.headless ? 'browser hidden' : 'browser shown'}${target.width && target.height ? ` · ${target.width}×${target.height}` : ''}${variables() ? ` · ${Object.keys(variables()!).length} value(s)` : ''}${target.ado ? ` · Azure DevOps ${target.ado === 'on' ? 'on' : 'off'}` : ''}`;
     // Lines of "Values for this run" that are not KEY=value (they are left out of the run).
     const badVars = target.vars.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !/^[A-Za-z][\w]*\s*=/.test(l));
@@ -326,8 +353,8 @@ export function Runs() {
                 <Card size="small" title="New run" className="tests-setup" styles={{ body: { maxHeight: 'calc(100vh - var(--chrome) - 200px)', overflow: 'auto', paddingTop: 0 } }}
                     extra={<Space size={6}>
                         {running && <Button size="small" danger icon={<StopOutlined />} onClick={() => { const r = runs.find((x) => x.state === 'running'); if (r) void api.stopRun(r.id); }}>Stop</Button>}
-                        <Tooltip title={running ? 'A run is already in progress' : nothing ? 'Nothing matches this choice' : tooMany ? `Framework ${fw?.version ?? ''} runs one chosen scenario at a time (several need 1.55 or later): choose one, or use a tag` : undefined}>
-                            <Button type="primary" icon={<CaretRightOutlined />} loading={starting} disabled={running || !target.project || nothing || tooMany || fw?.installed === false}
+                        <Tooltip title={running ? 'A run is already in progress' : badOpts.length ? `Put the options right first: ${badOpts.join(', ')}` : nothing ? 'Nothing matches this choice' : tooMany ? `Framework ${fw?.version ?? ''} runs one chosen scenario at a time (several need 1.55 or later): choose one, or use a tag` : undefined}>
+                            <Button type="primary" icon={<CaretRightOutlined />} loading={starting} disabled={running || !target.project || nothing || tooMany || fw?.installed === false || badOpts.length > 0}
                                 onClick={() => start(request())}>{starting ? 'Starting…' : 'Run'}</Button>
                         </Tooltip>
                         <Tooltip title="Run in a visible browser and pause before each step or when a step fails">
@@ -358,13 +385,13 @@ export function Runs() {
                                             options={DEVICES.map((d) => ({ value: d, label: d }))} /></Form.Item></Col>
                                 </Row>
                                 <Row gutter={12}>
-                                    <Col span={8}><Form.Item label="Workers" style={{ marginBottom: 8 }} htmlFor="cs-runs-workers" tooltip="Scenarios run at the same time"><InputNumber id="cs-runs-workers" precision={0} min={1} max={16} value={target.workers} onChange={(v) => { if (v !== null) setTarget({ ...target, workers: v }); }} style={{ width: '100%' }} /></Form.Item></Col>
-                                    <Col span={8}><Form.Item label="Retries" style={{ marginBottom: 8 }} htmlFor="cs-runs-retries" tooltip="Run a failed scenario again, up to this many times (passing on a retry marks it flaky)"><InputNumber id="cs-runs-retries" precision={0} min={0} max={5} value={target.retries} onChange={(v) => { if (v !== null) setTarget({ ...target, retries: v }); }} style={{ width: '100%' }} /></Form.Item></Col>
+                                    <Col span={8}><Form.Item label="Workers" style={{ marginBottom: 8 }} htmlFor="cs-runs-workers" tooltip="Scenarios run at the same time"><StrictWholeNumber id="cs-runs-workers" label="Workers" min={1} max={16} value={target.workers} onChange={(v) => setTarget((t) => ({ ...t, workers: v }))} onValidity={validity('Workers')} /></Form.Item></Col>
+                                    <Col span={8}><Form.Item label="Retries" style={{ marginBottom: 8 }} htmlFor="cs-runs-retries" tooltip="Run a failed scenario again, up to this many times (passing on a retry marks it flaky)"><StrictWholeNumber id="cs-runs-retries" label="Retries" min={0} max={5} value={target.retries} onChange={(v) => setTarget((t) => ({ ...t, retries: v }))} onValidity={validity('Retries')} /></Form.Item></Col>
                                     <Col span={8}><Form.Item label="Show browser" style={{ marginBottom: 8 }}><Switch aria-label="Show the browser" checked={!target.headless} onChange={(v) => setTarget({ ...target, headless: !v })} /></Form.Item></Col>
                                 </Row>
                                 <Row gutter={12}>
                                     <Col span={24}><Form.Item label="Window size" style={{ marginBottom: 8 }} tooltip="Browser window size (width × height); empty: the project's setting">
-                                        <Space.Compact style={{ width: '100%' }}><InputNumber min={200} max={7680} precision={0} controls={false} placeholder="Width" style={{ width: '50%' }} value={target.width} onChange={(v) => setTarget({ ...target, width: v ?? undefined })} aria-label="Window width" /><InputNumber min={200} max={7680} precision={0} controls={false} placeholder="Height" style={{ width: '50%' }} value={target.height} onChange={(v) => setTarget({ ...target, height: v ?? undefined })} aria-label="Window height" /></Space.Compact></Form.Item></Col>
+                                        <div style={{ display: 'flex', gap: 8 }}><StrictWholeNumber label="Window width" placeholder="Width" style={{ flex: 1 }} min={200} max={7680} value={target.width} onChange={(v) => setTarget((t) => ({ ...t, width: v }))} onClear={() => setTarget((t) => ({ ...t, width: undefined }))} onValidity={validity('Window width')} /><StrictWholeNumber label="Window height" placeholder="Height" style={{ flex: 1 }} min={200} max={7680} value={target.height} onChange={(v) => setTarget((t) => ({ ...t, height: v }))} onClear={() => setTarget((t) => ({ ...t, height: undefined }))} onValidity={validity('Window height')} /></div></Form.Item></Col>
                                 </Row>
                                 <Form.Item label="Azure DevOps results" style={{ marginBottom: 8 }} htmlFor="cs-runs-ado" tooltip="Whether this run sends its results to Azure DevOps test plans. Don't send: for local tries, and off the company network (otherwise each call waits for Azure DevOps).">
                                     <Select id="cs-runs-ado" value={target.ado ?? 'config'} onChange={(v) => setTarget({ ...target, ado: v === 'config' ? undefined : v as 'on' | 'off' })}
@@ -411,7 +438,7 @@ export function Runs() {
                             <Space direction="vertical" size={0} style={{ width: '100%', minWidth: 0 }}>
                                 <Space><Tag color={STATE_TAG[r.state].color} icon={r.state === 'running' ? <LoadingOutlined /> : undefined}>{STATE_TAG[r.state].label}</Tag><Typography.Text>{r.request.project} / {r.request.env}</Typography.Text>{r.bisect && <Tag color="geekblue">search {r.bisect.commit.slice(0, 7)}</Tag>}
                                     {r.summary && <Typography.Text type="secondary">{r.summary.passed}✓ {r.summary.failed}✗{r.summary.flaky ? <Tooltip title="Passed only after a retry"> <Typography.Text type="warning">{r.summary.flaky}↻</Typography.Text></Tooltip> : null}</Typography.Text>}</Space>
-                                <Typography.Text type="secondary" ellipsis={{ tooltip: r.command.slice(3).join(' ') }} style={{ fontSize: 12, maxWidth: '100%' }}>{new Date(r.startedAt).toLocaleString()} · {r.command.slice(3).join(' ') || 'everything'}</Typography.Text>
+                                <Typography.Text type="secondary" title={r.command.slice(3).join(' ')} style={{ fontSize: 12, maxWidth: '100%', display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{new Date(r.startedAt).toLocaleString()} · {r.command.slice(3).join(' ') || 'everything'}</Typography.Text>
                             </Space>
                         </List.Item>
                     )} />
@@ -440,7 +467,9 @@ export function Runs() {
                                 {current.bisect && <Tooltip title="A step of the search for the commit that broke a scenario, run on an earlier commit in a separate copy (removed when the search ended, with its report)"><Tag color="geekblue" style={{ marginInlineEnd: 0 }}>Search step · {current.bisect.commit.slice(0, 8)}</Tag></Tooltip>}
                                 {current.pr && <Tooltip title={`${current.pr.based === 'merge' ? 'Merge result' : 'Source branch'} ${current.pr.commit.slice(0, 8)} of "${current.pr.title}"`}>
                                     <Tag color="purple" style={{ cursor: 'pointer', marginInlineEnd: 0 }} onClick={() => navigate(['prs', current.pr!.repository, current.pr!.id, 'tests'])}>Pull request !{current.pr.id}</Tag></Tooltip>}
-                                <Typography.Text type="secondary">{fmtMs((current.endedAt ? Date.parse(current.endedAt) : now) - Date.parse(current.startedAt))}</Typography.Text>
+                                {/* Two durations, named: the whole run (with the framework's start-up and the report) and the tests' own time as the report counts it. */}
+                                <Tooltip title="From pressing Run to the end, with the framework's start-up, browser launch and report writing"><Typography.Text type="secondary">Run time (with start-up) {fmtMs((current.endedAt ? Date.parse(current.endedAt) : now) - Date.parse(current.startedAt))}</Typography.Text></Tooltip>
+                                {s && s.duration > 0 && <Tooltip title="The tests' own time, as the framework's HTML report shows it (its header and Timeline)"><Typography.Text type="secondary">· Test time (report) {fmtMs(s.duration)}</Typography.Text></Tooltip>}
                                 {s && <Space size={6} className="run-counts">
                                     <span><b>{s.total}</b> scenario{s.total === 1 ? '' : 's'}</span>
                                     <Tag color="success" style={{ marginInlineEnd: 0 }}>{s.passed} passed</Tag>

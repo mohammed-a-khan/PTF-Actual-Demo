@@ -86,6 +86,10 @@ export function validPolicy(p: LoadPolicy): string | null {
         if (!Array.isArray(p.points) || p.points.length < 2 || p.points.length > 10_000) return 'A custom curve needs 2 to 10000 points (second, users).';
         if (p.points.some((x, i) => !n(x?.t) || !n(x?.users) || x.users > 100_000 || (i > 0 && x.t < p.points![i - 1].t))) return 'The points of a custom curve go up in time, with 0 to 100000 users.';
     }
+    // Users and seconds are whole numbers: 2.5 users is refused (said), never rounded when it runs.
+    const WHOLE: Array<[keyof LoadPolicy, string]> = [['duration', 'Run for (seconds)'], ['users', 'Users'], ['rampUp', 'Ramp up (seconds)'], ['rampDown', 'Ramp down (seconds)'], ['startUsers', 'Start with (users)'], ['stepUsers', 'Users per step'], ['stepEvery', 'Seconds per step'], ['peakUsers', 'Peak users'], ['peakEvery', 'Peak every (seconds)'], ['peakLength', 'Peak length (seconds)'], ['amplitude', 'Plus/minus (users)'], ['period', 'Period (seconds)']];
+    for (const [k, label] of WHOLE) { const v = p[k]; if (typeof v === 'number' && Number.isFinite(v) && !Number.isInteger(v)) return `${label}: a whole number (not ${v}).`; }
+    if (p.type === 'custom' && p.points!.some((x) => !Number.isInteger(x.users))) return 'The users of a custom curve are whole numbers.';
     if (!n(p.duration) || p.duration < 1 || p.duration > 7 * 24 * 3600) return 'The duration must be between 1 second and 7 days.';
     if (!n(p.users) || p.users < 1 || p.users > 100_000) return 'The number of users must be between 1 and 100000.';
     for (const k of ['rampUp', 'rampDown', 'startUsers', 'stepUsers', 'stepEvery', 'peakUsers', 'peakEvery', 'peakLength', 'amplitude', 'period', 'rate', 'startRate'] as const) if (p[k] !== undefined && !n(p[k])) return `"${k}" must be a positive number.`;

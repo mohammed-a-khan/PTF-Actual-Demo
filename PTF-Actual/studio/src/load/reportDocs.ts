@@ -21,7 +21,27 @@ const when = (r: LoadRunDetail) => new Date(r.result?.startedAt ?? r.startedAt).
 const change = (now: number, ref: number) => (ref ? `${now >= ref ? '+' : ''}${((100 * (now - ref)) / ref).toFixed(0)}%` : '');
 
 const STATUS_COLOR: Record<string, string> = { green: '#1a7f37', amber: '#b45309', red: '#cf222e' };
-const VERDICT: Record<string, string> = { better: '▼ better', worse: '▲ worse', same: '≈ same', info: '', new: 'new', gone: 'not run' };
+const VERDICT: Record<string, string> = { better: 'better', worse: 'worse', same: '≈ same', info: '', new: 'new', gone: 'not run', failing: 'fails' };
+/** The arrow follows the number (▲ went up, ▼ went down); the word says whether that is better or worse. */
+export function verdictText(verdict: string, change: string): string {
+    const word = VERDICT[verdict] ?? '';
+    if (verdict !== 'better' && verdict !== 'worse') return word;
+    const m = /([+\-−])\s*\d*\.?\d*[1-9]/.exec(change);
+    const arrow = m ? (m[1] === '+' ? '▲ ' : '▼ ') : '';
+    return `${arrow}${word}`;
+}
+/** Transactions of runs paired by their request's id (two requests may share a name); the label tells same names apart. */
+function txRows(done: LoadRunDetail[]): Array<{ key: string; label: string; of: (r: LoadRunDetail) => NonNullable<LoadRunDetail['result']>['transactions'][number] | undefined }> {
+    const key = (t: { id?: string; name: string }) => t.id || `name:${t.name}`;
+    const seen = new Map<string, string>();
+    for (const r of done) for (const t of r.result!.transactions) if (!seen.has(key(t))) seen.set(key(t), t.name);
+    const count = new Map<string, number>();
+    return [...seen].map(([k, name]) => {
+        const n = (count.get(name) ?? 0) + 1; count.set(name, n);
+        const same = [...seen.values()].filter((x) => x === name).length;
+        return { key: k, label: same > 1 ? `${name} (${n})` : name, of: (r: LoadRunDetail) => r.result!.transactions.find((t) => key(t) === k) };
+    });
+}
 const label = (r: LoadRunDetail, i: number) => `Run ${String.fromCharCode(65 + i)} (${when(r)})`;
 
 /** 2–4 runs of a scenario compared: the first is the reference; each later run is judged against it in plain language. */
@@ -31,15 +51,13 @@ export function loadComparisonHtml(runs: LoadRunDetail[]): string {
     const ref = done[0];
     const parts = done.slice(1).map((r, k) => ({ r, i: k + 1, c: compareRuns(ref.result!, r.result!, { a: label(ref, 0), b: label(r, k + 1) }, { a: ref.definition, b: r.definition }) }));
     const exec = parts.map(({ c }) => `<div class="status" style="border-color:${STATUS_COLOR[c.status]}"><div class="badge" style="background:${STATUS_COLOR[c.status]}">${c.status.toUpperCase()}</div><div><b>${esc(c.headline.replace(/^\w+ — /, ''))}</b><p>${esc(c.answer)}</p></div></div>`).join('');
-    const vcell = (v: string, text: string) => `<td class="v-${v}">${esc(text)} <small>${VERDICT[v] ?? ''}</small></td>`;
+    const vcell = (v: string, text: string) => `<td class="v-${v}">${esc(text)} <small>${verdictText(v, text)}</small></td>`;
     const metricTable = parts.map(({ c, i }) => `<h3>${esc(label(ref, 0))} → ${esc(label(done[i], i))}</h3><table class="explain"><tr><th>Measure</th><th>${esc(label(ref, 0))}</th><th>${esc(label(done[i], i))}</th><th>Change</th><th>What it means</th></tr>`
         + c.metrics.map((m) => `<tr><td>${esc(m.label)}</td><td>${esc(m.a)}</td><td><b>${esc(m.b)}</b></td>${vcell(m.verdict, m.change)}<td>${esc(m.meaning)}</td></tr>`).join('') + '</table>'
         + (c.findings.length ? `<ul>${c.findings.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>` : '<p>No transaction changed beyond normal variation.</p>')).join('');
-    const names = [...new Set(done.flatMap((r) => r.result!.transactions.map((t) => t.name)))];
-    const tx = `<table><tr><th>Transaction (95% within)</th>${done.map((r, i) => `<th><span style="color:${COLORS[i]}">■</span> ${esc(label(r, i))}</th>`).join('')}</tr>${names.map((n) => {
-        const of = (r: LoadRunDetail) => r.result!.transactions.find((t) => t.name === n);
+    const tx = `<table><tr><th>Transaction (95% within)</th>${done.map((r, i) => `<th><span style="color:${COLORS[i]}">■</span> ${esc(label(r, i))}</th>`).join('')}</tr>${txRows(done).map(({ label: n, of }) => {
         const base = of(ref);
-        return `<tr><td>${esc(n)}</td>${done.map((r, i) => { const t = of(r); if (!t) return '<td>—</td>'; if (i === 0 || !base) return `<td>${t.p95} ms</td>`; const c = base.p95 ? Math.round((100 * (t.p95 - base.p95)) / base.p95) : 0; const v = Math.abs(c) < 10 || Math.abs(t.p95 - base.p95) < 20 ? 'same' : c > 0 ? 'worse' : 'better'; return vcell(v, `${t.p95} ms (${c >= 0 ? '+' : ''}${c}%)`); }).join('')}</tr>`;
+        return `<tr><td>${esc(n)}</td>${done.map((r, i) => { const t = of(r); if (!t) return '<td>—</td>'; if (t.errorRate >= 50) return vcell('failing', `${t.p95} ms (${Math.round(t.errorRate)}% errors)`); if (i === 0 || !base) return `<td>${t.p95} ms</td>`; const c = base.p95 ? Math.round((100 * (t.p95 - base.p95)) / base.p95) : 0; const v = Math.abs(c) < 10 || Math.abs(t.p95 - base.p95) < 20 ? 'same' : c > 0 ? 'worse' : 'better'; return vcell(v, `${t.p95} ms (${c >= 0 ? '+' : ''}${c}%)`); }).join('')}</tr>`;
     }).join('')}</table>`;
     const xs = [...new Set(done.flatMap((r) => r.result!.timeline.map((s) => s.t)))].sort((a, b) => a - b);
     const series = (get: (s: NonNullable<LoadRunDetail['result']>['timeline'][number]) => number) => done.map((r, i) => {
@@ -49,7 +67,7 @@ export function loadComparisonHtml(runs: LoadRunDetail[]): string {
     const notes = [...new Set(parts.flatMap((p) => p.c.notes))];
     return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${esc(ref.name)} — comparison</title><style>${REPORT_STYLE}
 .status{display:flex;gap:16px;align-items:center;border:2px solid;border-radius:8px;padding:12px 16px;margin:12px 0}.badge{color:#fff;font-weight:700;padding:10px 14px;border-radius:6px;font-size:18px}.status p{margin:4px 0 0}
-table.explain td,table.explain th{text-align:left!important}td.v-worse{color:#cf222e;font-weight:600}td.v-better{color:#1a7f37;font-weight:600}small{color:#6b7280;font-weight:400}</style></head><body>
+table.explain td,table.explain th{text-align:left!important}td.v-worse,td.v-failing{color:#cf222e;font-weight:600}td.v-better{color:#1a7f37;font-weight:600}small{color:#6b7280;font-weight:400}</style></head><body>
 <h1>${esc(ref.name)}: ${done.length} runs compared</h1>
 <div class="m">${esc(ref.project)} · ${done.map((r, i) => `${esc(label(r, i))}: ${esc(r.env)}, ${esc(describePolicy(r.definition.policy))}`).join(' · ')}</div>
 <h2>Verdict</h2>${exec}
@@ -75,7 +93,7 @@ export async function loadComparisonDocx(runs: LoadRunDetail[], projectRoot?: st
         blocks.push({ kind: 'heading', level: 2, text: `${label(ref, 0)} → ${label(done[i], i)}` },
             { kind: 'para', runs: [{ text: `${c.status.toUpperCase()}  `, bold: true, color: STATUS_COLOR[c.status] }, { text: c.headline.replace(/^\w+ — /, ''), bold: true }] },
             { kind: 'para', runs: c.answer },
-            { kind: 'table', header: ['Measure', label(ref, 0), label(done[i], i), 'Change', 'What it means'], widths: [2, 1.3, 1.3, 1.3, 4], rows: c.metrics.map((m) => [m.label, m.a, m.b, `${m.change} ${VERDICT[m.verdict] ?? ''}`.trim(), m.meaning]),
+            { kind: 'table', header: ['Measure', label(ref, 0), label(done[i], i), 'Change', 'What it means'], widths: [2, 1.3, 1.3, 1.3, 4], rows: c.metrics.map((m) => [m.label, m.a, m.b, `${m.change} ${verdictText(m.verdict, m.change)}`.trim(), m.meaning]),
                 shade: (k) => (c.metrics[k].verdict === 'worse' ? 'FFF5F5' : c.metrics[k].verdict === 'better' ? 'F0FFF4' : undefined) },
             ...c.findings.map((f) => ({ kind: 'para' as const, runs: `• ${f}` })),
             ...c.notes.map((n) => ({ kind: 'para' as const, muted: true, runs: n })));
@@ -85,8 +103,7 @@ export async function loadComparisonDocx(runs: LoadRunDetail[], projectRoot?: st
     const figs = [{ caption: '95% response time (ms)', svg: svgChart('95% response time (ms)', xs, series((s) => s.p95)) }, { caption: 'Requests per second', svg: svgChart('Requests per second', xs, series((s) => s.requests)) }];
     try { const pics = await chartsToPng(figs.map((f) => f.svg), projectRoot); blocks.push({ kind: 'heading', level: 2, text: 'Over time' }, ...pics.map((p, k) => ({ kind: 'image' as const, ...p, caption: figs[k].caption }))); }
     catch (e) { blocks.push({ kind: 'para', muted: true, runs: `Charts are in the HTML comparison (${(e as Error).message.split('\n')[0]}).` }); }
-    const names = [...new Set(done.flatMap((r) => r.result!.transactions.map((t) => t.name)))];
-    blocks.push({ kind: 'heading', level: 2, text: 'Every transaction (95% within, ms)' }, { kind: 'table', header: ['Transaction', ...done.map((r, i) => label(r, i))], rows: names.map((n) => [n, ...done.map((r) => String(r.result!.transactions.find((t) => t.name === n)?.p95 ?? '—'))]) },
+    blocks.push({ kind: 'heading', level: 2, text: 'Every transaction (95% within, ms)' }, { kind: 'table', header: ['Transaction', ...done.map((r, i) => label(r, i))], rows: txRows(done).map(({ label: n, of }) => [n, ...done.map((r) => String(of(r)?.p95 ?? '—'))]) },
         { kind: 'para', muted: true, runs: 'Run-to-run changes within ±10%, or under 20 ms, are normal variation.' });
     return docx(blocks, { title: `${ref.name} — comparison` });
 }

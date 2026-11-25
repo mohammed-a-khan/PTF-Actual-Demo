@@ -5,7 +5,7 @@
  * share of them. Started here on this computer, or in a test ("the API mock … is running").
  */
 import React from 'react';
-import { Alert, App, Button, Col, Empty, Form, Input, InputNumber, Modal, Popconfirm, Row, Segmented, Select, Space, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Col, Empty, Form, Input, Modal, Popconfirm, Row, Segmented, Select, Space, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { CaretRightOutlined, CopyOutlined, DeleteOutlined, PlusOutlined, SaveOutlined, StopOutlined, UploadOutlined } from '@ant-design/icons';
 import { api, ApiCollectionInfo, MockDef, MockFaultKind, MockInfo, MockLogEntryDef, MockRouteDef } from '../api';
 import { useUnsaved } from '../unsaved';
@@ -13,7 +13,8 @@ import { useKept } from '../kept';
 import { errText } from '../state';
 import { navigate, useRoute } from '../route';
 import { Split } from '../components/Split';
-import { askUnsaved, httpUrlProblem, SectionTitle, shownTab, useEscapeCloses, useRememberedTab } from '../apiperf-ui';
+import { staleVersion } from '../datagit-api';
+import { askChangedElsewhere, askUnsaved, FieldProblems, httpUrlProblem, isChangedElsewhere, NumField, SectionTitle, shownTab, useEscapeCloses, useFieldProblems, useRememberedTab, versionOf, withBase } from '../apiperf-ui';
 
 const FAULTS: Array<{ value: MockFaultKind; label: string; help: string }> = [
     { value: 'none', label: 'None', help: 'Answers as set' },
@@ -38,11 +39,13 @@ export function ApiMocks() {
     const [projects, setProjects] = React.useState<string[]>([]);
     const [project, setProject] = React.useState('');
     const [list, setList] = React.useState<MockInfo[] | null>(null);
-    const [cur, setCur] = React.useState<{ file: string; mock: MockDef; dirty: boolean } | null>(null);
+    // version: the file as it was read (a save over a version saved in another tab is refused: Reload / Overwrite / Keep editing).
+    const [cur, setCur] = React.useState<{ file: string; mock: MockDef; dirty: boolean; version?: string } | null>(null);
+    const fields = useFieldProblems();
     // Loads answer in any order: only the last one asked for is shown (a Discard's reload never replaces the next mock).
     const loadSeq = React.useRef(0);
     // Why the mock cannot be saved now (Save is then not offered in the prompts), or null.
-    const problem = cur && !cur.mock.name.trim() ? 'give the mock a name.' : null;
+    const problem = cur && !cur.mock.name.trim() ? 'give the mock a name.' : fields.problem;
     /** Discard: the saved mock again (no changes). */
     const discard = () => { const f = cur?.file; if (!f) return; setCur((c) => (c ? { ...c, dirty: false } : c)); void load(project, f); };
     useUnsaved('api-mock', !!cur?.dirty, `the mock "${cur?.mock.name || cur?.file.split('/').pop() || ''}"`, { lostOnLeave: true, save: problem ? undefined : async () => !!(await save()), discard });
@@ -68,29 +71,31 @@ export function ApiMocks() {
     React.useEffect(() => { if (here) api.apiCollections().then((r) => { setProjects(r.projects); setProject((p) => p || (projectInRoute && r.projects.includes(projectInRoute) ? projectInRoute : r.projects[0]) || ''); }).catch((e) => setErr(errText(e))); }, [here]); // eslint-disable-line react-hooks/exhaustive-deps
     const refresh = React.useCallback(() => { if (project) api.mocks(project).then((r) => setList(r.mocks)).catch((e) => setErr(errText(e))); }, [project]);
     React.useEffect(() => { loadSeq.current++; setCur(null); setList(null); refresh(); }, [project, refresh]);
-    // The running mock's requests, live.
+    // The running mock's requests, live (only while this screen is shown).
     React.useEffect(() => {
-        if (!cur || !url) return;
+        if (!cur || !url || !here) return;
         let stop = false;
         const tick = () => api.mockLog(project, cur.file).then((r) => { if (stop) return; setLog(r.log); if (!r.running) setUrl(null); }).catch(() => {}).finally(() => { if (!stop) setTimeout(tick, 1000); });
         void tick();
         return () => { stop = true; };
-    }, [cur?.file, url, project]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [cur?.file, url, project, here]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const load = (p: string, file: string) => { const n = ++loadSeq.current; return api.mockGet(p, file).then((r) => { if (n !== loadSeq.current) return; setLastFile(r.file); setCur({ file: r.file, mock: r.mock, dirty: false }); setUrl(r.url ?? null); setLog([]); setPort(r.mock.port ? r.mock.port : null); setErr(null); }).catch((e) => { setErr(errText(e)); setLastFile(null); }); };
+    const load = (p: string, file: string) => { const n = ++loadSeq.current; return api.mockGet(p, file).then((r) => { if (n !== loadSeq.current) return; setLastFile(r.file); setCur({ file: r.file, mock: r.mock, dirty: false, version: versionOf(r) }); setUrl(r.url ?? null); setLog([]); setPort(r.mock.port ? r.mock.port : null); setErr(null); }).catch((e) => { setErr(errText(e)); setLastFile(null); }); };
     /** A mock chosen in the list: its address (the address then opens it, below). */
     const open = (m: MockInfo) => {
         if (cur?.file === m.file) return;
         leave(() => navigate(['api-mocks', ...m.file.split('/')]));
     };
-    // The address → the open mock (also its project). With unsaved changes: Save, Discard or Stay (Stay puts the address back).
+    // The address → the open mock (also its project). With unsaved changes the app asks (one "Unsaved changes" question:
+    // Stay puts the address back, Discard and Save clean the mock); this screen does not ask again: it opens the mock in
+    // the address once nothing would be lost.
     React.useEffect(() => {
         if (!fileInRoute || !projects.length || !projectInRoute || !projects.includes(projectInRoute)) return;
+        if (cur?.dirty && cur.file !== fileInRoute) return;
         if (projectInRoute !== project) { setProject(projectInRoute); return; }
         if (cur?.file === fileInRoute) return;
-        const back = cur?.file;
-        leave(() => void load(projectInRoute, fileInRoute), () => navigate(back ? ['api-mocks', ...back.split('/')] : ['api-mocks'], true));
-    }, [fileInRoute, project, projects.length]); // eslint-disable-line react-hooks/exhaustive-deps
+        void load(projectInRoute, fileInRoute);
+    }, [fileInRoute, project, projects.length, cur?.dirty]); // eslint-disable-line react-hooks/exhaustive-deps
     // Back on the screen from the menu (#/api-mocks): the open mock's address again. Back from a mock to #/api-mocks
     // within the screen shows the list with none open (the address says so), and Forward opens it again.
     const prevFileInRoute = React.useRef(fileInRoute);
@@ -110,12 +115,29 @@ export function ApiMocks() {
         saving.current = true;
         try { return await saveNow(); } finally { saving.current = false; }
     };
-    const saveNow = async () => {
+    const saveNow = async (force = false): Promise<boolean> => {
         if (!cur) return false;
+        if (problem) { setErr(`Cannot be saved yet: ${problem}`); return false; }
         setBusy(true);
         setErr(null);
-        try { const r = await api.mockSave(project, cur.file, { ...cur.mock, ...(port !== null ? { port } : {}) }); setCur({ ...cur, dirty: false }); refresh(); if (r.restartForPort) message.warning('Saved. The running mock answers with the changes now; stop and start it to use the new port.'); else message.success(r.applied ? 'Saved: the running mock answers with the changes now' : 'Saved'); return true; }
-        catch (e) { setErr(errText(e)); return false; } finally { setBusy(false); }
+        try {
+            const r = await api.mockSave(project, cur.file, withBase({ ...cur.mock, ...(port !== null ? { port } : {}) }, cur.version, force));
+            setCur((c) => (c && c.file === cur.file ? { ...c, dirty: c.mock !== cur.mock, version: versionOf(r) } : c)); refresh();
+            if (r.restartForPort) message.warning('Saved. The running mock answers with the changes now; stop and start it to use the new port.'); else message.success(r.applied ? 'Saved: the running mock answers with the changes now' : 'Saved');
+            return true;
+        } catch (e) {
+            // Saved in another tab (or by a teammate) since it was opened here: Reload, Overwrite or Keep editing, never silently lost.
+            if (isChangedElsewhere(e) && !force) {
+                setBusy(false);
+                const how = await askChangedElsewhere(modal, `The mock "${cur.mock.name || cur.file.split('/').pop()}"`);
+                if (how === 'overwrite') return saveNow(true);
+                if (how === 'reload') { await load(project, cur.file); message.info('Showing the version saved elsewhere.'); }
+                // Keep editing: these edits now build on the version saved elsewhere, so the next Save goes through.
+                else { const v = staleVersion(e); if (v) setCur((c) => (c && c.file === cur.file ? { ...c, version: v } : c)); }
+                return false;
+            }
+            setErr(errText(e)); return false;
+        } finally { setBusy(false); }
     };
     const start = async () => {
         if (!cur) return;
@@ -151,7 +173,7 @@ export function ApiMocks() {
             await api.mockSave(project, file, r.mock);
             for (const w of r.warnings) message.warning(w);
             setCreating(null); refresh();
-            setCur({ file, mock: r.mock, dirty: false }); setUrl(null); setLog([]); setPort(r.mock.port ? r.mock.port : null);
+            setCur({ file, mock: r.mock, dirty: false, version: undefined }); setUrl(null); void load(project, file); setLog([]); setPort(r.mock.port ? r.mock.port : null);
             setLastFile(file); navigate(['api-mocks', ...file.split('/')]);
         } catch (e) { setCreateErr(errText(e)); } finally { setBusy(false); }
     };
@@ -194,15 +216,15 @@ export function ApiMocks() {
                     <div className="toolbar ap-toolbar-wrap">
                         <Input size="small" style={{ width: 220 }} status={m.name.trim() ? undefined : "error"} placeholder="Name (required)" value={m.name} maxLength={200} onChange={(e) => setCur({ ...cur, dirty: true, mock: { ...m, name: e.target.value } })} aria-label="Mock name" />
                         {cur.dirty && <span className="dirty-dot" title="Not saved" />}
-                        <Button size="small" icon={<SaveOutlined />} type={cur.dirty ? 'primary' : 'default'} loading={busy} disabled={!cur.dirty} onClick={() => void save()}>Save</Button>
+                        <Tooltip title={cur.dirty && problem ? `Cannot be saved yet: ${problem}` : undefined}><Button size="small" icon={<SaveOutlined />} type={cur.dirty ? 'primary' : 'default'} loading={busy} disabled={!cur.dirty || !!problem} onClick={() => void save()}>Save</Button></Tooltip>
                         {url ? <Button size="small" danger icon={<StopOutlined />} onClick={() => void stop()}>Stop</Button>
-                            : <Button size="small" type="primary" icon={<CaretRightOutlined />} loading={busy} onClick={() => void start()}>Start</Button>}
+                            : <Button size="small" type="primary" icon={<CaretRightOutlined />} loading={busy} disabled={!!problem} title={problem ? `Cannot be started yet: ${problem}` : undefined} onClick={() => void start()}>Start</Button>}
                         {url && <Space size={4}><Tag color="green" bordered={false} className="mono">{url}</Tag><Button size="small" type="text" icon={<CopyOutlined />} aria-label="Copy the URL" onClick={() => void navigator.clipboard?.writeText(url).then(() => message.success('Copied'))} /></Space>}
                         <span style={{ flex: 1 }} />
                         <Popconfirm title={`Delete ${cur.file}?`} okText="Delete" okButtonProps={{ danger: true }} onConfirm={async () => { try { await api.mockDelete(project, cur.file); setCur(null); setLastFile(null); setUrl(null); refresh(); navigate(['api-mocks'], true); } catch (e) { setErr(errText(e)); } }}>
                             <Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Delete the mock" /></Popconfirm>
                     </div>
-                    <div style={{ flex: 1, overflow: 'auto', padding: '0 12px 10px' }}>
+                    <FieldProblems value={fields.report}><div style={{ flex: 1, overflow: 'auto', padding: '0 12px 10px' }}>
                         <Tabs size="small" className="ap-tabs" activeKey={shownTab(tab, ['routes', 'faults', 'log', 'settings'])} onChange={setTab} items={[
                             { key: 'routes', label: <span>Routes <Tag bordered={false}>{m.routes.length}</Tag></span>, children: <>
                                 <Typography.Text type="secondary" className="ap-note" style={{ marginBottom: 6 }}>A body can answer with the request's values: {'{{path.id}}'}, {'{{query.name}}'}, {'{{body.field}}'}.</Typography.Text>
@@ -210,7 +232,7 @@ export function ApiMocks() {
                                     columns={[
                                         { title: 'On', width: 56, render: (_v, r, i) => <Switch size="small" checked={r.enabled !== false} onChange={(on) => route(i, { enabled: on })} aria-label={`Serve ${r.method} ${r.path}`} /> },
                                         { title: 'Route', ellipsis: true, render: (_v, r) => <span title={`${r.method.toUpperCase()} ${r.path}`}>{routeLabel(r)}</span> },
-                                        { title: 'Status', width: 90, render: (_v, r, i) => <InputNumber size="small" min={100} max={599} style={{ width: 76 }} value={r.status} onChange={(v) => route(i, { status: Number(v ?? 200) })} aria-label={`Status of ${r.method} ${r.path}`} /> },
+                                        { title: 'Status', width: 90, render: (_v, r, i) => <NumField size="small" min={100} max={599} width={76} value={r.status} onChange={(v) => v !== undefined && route(i, { status: v })} label={`Status of ${r.method} ${r.path}`} /> },
                                         { title: 'Body', width: 96, render: (_v, r, i) => <Button size="small" onClick={() => setEditBody({ i, text: r.body === undefined ? '' : typeof r.body === 'string' ? r.body : JSON.stringify(r.body, null, 2) })}>{r.body === undefined ? 'None' : 'Edit'}</Button> },
                                         { title: <Tooltip title="Other answers chosen by query, headers or body; or answers in turn (stateful)">Answers</Tooltip>, width: 130, render: (_v, r, i) => <Button size="small" onClick={() => setEditAnswers({ i, text: JSON.stringify({ sequence: !!r.sequence, responses: r.responses ?? [] }, null, 2) })}>{r.responses?.length ? `${r.responses.length} more${r.sequence ? ' · in turn' : ''}` : 'Add'}</Button> },
                                     ]} />
@@ -220,15 +242,15 @@ export function ApiMocks() {
                                 <Table<MockRouteDef> size="small" tableLayout="fixed" pagination={false} rowKey={(_r, i) => String(i)} dataSource={m.routes}
                                     columns={[
                                         { title: 'Route', ellipsis: true, render: (_v, r) => <span title={`${r.method.toUpperCase()} ${r.path}`}>{routeLabel(r)}</span> },
-                                        { title: <Tooltip title="Wait before every answer (ms)">Delay</Tooltip>, width: 110, render: (_v, r, i) => <InputNumber size="small" min={0} max={300000} step={100} style={{ width: 96 }} value={r.delayMs ?? 0} onChange={(v) => route(i, { delayMs: Number(v ?? 0) })} aria-label={`Delay of ${r.method} ${r.path}`} /> },
+                                        { title: <Tooltip title="Wait before every answer, in milliseconds">Delay (ms)</Tooltip>, width: 150, render: (_v, r, i) => <NumField size="small" min={0} max={300000} width={130} value={r.delayMs ?? 0} addonAfter="ms" onChange={(v) => v !== undefined && route(i, { delayMs: v })} label={`Delay of ${r.method} ${r.path}`} /> },
                                         { title: 'Fault', width: 230, render: (_v, r, i) => {
                                             const f = r.fault ?? { kind: 'none' as MockFaultKind };
                                             return <Space size={4} wrap>
                                                 <Select size="small" style={{ width: 110 }} value={f.kind} onChange={(k: MockFaultKind) => fault(i, { kind: k })} aria-label={`Fault of ${r.method} ${r.path}`}
                                                     options={FAULTS.map((x) => ({ value: x.value, label: <Tooltip title={x.help} placement="left">{x.label}</Tooltip> }))} />
-                                                {f.kind !== 'none' && <Tooltip title="The share of requests it applies to"><InputNumber size="small" min={0} max={100} style={{ width: 76 }} value={f.rate ?? 100} formatter={(v) => `${v}%`} parser={(v) => Number(String(v).replace('%', ''))} onChange={(v) => fault(i, { rate: Number(v ?? 100) })} aria-label="Share of requests" /></Tooltip>}
-                                                {f.kind === 'error' && <Tooltip title="Error status"><InputNumber size="small" min={400} max={599} style={{ width: 70 }} value={f.status ?? 503} onChange={(v) => fault(i, { status: Number(v ?? 503) })} aria-label="Error status" /></Tooltip>}
-                                                {f.kind === 'delay' && <InputNumber size="small" min={1} max={300000} step={500} style={{ width: 100 }} value={f.delayMs ?? 3000} formatter={(v) => `${v} ms`} parser={(v) => Number(String(v).replace(/\D/g, ''))} onChange={(v) => fault(i, { delayMs: Number(v ?? 3000) })} aria-label="Fault delay" />}
+                                                {f.kind !== 'none' && <Tooltip title="The share of requests it applies to"><NumField size="small" min={0} max={100} width={96} value={f.rate ?? 100} addonAfter="%" onChange={(v) => v !== undefined && fault(i, { rate: v })} label="Share of requests" /></Tooltip>}
+                                                {f.kind === 'error' && <Tooltip title="Error status"><NumField size="small" min={400} max={599} width={76} value={f.status ?? 503} onChange={(v) => v !== undefined && fault(i, { status: v })} label="Error status" /></Tooltip>}
+                                                {f.kind === 'delay' && <NumField size="small" min={1} max={300000} width={130} value={f.delayMs ?? 3000} addonAfter="ms" onChange={(v) => v !== undefined && fault(i, { delayMs: v })} label="Fault delay" />}
                                             </Space>;
                                         } },
                                     ]} />
@@ -245,7 +267,7 @@ export function ApiMocks() {
                                         ]} /> },
                             { key: 'settings', label: 'Settings', children: <Form layout="vertical" size="small" className="ap-form" style={{ maxWidth: 720 }}>
                                 <Row gutter={16}>
-                                    <Col xs={24} md={12}><Form.Item label="Port" tooltip="The port it listens on (empty: any free port)"><InputNumber min={0} max={65535} placeholder="any free port" value={port ?? undefined} onChange={(v) => { setPort(v === null || v === undefined ? null : Number(v)); setCur({ ...cur, dirty: true }); }} aria-label="Port" /></Form.Item></Col>
+                                    <Col xs={24} md={12}><Form.Item label="Port" tooltip="The port it listens on (empty: any free port)"><NumField min={0} max={65535} optional placeholder="any free port" width={200} value={port ?? undefined} onChange={(v) => { setPort(v === undefined ? null : v); setCur((c) => (c ? { ...c, dirty: true } : c)); }} label="Port" /></Form.Item></Col>
                                     <Col xs={24} md={12}><Form.Item label="File"><Input readOnly className="mono" value={cur.file} aria-label="Mock file" /></Form.Item></Col>
                                 </Row>
                                 <SectionTitle help="Start the mock from a feature file; the base URL step points the API steps at it.">Use it in a test</SectionTitle>
@@ -253,7 +275,7 @@ export function ApiMocks() {
 And the API base URL is "{{mockUrl}}"`}</pre>
                             </Form> },
                         ]} />
-                    </div>
+                    </div></FieldProblems>
                 </>}
             </div>
         </Split>

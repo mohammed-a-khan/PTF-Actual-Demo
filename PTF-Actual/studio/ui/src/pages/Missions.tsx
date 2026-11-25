@@ -4,9 +4,9 @@
  * pull request, or discard it. Team notes for agents and the team's triggers are here too.
  */
 import React from 'react';
-import { Alert, App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Progress, Radio, Row, Select, Space, Table, Tabs, Tag, Timeline, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Progress, Radio, Result, Row, Select, Space, Table, Tabs, Tag, Timeline, Tooltip, Typography } from 'antd';
 import { AimOutlined, BranchesOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, ExperimentOutlined, FileTextOutlined, PauseCircleOutlined, PullRequestOutlined, ReloadOutlined, TeamOutlined, HistoryOutlined, RocketOutlined, SafetyCertificateOutlined, StopOutlined, ThunderboltOutlined } from '@ant-design/icons';
-import { api, ExploreNoteDef, MissionDef, MissionStateDef, MissionSummaryDef, MissionTemplateDef, RunInfo } from '../api';
+import { api, ApiError, ExploreNoteDef, MissionDef, MissionStateDef, MissionSummaryDef, MissionTemplateDef, RunInfo } from '../api';
 import { errText, useStudio } from '../state';
 import { navigate, useRoute } from '../route';
 import { DiffView } from '../components/DiffView';
@@ -16,7 +16,8 @@ import { Markdown } from '../components/Markdown';
 import { Replay } from '../components/Replay';
 import { agentsApi, AgentTriggerView, MissionsView } from '../agents-api';
 import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
-import { WholeNumber } from '../components/WholeNumber';
+import { useValidity, WholeNumber } from '../components/WholeNumber';
+import { openAgentEditor } from './AgentBuilder';
 
 /** What a mission agent's trigger does, in words. */
 const agentTriggerText = (t: AgentTriggerView) => t.on === 'schedule' ? `schedule ${t.cron}` : t.on === 'run-failed' ? 'when a run fails' : t.on === 'work-item' ? 'new or changed work items' : `pull requests${t.target ? ` into ${t.target}` : ''}`;
@@ -49,7 +50,7 @@ export function Missions({ openConversation }: { openConversation: (session: str
     const [err, setErr] = React.useState<string | null>(null);
     const [starting, setStarting] = React.useState<MissionTemplateDef | null>(null);
     const [notesOpen, setNotesOpen] = React.useState(false);
-    const [tab, setTab] = useRememberedTab('missions', 'start', MISSION_TABS, 'missions');
+    const [tab, setTab] = useRememberedTab('missions', 'start', MISSION_TABS, 'missions', { items: true });
     const load = React.useCallback(() => { agentsApi.missions().then((r) => { setD(r); setErr(null); }).catch((e) => { startNext = null; setErr(errText(e)); }); }, []);
     React.useEffect(load, [load]);
     React.useEffect(() => {
@@ -91,6 +92,7 @@ export function Missions({ openConversation }: { openConversation: (session: str
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
             {d.problems.length > 0 && <Alert type="warning" showIcon message={`${d.file}: ${d.problems.join(' ')}`} />}
             {running?.state === 'waiting' && <Alert type="warning" showIcon message={<>The mission <b>{running.title}</b> is waiting for you.</>} action={<Button size="small" type="primary" onClick={() => navigate(['missions', running.id])}>Answer</Button>} />}
+            {open && <MissionDrawer key={open} id={open} onClose={() => navigate(['missions'])} onChanged={load} openConversation={openConversation} onDelete={remove} />}
             <Tabs size="small" activeKey={tab} onChange={setTab} tabBarExtraContent={<Space><Tooltip title="Every agent and mission reads these notes first"><Button size="small" icon={<FileTextOutlined />} onClick={() => setNotesOpen(true)}>Team notes for agents</Button></Tooltip><Tooltip title="Refresh"><Button size="small" icon={<ReloadOutlined />} onClick={load} aria-label="Refresh" /></Tooltip></Space>} items={[
                 { key: 'start', icon: <RocketOutlined />, label: <span>Start a mission</span>, children: (
                     <Row gutter={[12, 12]}>
@@ -113,7 +115,7 @@ export function Missions({ openConversation }: { openConversation: (session: str
                     <Card size="small" title="Mission agents' triggers" extra={<Button size="small" type="link" onClick={() => navigate(['agent-builder', 'mission'])}>Agent builder</Button>}>
                         {agentTriggers.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No mission agent starts by itself. Add a trigger in Agent builder (a mission agent's Triggers tab)." /> : (
                             <List size="small" dataSource={agentTriggers} renderItem={(t) => (
-                                <List.Item><Space wrap><Tag color={t.enabled === false ? 'default' : 'blue'}>{agentTriggerText(t)}</Tag><Typography.Text>{t.name}</Typography.Text>
+                                <List.Item><Space wrap><Tag color={t.enabled === false ? 'default' : 'blue'}>{agentTriggerText(t)}</Tag><Tooltip title={`Open ${t.name} in Agent builder (its Triggers tab)`}><Typography.Link onClick={() => openAgentEditor(t.agent, 'mission', 'triggers')}>{t.name}</Typography.Link></Tooltip>
                                     <Typography.Text type="secondary">· at most {t.maxPerDay ?? 3} a day</Typography.Text>{t.enabled === false && <Tag>off</Tag>}</Space></List.Item>
                             )} />
                         )}
@@ -130,7 +132,6 @@ export function Missions({ openConversation }: { openConversation: (session: str
                 ) },
             ]} />
             {starting && <StartMission queue={!!running} t={starting} onClose={() => setStarting(null)} onStarted={(id) => { setStarting(null); setTab('running'); load(); navigate(['missions', id]); }} />}
-            {open && <MissionDrawer id={open} onClose={() => navigate(['missions'])} onChanged={load} openConversation={openConversation} onDelete={remove} />}
             {notesOpen && <TeamNotes onClose={() => setNotesOpen(false)} />}
         </Space>
     );
@@ -144,24 +145,28 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
     const [budget, setBudget] = React.useState(t.budget);
     const [runs, setRuns] = React.useState<RunInfo[]>([]);
     const [busy, setBusy] = React.useState(false);
+    const startingNow = React.useRef(false);
+    // Whole-number fields in error (a budget, a number input): the mission does not start until put right.
+    const numbers = useValidity();
     const { modal } = App.useApp();
     // Typed into the dialog: Esc, the close button and Cancel ask before it is thrown away.
-    const typed = Object.values(v).some((x) => (x ?? '').trim() !== '');
+    const typed = Object.values(v).some((x) => (x ?? '').trim() !== '') || numbers.bad.length > 0;
     useUnsaved('start-mission', typed, `the "${t.title}" mission not started`, { lostOnLeave: true });
     const cancel = () => { if (!typed || busy) { if (!busy) onClose(); return; } modal.confirm({ title: 'Leave without starting?', content: 'What you typed for this mission is lost.', okText: 'Leave', okButtonProps: { danger: true }, cancelText: 'Stay', onOk: onClose }); };
     React.useEffect(() => { if (t.inputs.some((i) => i.kind === 'run')) api.runs().then((r) => setRuns(r.filter((x) => x.state === 'failed' && !x.workdir && (x.summary?.failed ?? 0) > 0).slice(0, 30))).catch(() => undefined); }, [t]);
     const projects = env?.projects ?? [];
     const envs = v.project ? env?.environments[v.project] ?? [] : [];
     const go = async () => {
-        if (busy) return;
+        if (busy || startingNow.current) return;
+        if (numbers.bad.length) { message.warning(`Put right first: ${numbers.bad.join(', ')} (a whole number in range).`); return; }
         const missing = t.inputs.filter((i) => i.required && !(v[i.key] ?? '').trim()).map((i) => i.label);
         if (missing.length) { message.warning(`Fill in: ${missing.join(', ')}`); return; }
         const badUrl = t.inputs.find((i) => i.key === 'url' && (v[i.key] ?? '').trim() && !/^https?:\/\/[^\s/?#]+\S*$/i.test((v[i.key] ?? '').trim()));
         if (badUrl) { message.warning(`${badUrl.label}: a web address starting with http:// or https://, or leave it empty for the environment's BASE_URL.`); return; }
         if (t.oneOf?.length && !t.oneOf.some((k) => (v[k] ?? '').trim())) { message.warning(`Fill in one of: ${t.oneOf.map((k) => t.inputs.find((i) => i.key === k)?.label ?? k).join(' or ')}`); return; }
-        setBusy(true);
+        setBusy(true); startingNow.current = true;
         try { const m = await api.missionStart(t.key, v, autonomy, budget, queue); message.success(queue ? 'Mission queued: it starts when the one working ends' : 'Mission started'); onStarted(m.id); }
-        catch (e) { message.error(errText(e)); } finally { setBusy(false); }
+        catch (e) { message.error(errText(e)); } finally { setBusy(false); startingNow.current = false; }
     };
     return (
         <Modal open title={t.title} onCancel={cancel} maskClosable={!typed} onOk={go} okText={queue ? 'Queue the mission' : 'Start the mission'} confirmLoading={busy} width={640} okButtonProps={{ icon: <RocketOutlined /> }}>
@@ -172,7 +177,7 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
                         {i.kind === 'project' ? <Select value={v.project} onChange={(x) => setV({ ...v, project: x, env: '' })} options={projects.map((p) => ({ value: p }))} />
                             : i.kind === 'env' ? <Select value={v.env || undefined} onChange={(x) => setV({ ...v, env: x })} options={envs.map((p) => ({ value: p }))} disabled={!v.project} />
                             : i.kind === 'run' ? <Select value={v.run} onChange={(x) => setV({ ...v, run: x })} placeholder={runs.length ? 'A run with failures' : 'No failed run on this computer yet'} options={runs.map((r) => ({ value: r.id, label: `${new Date(r.startedAt).toLocaleString()} · ${r.request.project}/${r.request.env} · ${r.summary?.failed} failed${r.request.tags ? ` · ${r.request.tags}` : ''}` }))} />
-                            : i.kind === 'number' ? <WholeNumber min={1} max={i.key === 'explorers' ? 3 : i.key === 'repeat' ? 20 : 999999999} fallback={1} label={i.label} value={v[i.key] ? Number(v[i.key]) : undefined} onChange={(x) => setV({ ...v, [i.key]: String(x) })} />
+                            : i.kind === 'number' ? <WholeNumber min={1} max={i.key === 'explorers' ? 3 : i.key === 'repeat' ? 20 : 999999999} fallback={1} label={i.label} onValidity={numbers.ok(i.label)} value={v[i.key] ? Number(v[i.key]) : undefined} onChange={(x) => setV({ ...v, [i.key]: String(x) })} />
                             : i.multiline ? <Input.TextArea rows={4} placeholder={i.placeholder} value={v[i.key]} onChange={(e) => setV({ ...v, [i.key]: e.target.value })} />
                             : <Input placeholder={i.placeholder} value={v[i.key]} onChange={(e) => setV({ ...v, [i.key]: e.target.value })} />}
                     </Form.Item></Col>
@@ -187,9 +192,9 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
                 )}
                 <Form.Item label="Budget" tooltip="The mission stops when it uses more. Time waiting for you does not count." style={{ marginBottom: 0 }}>
                     <Row gutter={8}>
-                        <Col span={8}><WholeNumber min={5} max={480} fallback={t.budget.minutes} value={budget.minutes} onChange={(x) => setBudget((b) => ({ ...b, minutes: x }))} suffix="min" label="Minutes" /></Col>
-                        <Col span={8}><WholeNumber min={10} max={2000} fallback={t.budget.modelCalls} value={budget.modelCalls} onChange={(x) => setBudget((b) => ({ ...b, modelCalls: x }))} suffix="calls" label="Model calls" /></Col>
-                        {t.writes && <Col span={8}><WholeNumber min={1} max={10} fallback={t.budget.attempts} value={budget.attempts} onChange={(x) => setBudget((b) => ({ ...b, attempts: x }))} suffix="attempts" label="Verification attempts" /></Col>}
+                        <Col span={8}><WholeNumber min={5} max={480} fallback={t.budget.minutes} value={budget.minutes} onChange={(x) => setBudget((b) => ({ ...b, minutes: x }))} suffix="min" label="Minutes" onValidity={numbers.ok('Minutes')} /></Col>
+                        <Col span={8}><WholeNumber min={10} max={2000} fallback={t.budget.modelCalls} value={budget.modelCalls} onChange={(x) => setBudget((b) => ({ ...b, modelCalls: x }))} suffix="calls" label="Model calls" onValidity={numbers.ok('Model calls')} /></Col>
+                        {t.writes && <Col span={8}><WholeNumber min={1} max={10} fallback={t.budget.attempts} value={budget.attempts} onChange={(x) => setBudget((b) => ({ ...b, attempts: x }))} suffix="attempts" label="Verification attempts" onValidity={numbers.ok('Verification attempts')} /></Col>}
                     </Row>
                 </Form.Item>
             </Form>
@@ -205,7 +210,8 @@ function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: {
     const [answer, setAnswer] = React.useState('');
     const [prOpen, setPrOpen] = React.useState(false);
     const [replay, setReplay] = React.useState<{ session: string; title: string } | null>(null);
-    const load = React.useCallback(() => { api.mission(id).then(setM).catch((e) => setErr(errText(e))); }, [id]);
+    const [missing, setMissing] = React.useState(false);
+    const load = React.useCallback(() => { api.mission(id).then((x) => { setM(x); setMissing(false); }).catch((e) => { if (e instanceof ApiError && e.status === 404) setMissing(true); else setErr(errText(e)); }); }, [id]);
     React.useEffect(load, [load]);
     React.useEffect(() => {
         if (!m || !LIVE.includes(m.state)) return;
@@ -217,6 +223,11 @@ function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: {
     const cp = m?.checkpoints.find((c) => c.answer === undefined);
     const v = m?.verifications.at(-1);
     const finished = m && !LIVE.includes(m.state);
+    // An address naming no mission (deleted, mistyped): said in place of the drawer.
+    if (missing) return (
+        <Card size="small"><Result status="404" title="Mission not found" subTitle={`There is no mission "${id}": it may have been deleted, or the address is mistyped.`}
+            extra={<Button type="primary" onClick={onClose}>Back to the missions</Button>} /></Card>
+    );
     return (
         <Drawer open width="min(980px, calc(100vw - 32px))" onClose={onClose} title={m ? <Space wrap><span>{m.title}</span><Tag color={STATE[m.state].color}>{STATE[m.state].label}</Tag>{v?.passed && <Tag icon={<SafetyCertificateOutlined />} color="green">verified by the Studio</Tag>}</Space> : 'Mission'}
             extra={m && <Space>

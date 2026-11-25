@@ -70,7 +70,12 @@ if (typeof window !== 'undefined') {
         shownHash = toHash; shownIdx = target;
     });
     window.addEventListener(EVENT, () => { shownHash = window.location.hash; shownIdx = idxOf(history.state) ?? shownIdx; });
-    window.addEventListener('hashchange', () => { shownHash = window.location.hash; });
+    // The browser also says "hashchange" for a step the guard refused (before its undoing lands): held back,
+    // or the screens would switch under the open question and lose the work (popstate already says the rest).
+    window.addEventListener('hashchange', (e) => {
+        if ((expect !== null || asking) && window.location.hash !== shownHash) { e.stopImmediatePropagation(); return; }
+        shownHash = window.location.hash;
+    });
 }
 function routeOf(hash: string): string[] {
     const h = hash.replace(/^#\/?/, '');

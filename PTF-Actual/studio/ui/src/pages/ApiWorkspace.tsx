@@ -5,7 +5,7 @@
  */
 import React from 'react';
 import { useUnsaved } from '../unsaved';
-import { Alert, App, Button, Checkbox, Col, Drawer, Dropdown, Empty, Form, Input, InputNumber, Modal, Row, Segmented, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Tree, Typography, Upload , Switch } from 'antd';
+import { Alert, App, Button, Checkbox, Col, Drawer, Dropdown, Empty, Form, Input, Modal, Row, Segmented, Select, Space, Spin, Table, Tabs, Tag, Tooltip, Tree, Typography, Upload , Switch } from 'antd';
 import type { InputRef } from 'antd';
 import { ApiOutlined, EllipsisOutlined, EditOutlined, CaretRightOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, DownOutlined, ExperimentOutlined, FileAddOutlined, FolderAddOutlined, FolderOutlined, ImportOutlined, LockOutlined, PlusOutlined, SaveOutlined, SettingOutlined, CodeOutlined } from '@ant-design/icons';
 import {
@@ -26,7 +26,7 @@ import { errText, openInEditor, showRun } from '../state';
 import { navigate, useRoute } from '../route';
 import { askCopilot, useAgentContext } from '../agentContext';
 import { Split } from '../components/Split';
-import { apiRoute, askChangedElsewhere, askUnsaved, isChangedElsewhere, SectionTitle, shownTab, useRememberedTab, versionOf, withBase } from '../apiperf-ui';
+import { apiRoute, askChangedElsewhere, askUnsaved, FieldProblems, isChangedElsewhere, NumField, restoredName, SectionTitle, shownTab, useFieldProblems, useRememberedTab, versionOf, withBase } from '../apiperf-ui';
 
 const METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 /** Other methods (PURGE, PROPFIND…) in grey. */
@@ -187,9 +187,10 @@ function RequestSettingsEditor({ value, onChange }: { value?: ApiRequestDef['set
     return (
         <Form layout="vertical" size="small" className="ap-form" style={{ maxWidth: 760 }}>
             <Row gutter={16}>
-                <Col xs={12} md={8}><Form.Item label="Timeout" tooltip="Empty: the default"><InputNumber min={0.1} max={600} step={1} value={s.timeoutMs ? s.timeoutMs / 1000 : undefined} placeholder="default" addonAfter="s" onChange={(v) => set({ timeoutMs: v ? Math.round(Number(v) * 1000) : undefined })} aria-label="Timeout (seconds)" /></Form.Item></Col>
-                <Col xs={12} md={8}><Form.Item label="Retries" tooltip="Sent again after a connection error, a 5xx or a 429 (not in load tests)."><InputNumber min={0} max={10} value={s.retries} placeholder="0" onChange={(v) => set({ retries: v ? Number(v) : undefined })} aria-label="Retries" /></Form.Item></Col>
-                <Col xs={12} md={8}><Form.Item label="Retry delay"><InputNumber min={0} max={60000} step={250} value={s.retryDelayMs} placeholder="1000" addonAfter="ms" disabled={!s.retries} onChange={(v) => set({ retryDelayMs: v ?? undefined })} aria-label="Retry delay" /></Form.Item></Col>
+                {/* Seconds with up to 3 decimals (whole milliseconds); retries and the delay are whole numbers. Nothing typed is rounded or replaced. */}
+                <Col xs={12} md={8}><Form.Item label="Timeout" tooltip="Empty: the default"><NumField min={0.1} max={600} decimals={3} optional value={s.timeoutMs ? s.timeoutMs / 1000 : undefined} placeholder="default" addonAfter="s" width="100%" onChange={(v) => set({ timeoutMs: v === undefined ? undefined : Math.abs(v * 1000 - Math.round(v * 1000)) < 1e-6 ? Math.round(v * 1000) : v * 1000 })} label="Timeout (seconds)" /></Form.Item></Col>
+                <Col xs={12} md={8}><Form.Item label="Retries" tooltip="Sent again after a connection error, a 5xx or a 429 (not in load tests)."><NumField min={0} max={10} optional value={s.retries} placeholder="0" width="100%" onChange={(v) => set({ retries: v || undefined })} label="Retries" /></Form.Item></Col>
+                <Col xs={12} md={8}><Form.Item label="Retry delay"><NumField min={0} max={60000} optional value={s.retryDelayMs} placeholder="1000" addonAfter="ms" width="100%" disabled={!s.retries} onChange={(v) => set({ retryDelayMs: v })} label="Retry delay" /></Form.Item></Col>
             </Row>
             <Row gutter={16}>
                 {sw('Follow redirects', 'On: a 3xx answer is followed to its Location. Off: the 3xx answer is the response (to check its Location).', s.followRedirects !== false, (on) => set({ followRedirects: on ? undefined : false }))}
@@ -247,7 +248,9 @@ function RequestEditor({ req, onChange, onSend, sending, result, project, env, r
         <SnippetModal open={codeOpen} req={req} saved={saved} onClose={() => setCodeOpen(false)} />
         <div style={{ padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8, height: '100%', minHeight: 0, overflow: 'auto' }}>
             <Input variant="borderless" className="name-edit" value={req.name} placeholder="Request name" suffix={<EditOutlined className="name-edit-icon" />} maxLength={200}
-                onChange={(e) => set({ name: e.target.value })} onBlur={() => { if (!req.name.trim()) set({ name: 'Untitled request' }); }} style={{ fontWeight: 600, fontSize: 15 }} aria-label="Request name" />
+                onChange={(e) => set({ name: e.target.value })} status={req.name.trim() ? undefined : 'error'} aria-invalid={!req.name.trim()} style={{ fontWeight: 600, fontSize: 15 }} aria-label="Request name" />
+            {/* A blank name is said (and the collection is not saved with it), never replaced silently. */}
+            {!req.name.trim() && <Typography.Text type="danger" role="alert" style={{ fontSize: 12, marginTop: -6 }}>Give the request a name.</Typography.Text>}
             <Space.Compact style={{ width: '100%' }}>
                 <Select showSearch searchValue={methodSearch} onSearch={setMethodSearch} onBlur={() => setMethodSearch('')} filterOption={false} value={req.ws ? `@${req.ws.protocol ?? 'websocket'}` : req.method} onChange={(m) => (m.startsWith('@') ? set({ method: 'GET', body: { mode: 'none' }, ws: { steps: req.ws?.steps ?? [{ kind: 'send', text: '' }, { kind: 'expect', text: '' }], ...(m === '@websocket' ? {} : { protocol: m.slice(1) as ApiMsgProtocol }), ...(req.ws?.protocol === m.slice(1) && req.ws.options ? { options: req.ws.options } : {}) } }) : set({ method: m as HttpMethod, ws: undefined }))} style={{ width: 110 }} aria-label="Method"
                     options={[...[...METHODS, ...(METHODS.includes(req.method) || req.ws ? [] : [req.method]), ...(typedMethod(methodSearch) && !METHODS.includes(typedMethod(methodSearch)!) && typedMethod(methodSearch) !== req.method ? [typedMethod(methodSearch)!] : [])]
@@ -638,7 +641,11 @@ export function ApiWorkspace() {
     const [naming, setNaming] = React.useState(false);
     // Unsaved changes are asked about before another screen, another collection or Back/Forward shows something else
     // (Stay / Discard / Save, the same as the other screens); Save is not offered while the collection cannot be saved.
-    const saveProblem = open ? collectionNameProblem(open.collection.name, open.project, (meta?.collections ?? []).filter((c) => c.project === open.project), open.file) : null;
+    // Number fields in error (said under them) and requests without a name keep Save off too.
+    const fields = useFieldProblems();
+    const unnamed = open ? allRequests(open.collection.items).find((x) => !x.name.trim()) : undefined;
+    const saveProblem = open ? collectionNameProblem(open.collection.name, open.project, (meta?.collections ?? []).filter((c) => c.project === open.project), open.file)
+        ?? (unnamed ? 'give every request a name.' : null) ?? fields.problem : null;
     // Loads answer in any order: only the last one asked for is shown (a Discard's reload never replaces the next collection).
     const loadSeq = React.useRef(0);
     const loadFile = (file: string, want: string | null, quiet = false) => {
@@ -647,10 +654,31 @@ export function ApiWorkspace() {
             if (n !== loadSeq.current) return;
             setOpen({ file: r.file, project: r.file.split('/')[1], collection: r.collection, dirty: false, version: versionOf(r) });
             const ok = !!want && findItem(r.collection.items, want)?.kind === 'request';
-            // A request id in the address that the collection does not have: said, and dropped from the address.
-            if (want && !ok && !quiet) { message.warning(`The collection "${r.collection.name}" has no request "${want}": showing its settings.`); }
+            // A request id in the address that the collection does not have: said (on the screen, until another request
+            // is chosen), and dropped from the address.
+            if (want && !ok && !quiet) { missingAt.current = ''; setMissing({ id: want, file: r.file, name: r.collection.name, shownSel: null }); message.warning(`The collection "${r.collection.name}" has no request "${want}": showing its settings.`); }
             setSel(ok ? want : null); setResult({});
         }).catch((e) => setErr(errText(e)));
+    };
+    /** A request id in the address the collection does not have (a bad link): said above the editor while that is shown. */
+    const [missing, setMissing] = React.useState<{ id: string; file: string; name: string; shownSel: string | null } | null>(null);
+    // Gone once another address is opened (a request, another collection).
+    const missingKey = `${route.join('/')}`;
+    const missingAt = React.useRef('');
+    React.useEffect(() => { if (!missing) return; if (!missingAt.current) { missingAt.current = missingKey; return; } if (missingAt.current !== missingKey) { missingAt.current = ''; setMissing(null); } }, [missingKey]); // eslint-disable-line react-hooks/exhaustive-deps
+    /**
+     * The file changed on disk (another tab, a pull) while this collection is shown without unsaved changes: read again
+     * when the screen is shown again, the tab gets the focus, or the collection is chosen again in the list.
+     */
+    const refreshIfChanged = (force = false) => {
+        if (!open?.file || open.dirty) return;
+        const f = open.file, v = open.version, n = loadSeq.current;
+        void api.apiCollection(f).then((r) => {
+            if (n !== loadSeq.current) return;
+            if (!force && versionOf(r) === v) return;
+            setOpen((o) => (o && o.file === f && !o.dirty ? { ...o, collection: r.collection, version: versionOf(r) } : o));
+            setSel((cur) => (cur && findItem(r.collection.items, cur)?.kind === 'request' ? cur : null));
+        }).catch(() => undefined);
     };
     /** Discard: the saved collection again (no changes), or nothing for one never saved. */
     const discard = () => {
@@ -678,15 +706,13 @@ export function ApiWorkspace() {
 
     // The collection and the selected request in the address: #/api/<file>[/<request id>] (a reload or Back returns to them).
     const { file: fileInRoute, request: reqInRoute } = apiRoute(here ? route : []);
+    // Another collection in the address (Back, Forward, a typed address) while this one has unsaved changes: the app
+    // asks (one "Unsaved changes" question: Stay puts the address back, Discard and Save clean this collection); this
+    // screen does not ask a second time, it opens the collection in the address once nothing would be lost.
     React.useEffect(() => {
-        if (!fileInRoute || open?.file === fileInRoute) return;
-        const load = () => loadFile(fileInRoute, reqInRoute);
-        // Another collection in the address (Back, a link from another screen) while this one has unsaved changes:
-        // Save, Discard or Stay (Stay puts the address back on this collection).
-        const keep = open;
-        if (keep?.dirty) leave(() => void load(), () => navigate(keep.file ? ['api', ...keep.file.split('/'), sel ?? undefined] : ['api'], true));
-        else void load();
-    }, [fileInRoute]); // eslint-disable-line react-hooks/exhaustive-deps
+        if (!fileInRoute || open?.file === fileInRoute || open?.dirty) return;
+        void loadFile(fileInRoute, reqInRoute);
+    }, [fileInRoute, open?.dirty]); // eslint-disable-line react-hooks/exhaustive-deps
     // The selection and the address follow each other, one way at a time: the request id this screen last wrote to the
     // address is not read back as a choice (otherwise a selection made while an older write is on its way, such as a
     // request restored from History, makes the two chase each other for ever).
@@ -698,6 +724,7 @@ export function ApiWorkspace() {
         wrote.current = undefined;
         if (reqInRoute === null || findItem(open.collection.items, reqInRoute)?.kind === 'request') { setSel(reqInRoute); return; }
         // A request id the collection does not have: said, and the address is put back on what is shown.
+        missingAt.current = ''; setMissing({ id: reqInRoute, file: open.file, name: open.collection.name, shownSel: sel });
         message.warning(`The collection "${open.collection.name}" has no request "${reqInRoute}".`);
         wrote.current = sel;
         navigate(['api', ...open.file.split('/'), sel ?? undefined], true);
@@ -716,7 +743,8 @@ export function ApiWorkspace() {
         try { x = JSON.parse(sessionStorage.getItem('cs-api-restore') ?? 'null'); } catch { /* none */ }
         if (!x || x.file !== open.file) return;
         sessionStorage.removeItem('cs-api-restore');
-        const copy: ApiRequestDef = { ...x.def, id: `r${Date.now().toString(36)}`, name: `${x.def.name} (from ${new Date(x.at).toLocaleString()})` };
+        // One "(from …)" however often a restored copy is restored again.
+        const copy: ApiRequestDef = { ...x.def, id: `r${Date.now().toString(36)}`, name: restoredName(x.def.name, new Date(x.at).toLocaleString()) };
         setOpen((o) => (o ? { ...o, collection: { ...o.collection, items: [...o.collection.items, copy] }, dirty: true } : o));
         setSel(copy.id);
         setSendWhenShown(copy.id);
@@ -738,6 +766,8 @@ export function ApiWorkspace() {
         if (!open) return false;
         const problem = collectionNameProblem(open.collection.name, open.project, collections, open.file);
         if (problem) { message.error(problem); setSel(null); return false; }
+        if (unnamed) { message.error('Give every request a name before saving.'); setSel(unnamed.id); return false; }
+        if (fields.problem) { message.error(`Cannot be saved yet: ${fields.problem}`); return false; }
         try {
             const r = await api.apiSaveCollection(open.project, withBase(open.collection, open.version, force), open.file ?? undefined);
             setOpen({ ...open, file: r.file, dirty: false, version: versionOf(r) });
@@ -761,7 +791,20 @@ export function ApiWorkspace() {
         if (!open?.dirty) { then(); return; }
         askUnsaved(modal, { what: `the API collection "${open.collection.name}"`, problem: saveProblem, save, discard, then, stay });
     }
-    const openFile = (file: string) => leave(() => { loadSeq.current++; setOpen(null); navigate(['api', ...file.split('/')]); });
+    const openFile = (file: string) => {
+        // The collection shown, chosen again: read again (it may have changed on disk), unless it has unsaved changes.
+        if (open?.file === file) { refreshIfChanged(); return; }
+        leave(() => { loadSeq.current++; setOpen(null); navigate(['api', ...file.split('/')]); });
+    };
+    const refreshRef = React.useRef(refreshIfChanged);
+    refreshRef.current = refreshIfChanged;
+    React.useEffect(() => { if (here) refreshRef.current(); }, [here]);
+    React.useEffect(() => {
+        const onFocus = () => { if (here && document.visibilityState === 'visible') refreshRef.current(); };
+        window.addEventListener('focus', onFocus);
+        document.addEventListener('visibilitychange', onFocus);
+        return () => { window.removeEventListener('focus', onFocus); document.removeEventListener('visibilitychange', onFocus); };
+    }, [here]);
     /** Open a collection that is not saved yet; an imported one opens on its settings (base URL, variables). */
     const startNew = (c0: ApiCollectionDef, settings = false) => leave(() => {
         // An imported collection whose name is in use (the same host imported again) gets the next free one ("… 2").
@@ -981,13 +1024,15 @@ export function ApiWorkspace() {
                 {!open ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 80 }} description="Open a collection, or create one with New" /> : <>
                     <div className="toolbar">
                         <Typography.Text type="secondary" style={{ flex: 1, fontSize: 12 }} ellipsis>{open.file ?? `Not saved yet — will be test/${open.project}/api/…`}</Typography.Text>
-                        <Button size="small" icon={<SaveOutlined />} type={open.dirty ? 'primary' : 'default'} onClick={() => void save()}>Save</Button>
+                        <Tooltip title={saveProblem ? `Cannot be saved yet: ${saveProblem}` : undefined}><Button size="small" icon={<SaveOutlined />} type={open.dirty ? 'primary' : 'default'} disabled={!!unnamed || !!fields.problem} onClick={() => void save()}>Save</Button></Tooltip>
                         <Tooltip title="Run every request in order, with checks, and get a report"><Button size="small" icon={<CaretRightOutlined />} disabled={countRequests(open.collection.items) === 0} onClick={() => leave(() => navigate(['api-runner', ...(open.file ? open.file.split('/') : [])]))}>Run collection</Button></Tooltip>
                         <Tooltip title={countRequests(open.collection.items) < 2 ? 'Needs at least 2 requests: a value is correlated when a later request sends what an earlier one received' : 'Replay the requests twice and save the values that change (tokens, ids) where later requests send them fixed'}><Button size="small" disabled={countRequests(open.collection.items) < 2} onClick={() => setCorrelating(true)}>Correlate</Button></Tooltip>
                         <Tooltip title="Write a framework feature (Gherkin) that runs these requests with the framework's API steps"><Button size="small" icon={<ExperimentOutlined />} disabled={countRequests(open.collection.items) === 0} onClick={() => setFeature(true)}>Create test</Button></Tooltip>
                         <Dropdown menu={{ items: [{ key: 'exp', label: 'Export as a collection v2.1 file' }, ...(open.file ? [{ key: 'doc-html', label: 'Documentation (HTML page)' }, { key: 'doc-md', label: 'Documentation (Markdown)' }, { key: 'doc-wiki', label: 'Publish the documentation to the Azure DevOps wiki…' }, { key: 'pipe', label: 'Run it in a pipeline…' }, { key: 'del', danger: true, label: 'Delete this collection…' }] : [])], onClick: ({ key }) => (key === 'exp' ? void exportFile() : key.startsWith('doc-') ? void docs(key.slice(4) as 'html') : key === 'pipe' ? leave(() => setPipeline({ group: '', schedule: '', yaml: null })) : modal.confirm({ title: `Delete "${open.collection.name}"?`, content: `${open.file} is deleted from the project (Git keeps it in history if it was committed).`, okText: 'Delete', okButtonProps: { danger: true }, onOk: async () => { try { await api.apiDeleteCollection(open.file!); setOpen(null); navigate(['api']); await loadMeta(); } catch (e) { message.error(errText(e)); } } })) }}><Button size="small">⋯</Button></Dropdown>
                     </div>
-                    <AuthContext.Provider value={{ project: open.project, env: env ?? envs[0], collection: open.collection }}>
+                    {missing && missing.file === open.file && missing.shownSel === sel && <Alert type="warning" showIcon closable onClose={() => setMissing(null)} style={{ margin: '8px 12px 0' }}
+                        message={`Not found: the collection "${missing.name}" has no request "${missing.id}" (it was deleted, or the link is wrong). Showing ${sel ? 'the request shown before' : 'the collection settings'} instead.`} />}
+                    <FieldProblems value={fields.report}><AuthContext.Provider value={{ project: open.project, env: env ?? envs[0], collection: open.collection }}>
                     {req && req.kind === 'request'
                         ? <Split id="api-response" direction="column" sizeOf="second" initial={300} min={120} max={900} style={{ flex: 1, minHeight: 0 }}>
                             <RequestEditor key={req.id} saved={saved} file={open.file} req={req} onChange={setReq} onSend={() => void sendNow()} sending={sending} result={result[req.id] ?? null}
@@ -1006,7 +1051,7 @@ export function ApiWorkspace() {
                                 onRemoveCookie={(name, domain) => { if (!open) return; void api.apiClearCookies(open.project, env, open.collection.name, name, domain).then((x) => setResult((all) => ({ ...all, [req.id]: { ...all[req.id], cookies: x.cookies } }))).catch((e) => message.error(errText(e))); }} /></div>
                         </Split>
                         : <CollectionSettings c={open.collection} onChange={update} project={open.project} env={env ?? envs[0]} />}
-                    </AuthContext.Provider>
+                    </AuthContext.Provider></FieldProblems>
                 </>}
             </div>
         </Split>

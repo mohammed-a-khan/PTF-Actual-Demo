@@ -53,6 +53,13 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
         return () => window.removeEventListener('keydown', f, true);
     }, [open, onClose]);
 
+    // A screen asks the panel to close (the Inbox, when Back undoes its "Open" of a conversation).
+    React.useEffect(() => {
+        if (!open || !onClose) return;
+        const f = () => onClose();
+        window.addEventListener('cs-studio:close-copilot', f);
+        return () => window.removeEventListener('cs-studio:close-copilot', f);
+    }, [open, onClose]);
     React.useEffect(() => subscribeAgentContext(() => setCtx(agentContext())), []);
     React.useEffect(() => { if (initialSession) setCurrent(initialSession); }, [initialSession]);
     React.useEffect(() => { try { if (current) localStorage.setItem('cs-studio-agent-session', current); } catch { /* private mode */ } }, [current]);

@@ -12,7 +12,7 @@ import { api, baseHashesOf, RecDataChoice, RecDataFileInfo, RecLocator, Recordin
 import { findingsSummary, PlanReview } from '../components/PlanReview';
 import { LiveRecorder } from '../components/LiveRecorder';
 import { errText, openInEditor, showRun } from '../state';
-import { useRoute } from '../route';
+import { navigate, useRoute } from '../route';
 import { useAgentContext } from '../agentContext';
 import { RECORDER_IMPORT_KEY } from '../components/AgentBrowser';
 import { Split } from '../components/Split';
@@ -20,6 +20,9 @@ import { ago } from '../format';
 import { useUnsaved } from '../unsaved';
 import { useKept } from '../kept';
 import '../styles-tests.css';
+
+/** The review's tabs (also the address's second segment: #/recorder/data). */
+const REVIEW_TABS = ['steps', 'data', 'files'];
 
 const loadPref = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : d; } catch { return d; } };
 const savePref = (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
@@ -107,8 +110,15 @@ export function Recorder() {
     const [pasting, setPasting] = React.useState<string | null>(null);
     const [splitAt, setSplitAt] = React.useState<{ index: number; name: string } | null>(null);
     // The review of a recording, one concern per tab (remembered on this computer).
-    const [reviewTab, setReviewTabRaw] = React.useState<string>(() => loadPref('cs-studio-rec-review-tab', 'steps'));
-    const setReviewTab = (k: string) => { setReviewTabRaw(k); savePref('cs-studio-rec-review-tab', k); };
+    // The tab is in the address too (#/recorder/data): a link opens it, and an unknown one (#/recorder/bogus) is
+    // rewritten in place to the tab shown.
+    const [reviewTabRaw, setReviewTabRaw] = React.useState<string>(() => loadPref('cs-studio-rec-review-tab', 'steps'));
+    const onRecorder = agentRoute[0] === 'recorder';
+    const linkedTab = onRecorder && REVIEW_TABS.includes(agentRoute[1] ?? '') ? agentRoute[1] : null;
+    const reviewTab = linkedTab ?? (REVIEW_TABS.includes(reviewTabRaw) ? reviewTabRaw : 'steps');
+    React.useEffect(() => { if (linkedTab && linkedTab !== reviewTabRaw) { setReviewTabRaw(linkedTab); savePref('cs-studio-rec-review-tab', linkedTab); } }, [linkedTab]); // eslint-disable-line react-hooks/exhaustive-deps
+    React.useEffect(() => { if (onRecorder && agentRoute.length > 1 && (agentRoute.length > 2 || agentRoute[1] !== reviewTab)) navigate(['recorder', reviewTab], true); }, [onRecorder, agentRoute, reviewTab]);
+    const setReviewTab = (k: string) => { setReviewTabRaw(k); savePref('cs-studio-rec-review-tab', k); if (onRecorder) navigate(['recorder', k], true); };
 
     useAgentContext('recorder', { project, environment: env, recording: cur?.url, testName: name, actions: preview?.rows.length }, agentRoute[0] === 'recorder');
     // A manual run handed over from the Studio browser (Copilot panel): open it as a script.
@@ -133,7 +143,20 @@ export function Recorder() {
     const reviewEdited = !!cur && cur.state === 'finished' && (name.trim() !== (cur.name || nameFromUrl(cur.url)).trim() || Object.keys(labels).length > 0 || Object.keys(values).length > 0 || Object.keys(locators).length > 0);
     const reviewSig = JSON.stringify({ n: name.trim(), labels, values, locators });
     const [savedSig, setSavedSig] = React.useState<string | null>(null);
-    useUnsaved('recorder-review', reviewEdited && reviewSig !== savedSig, `the review of the recording "${name || 'recording'}"`, { lostOnLeave: true });
+    const reviewDirty = reviewEdited && reviewSig !== savedSig;
+    // "Discard" (leaving the screen): the review goes back to the recording as saved.
+    const discardReview = () => { if (cur) setName(cur.name || nameFromUrl(cur.url)); setLabels({}); setValues({}); setLocators({}); setSavedSig(null); };
+    useUnsaved('recorder-review', reviewDirty, `the review of the recording "${name || 'recording'}"`, { lostOnLeave: true, discard: discardReview });
+    /** Opening another recording (or starting one) while the review has changes not made into a test: asked first. */
+    const unlessDirty = (go: () => void) => {
+        if (!reviewDirty) { go(); return; }
+        modal.confirm({
+            title: 'Leave this review without saving?',
+            content: `The changes to the review of "${name || 'recording'}" (name, labels, values, locators) are not made into a test yet. Opening another recording drops them.`,
+            okText: 'Discard and open', okButtonProps: { danger: true }, cancelText: 'Stay',
+            onOk: () => { discardReview(); go(); },
+        });
+    };
     const open = (r: RecordingInfo) => { setSavedSig(null); setCur(r); setName(r.name || nameFromUrl(r.url)); setBreaks({}); setLabels({}); setLocators({}); setValues({}); setSignIn(null); setSignInChecks([]); setOptional([]); setBlocks([]); setPicked([]); setPreview(null); setErr(null); };
 
     // Follow a recording: its script grows with every action in the recorded browser.
@@ -281,7 +304,7 @@ export function Recorder() {
                                 <Select id="cs-rec-env" value={env} placeholder={envs[0] ?? 'env'} allowClear disabled={!envs.length} onChange={(v) => { setEnv(v); savePref('cs-studio-rec-env', v); }} options={envs.map((e) => ({ value: e, label: e }))} aria-label="Environment" /></Form.Item></Col>
                         </Row>
                         <Form.Item label="Start address" htmlFor="cs-rec-url" tooltip="Empty: the BASE_URL of the environment">
-                            <Input id="cs-rec-url" className="mono" placeholder="BASE_URL of the environment" value={start.url} onChange={(e) => setStart({ ...start, url: e.target.value })} aria-label="Start address" onPressEnter={() => { if (project && !busy) void record(); }} />
+                            <Input id="cs-rec-url" className="mono" placeholder="BASE_URL of the environment" value={start.url} onChange={(e) => setStart({ ...start, url: e.target.value })} aria-label="Start address" onPressEnter={() => { if (project && !busy) unlessDirty(() => void record()); }} />
                         </Form.Item>
                         <Row gutter={10}>
                             <Col span={15}><Form.Item label="Browser" htmlFor="cs-rec-browser">
@@ -292,7 +315,7 @@ export function Recorder() {
                                     ? 'The application opens here, in the Studio: use it as usual (sign-in pages too), add checks from the toolbar, and press Stop when done.'
                                     : engine === 'window' ? 'A browser window opens on this computer (single sign-on, client certificates); the steps and toolbar stay here. Press Stop when done.'
                                     : 'A browser window opens with Playwright\'s recorder: use its toolbar to add checks. Close the window or press Stop when done.'}>
-                                    <Button type="primary" block icon={<VideoCameraOutlined />} loading={busy} disabled={!project || cur?.state === 'recording'} onClick={() => void record()}>Record</Button>
+                                    <Button type="primary" block icon={<VideoCameraOutlined />} loading={busy} disabled={!project || cur?.state === 'recording'} onClick={() => unlessDirty(() => void record())}>Record</Button>
                                 </Tooltip></Form.Item></Col>
                         </Row>
                         <Collapse ghost size="small" className="run-options" items={[{ key: 'o', label: <span>Advanced{engine !== 'studio' && <Typography.Text type="secondary" style={{ fontSize: 12 }}> · {engine === 'window' ? 'in a browser window' : "in Playwright's recorder"}</Typography.Text>}</span>, children: (
@@ -308,7 +331,7 @@ export function Recorder() {
                                 <Checkbox checked={start.ignoreHttpsErrors} onChange={(e) => setStart({ ...start, ignoreHttpsErrors: e.target.checked })}>Ignore certificate errors</Checkbox>
                             </>) }]} />
                         <Space size={6} wrap style={{ marginTop: 6 }}>
-                            <Tooltip title="Convert a Playwright script (test file) you already have"><Button size="small" icon={<FileTextOutlined />} disabled={!project} onClick={() => setPasting('')}>Convert a script</Button></Tooltip>
+                            <Tooltip title="Convert a Playwright script (test file) you already have"><Button size="small" icon={<FileTextOutlined />} disabled={!project} onClick={() => unlessDirty(() => setPasting(''))}>Convert a script</Button></Tooltip>
                             {engine !== 'studio' && <Tooltip title="Chosen under Advanced → Record in (remembered on this computer)">
                                 <Tag closable onClose={(e) => { e.preventDefault(); setEngine('studio'); savePref('cs-studio-rec-engine', 'studio'); }}>
                                     {engine === 'window' ? 'in a browser window' : "in Playwright's recorder"}
@@ -319,7 +342,7 @@ export function Recorder() {
                 </div>
                 <div className="side-section">Recordings</div>
                 {!list.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="None yet" /> : list.map((r) => (
-                    <div key={r.id} className={`item-row${cur?.id === r.id ? ' active' : ''}`} onClick={() => void api.recGet(r.id).then(open).catch((e) => setErr(errText(e)))} style={{ cursor: 'pointer' }}>
+                    <div key={r.id} className={`item-row${cur?.id === r.id ? ' active' : ''}`} onClick={() => { if (cur?.id !== r.id) unlessDirty(() => void api.recGet(r.id).then(open).catch((e) => setErr(errText(e)))); }} style={{ cursor: 'pointer' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} className={r.name ? undefined : 'mono'} title={r.url}>{r.name || r.url}</span>
                             {r.state === 'recording' ? <Tag color="red" bordered={false}>Recording</Tag> : r.state === 'failed' ? <Tag color="error" bordered={false}>Failed</Tag> : null}
@@ -354,7 +377,7 @@ export function Recorder() {
                         </Typography.Text>}
                         {!!preview?.warnings.length && <Alert type="warning" showIcon message={<ul style={{ margin: 0, paddingLeft: 18 }}>{preview.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>} />}
                         {!cur.script?.trim() && cur.state === 'recording' && <Alert type="info" showIcon message="Waiting for the first action in the recorded browser…" />}
-                        {preview && <Table size="small" pagination={false} rowKey={(r) => String(r.index)} dataSource={preview.rows} scroll={{ x: (narrowReview ? (window.innerWidth >= 1200 ? 640 : 420) : 880), y: 'calc(100vh - var(--chrome) - 330px)' }} tableLayout="fixed"
+                        {preview && <Table size="small" pagination={false} rowKey={(r) => String(r.index)} dataSource={preview.rows} scroll={{ x: (narrowReview ? (window.innerWidth >= 1200 ? 640 : undefined) : 880), y: 'calc(100vh - var(--chrome) - 330px)' }} tableLayout="fixed"
                             rowSelection={{ columnWidth: 32, selectedRowKeys: picked.map(String), onChange: (keys) => setPicked(keys.map(Number).sort((a, b) => a - b)), getCheckboxProps: (r) => ({ disabled: !!r.block || !!r.signIn, 'aria-label': `Step ${r.index + 1}` }) }}
                             columns={[
                                 { title: '#', width: 86, render: (_v, r) => <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><span className="item-id">{r.index + 1}</span>
@@ -374,7 +397,7 @@ export function Recorder() {
                                         {r.elementReused && <Tag bordered={false} color="blue" style={{ marginLeft: 4 }}>existing</Tag>}</Tooltip>
                                         {!!r.locators?.length && <LocatorPick row={r} onPick={(l) => setLocators({ ...locators, [r.elementKey!]: l })} />}</>
                                     : <Typography.Text type="secondary">{KIND_LABEL[r.kind] ?? r.kind}</Typography.Text> },
-                                { title: 'Step', render: (_v, r) => <><span><span className="mono" style={{ fontSize: 12 }}>{r.line}</span> {r.signIn ? <Tag bordered={false} color="purple">steps 1–{r.index + 1}</Tag> : null}{r.block ? <Tooltip title={`Part of the reusable step "${r.block}"`}><Tag bordered={false} color="geekblue">reusable</Tag></Tooltip> : null}{r.stepReused ? <Tag bordered={false} color="blue">existing step</Tag> : null}</span>{narrowReview && <div style={{ marginTop: 4 }}>{valueCell(r)}</div>}</> },
+                                { title: 'Step', render: (_v, r) => <><span style={{ overflowWrap: 'anywhere' }}><span className="mono" style={{ fontSize: 12 }}>{r.line}</span> {r.signIn ? <Tag bordered={false} color="purple">steps 1–{r.index + 1}</Tag> : null}{r.block ? <Tooltip title={`Part of the reusable step "${r.block}"`}><Tag bordered={false} color="geekblue">reusable</Tag></Tooltip> : null}{r.stepReused ? <Tag bordered={false} color="blue">existing step</Tag> : null}</span>{narrowReview && <div style={{ marginTop: 4 }}>{valueCell(r)}</div>}</> },
                                 ...(narrowReview ? [] : [{ title: 'Value', width: 230, render: (_v: unknown, r: RecPreview['rows'][number]) => valueCell(r) }]),
                             ]} />}
                             </Space>) },

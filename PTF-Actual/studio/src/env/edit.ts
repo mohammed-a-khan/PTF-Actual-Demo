@@ -13,6 +13,7 @@ import { safeRepoPath, writeFileInRepo } from '../core/safePath';
 import { isSensitiveKey } from './resolve';
 import { CONFIG_DIR, discover } from './layers';
 import { SecretStore } from '../secrets/store';
+import { StaleSaveError } from '../core/version';
 
 export const KEY_RE = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
 const ENV_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
@@ -116,6 +117,25 @@ export function setValue(repoRoot: string, file: string, key: string, value: str
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     writeFileInRepo(abs, out);
     return idx + 1;
+}
+
+/** KEY's value in a file as dotenv reads it (the last definition wins), or null when the file does not set it. */
+export function currentValue(repoRoot: string, file: string, key: string): string | null {
+    const abs = configFile(repoRoot, file);
+    if (!fs.existsSync(abs)) return null;
+    const v = dotenv.parse(fs.readFileSync(abs, 'utf8'))[key];
+    return v === undefined ? null : v;
+}
+
+/**
+ * A change from a screen that read KEY earlier: `was` is the value it was shown in this file (null: not set there).
+ * When the file holds something else now (another tab, someone else), the change is refused (StaleSaveError, 409)
+ * instead of silently replacing that. `was` absent (a script, an older screen) or force: no check.
+ */
+export function checkUnchanged(repoRoot: string, file: string, key: string, was: unknown, force?: unknown): void {
+    if (force === true || was === undefined) return;
+    if (was !== null && typeof was !== 'string') throw new UserError('"was" must be the value shown, or null.');
+    if (currentValue(repoRoot, file, key) !== was) throw new StaleSaveError(`${key} in ${file} changed in another tab or by someone else: reload to see it.`);
 }
 
 /** Remove the definitions of KEY from a file. Returns how many lines were removed. */
