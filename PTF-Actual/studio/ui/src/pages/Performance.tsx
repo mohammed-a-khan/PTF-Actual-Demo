@@ -18,7 +18,7 @@ import { curveFromCsv, curveProblems, policyCurve, validPolicy } from '../../../
 import { ago } from '../format';
 import { LogicEditor } from '../components/LogicEditor';
 import { RecordPathModal } from '../components/RecordPathModal';
-import { nameProblem, SectionTitle, shownTab, useEscapeCloses, useRememberedTab } from '../apiperf-ui';
+import { askChangedElsewhere, askUnsaved, isChangedElsewhere, nameProblem, SectionTitle, shownTab, useEscapeCloses, useRememberedTab, versionOf, withBase } from '../apiperf-ui';
 
 const C = { users: '#8250df', rps: '#0969da', avg: '#1a7f37', p95: '#bf8700', errors: '#cf222e' };
 const dur = (s: number) => (s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min` : s >= 60 ? `${Math.floor(s / 60)} min${s % 60 ? ` ${Math.round(s % 60)} s` : ''}` : `${Math.round(s)} s`);
@@ -495,7 +495,7 @@ function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[
                             <Table size="small" rowKey="label" pagination={false} dataSource={c.comparison.metrics} scroll={{ x: 800 }} columns={[
                                 { title: 'Measure', dataIndex: 'label', width: 170 },
                                 { title: 'A', dataIndex: 'a', width: 110 }, { title: 'B', dataIndex: 'b', width: 110, render: (v: string) => <b>{v}</b> },
-                                { title: 'Change', width: 140, render: (_, m) => <span style={{ color: vColor(m.verdict), fontWeight: m.verdict === 'same' ? 400 : 600 }}>{m.change} {m.verdict === 'worse' ? '▲ worse' : m.verdict === 'better' ? '▼ better' : '≈ same'}</span> },
+                                { title: <Tooltip title={SAME_RULE}><span>Change <QuestionCircleOutlined style={{ fontSize: 11, opacity: 0.6 }} /></span></Tooltip>, width: 140, render: (_, m) => <span style={{ color: vColor(m.verdict), fontWeight: m.verdict === 'same' ? 400 : 600 }}>{m.change} {m.verdict === 'worse' ? '▲ worse' : m.verdict === 'better' ? '▼ better' : '≈ same'}</span> },
                                 { title: 'What it means', dataIndex: 'meaning', width: 300 },
                             ]} />
                             {c.comparison.findings.length > 0 && <Alert type={c.comparison.status === 'green' ? 'success' : 'warning'} showIcon message="What changed" description={<ul style={{ margin: 0, paddingLeft: 18 }}>{c.comparison.findings.map((f, k) => <li key={k}>{f}</li>)}</ul>} />}
@@ -508,7 +508,7 @@ function CompareView({ file, runs, a, b }: { file: string; runs: LoadRunInfoDef[
                             { title: 'Transaction', dataIndex: 'name' },
                             { title: 'A: 95% within', width: 130, align: 'right', render: (_, t) => (t.verdict === 'new' ? '—' : ms(t.aP95)) },
                             { title: 'B: 95% within', width: 130, align: 'right', render: (_, t) => (t.verdict === 'gone' ? '—' : <b>{ms(t.bP95)}</b>) },
-                            { title: 'Change', width: 150, render: (_, t) => (t.verdict === 'new' ? 'new in B' : t.verdict === 'gone' ? 'not run in B' : <span style={{ color: vColor(t.verdict), fontWeight: t.verdict === 'same' ? 400 : 600 }}>{t.changePct >= 0 ? '+' : ''}{t.changePct}% {t.verdict === 'worse' ? '▲ worse' : t.verdict === 'better' ? '▼ better' : '≈ same'}</span>) },
+                            { title: <Tooltip title={SAME_RULE}><span>Change <QuestionCircleOutlined style={{ fontSize: 11, opacity: 0.6 }} /></span></Tooltip>, width: 150, render: (_, t) => (t.verdict === 'new' ? 'new in B' : t.verdict === 'gone' ? 'not run in B' : <span style={{ color: vColor(t.verdict), fontWeight: t.verdict === 'same' ? 400 : 600 }}>{t.changePct >= 0 ? '+' : ''}{t.changePct}% {t.verdict === 'worse' ? '▲ worse' : t.verdict === 'better' ? '▼ better' : '≈ same'}</span>) },
                         ]} /> },
                     ]} />
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>{c.comparison.notes.join(' ')}</Typography.Text>
@@ -1074,6 +1074,8 @@ function Trends({ file, runs, name }: { file: string; runs: LoadRunInfoDef[]; na
 export type PerfMode = 'scenarios' | 'runs' | 'trends' | 'compare';
 const KEY: Record<PerfMode, string> = { scenarios: 'perf', runs: 'perf-runs', trends: 'perf-trends', compare: 'perf-compare' };
 
+/** When Compare says "≈ same" (the same rule as src/load/explain.ts compareRuns, for every measure). */
+const SAME_RULE = '≈ same means normal run-to-run variation. Response times (average, median, p90, p95, p99 and each transaction\'s p95): a change under 10%, or under 20 ms however large the %, e.g. 3 ms → 8 ms is +167% but only 5 ms. Throughput: under 10%. Error rate: under 0.1 points.';
 /** Performance: Scenarios (edit, run), Runs (live and results), Trends (one scenario across runs). */
 export function Performance({ mode }: { mode: PerfMode }) {
     const { message, modal } = App.useApp();
@@ -1083,8 +1085,17 @@ export function Performance({ mode }: { mode: PerfMode }) {
     const [runs, setRuns] = React.useState<LoadRunInfoDef[]>([]);
     const [project, setProjectRaw] = React.useState<string>(() => loadPref('cs-studio-perf-project', ''));
     const [env, setEnv] = React.useState<string | undefined>(() => loadPref<string | undefined>('cs-studio-perf-env', undefined));
-    const [open, setOpen] = React.useState<{ file: string | null; sc: LoadScenarioDef; dirty: boolean } | null>(null);
-    useUnsaved('load-scenario', !!open?.dirty, 'a load scenario', { lostOnLeave: true, save: async () => !!(await save()) });
+    // version: the file as it was read (a save over a version changed elsewhere is refused: Reload / Overwrite).
+    const [open, setOpenRaw] = React.useState<{ file: string | null; sc: LoadScenarioDef; dirty: boolean; version?: string } | null>(null);
+    // Loads answer in any order: only the last one asked for is shown (a Discard's reload never replaces the next scenario).
+    const loadSeq = React.useRef(0);
+    const setOpen: typeof setOpenRaw = (v) => { loadSeq.current++; setOpenRaw(v); };
+    const loadFile = (f: string) => { const n = ++loadSeq.current; return api.loadScenario(f).then((r) => { if (n === loadSeq.current) setOpenRaw({ file: r.file, sc: r.scenario, dirty: false, version: versionOf(r) }); }).catch((e) => setErr(errText(e))); };
+    // Why the scenario cannot be saved now (Save is then not offered in the prompts), or null.
+    const problem = !open ? null : curveInvalid ? 'the custom curve has mistakes (shown under it).' : !open.sc.name.trim() ? 'give the scenario a name.' : validPolicy(open.sc.policy);
+    /** Discard: the saved scenario again (no changes), or nothing for one never saved. */
+    const discard = () => { const f = open?.file; if (f) { setOpenRaw((o) => (o ? { ...o, dirty: false } : o)); void loadFile(f); } else setOpen(null); };
+    useUnsaved('load-scenario', !!open?.dirty, `the load scenario "${open?.sc.name ?? ''}"`, { lostOnLeave: true, save: problem ? undefined : async () => !!(await save()), discard });
     useAgentContext('perf', { project, environment: env, scenario: open?.file ?? null, scenarioName: open?.sc.name, unsaved: open?.dirty });
     const [reqs, setReqs] = React.useState<Req[] | null>(null);
     const [err, setErr] = React.useState<string | null>(null);
@@ -1113,9 +1124,16 @@ export function Performance({ mode }: { mode: PerfMode }) {
     React.useEffect(() => { if (here) void refresh(); }, [here, refresh]);
     // While a run is going, keep the list (and its "running" badge) fresh.
     React.useEffect(() => { if (!here || !runs.some((r) => r.state === 'running' || r.state === 'stopping')) return; const t = setInterval(() => { void api.loadRuns().then((r) => setRuns(r.runs)).catch(() => {}); }, 3000); return () => clearInterval(t); }, [here, runs]);
+    // The address → the scenario shown. Back to #/perf shows none (not the one left); another file with unsaved
+    // changes (an address typed in) asks first, and Stay puts the address back.
+    const prevScenarioFile = React.useRef(scenarioFile);
     React.useEffect(() => {
-        if (!scenarioFile || open?.file === scenarioFile) return;
-        api.loadScenario(scenarioFile).then((r) => setOpen({ file: r.file, sc: r.scenario, dirty: false })).catch((e) => setErr(errText(e)));
+        const prev = prevScenarioFile.current;
+        prevScenarioFile.current = scenarioFile;
+        if (!scenarioFile) { if (here && prev && open?.file === prev && !open.dirty) setOpen(null); return; }
+        if (open?.file === scenarioFile) return;
+        const back = open?.file;
+        leave(() => void loadFile(scenarioFile), () => navigate(back ? ['perf', ...back.split('/')] : ['perf'], true));
     }, [scenarioFile]); // eslint-disable-line react-hooks/exhaustive-deps
     // Requests of the scenario's collection.
     React.useEffect(() => { setReqs(null); if (open?.sc.collection && !open.sc.browserPath) api.apiCollection(open.sc.collection).then((r) => setReqs(flatRequests(r.collection))).catch(() => setReqs([])); }, [open?.sc.collection, open?.sc.browserPath]);
@@ -1131,15 +1149,24 @@ export function Performance({ mode }: { mode: PerfMode }) {
         busy.current = true;
         try { return await saveNow(); } finally { busy.current = false; }
     };
-    const saveNow = async (): Promise<string | null> => {
+    const saveNow = async (force = false): Promise<string | null> => {
         if (!open) return null;
         if (curveInvalid) { message.error('The custom curve has mistakes (shown under it): fix them before saving.'); return null; }
         try {
-            const r = await api.loadSaveScenario(projectOf(open.sc), open.sc, open.file ?? undefined);
-            setOpen({ ...open, file: r.file, dirty: false }); message.success('Saved'); await refresh();
+            const r = await api.loadSaveScenario(projectOf(open.sc), withBase(open.sc, open.version, force), open.file ?? undefined);
+            setOpen({ ...open, file: r.file, dirty: false, version: versionOf(r) }); message.success('Saved'); await refresh();
             if (!open.file) navigate(['perf', ...r.file.split('/')], true);
             return r.file;
-        } catch (e) { message.error(errText(e)); return null; }
+        } catch (e) {
+            // Saved in another tab (or by a teammate) since it was opened here: Reload or Overwrite, never silently lost.
+            if (isChangedElsewhere(e) && open.file && !force) {
+                const how = await askChangedElsewhere(modal, `The scenario "${open.sc.name}"`);
+                if (how === 'overwrite') return saveNow(true);
+                if (how === 'reload') { await loadFile(open.file); message.info('Showing the version saved elsewhere.'); }
+                return null;
+            }
+            message.error(errText(e)); return null;
+        }
     };
     const starting = React.useRef(false);
     const run = async () => {
@@ -1161,14 +1188,11 @@ export function Performance({ mode }: { mode: PerfMode }) {
             afterClose: () => { starting.current = false; },
         });
     };
-    const leave = (then: () => void) => {
+    /** Before another scenario is shown: Stay, Discard or Save (Escape and the close button stay; Save is off while it is not valid). */
+    function leave(then: () => void, stay?: () => void) {
         if (!open?.dirty) { then(); return; }
-        (() => {
-            // Save, Discard or Stay (Escape and the close button stay: unsaved changes are never dropped by accident).
-            const inst = modal.confirm({ title: `Save the changes to "${open.sc.name}"?`, okText: 'Save', closable: true, onOk: async () => { if (await save()) then(); },
-                footer: (_: React.ReactNode, { OkBtn }: { OkBtn: React.FC }) => <><Button onClick={() => inst.destroy()}>Stay</Button><Button danger onClick={() => { inst.destroy(); then(); }}>Discard</Button><OkBtn /></> });
-        })();
-    };
+        askUnsaved(modal, { what: `the load scenario "${open.sc.name}"`, problem, save: async () => !!(await save()), discard, then, stay });
+    }
 
     const scenarios = (meta?.scenarios ?? []).filter((s) => s.project === project);
     const collections = (meta?.collections ?? []).filter((c) => c.project === project);

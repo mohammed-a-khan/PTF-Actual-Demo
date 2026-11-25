@@ -4,7 +4,7 @@
  */
 import React from 'react';
 import { Alert, App, Button, Dropdown, Input, Progress, Radio, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd';
-import { CloudDownloadOutlined, CopyOutlined, DownOutlined, GithubOutlined, LogoutOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ApiOutlined, CloudDownloadOutlined, CopyOutlined, DownOutlined, GithubOutlined, LogoutOutlined, ReloadOutlined } from '@ant-design/icons';
 import { AgentRuntimeDef, AgentStatus, api, SignInStateDef } from '../api';
 import { errText } from '../state';
 
@@ -75,6 +75,8 @@ export function RuntimeSetup({ status, onChange, compact }: { status: AgentStatu
 }
 
 /** The GitHub account for Copilot: sign in (browser or code; github.com or Enterprise Cloud), switch, sign out, plan usage. */
+const ENDPOINT_TYPE: Record<string, string> = { azure: 'Azure OpenAI', openai: 'OpenAI-compatible', anthropic: 'Anthropic' };
+
 export function AccountSetup({ status, onChange, compact }: { status: AgentStatus; onChange: () => void; compact?: boolean }) {
     const { message, modal } = App.useApp();
     const [si, setSi] = React.useState<SignInStateDef>(status.signIn ?? { active: false });
@@ -154,6 +156,20 @@ export function AccountSetup({ status, onChange, compact }: { status: AgentStatu
             action={signInButton} /></>;
     }
     if (compact) return lastNote;
+    // The model comes from the organisation's own endpoint: no GitHub account is involved, so none is shown.
+    const eff = status.effective ?? status.settings;
+    if (eff?.provider === 'custom') {
+        const where = (eff.custom?.baseUrl ?? '').trim();
+        return (
+            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                {lastNote}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13, minWidth: 0 }}>
+                    <ApiOutlined /><Typography.Text style={{ minWidth: 0 }}>Model from your own endpoint: <b>{eff.model}</b> ({ENDPOINT_TYPE[eff.custom?.type ?? ''] ?? eff.custom?.type ?? 'custom'}) at <Typography.Text code style={{ wordBreak: 'break-all' }}>{where || 'no address'}</Typography.Text></Typography.Text>
+                    <Tag bordered={false}>{status.providerKeySet ? 'API key saved' : 'no API key (local endpoint)'}</Tag>
+                </div>
+            </Space>
+        );
+    }
     const premium = status.quota?.premium_interactions;
     const others = (status.accounts ?? []).filter((a) => !a.active);
     const host = auth.host && !/github\.com/.test(auth.host) ? auth.host.replace(/^https?:\/\//, '') : '';

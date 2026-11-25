@@ -178,6 +178,8 @@ export function Quality() {
     const route = useRoute();
     const here = route[0] === 'quality';
     const tab = (['overview', 'scenarios', 'causes', 'quarantine', 'team'].includes(route[1] ?? '') ? route[1] : 'overview') as string;
+    // A wrong address (#/quality/bogus) is replaced by the tab shown.
+    React.useEffect(() => { if (here && route[1] !== undefined && route[1] !== tab) navigate(['quality', tab], true); }, [here, route[1], tab]); // eslint-disable-line react-hooks/exhaustive-deps
     const [windowSize, setWindowSize] = useKept('quality.window', 30);
     const [project, setProject] = useKept<string | undefined>('quality.project', undefined);
     const [data, setData] = React.useState<QualityReport | null>(null);
@@ -514,10 +516,10 @@ function GateModal({ open, value, onClose, onSaved }: { open: boolean; value: Ga
             <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 10 }}>Checked on the latest run. Kept on this computer for this repository.</Typography.Text>
             <Form form={form} layout="vertical" requiredMark={false} onKeyDown={(e) => { if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT') { e.preventDefault(); void saveGate(); } }}>
                 <Row gutter={16}>
-                    <Col span={12}><Form.Item name="minPassRate" label="Pass rate at least" rules={[{ required: true, message: 'Give a pass rate (0–100)' }]}><InputNumber min={0} max={100} precision={0} addonAfter="%" style={{ width: '100%' }} /></Form.Item></Col>
+                    <Col span={12}><Form.Item name="minPassRate" label="Pass rate at least" rules={[{ required: true, message: 'Give a pass rate (0–100)' }, { type: 'number', min: 0, max: 100, message: 'The pass rate is a percentage: give a number from 0 to 100.' }]}><InputNumber precision={0} addonAfter="%" style={{ width: '100%' }} aria-label="Pass rate at least" /></Form.Item></Col>
                     <Col span={12}><Form.Item name="noNewFailures" label="No new failures" valuePropName="checked"><Switch size="small" /></Form.Item></Col>
                     <Col span={12}><Form.Item name="limitFlaky" label="Limit flaky scenarios" valuePropName="checked"><Switch size="small" /></Form.Item></Col>
-                    <Col span={12}>{limit && <Form.Item name="maxFlaky" label="At most"><InputNumber min={0} precision={0} style={{ width: '100%' }} addonAfter="flaky" /></Form.Item>}</Col>
+                    <Col span={12}>{limit && <Form.Item name="maxFlaky" label="At most" rules={[{ type: 'number', min: 0, message: 'Give 0 or more.' }]}><InputNumber precision={0} style={{ width: '100%' }} addonAfter="flaky" /></Form.Item>}</Col>
                     <Col span={12}><Form.Item name="ignoreQuarantined" label="Leave out quarantined" valuePropName="checked"><Switch size="small" /></Form.Item></Col>
                 </Row>
             </Form>

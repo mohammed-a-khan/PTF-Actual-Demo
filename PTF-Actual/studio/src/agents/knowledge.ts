@@ -16,6 +16,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createHash } from 'crypto';
 import type { ToolDef } from './tools';
+import { checkVersion, fileVersion } from './version';
 
 export type SourceKind = 'repo' | 'folder' | 'ado-wiki' | 'ado-workitems' | 'history' | 'url';
 export interface KnowledgeSource {
@@ -225,18 +226,34 @@ export class KnowledgeBase {
         fs.writeFileSync(file, `${JSON.stringify(raw, null, 2)}\n`);
         this.dirty = true;
     }
-    saveSources(list: unknown): KnowledgeSource[] {
+    /** The version of the sources file the screen reads (sent back when it saves). */
+    version(): string { return fileVersion(path.join(this.repoRoot, KNOWLEDGE_FILE)); }
+    /** A folder source whose folder is not there (relative paths are from the repository), or null. */
+    folderProblem(x: KnowledgeSource): string | null {
+        if (x.kind !== 'folder' || !x.path) return null;
+        const abs = path.resolve(this.repoRoot, x.path);
+        let ok = false;
+        try { ok = fs.statSync(abs).isDirectory(); } catch { /* missing */ }
+        return ok ? null : `The folder ${x.path} does not exist${path.isAbsolute(x.path) ? '' : ` (from the repository: ${abs})`}.`;
+    }
+    /**
+     * Save the whole list. `version`: the version of the file the screen read; when it changed since, the save is
+     * refused (ChangedElsewhere). A folder that is not there is refused only for a source added or changed now: a
+     * source whose folder went missing stays as it is (flagged on its row) and does not block the other changes.
+     */
+    saveSources(list: unknown, version?: string): KnowledgeSource[] {
         // The whole list is written: while the file has entries the Studio cannot read, saving would drop them.
+        checkVersion(this.version(), version, KNOWLEDGE_FILE);
         const cur = this.sources();
         if (cur.unreadable) throw new Error(cur.problems[0]);
         if (cur.invalid.length) throw new Error(`Not saved: ${KNOWLEDGE_FILE} has ${cur.invalid.length === 1 ? 'an entry' : `${cur.invalid.length} entries`} the Studio leaves out (${cur.invalid.map((x) => `"${x.name}"`).join(', ')}); saving now would delete ${cur.invalid.length === 1 ? 'it' : 'them'}. Fix the file, or remove ${cur.invalid.length === 1 ? 'that entry' : 'those entries'} first.`);
         const s = validateSources(list);
         // A folder must be there (relative paths are from the repository).
-        for (const x of s) if (x.kind === 'folder' && x.path) {
-            const abs = path.resolve(this.repoRoot, x.path);
-            let ok = false;
-            try { ok = fs.statSync(abs).isDirectory(); } catch { /* missing */ }
-            if (!ok) throw new Error(`Source "${x.name}": the folder ${x.path} does not exist${path.isAbsolute(x.path) ? '' : ` (from the repository: ${abs})`}.`);
+        for (const x of s) {
+            const before = cur.sources.find((y) => y.id === x.id);
+            if (before && before.kind === x.kind && before.path === x.path) continue;
+            const p = this.folderProblem(x);
+            if (p) throw new Error(`Source "${x.name}": ${p.charAt(0).toLowerCase()}${p.slice(1)}`);
         }
         const file = path.join(this.repoRoot, KNOWLEDGE_FILE);
         fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -256,7 +273,8 @@ export class KnowledgeBase {
     status() {
         return this.sources().sources.map((s) => {
             const i = this.load(s.id);
-            return { ...s, enabled: s.enabled !== false, docs: i ? Object.keys(i.docs).length : 0, chunks: i?.chunks.length ?? 0, builtAt: i?.builtAt ?? null, errors: i?.errors ?? [] };
+            const missing = this.folderProblem(s);
+            return { ...s, enabled: s.enabled !== false, docs: i ? Object.keys(i.docs).length : 0, chunks: i?.chunks.length ?? 0, builtAt: i?.builtAt ?? null, errors: i?.errors ?? [], ...(missing ? { warning: missing } : {}) };
         });
     }
 

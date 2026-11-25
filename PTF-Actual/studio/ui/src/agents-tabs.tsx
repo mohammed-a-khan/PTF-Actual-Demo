@@ -2,7 +2,8 @@
  * The inner tab a screen of the Agents group shows, remembered per screen on this computer (a private window or
  * blocked storage just starts on the first tab). With a screen given, the tab is in the address too
  * (#/agents/tools, #/missions/finished…): a link opens that tab, and switching tabs changes the address in place
- * (no new history entry, so Back and "Back to …" still return to where the screen was opened from).
+ * (no new history entry, so Back and "Back to …" still return to where the screen was opened from). A bare screen
+ * address (#/agents) gets the tab shown written into it, so the address always names the tab.
  */
 import React from 'react';
 import { navigate, useRoute } from './route';
@@ -26,6 +27,10 @@ export function useRememberedTab(key: string, first: string, allowed?: string[],
     }, [key, page]);
     const current = fromRoute ?? tab;
     const shown = allowed && !allowed.includes(current) ? first : current;
+    // A bare screen address (#/knowledge): the tab shown is written into it at once (in place, no new history
+    // entry), so the address always says which tab is shown and a copied link opens the same tab.
+    const bare = !!page && route[0] === page && route.length === 1;
+    React.useEffect(() => { if (bare && page) navigate([page, shown], true); }, [bare, page, shown]);
     return [shown, setTab];
 }
 

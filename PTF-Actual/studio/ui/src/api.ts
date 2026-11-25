@@ -1,17 +1,44 @@
 /**
  * API client for the local Studio server. The per-launch token arrives once in the URL fragment
- * (#token=…), is kept in sessionStorage for this tab only, and removed from the address bar.
+ * (#token=…), is removed from the address bar, and is kept for this browser (localStorage, or
+ * sessionStorage where localStorage is blocked), so a second tab or a pasted Studio link works too.
+ * The server makes a new token at each launch: a stored token it rejects (401) is dropped, and only
+ * then the page asks to open the Studio from its start link.
  */
 const TOKEN_KEY = 'cs-studio-token';
+const TOKEN_RE = /(?:^#|&)token=([A-Za-z0-9_-]+)/;
+
+function stores(): Storage[] {
+    const out: Storage[] = [];
+    try { out.push(localStorage); } catch { /* blocked */ }
+    try { out.push(sessionStorage); } catch { /* blocked */ }
+    return out;
+}
+function saveToken(v: string): void {
+    // localStorage first (shared by this browser's tabs); sessionStorage when it is blocked or full.
+    for (const s of stores()) { try { s.setItem(TOKEN_KEY, v); return; } catch { /* try the next */ } }
+}
+function readToken(): string {
+    for (const s of stores()) { try { const v = s.getItem(TOKEN_KEY); if (v) return v; } catch { /* try the next */ } }
+    return '';
+}
+function dropToken(): void {
+    for (const s of stores()) { try { s.removeItem(TOKEN_KEY); } catch { /* blocked */ } }
+}
+/** Removes the key from the address bar, keeping the rest of the fragment (a deep link after the key). */
+function hashWithoutToken(hash: string): string {
+    const rest = hash.replace(/^#/, '').split('&').filter((p) => !/^token=/.test(p)).join('&');
+    return rest ? '#' + rest : '';
+}
 
 function initToken(): string {
-    const m = /(?:^#|&)token=([A-Za-z0-9_-]+)/.exec(window.location.hash);
+    const m = TOKEN_RE.exec(window.location.hash);
     if (m) {
-        try { sessionStorage.setItem(TOKEN_KEY, m[1]); } catch { /* storage blocked */ }
-        history.replaceState(null, '', window.location.pathname + window.location.search);
+        saveToken(m[1]);
+        history.replaceState(history.state, '', window.location.pathname + window.location.search + hashWithoutToken(window.location.hash));
         return m[1];
     }
-    try { return sessionStorage.getItem(TOKEN_KEY) ?? ''; } catch { return ''; }
+    return readToken();
 }
 
 let token = initToken();
@@ -19,9 +46,26 @@ export const hasToken = () => token !== '';
 // A start link pasted into an already open tab changes only the fragment (no page load): pick
 // up the new key by loading the page again (the key is then read and removed as usual).
 window.addEventListener('hashchange', () => {
-    const m = /(?:^#|&)token=([A-Za-z0-9_-]+)/.exec(window.location.hash);
-    if (m && m[1] !== token) window.location.reload();
+    const m = TOKEN_RE.exec(window.location.hash);
+    if (m && m[1] !== token) { saveToken(m[1]); window.location.reload(); }
 });
+// Another tab opened a new start link (the Studio was started again): use its key here too.
+window.addEventListener('storage', (e) => {
+    if (e.key === TOKEN_KEY && e.newValue && e.newValue !== token) token = e.newValue;
+});
+/** The server rejected the key (a stored key from an earlier launch): forget it and show the start-link page. */
+function tokenRejected(res: Response, data?: unknown): boolean {
+    if (res.status !== 401) return false;
+    const msg = data && typeof data === 'object' && 'error' in data ? String((data as { error: unknown }).error) : '';
+    if (data !== undefined && !/Studio token/i.test(msg)) return false;
+    // A newer key may have arrived from another tab meanwhile: only drop the one that was refused.
+    if (readToken() === token) dropToken();
+    const fresh = readToken();
+    if (fresh && fresh !== token) { token = fresh; return true; }
+    token = '';
+    window.location.reload();
+    return true;
+}
 
 export class ApiError extends Error {
     /** e.g. 'stale-hunk', 'index-lock': errors the UI offers a specific action for. */
@@ -38,6 +82,7 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
     let data: unknown = undefined;
     try { data = text ? JSON.parse(text) : undefined; } catch { data = text; }
     if (!res.ok) {
+        tokenRejected(res, data);
         const msg = (data && typeof data === 'object' && 'error' in data) ? String((data as { error: unknown }).error) : `Request failed (${res.status})`;
         const code = data && typeof data === 'object' && 'code' in data && typeof (data as { code: unknown }).code === 'string' ? (data as { code: string }).code : undefined;
         // Git's index.lock is left behind by a crashed Git: the app offers to remove it (App.tsx).
@@ -600,6 +645,7 @@ export interface LogLine { n: number; stream: 'out' | 'err' | 'studio'; text: st
 /** Follow a run's output live (newline-delimited JSON over fetch, so the token header is sent). */
 export async function followRun(id: string, from: number, onLog: (l: LogLine) => void, onEnd: (r: RunInfo) => void, signal: AbortSignal): Promise<void> {
     const res = await fetch(`/api/runs/${encodeURIComponent(id)}/stream?from=${from}`, { headers: { Authorization: `Bearer ${token}` }, signal });
+    if (res.status === 401) tokenRejected(res);
     if (!res.ok || !res.body) throw new ApiError(`Could not follow the run (${res.status})`, res.status);
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -1058,8 +1104,8 @@ export const api = {
     searchKnowledge: (text: string, sources?: string[]) => request<{ hits: KnowledgeHitDef[] }>('GET', '/api/knowledge/search' + q({ q: text, k: '12', ...(sources?.length ? { sources: sources.join(',') } : {}) })),
     readKnowledge: (id: string) => request<{ id: string; path: string; title: string; source: string; url?: string; lines?: [number, number]; text: string }>('GET', '/api/knowledge/read' + q({ id })),
     doctorFix: (action: string) => request<{ done: string }>('POST', '/api/doctor/fix', { action }),
-    runConfigs: () => request<{ configs: RunConfigDef[]; file: string }>('GET', '/api/run-configs'),
-    saveRunConfigs: (configs: RunConfigDef[]) => request<{ configs: RunConfigDef[]; file: string }>('PUT', '/api/run-configs', { configs }),
+    runConfigs: () => request<{ configs: RunConfigDef[]; file: string; version?: string }>('GET', '/api/run-configs'),
+    saveRunConfigs: (configs: RunConfigDef[], version?: string) => request<{ configs: RunConfigDef[]; file: string; version?: string }>('PUT', '/api/run-configs', { configs, ...(version ? { version } : {}) }),
     stopRun: (id: string) => request<{ ok: boolean }>('POST', `/api/runs/${encodeURIComponent(id)}/stop`),
     run: (id: string, from?: number) => request<RunInfo & { log: LogLine[] }>('GET', `/api/runs/${encodeURIComponent(id)}` + q({ from })),
     debugRun: (id: string, command: 'next' | 'into' | 'continue' | 'stop' | 'resume' | 'stepOver' | 'stepInto' | 'stepOut' | 'pause') => request<{ ok: true }>('POST', `/api/runs/${encodeURIComponent(id)}/debug`, { command }),

@@ -9,7 +9,29 @@ import { api, McpSettings, StudioSettings } from '../api';
 import { errText } from '../state';
 import { GitNetworkCard, StudioNetworkCard } from './NetworkSettings';
 import { navigate, useRoute } from '../route';
-import { asciiDigits, useStoredTab } from '../datagit-common';
+import { asciiDigits, charCount, useStoredTab } from '../datagit-common';
+
+/** The same limits as the server (src/git/identity.ts): what Git is given as your name and email. */
+export const IDENTITY_NAME_MAX = 100;
+const HIDDEN = /[\p{Cc}\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/u;
+export function identityNameProblem(name: string): string | null {
+    const n = name.trim();
+    if (!n) return name ? 'Enter your name (not only spaces).' : 'Enter your name.';
+    const len = charCount(n);
+    if (len > IDENTITY_NAME_MAX) return `Too long: at most ${IDENTITY_NAME_MAX} characters (it has ${len}).`;
+    if (/[<>]/.test(n)) return 'A name cannot contain < or > (Git writes it as "Name <email>").';
+    if (HIDDEN.test(n)) return 'No line breaks, tabs or hidden direction marks (such as right-to-left override) in the name.';
+    return null;
+}
+export function identityEmailProblem(email: string): string | null {
+    const e = email.trim();
+    if (!e) return 'Enter your email address: Git puts it on every commit, next to your name.';
+    if (e.length > 254) return 'Too long: at most 254 characters.';
+    if (HIDDEN.test(e) || !/^[^\s@<>]+@[^\s@<>]+$/.test(e)) return 'Enter an email address, such as name@company.com.';
+    return null;
+}
+/** A secret name, as the server keeps it. */
+export const SECRET_NAME_MAX = 64;
 
 const SETTINGS_TABS = ['general', 'ado', 'network', 'assistants'] as const;
 type SettingsTab = typeof SETTINGS_TABS[number];
@@ -26,7 +48,8 @@ export function Settings() {
     // The tab is in the address (#/settings/ado), so other screens can open it; the last one is remembered.
     const route = useRoute();
     const [storedTab, storeTab] = useStoredTab<SettingsTab>('settings', SETTINGS_TABS, 'general');
-    const tab: SettingsTab = SETTINGS_TABS.includes(route[1] as SettingsTab) ? route[1] as SettingsTab : storedTab;
+    // No tab in the address: the one used last; a wrong one (#/settings/bogus): General.
+    const tab: SettingsTab = SETTINGS_TABS.includes(route[1] as SettingsTab) ? route[1] as SettingsTab : route[1] ? 'general' : storedTab;
     const setTab = (t: SettingsTab) => { storeTab(t); navigate(['settings', t]); };
     React.useEffect(() => { if (route[0] === 'settings' && route[1] !== tab) navigate(['settings', tab], true); }, [route, tab]);
     React.useEffect(() => { if (SETTINGS_TABS.includes(route[1] as SettingsTab) && route[1] !== storedTab) storeTab(route[1] as SettingsTab); }, [route]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -49,7 +72,11 @@ export function Settings() {
         finally { setBusy(null); }
     };
 
-    const idOk = !!name.trim() && !/[<>]/.test(name) && /^[^\s@]+@[^\s@]+$/.test(email.trim());
+    // Said as you type (the server refuses the same): an empty email too, once the name is there or the email was touched.
+    const [emailTouched, setEmailTouched] = React.useState(false);
+    const nameProblem = identityNameProblem(name);
+    const emailProblem = identityEmailProblem(email);
+    const idOk = !nameProblem && !emailProblem;
     const saveIdentity = async () => {
         if (!s || !idOk || busy === 'git') return;
         setBusy('git');
@@ -60,7 +87,6 @@ export function Settings() {
 
     if (loadError) return <Alert type="error" showIcon message="Could not load settings" description={loadError} />;
     if (!s) return null;
-    const emailOk = /^[^\s@]+@[^\s@]+$/.test(email.trim());
 
     const tabs = [
         {
@@ -70,13 +96,12 @@ export function Settings() {
                     <Form layout="vertical" onFinish={() => void saveIdentity()}>
                         <Row gutter={16}>
                             <Col xs={24} md={12}>
-                                <Form.Item label="Name" htmlFor="cs-settings-name" validateStatus={name && (!name.trim() || /[<>]/.test(name)) ? 'error' : undefined}
-                                    help={name && !name.trim() ? 'Enter your name (not only spaces).' : /[<>]/.test(name) ? 'A name cannot contain < or > (Git writes it as "Name <email>").' : undefined}>
-                                    <Input id="cs-settings-name" value={name} maxLength={200} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></Form.Item>
+                                <Form.Item label="Name" htmlFor="cs-settings-name" validateStatus={nameProblem ? 'error' : undefined} help={nameProblem ?? undefined}>
+                                    <Input id="cs-settings-name" value={name} count={{ show: true, max: IDENTITY_NAME_MAX, strategy: charCount }} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></Form.Item>
                             </Col>
                             <Col xs={24} md={12}>
-                                <Form.Item label="Email" htmlFor="cs-settings-email" tooltip="The address your team knows you by (the one in Azure DevOps)." validateStatus={email && !emailOk ? 'error' : undefined} help={email && !emailOk ? 'Enter an email address' : undefined}>
-                                    <Input id="cs-settings-email" value={email} maxLength={254} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.com" />
+                                <Form.Item label="Email" htmlFor="cs-settings-email" tooltip="The address your team knows you by (the one in Azure DevOps)." validateStatus={emailProblem && (email || emailTouched || name.trim()) ? 'error' : undefined} help={emailProblem && (email || emailTouched || name.trim()) ? emailProblem : undefined}>
+                                    <Input id="cs-settings-email" value={email} onChange={(e) => { setEmail(e.target.value); setEmailTouched(true); }} onBlur={() => setEmailTouched(true)} placeholder="name@company.com" />
                                 </Form.Item>
                             </Col>
                         </Row>
@@ -86,7 +111,7 @@ export function Settings() {
                                 <Radio value="global">All projects on this computer</Radio>
                             </Radio.Group>
                         </Form.Item>
-                        <Button type="primary" htmlType="submit" loading={busy === 'git'} disabled={!idOk}>Save name and email</Button>
+                        <Tooltip title={nameProblem ?? emailProblem ?? undefined}><Button type="primary" htmlType="submit" loading={busy === 'git'} disabled={!idOk}>Save name and email</Button></Tooltip>
                     </Form>
                 </Card>
                 <Card title="Starting the Studio" size="small">
@@ -121,9 +146,15 @@ export function Settings() {
                     <Form layout="vertical">
                         <Form.Item label="Shared folder for load-test results" htmlFor="cs-settings-team" style={{ marginBottom: 0 }}
                             tooltip="A network share or synced folder the team can reach (e.g. \\files\perf-results). Runs you share, and results imported from pipelines, go there; everyone sees the same history and trends.">
-                            <Input id="cs-settings-team" className="mono" defaultValue={s.loadTeamFolder ?? ''} key={`${s.loadTeamFolder ?? ''}-${rev}`} placeholder="\\files\perf-results" allowClear maxLength={500}
+                            <Input id="cs-settings-team" className="mono" defaultValue={s.loadTeamFolder ?? ''} key={`${s.loadTeamFolder ?? ''}-${rev}`} placeholder="\\files\perf-results" allowClear count={{ show: (o) => o.count > 400, max: 500 }}
                                 onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
-                                onBlur={(e) => { const v = e.target.value.trim(); if (v !== (s.loadTeamFolder ?? '')) void save('team', { loadTeamFolder: v }); }} />
+                                onBlur={(e) => {
+                                    const raw = e.target.value, v = raw.trim();
+                                    // Only spaces, or longer than the limit: said, and the saved folder shown again.
+                                    if (raw && !v) { message.warning(s.loadTeamFolder ? `Only spaces: still ${s.loadTeamFolder}. Clear the field (×) to stop sharing.` : 'Only spaces: no shared folder is set.'); reset(); return; }
+                                    if (v.length > 500) { message.error(`The folder path is too long: at most 500 characters (it has ${v.length}).`); reset(); return; }
+                                    if (v !== (s.loadTeamFolder ?? '')) void save('team', { loadTeamFolder: v });
+                                }} />
                         </Form.Item>
                     </Form>
                 </Card>
@@ -145,13 +176,14 @@ export function Settings() {
                                 <Form.Item label="Secret that holds your token" htmlFor="ado-pat-secret"
                                     tooltip="Add it under Secrets with this name. It is sent only to Azure DevOps (dev.azure.com, *.visualstudio.com, or a server you list), and only over https."
                                     extra={<Button type="link" size="small" style={{ padding: 0 }} onClick={() => navigate(['secrets', 'add', s.adoPatSecret])}>Add or replace {s.adoPatSecret} in Secrets</Button>}>
-                                    <Input defaultValue={s.adoPatSecret} key={`${s.adoPatSecret}-${rev}`} id="ado-pat-secret" className="mono" maxLength={64}
+                                    <Input defaultValue={s.adoPatSecret} key={`${s.adoPatSecret}-${rev}`} id="ado-pat-secret" className="mono" count={{ show: true, max: SECRET_NAME_MAX }}
                                         onPressEnter={(e) => (e.target as HTMLInputElement).blur()}
                                         onBlur={(e) => {
                                             const v = e.target.value.trim().toUpperCase();
                                             // Empty or not a secret name: said, and the saved name shown again.
                                             if (!v) { message.warning(`The secret name cannot be empty: still ${s.adoPatSecret}.`); reset(); return; }
-                                            if (!/^[A-Z_][A-Z0-9_]{0,63}$/.test(v)) { message.error(`A secret name: letters, digits and _ (for example ADO_PAT): still ${s.adoPatSecret}.`); reset(); return; }
+                                            if (v.length > SECRET_NAME_MAX) { message.error(`The secret name is too long: at most ${SECRET_NAME_MAX} characters (it has ${v.length}): still ${s.adoPatSecret}.`); reset(); return; }
+                                            if (!/^[A-Z_][A-Z0-9_]{0,63}$/.test(v)) { message.error(`A secret name: Latin letters (A-Z), digits and _, not starting with a digit (for example ADO_PAT): still ${s.adoPatSecret}.`); reset(); return; }
                                             if (v !== s.adoPatSecret) void save('pat', { adoPatSecret: v }); else if (e.target.value.trim() !== v) reset(); // ado_pat → ADO_PAT
                                         }} />
                                 </Form.Item>

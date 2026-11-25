@@ -18,6 +18,7 @@ import { RECORDER_IMPORT_KEY } from '../components/AgentBrowser';
 import { Split } from '../components/Split';
 import { ago } from '../format';
 import { useUnsaved } from '../unsaved';
+import { useKept } from '../kept';
 import '../styles-tests.css';
 
 const loadPref = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : d; } catch { return d; } };
@@ -73,10 +74,11 @@ export function Recorder() {
     const [meta, setMeta] = React.useState<{ projects: string[]; environments: Record<string, string[]> } | null>(null);
     const [project, setProjectRaw] = React.useState<string>(() => loadPref('cs-studio-rec-project', ''));
     const [env, setEnv] = React.useState<string | undefined>(() => loadPref<string | undefined>('cs-studio-rec-env', undefined));
-    const [start, setStart] = React.useState({ url: '', browser: 'chromium', testIdAttribute: '', device: '', ignoreHttpsErrors: false });
+    // The start address and the open recording are kept across a reload of the tab.
+    const [start, setStart] = useKept('recorder.start', { url: '', browser: 'chromium', testIdAttribute: '', device: '', ignoreHttpsErrors: false });
     const [list, setList] = React.useState<RecordingInfo[]>([]);
-    const [cur, setCur] = React.useState<RecordingInfo | null>(null);
-    const [name, setName] = React.useState('');
+    const [cur, setCur] = useKept<RecordingInfo | null>('recorder.open', null);
+    const [name, setName] = useKept('recorder.name', '');
     const [secretMode, setSecretMode] = React.useState<'encrypted' | 'studio'>(() => loadPref('cs-studio-rec-secrets', 'encrypted'));
     const [breaks, setBreaks] = React.useState<Record<number, string>>({});
     const [labels, setLabels] = React.useState<Record<string, string>>({});
@@ -120,6 +122,11 @@ export function Recorder() {
     const envs = meta?.environments[project] ?? [];
     const projects = meta ? (meta.projects.includes(project) || !project ? meta.projects : [...meta.projects, project]) : [];
     const refresh = React.useCallback(() => api.recList().then((r) => setList(r.recordings)).catch(() => {}), []);
+    // A recording kept from before a reload: take its current state from the server (it may have been deleted).
+    React.useEffect(() => {
+        if (!cur || cur.id === 'pasted') return;
+        api.recGet(cur.id).then((r) => setCur((c) => (c && c.id === r.id ? { ...r, warnings: c.warnings } : c))).catch(() => setCur((c) => (c && c.id === cur.id ? null : c)));
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
     React.useEffect(() => { api.dbConnections().then((r) => { setMeta({ projects: r.projects, environments: r.environments }); if (!project && r.projects[0]) setProject(r.projects[0]); }).catch((e) => setErr(errText(e))); void refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // The review's changes live in this screen until a test is made: a reload or leaving asks first.
@@ -222,8 +229,9 @@ export function Recorder() {
     const remove = (r: RecordingInfo) => modal.confirm({ title: 'Delete this recording?', content: 'The recorded script is removed (tests saved from it stay).', okText: 'Delete', okButtonProps: { danger: true },
         onOk: (close) => { void (async () => { try { await api.recDelete(r.id); if (cur?.id === r.id) setCur(null); close(); await refresh(); } catch (e) { message.error(errText(e)); } })(); } });
 
-    // On a narrow screen the value goes under the step (a column of its own would leave the step no room).
-    const narrowReview = window.innerWidth < 1200;
+    // Below 1600 px the value goes under the step: a column of its own (beside the list of recordings)
+    // would leave the step no room. The Value column is never sticky, so it cannot cover the step.
+    const narrowReview = window.innerWidth < 1600;
     const valueCell = (r: RecPreview['rows'][number]) => ['click', 'dblclick', 'check', 'uncheck'].includes(r.kind)
                                     ? <Tooltip title="For a dialog or banner that appears now and then: the test waits up to 5 s for it, and goes on without it">
                                         <Checkbox checked={optional.includes(r.index)} onChange={(e) => setOptional(e.target.checked ? [...optional, r.index] : optional.filter((x) => x !== r.index))}>Only if shown</Checkbox></Tooltip>
@@ -346,7 +354,7 @@ export function Recorder() {
                         </Typography.Text>}
                         {!!preview?.warnings.length && <Alert type="warning" showIcon message={<ul style={{ margin: 0, paddingLeft: 18 }}>{preview.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul>} />}
                         {!cur.script?.trim() && cur.state === 'recording' && <Alert type="info" showIcon message="Waiting for the first action in the recorded browser…" />}
-                        {preview && <Table size="small" pagination={false} rowKey={(r) => String(r.index)} dataSource={preview.rows} scroll={{ x: (window.innerWidth >= 1200 ? 860 : 420), y: 'calc(100vh - var(--chrome) - 330px)' }} tableLayout="fixed"
+                        {preview && <Table size="small" pagination={false} rowKey={(r) => String(r.index)} dataSource={preview.rows} scroll={{ x: (narrowReview ? (window.innerWidth >= 1200 ? 640 : 420) : 880), y: 'calc(100vh - var(--chrome) - 330px)' }} tableLayout="fixed"
                             rowSelection={{ columnWidth: 32, selectedRowKeys: picked.map(String), onChange: (keys) => setPicked(keys.map(Number).sort((a, b) => a - b)), getCheckboxProps: (r) => ({ disabled: !!r.block || !!r.signIn, 'aria-label': `Step ${r.index + 1}` }) }}
                             columns={[
                                 { title: '#', width: 86, render: (_v, r) => <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}><span className="item-id">{r.index + 1}</span>
@@ -367,7 +375,7 @@ export function Recorder() {
                                         {!!r.locators?.length && <LocatorPick row={r} onPick={(l) => setLocators({ ...locators, [r.elementKey!]: l })} />}</>
                                     : <Typography.Text type="secondary">{KIND_LABEL[r.kind] ?? r.kind}</Typography.Text> },
                                 { title: 'Step', render: (_v, r) => <><span><span className="mono" style={{ fontSize: 12 }}>{r.line}</span> {r.signIn ? <Tag bordered={false} color="purple">steps 1–{r.index + 1}</Tag> : null}{r.block ? <Tooltip title={`Part of the reusable step "${r.block}"`}><Tag bordered={false} color="geekblue">reusable</Tag></Tooltip> : null}{r.stepReused ? <Tag bordered={false} color="blue">existing step</Tag> : null}</span>{narrowReview && <div style={{ marginTop: 4 }}>{valueCell(r)}</div>}</> },
-                                ...(narrowReview ? [] : [{ title: 'Value', width: 250, fixed: 'right' as const, render: (_v: unknown, r: RecPreview['rows'][number]) => valueCell(r) }]),
+                                ...(narrowReview ? [] : [{ title: 'Value', width: 230, render: (_v: unknown, r: RecPreview['rows'][number]) => valueCell(r) }]),
                             ]} />}
                             </Space>) },
                             { key: 'data', label: 'Test data & sign-in', children: (<Form layout="vertical" size="small" className="tests-rec-form" style={{ maxWidth: 760 }}>

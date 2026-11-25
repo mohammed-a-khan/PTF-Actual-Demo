@@ -150,6 +150,12 @@ export function policyCurve(p: LoadPolicy): Array<{ t: number; users: number; ra
     const out: Array<{ t: number; users: number; rate?: number }> = [];
     const arrival = p.type === 'arrival';
     for (let t = 0; t < p.duration; t += step) out.push(arrival ? { t, users: 0, rate: Math.round(rateAt(p, t) * 100) / 100 } : { t, users: usersAt(p, t) });
+    // No ramp-down: the load holds to the very end and stops there (a straight drop, not a slope over the last step).
+    if (!p.rampDown) {
+        const end = Math.max(0, p.duration - 1e-6);
+        const hold = arrival ? Math.round(rateAt(p, end) * 100) / 100 : usersAt(p, end);
+        if (hold > 0 && out.at(-1)?.t !== p.duration) out.push(arrival ? { t: p.duration, users: 0, rate: hold } : { t: p.duration, users: hold });
+    }
     out.push(arrival ? { t: p.duration, users: 0, rate: 0 } : { t: p.duration, users: 0 });
     return out;
 }

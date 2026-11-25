@@ -214,8 +214,8 @@ function VisualTab() {
                             { title: 'Status', key: 'status', width: 170, render: (_, v) => <Space size={4}><Tooltip title={STATUS[v.status].about}><Tag bordered={false} color={STATUS[v.status].color}>{STATUS[v.status].label}</Tag></Tooltip>{v.reviewed && v.status === 'same' && <Tooltip title={`${v.reviewed.action === 'approved' ? 'Approved' : 'Reviewed'} ${new Date(v.reviewed.at).toLocaleString()}`}><CheckOutlined style={{ color: 'var(--muted)' }} /></Tooltip>}</Space> },
                         ]} />}
             </div>
-            <Drawer open={!!current} onClose={() => setOpen(null)} width={980} destroyOnClose
-                title={current && <span style={{ display: 'flex', alignItems: 'center', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}><Typography.Text className="mono" ellipsis={{ tooltip: current.name.replace(/_region_.*/, '') }} style={{ minWidth: 0 }}>{current.name.replace(/_region_.*/, '')}</Typography.Text>{current.region && <Tag bordered={false} style={{ marginInlineStart: 8 }}>region</Tag>}</span>}>
+            <Drawer open={!!current} onClose={() => setOpen(null)} width="min(980px, 100vw)" destroyOnClose rootClassName="visual-drawer"
+                title={current && <span className="visual-drawer-title"><Typography.Text className="mono" ellipsis={{ tooltip: current.name.replace(/_region_.*/, '') }}>{current.name.replace(/_region_.*/, '')}</Typography.Text>{current.region && <Tag bordered={false} style={{ marginInlineStart: 8 }}>region</Tag>}</span>}>
                 {current && <VisualDetail v={current} onDone={() => { setOpen(null); void load(); }} />}
             </Drawer>
         </div>
@@ -288,6 +288,10 @@ function AccessibilityTab() {
 export function VisualReview() {
     const route = useRoute();
     const tab = route[1] === 'accessibility' ? 'accessibility' : 'visual';
+    // A wrong address (#/visual/bogus) is replaced by the tab shown.
+    React.useEffect(() => {
+        if (route[0] === 'visual' && route.length > 1 && !(route[1] === 'accessibility' && route.length === 2)) navigate(['visual', ...(tab === 'accessibility' ? ['accessibility'] : [])], true);
+    }, [route.join('/')]); // eslint-disable-line react-hooks/exhaustive-deps
     return (
         <div className="panel" style={{ height: 'calc(100vh - var(--chrome))', display: 'flex', flexDirection: 'column' }}>
             <Tabs size="small" className="tests-panel-tabs" activeKey={tab} onChange={(k) => navigate(['visual', ...(k === 'accessibility' ? ['accessibility'] : [])])} style={{ flex: 'none' }} destroyInactiveTabPane

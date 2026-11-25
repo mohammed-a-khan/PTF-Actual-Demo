@@ -4,9 +4,9 @@
  * pull request, or discard it. Team notes for agents and the team's triggers are here too.
  */
 import React from 'react';
-import { Alert, App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, InputNumber, List, Modal, Progress, Radio, Row, Select, Space, Table, Tabs, Tag, Timeline, Tooltip, Typography } from 'antd';
-import { AimOutlined, BranchesOutlined, CheckCircleFilled, CloseCircleFilled, ExperimentOutlined, FileTextOutlined, PauseCircleOutlined, PullRequestOutlined, ReloadOutlined, TeamOutlined, HistoryOutlined, RocketOutlined, SafetyCertificateOutlined, StopOutlined, ThunderboltOutlined } from '@ant-design/icons';
-import { api, ExploreNoteDef, MissionDef, MissionsDef, MissionStateDef, MissionSummaryDef, MissionTemplateDef, RunInfo } from '../api';
+import { Alert, App, Button, Card, Col, Descriptions, Drawer, Empty, Form, Input, List, Modal, Popconfirm, Progress, Radio, Row, Select, Space, Table, Tabs, Tag, Timeline, Tooltip, Typography } from 'antd';
+import { AimOutlined, BranchesOutlined, CheckCircleFilled, CloseCircleFilled, DeleteOutlined, ExperimentOutlined, FileTextOutlined, PauseCircleOutlined, PullRequestOutlined, ReloadOutlined, TeamOutlined, HistoryOutlined, RocketOutlined, SafetyCertificateOutlined, StopOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { api, ExploreNoteDef, MissionDef, MissionStateDef, MissionSummaryDef, MissionTemplateDef, RunInfo } from '../api';
 import { errText, useStudio } from '../state';
 import { navigate, useRoute } from '../route';
 import { DiffView } from '../components/DiffView';
@@ -14,6 +14,12 @@ import { isTab, useRememberedTab } from '../agents-tabs';
 import { useUnsaved } from '../unsaved';
 import { Markdown } from '../components/Markdown';
 import { Replay } from '../components/Replay';
+import { agentsApi, AgentTriggerView, MissionsView } from '../agents-api';
+import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
+import { WholeNumber } from '../components/WholeNumber';
+
+/** What a mission agent's trigger does, in words. */
+const agentTriggerText = (t: AgentTriggerView) => t.on === 'schedule' ? `schedule ${t.cron}` : t.on === 'run-failed' ? 'when a run fails' : t.on === 'work-item' ? 'new or changed work items' : `pull requests${t.target ? ` into ${t.target}` : ''}`;
 
 const STATE: Record<MissionStateDef, { label: string; color: string }> = {
     queued: { label: 'Queued', color: 'default' }, preparing: { label: 'Preparing', color: 'processing' }, working: { label: 'Working', color: 'processing' }, waiting: { label: 'Waiting for you', color: 'warning' },
@@ -39,12 +45,12 @@ export function Missions({ openConversation }: { openConversation: (session: str
     const route = useRoute();
     // #/missions/<tab> is a tab (start, running, finished, triggers); anything else, a mission.
     const open = isTab(route[1], MISSION_TABS) ? undefined : route[1];
-    const [d, setD] = React.useState<MissionsDef | null>(null);
+    const [d, setD] = React.useState<MissionsView | null>(null);
     const [err, setErr] = React.useState<string | null>(null);
     const [starting, setStarting] = React.useState<MissionTemplateDef | null>(null);
     const [notesOpen, setNotesOpen] = React.useState(false);
     const [tab, setTab] = useRememberedTab('missions', 'start', MISSION_TABS, 'missions');
-    const load = React.useCallback(() => { api.missions().then((r) => { setD(r); setErr(null); }).catch((e) => { startNext = null; setErr(errText(e)); }); }, []);
+    const load = React.useCallback(() => { agentsApi.missions().then((r) => { setD(r); setErr(null); }).catch((e) => { startNext = null; setErr(errText(e)); }); }, []);
     React.useEffect(load, [load]);
     React.useEffect(() => {
         if (!d || !startNext) return;
@@ -63,12 +69,22 @@ export function Missions({ openConversation }: { openConversation: (session: str
     const running = d.runs.find((r) => LIVE.includes(r.state));
     const live = d.runs.filter((r) => LIVE.includes(r.state));
     const done = d.runs.filter((r) => !LIVE.includes(r.state));
+    // The triggers that are on: the team's (missions.json) and the mission agents' own (Agent builder).
+    const agentTriggers = d.agentTriggers ?? [];
+    const triggersOn = d.triggers.filter((t) => t.enabled !== false).length + agentTriggers.filter((t) => t.enabled !== false).length;
+    const remove = async (id: string) => { try { await agentsApi.deleteMission(id); message.success('Mission deleted'); if (open === id) navigate(['missions', 'finished']); load(); } catch (e) { message.error(errText(e)); } };
     const table = (rows: MissionSummaryDef[], empty: string) => rows.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={empty} /> : (
         <Table<MissionSummaryDef> size="small" rowKey="id" dataSource={rows} pagination={{ pageSize: 15, hideOnSinglePage: true }} onRow={(r) => ({ onClick: () => navigate(['missions', r.id]), style: { cursor: 'pointer' } })} columns={[
             { title: 'Mission', dataIndex: 'title', render: (v: string, r) => <Space direction="vertical" size={0}><Typography.Text strong>{v}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.trigger.kind === 'manual' ? `by ${r.trigger.by}` : r.trigger.kind === 'run-failed' ? `after failed run ${r.trigger.ref ?? ''}` : r.trigger.kind === 'pipeline' ? 'from a pipeline' : `on schedule ${r.trigger.ref ?? ''}`} · {ago(r.createdAt)}</Typography.Text></Space> },
             { title: 'State', width: 190, render: (_: unknown, r) => <Space size={4} wrap><Tag color={STATE[r.state].color}>{STATE[r.state].label}</Tag>{r.verified && <Tooltip title="The Studio ran the proof itself and it passed"><Tag icon={<SafetyCertificateOutlined />} color="green">verified</Tag></Tooltip>}</Space> },
             { title: 'Work', width: 220, render: (_: unknown, r) => <Space direction="vertical" size={0} style={{ width: '100%' }}>{budgetBar(r.used.activeMs, r.budget.minutes * 60000, mins(r.used.activeMs))}<Typography.Text type={r.used.modelCalls >= r.budget.modelCalls ? 'danger' : 'secondary'} style={{ fontSize: 11 }}>{r.used.modelCalls}/{r.budget.modelCalls} model calls</Typography.Text></Space> },
             { title: 'Changes', dataIndex: 'changes', width: 140, render: (n: number, r) => (n ? `${n} file${n === 1 ? '' : 's'}` : '—') + (r.result ? ` · ${r.result}` : '') },
+            ...(rows.some((r) => !LIVE.includes(r.state)) ? [{ title: '', width: 50, render: (_: unknown, r: MissionSummaryDef) => LIVE.includes(r.state) ? null : (
+                <span onClick={(e) => e.stopPropagation()}>
+                    <Popconfirm title="Delete this mission?" description={deleteText(r)} okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => remove(r.id)}>
+                        <Tooltip title="Delete the mission"><Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label={`Delete the mission ${r.title}`} /></Tooltip>
+                    </Popconfirm>
+                </span>) }] : []),
         ]} />
     );
     return (
@@ -92,7 +108,16 @@ export function Missions({ openConversation }: { openConversation: (session: str
                 ) },
                 { key: 'running', label: <span>Running <Tag bordered={false} color={live.length ? 'processing' : undefined} style={{ marginInlineEnd: 0 }}>{live.length}</Tag></span>, children: <Card size="small">{table(live, 'No mission is working now: start one from the first tab.')}</Card> },
                 { key: 'finished', label: <span>Finished <Tag bordered={false} style={{ marginInlineEnd: 0 }}>{done.length}</Tag></span>, children: <Card size="small">{table(done, 'No finished missions yet.')}</Card> },
-                { key: 'triggers', icon: <ThunderboltOutlined />, label: <span>Triggers <Tag bordered={false} style={{ marginInlineEnd: 0 }}>{d.triggers.length}</Tag></span>, children: (
+                { key: 'triggers', icon: <ThunderboltOutlined />, label: <Tooltip title="Triggers that are on: the team's and the mission agents' own"><span>Triggers <Tag bordered={false} style={{ marginInlineEnd: 0 }}>{triggersOn}</Tag></span></Tooltip>, children: (
+                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <Card size="small" title="Mission agents' triggers" extra={<Button size="small" type="link" onClick={() => navigate(['agent-builder', 'mission'])}>Agent builder</Button>}>
+                        {agentTriggers.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No mission agent starts by itself. Add a trigger in Agent builder (a mission agent's Triggers tab)." /> : (
+                            <List size="small" dataSource={agentTriggers} renderItem={(t) => (
+                                <List.Item><Space wrap><Tag color={t.enabled === false ? 'default' : 'blue'}>{agentTriggerText(t)}</Tag><Typography.Text>{t.name}</Typography.Text>
+                                    <Typography.Text type="secondary">· at most {t.maxPerDay ?? 3} a day</Typography.Text>{t.enabled === false && <Tag>off</Tag>}</Space></List.Item>
+                            )} />
+                        )}
+                    </Card>
                     <Card size="small" title="Team triggers" extra={<Space><Typography.Text type="secondary" className="mono" style={{ fontSize: 12 }}>{d.file}</Typography.Text><Tooltip title="Mission agents' own triggers are set in their editor"><Button size="small" type="link" onClick={() => navigate(['agent-builder'])}>Agent builder</Button></Tooltip></Space>}>
                         {d.triggers.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No team triggers. A mission agent's triggers are set in Agent builder (Triggers tab)." /> : (
                             <List size="small" dataSource={d.triggers} renderItem={(t) => (
@@ -101,10 +126,11 @@ export function Missions({ openConversation }: { openConversation: (session: str
                             )} />
                         )}
                     </Card>
+                    </Space>
                 ) },
             ]} />
             {starting && <StartMission queue={!!running} t={starting} onClose={() => setStarting(null)} onStarted={(id) => { setStarting(null); setTab('running'); load(); navigate(['missions', id]); }} />}
-            {open && <MissionDrawer id={open} onClose={() => navigate(['missions'])} onChanged={load} openConversation={openConversation} />}
+            {open && <MissionDrawer id={open} onClose={() => navigate(['missions'])} onChanged={load} openConversation={openConversation} onDelete={remove} />}
             {notesOpen && <TeamNotes onClose={() => setNotesOpen(false)} />}
         </Space>
     );
@@ -118,6 +144,11 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
     const [budget, setBudget] = React.useState(t.budget);
     const [runs, setRuns] = React.useState<RunInfo[]>([]);
     const [busy, setBusy] = React.useState(false);
+    const { modal } = App.useApp();
+    // Typed into the dialog: Esc, the close button and Cancel ask before it is thrown away.
+    const typed = Object.values(v).some((x) => (x ?? '').trim() !== '');
+    useUnsaved('start-mission', typed, `the "${t.title}" mission not started`, { lostOnLeave: true });
+    const cancel = () => { if (!typed || busy) { if (!busy) onClose(); return; } modal.confirm({ title: 'Leave without starting?', content: 'What you typed for this mission is lost.', okText: 'Leave', okButtonProps: { danger: true }, cancelText: 'Stay', onOk: onClose }); };
     React.useEffect(() => { if (t.inputs.some((i) => i.kind === 'run')) api.runs().then((r) => setRuns(r.filter((x) => x.state === 'failed' && !x.workdir && (x.summary?.failed ?? 0) > 0).slice(0, 30))).catch(() => undefined); }, [t]);
     const projects = env?.projects ?? [];
     const envs = v.project ? env?.environments[v.project] ?? [] : [];
@@ -133,7 +164,7 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
         catch (e) { message.error(errText(e)); } finally { setBusy(false); }
     };
     return (
-        <Modal open title={t.title} onCancel={onClose} onOk={go} okText={queue ? 'Queue the mission' : 'Start the mission'} confirmLoading={busy} width={640} okButtonProps={{ icon: <RocketOutlined /> }}>
+        <Modal open title={t.title} onCancel={cancel} maskClosable={!typed} onOk={go} okText={queue ? 'Queue the mission' : 'Start the mission'} confirmLoading={busy} width={640} okButtonProps={{ icon: <RocketOutlined /> }}>
             <Typography.Paragraph type="secondary" ellipsis={{ rows: 2, expandable: true, symbol: 'more' }} style={{ fontSize: 13 }}>{t.about}</Typography.Paragraph>
             <Form layout="vertical" size="small">
                 <Row gutter={12}>{t.inputs.map((i) => (
@@ -141,7 +172,7 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
                         {i.kind === 'project' ? <Select value={v.project} onChange={(x) => setV({ ...v, project: x, env: '' })} options={projects.map((p) => ({ value: p }))} />
                             : i.kind === 'env' ? <Select value={v.env || undefined} onChange={(x) => setV({ ...v, env: x })} options={envs.map((p) => ({ value: p }))} disabled={!v.project} />
                             : i.kind === 'run' ? <Select value={v.run} onChange={(x) => setV({ ...v, run: x })} placeholder={runs.length ? 'A run with failures' : 'No failed run on this computer yet'} options={runs.map((r) => ({ value: r.id, label: `${new Date(r.startedAt).toLocaleString()} · ${r.request.project}/${r.request.env} · ${r.summary?.failed} failed${r.request.tags ? ` · ${r.request.tags}` : ''}` }))} />
-                            : i.kind === 'number' ? <InputNumber min={1} max={i.key === 'explorers' ? 3 : i.key === 'repeat' ? 20 : undefined} precision={0} style={{ width: '100%' }} placeholder={i.placeholder} value={v[i.key] ? Number(v[i.key]) : undefined} onChange={(x) => setV({ ...v, [i.key]: x ? String(x) : '' })} />
+                            : i.kind === 'number' ? <WholeNumber min={1} max={i.key === 'explorers' ? 3 : i.key === 'repeat' ? 20 : 999999999} fallback={1} label={i.label} value={v[i.key] ? Number(v[i.key]) : undefined} onChange={(x) => setV({ ...v, [i.key]: String(x) })} />
                             : i.multiline ? <Input.TextArea rows={4} placeholder={i.placeholder} value={v[i.key]} onChange={(e) => setV({ ...v, [i.key]: e.target.value })} />
                             : <Input placeholder={i.placeholder} value={v[i.key]} onChange={(e) => setV({ ...v, [i.key]: e.target.value })} />}
                     </Form.Item></Col>
@@ -156,9 +187,9 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
                 )}
                 <Form.Item label="Budget" tooltip="The mission stops when it uses more. Time waiting for you does not count." style={{ marginBottom: 0 }}>
                     <Row gutter={8}>
-                        <Col span={8}><InputNumber min={5} max={480} precision={0} value={budget.minutes} onChange={(x) => setBudget({ ...budget, minutes: x ?? t.budget.minutes })} addonAfter="min" style={{ width: '100%' }} aria-label="Minutes" /></Col>
-                        <Col span={8}><InputNumber min={10} max={2000} precision={0} value={budget.modelCalls} onChange={(x) => setBudget({ ...budget, modelCalls: x ?? t.budget.modelCalls })} addonAfter="calls" style={{ width: '100%' }} aria-label="Model calls" /></Col>
-                        {t.writes && <Col span={8}><InputNumber min={1} max={10} precision={0} value={budget.attempts} onChange={(x) => setBudget({ ...budget, attempts: x ?? t.budget.attempts })} addonAfter="attempts" style={{ width: '100%' }} aria-label="Verification attempts" /></Col>}
+                        <Col span={8}><WholeNumber min={5} max={480} fallback={t.budget.minutes} value={budget.minutes} onChange={(x) => setBudget((b) => ({ ...b, minutes: x }))} suffix="min" label="Minutes" /></Col>
+                        <Col span={8}><WholeNumber min={10} max={2000} fallback={t.budget.modelCalls} value={budget.modelCalls} onChange={(x) => setBudget((b) => ({ ...b, modelCalls: x }))} suffix="calls" label="Model calls" /></Col>
+                        {t.writes && <Col span={8}><WholeNumber min={1} max={10} fallback={t.budget.attempts} value={budget.attempts} onChange={(x) => setBudget((b) => ({ ...b, attempts: x }))} suffix="attempts" label="Verification attempts" /></Col>}
                     </Row>
                 </Form.Item>
             </Form>
@@ -166,7 +197,7 @@ function StartMission({ t, queue, onClose, onStarted }: { t: MissionTemplateDef;
     );
 }
 
-function MissionDrawer({ id, onClose, onChanged, openConversation }: { id: string; onClose: () => void; onChanged: () => void; openConversation: (session: string) => void }) {
+function MissionDrawer({ id, onClose, onChanged, openConversation, onDelete }: { id: string; onClose: () => void; onChanged: () => void; openConversation: (session: string) => void; onDelete: (id: string) => Promise<void> }) {
     const { message, modal } = App.useApp();
     const [m, setM] = React.useState<MissionDef | null>(null);
     const [err, setErr] = React.useState<string | null>(null);
@@ -192,6 +223,7 @@ function MissionDrawer({ id, onClose, onChanged, openConversation }: { id: strin
                 {!finished && <Button danger icon={<StopOutlined />} onClick={() => modal.confirm({ title: 'Stop the mission?', content: 'What it changed so far is kept on its branch.', okText: 'Stop', okButtonProps: { danger: true }, onOk: () => act(() => api.missionStop(m.id), 'Stopped') })}>Stop</Button>}
                 {m.session && <Button onClick={() => openConversation(m.session!)}>Conversation</Button>}
                 {m.session && <Button icon={<HistoryOutlined />} onClick={() => setReplay({ session: m.session!, title: m.title })}>Replay</Button>}
+                {finished && <Button danger icon={<DeleteOutlined />} onClick={() => modal.confirm({ title: 'Delete this mission?', content: deleteText(m), okText: 'Delete', okButtonProps: { danger: true }, onOk: () => onDelete(m.id) })}>Delete</Button>}
             </Space>}>
             {err && <Alert type="error" showIcon message={err} />}
             {m && (
@@ -329,15 +361,22 @@ function PublishMission({ m, onClose, onDone }: { m: MissionDef; onClose: () => 
 
 function TeamNotes({ onClose }: { onClose: () => void }) {
     const { message, modal } = App.useApp();
-    const [t, setT] = React.useState<{ file: string; text: string } | null>(null);
+    const [t, setT] = React.useState<{ file: string; text: string; version?: string } | null>(null);
     const [saved, setSaved] = React.useState<string | null>(null);
-    React.useEffect(() => { api.teamNotes().then((x) => { setT(x); setSaved(x.text); }).catch((e) => message.error(errText(e))); }, [message]);
+    const read = React.useCallback(() => { agentsApi.teamNotes().then((x) => { setT(x); setSaved(x.text); }).catch((e) => message.error(errText(e))); }, [message]);
+    React.useEffect(read, [read]);
+    // Saved with the version read: changed meanwhile (another tab, a pull) → reload or overwrite.
+    const save = async (force = false) => {
+        if (!t) return;
+        try { await agentsApi.saveTeamNotes(t.text, t.version, force); message.success(`Saved ${t.file}: commit it to share it`); onClose(); }
+        catch (e) { if (isChangedElsewhere(e)) askChangedElsewhere(modal, e, 'The team notes', { reload: read, overwrite: () => save(true) }); else message.error(errText(e)); }
+    };
     const dirty = !!t && saved !== null && t.text !== saved;
     useUnsaved('team-notes', dirty, 'team notes for agents', { lostOnLeave: true });
     // Esc, the close button and Cancel ask first when the notes were changed.
     const cancel = () => { if (!dirty) { onClose(); return; } modal.confirm({ title: 'Leave without saving?', content: 'Your changes to the team notes are lost.', okText: 'Leave', okButtonProps: { danger: true }, cancelText: 'Stay', onOk: onClose }); };
     return (
-        <Modal open width={760} title="Team notes for agents" onCancel={cancel} maskClosable={!dirty} okText="Save" onOk={async () => { if (!t) return; try { await api.saveTeamNotes(t.text); message.success(`Saved ${t.file}: commit it to share it`); onClose(); } catch (e) { message.error(errText(e)); } }}>
+        <Modal open width={760} title="Team notes for agents" onCancel={cancel} maskClosable={!dirty} okText="Save" onOk={() => save()}>
             <Typography.Paragraph type="secondary">Every agent and mission reads these notes first: how to sign in, the application's quirks, the team's conventions. Missions propose notes; you accept them. Kept in {t?.file ?? '.cs-studio/agent-memory.md'} (commit it so the team shares it).</Typography.Paragraph>
             <Input.TextArea rows={16} value={t?.text ?? ''} onChange={(e) => t && setT({ ...t, text: e.target.value })} placeholder={'# Notes for agents\n- Sign in as the "qa-buyer" account; it has orders.\n- Close the cookie banner before anything else.'} style={{ fontFamily: 'var(--mono, monospace)', fontSize: 12 }} />
         </Modal>
@@ -375,4 +414,11 @@ function Exploration({ id, notes }: { id: string; notes: ExploreNoteDef[] }) {
             <Modal open={!!shot} width={1000} title={shot?.title} footer={null} onCancel={() => setShot(null)}>{shot && <img src={shot.url} alt={shot.title} style={{ width: '100%' }} />}</Modal>
         </Space>
     );
+}
+
+/** What deleting a finished mission removes (asked first). */
+function deleteText(m: { changes: number | unknown[]; result?: unknown }): string {
+    const n = Array.isArray(m.changes) ? m.changes.length : m.changes;
+    const kind = typeof m.result === 'string' ? m.result : (m.result as { kind?: string } | undefined)?.kind;
+    return `It is removed from the list with its screenshots${n ? kind === 'pr' ? '; its branch stays (a pull request uses it)' : kind ? ', its copy and its branch' : ', its copy and its branch: its changes were not brought in or published and are lost' : ''}.`;
 }

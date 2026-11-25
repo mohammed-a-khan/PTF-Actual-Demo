@@ -33,6 +33,7 @@ import { EvalRunner, EVALS_DIR, readSuite, saveSuite, validateSuite, type EvalRu
 import { AGENT_TEMPLATES, deleteAgent, getAgent, listAgents, profileOf, saveAgent, TOOL_GROUPS, AGENTS_DIR, teamCandidates, teamMember } from '../agents/builder';
 import { FINISHED as MISSION_FINISHED, label as missionLabel, MissionAgent, MissionDeps, MissionEngine, MissionRun, MissionTriggers, MISSIONS_FILE, PolledTriggers, readMissionsFile, TEMPLATES as BUILT_IN_MISSIONS, templates as missionTemplates } from '../agents/missions';
 import { TEAM_MEMORY_FILE } from '../agents/host';
+import { ChangedElsewhere, checkVersion as checkAgentVersion, fileVersion as agentFileVersion, textVersion } from '../agents/version';
 import { htmlText, KnowledgeBase, KnowledgeDoc, KNOWLEDGE_FILE } from '../agents/knowledge';
 import { deliver, deliverInbox, Delivery, NotifyChannel, NotifyStore, previousState, runNote, secretName as notifySecret, shouldNotify, validateChannels, validateWebhook } from '../notify/notify';
 import { applyGitNetwork, checkGitConnection, gitNetworkCommands, GitNetworkChange, gitNetworkState } from '../git/network';
@@ -67,7 +68,7 @@ import { requestHistory } from '../api/requestHistory';
 import { snippet, SNIPPET_LANGS, type SnippetLang } from '../api/snippets';
 import { exportReport } from '../api/collectionExport';
 import { CollectionRunner, compareRuns, runnerJUnit, runnerReport, type RunnerJob } from '../api/runner';
-import { collectionRel, listCollections, readCollection, writeCollection } from '../api/store';
+import { collectionRel, fileVersion, listCollections, readCollection, staleSave, takeSaveMeta, writeCollection } from '../api/store';
 import { allRequests } from '../api/model';
 import { LoadRuns, LoadRunDetail, LoadRunInfo, junit } from '../load/runs';
 import { mergeRuns } from '../load/merge';
@@ -131,6 +132,7 @@ import { resultsComment } from '../run/prComment';
 import { AUTO_DOWNLOAD_BYTES, fetchArtifact, findReports, Pipelines, reportCandidates } from '../ado/pipelines';
 import { getIdentity, setIdentity } from '../git/identity';
 import { ConflictError, Workspace } from '../workspace/files';
+import { checkVersion, contentVersion, StaleSaveError } from '../core/version';
 import { TsService } from '../lang/tsService';
 import { TsClient } from '../lang/tsClient';
 import { projectFeatureFolder, readCatalog } from '../run/catalog';
@@ -381,6 +383,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     // A few errors the UI offers a specific action for ("Refresh", "Remove the stale lock").
     const errorCode = (m: string) => m === STALE_HUNK_MESSAGE ? 'stale-hunk' : m.includes(INDEX_LOCK_MESSAGE) ? 'index-lock' : undefined;
     app.setErrorHandler((err: Error & { statusCode?: number }, _req, reply) => {
+        if (err instanceof StaleSaveError) return reply.code(409).send({ error: err.message, code: err.code });
         if (err instanceof ConflictError) return reply.code(409).send({ error: err.message, conflict: true, ...(err.deleted ? { deleted: true, code: 'deleted' } : {}) });
         if (err instanceof BadRequest || err instanceof UserError) return reply.code(400).send({ error: err.message, code: errorCode(err.message) });
         if (err instanceof GitError) return reply.code(409).send({ error: err.message, code: errorCode(err.message) });
@@ -881,15 +884,24 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
 
     // ---- ADO pipeline secrets
-    app.get('/api/pipeline/settings', async () => readPipelineSettings(opts.repoRoot));
+    // version: what the screen read (.cs-studio/pipeline.json); a save from an older read is refused (two tabs, a pull).
+    const pipelineSettingsView = () => { const s = readPipelineSettings(opts.repoRoot); return { ...s, version: contentVersion(s) }; };
+    app.get('/api/pipeline/settings', async () => pipelineSettingsView());
     app.put('/api/pipeline/settings', async (req) => {
-        const vg = str(body(req).variableGroup, 'variableGroup', { max: 120 }).trim();
-        // An Azure DevOps variable group name: not empty, no characters ADO refuses.
-        if (!vg) throw new BadRequest('Give the variable group a name (for example cs-studio-secrets).');
-        if (/[\\/:*?"<>|#%]/.test(vg)) throw new BadRequest('A variable group name cannot contain \\ / : * ? " < > | # or %.');
-        writePipelineSettings(opts.repoRoot, { variableGroup: vg });
-        log('pipeline.settings', 'Changed the pipeline variable group name', { variableGroup: String(body(req).variableGroup) });
-        return readPipelineSettings(opts.repoRoot);
+        const b = body(req);
+        const raw = typeof b.variableGroup === 'string' ? b.variableGroup.trim() : '';
+        // An Azure DevOps variable group name: not empty, no characters ADO refuses, only the placeholders the Studio fills in.
+        if (!raw) throw new BadRequest('Give the variable group a name (for example cs-studio-secrets).');
+        if (Array.from(raw).length > 120) throw new BadRequest(`The variable group name is too long: at most 120 characters (it has ${Array.from(raw).length}).`);
+        if (/[\\/:*?"<>|#%]/.test(raw)) throw new BadRequest('A variable group name cannot contain \\ / : * ? " < > | # or %.');
+        const unknown = (raw.match(/\{[^{}]*\}/g) ?? []).filter((p) => p !== '{project}' && p !== '{env}');
+        if (unknown.length) throw new BadRequest(`Only {project} and {env} are filled in: ${unknown[0]} is not a placeholder the Studio knows.`);
+        if (/[{}]/.test(raw.replace(/\{(project|env)\}/g, ''))) throw new BadRequest('A { or } on its own: the only placeholders are {project} and {env}.');
+        if (/[^\x00-\x7F]/.test(raw)) throw new BadRequest('Use Latin letters (A-Z), digits, spaces, - _ . and {project} / {env}: Azure DevOps pipelines refer to the group by this name.');
+        checkVersion(b.version, contentVersion(readPipelineSettings(opts.repoRoot)));
+        writePipelineSettings(opts.repoRoot, { variableGroup: raw });
+        log('pipeline.settings', 'Changed the pipeline variable group name', { variableGroup: raw });
+        return pipelineSettingsView();
     });
     const adoClient = (project: string, env: string) =>
         new AdoClient({ ...adoSettingsFor(opts.repoRoot, opts.store, projectId, project, env, process.env, personal()), connection: netConnection(), transport: opts.adoTransport });
@@ -1679,11 +1691,14 @@ export function createServer(opts: ServerOptions): StudioServer {
             }
         })().catch(() => { /* a notification never breaks a run */ });
     });
-    const notifyView = () => ({ channels: notifyChannels().map((c) => ({ ...c, hasWebhook: !!webhookOf(c) })), deliveries, canSave: !!notifyStore && opts.store.exists });
+    const notifyChannelsView = () => notifyChannels().map((c) => ({ ...c, hasWebhook: !!webhookOf(c) }));
+    // version: what the screen read; a save from a screen that read an older version is refused (two tabs).
+    const notifyView = () => { const channels = notifyChannelsView(); return { channels, version: contentVersion(channels), deliveries, canSave: !!notifyStore && opts.store.exists }; };
     app.get('/api/notifications', async () => notifyView());
     app.put('/api/notifications', async (req) => {
         if (!notifyStore) throw new BadRequest('Notifications need the Studio\'s data folder.');
         const b = body(req);
+        checkVersion(b.version, contentVersion(notifyChannelsView()));
         const channels = validateChannels(b.channels);
         const hooks = (b.webhooks && typeof b.webhooks === 'object' ? b.webhooks : {}) as Record<string, unknown>;
         for (const c of channels) {
@@ -1832,9 +1847,12 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     // ---- Saved run configurations: shared with the team in the repository (.cs-studio/run-configurations.json).
     const runConfigsFile = path.join(opts.repoRoot, '.cs-studio', 'run-configurations.json');
-    app.get('/api/run-configs', async () => { try { return { configs: JSON.parse(fs.readFileSync(runConfigsFile, 'utf8')), file: relPath(runConfigsFile) }; } catch { return { configs: [], file: relPath(runConfigsFile) }; } });
+    // The version of the file a screen read: a save over a newer one (another tab, a teammate's pull) is refused.
+    const runConfigsVersion = () => { try { return contentVersion(fs.readFileSync(runConfigsFile, 'utf8')); } catch { return contentVersion(''); } };
+    app.get('/api/run-configs', async () => { try { return { configs: JSON.parse(fs.readFileSync(runConfigsFile, 'utf8')), file: relPath(runConfigsFile), version: runConfigsVersion() }; } catch { return { configs: [], file: relPath(runConfigsFile), version: runConfigsVersion() }; } });
     app.put('/api/run-configs', async (req) => {
         const b = body(req);
+        checkVersion(b.version, runConfigsVersion());
         const list = Array.isArray(b.configs) ? (b.configs as unknown[]) : null;
         if (!list || list.length > 200) throw new BadRequest('At most 200 run configurations.');
         const names = new Set<string>();
@@ -1852,7 +1870,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         fs.mkdirSync(path.dirname(runConfigsFile), { recursive: true });
         fs.writeFileSync(runConfigsFile, JSON.stringify(clean, null, 2) + '\n');
         log('run.configs', `Saved ${clean.length} run configuration(s)`, { file: relPath(runConfigsFile) });
-        return { configs: clean, file: relPath(runConfigsFile) };
+        return { configs: clean, file: relPath(runConfigsFile), version: runConfigsVersion() };
     });
     // ---- Team test trends from Azure DevOps Analytics (every published result, not only this computer's runs).
     app.get('/api/ado/analytics/tests', async (req) => {
@@ -2847,6 +2865,8 @@ export function createServer(opts: ServerOptions): StudioServer {
         if (envProxy) { try { const u = new URL(envProxy); u.username = ''; u.password = ''; envProxyLabel = u.href; } catch { envProxyLabel = '(set, but not a valid address)'; } }
         return {
             ...p, git: await getIdentity(opts.repoRoot),
+            // What the Network card read: its save (the whole network block) is refused when it changed since (two tabs).
+            networkVersion: contentVersion(p.network),
             networkInfo: {
                 systemCertsSupported: systemCertsSupported(), nodeVersion: process.version,
                 hasProxyPassword: opts.store.exists && opts.store.hasStudio(PROXY_PASSWORD_SECRET),
@@ -2883,6 +2903,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         if (!settings) throw new BadRequest('Settings are not available.');
         const b = body(req);
         const cur = personal().network;
+        checkVersion(b.version, contentVersion(cur));
         // Empty is a valid value here (no proxy address, no certificate file).
         const s2 = (v: unknown, f: string, d: string) => (v === undefined ? d : str(v, f, { optional: true, max: 2048 }) ?? '');
         const proxyMode = (['off', 'environment', 'manual', 'system', 'pac'] as const).find((m) => m === b.proxyMode) ?? cur.proxyMode;
@@ -2968,7 +2989,9 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     app.put('/api/settings/git-identity', async (req) => {
         const b = body(req);
-        const r = await setIdentity(opts.repoRoot, str(b.name, 'name', { max: 200 }), str(b.email, 'email', { max: 320 }), b.scope === 'global' ? 'global' : 'repository');
+        // The limits and their messages are setIdentity's (name at most 100 characters, email required).
+        const text = (v: unknown) => (typeof v === 'string' ? v.slice(0, 2000) : '');
+        const r = await setIdentity(opts.repoRoot, text(b.name), text(b.email), b.scope === 'global' ? 'global' : 'repository');
         log('settings.git', `Set Git identity (${r.scope})`, { name: r.name });
         return r;
     });
@@ -3217,21 +3240,24 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     app.get('/api/apiws/collection', async (req) => {
         const file = str((req.query as Record<string, string>).file, 'file', { max: 300 });
-        try { return { file, collection: readCollection(opts.repoRoot, file) }; } catch (e) { throw new BadRequest((e as Error).message); }
+        try { return { file, collection: readCollection(opts.repoRoot, file), version: fileVersion(path.join(opts.repoRoot, file)) }; } catch (e) { throw new BadRequest((e as Error).message); }
     });
     app.put('/api/apiws/collection', async (req) => {
         const b = body(req);
         const project = apiProject(b.project);
         let c: ApiCollection;
-        try { c = validCollection(b.collection); } catch (e) { throw new BadRequest((e as Error).message); }
+        const { item: cItem, meta: cMeta } = takeSaveMeta(b.collection);
+        try { c = validCollection(cItem); } catch (e) { throw new BadRequest((e as Error).message); }
         const file = b.file ? str(b.file, 'file', { max: 300 }) : collectionRel(project, c.name);
+        // Saved over a version someone else changed meanwhile (another tab): refused, the UI offers Reload / Overwrite.
+        if (b.file) { const stale = staleSave(path.join(opts.repoRoot, file), cMeta); if (stale) throw new Conflict(stale); }
         // A new collection must not replace another one with the same file name.
         if (!b.file && fs.existsSync(path.join(opts.repoRoot, file)) && b.overwrite !== true) throw new BadRequest(`${file} already exists. Choose another name.`);
         // Secret values never go into the file: only {env:NAME} references.
         for (const v of c.variables) if (v.secret && v.value && !/^\{env:[\w.-]+\}$/.test(v.value.trim())) throw new BadRequest(`Variable "${v.key}" is secret: store its value as a Studio secret and use {env:NAME}.`);
         try { writeCollection(opts.repoRoot, project, c, file); } catch (e) { throw new BadRequest((e as Error).message); }
         log('api.collection.save', `Saved the API collection ${c.name}`, { file });
-        return { file };
+        return { file, version: fileVersion(path.join(opts.repoRoot, file)) };
     });
     app.delete('/api/apiws/collection', async (req) => {
         const q = req.query as Record<string, string>;
@@ -3659,6 +3685,8 @@ export function createServer(opts: ServerOptions): StudioServer {
         const list = readMonitors();
         const id = typeof b.id === 'string' && list.some((x) => x.id === b.id) ? b.id : Date.now().toString(36);
         const prev = list.find((x) => x.id === id);
+        // A new monitor needs a name the person gave it (none is taken silently from the collection); an old nameless one can still be switched on or off.
+        if ((typeof b.name !== 'string' || !b.name.trim()) && !(prev && !prev.name.trim())) throw new BadRequest('Give the monitor a name.');
         const m: Monitor = { id, name: str(b.name, 'name', { max: 120 }).trim(), file, env: b.env ? envParam(b.env) : 'dev', everyMinutes: every, enabled: b.enabled !== false, alertOn: b.alertOn === 'change' ? 'change' : 'failure', ...(wh ? { webhookSecret: wh } : {}), ...(prev?.last ? { last: prev.last } : {}) };
         writeMonitors(prev ? list.map((x) => (x.id === id ? m : x)) : [...list, m]);
         return m;
@@ -3863,22 +3891,26 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.get('/api/load/scenario', async (req) => {
         const file = str((req.query as Record<string, string>).file, 'file', { max: 300 });
         if (!scenarioFileOk(file)) throw new BadRequest('Not a load scenario file.');
-        try { return { file, scenario: validScenario(JSON.parse(fs.readFileSync(path.join(opts.repoRoot, file), 'utf8'))) }; } catch (e) { throw new BadRequest((e as Error).message); }
+        try { return { file, scenario: validScenario(JSON.parse(fs.readFileSync(path.join(opts.repoRoot, file), 'utf8'))), version: fileVersion(path.join(opts.repoRoot, file)) }; } catch (e) { throw new BadRequest((e as Error).message); }
     });
     app.put('/api/load/scenario', async (req) => {
         const b = body(req);
         const project = apiProject(b.project);
         let sc: LoadScenario;
-        try { sc = validScenario(b.scenario); } catch (e) { throw new BadRequest((e as Error).message); }
+        const { item: scItem, meta: scMeta } = takeSaveMeta(b.scenario);
+        try { sc = validScenario(scItem); } catch (e) { throw new BadRequest((e as Error).message); }
         const inProject = (x: { browserPath?: string; collection?: string }) => (x.browserPath ? x.browserPath.startsWith(`test/${project}/load/`) : !!x.collection?.startsWith(`test/${project}/api/`));
         if (!inProject(sc) || !(sc.populations ?? []).every(inProject)) throw new BadRequest('The scenario must use collections or browser paths of the same project.');
         const file = b.file ? str(b.file, 'file', { max: 300 }) : `test/${project}/load/${slug(sc.name)}.load.json`;
         if (!scenarioFileOk(file) || !file.startsWith(`test/${project}/load/`)) throw new BadRequest('Not a load scenario file.');
         if (!b.file && fs.existsSync(path.join(opts.repoRoot, file))) throw new BadRequest(`${file} already exists. Choose another name.`);
+        // Saved over a version someone else changed meanwhile (another tab): refused, the UI offers Reload / Overwrite.
+        const scStale = b.file ? staleSave(path.join(opts.repoRoot, file), scMeta) : null;
+        if (scStale) throw new Conflict(scStale);
         fs.mkdirSync(path.dirname(path.join(opts.repoRoot, file)), { recursive: true });
         fs.writeFileSync(path.join(opts.repoRoot, file), JSON.stringify(sc, null, 2) + '\n');
         log('load.scenario.save', `Saved the load scenario ${sc.name}`, { file });
-        return { file };
+        return { file, version: fileVersion(path.join(opts.repoRoot, file)) };
     });
     // Reusable service levels: test/<project>/load/sla/<name>.sla.json.
     app.get('/api/load/sla-profiles', async (req) => {
@@ -5336,9 +5368,13 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.post('/api/agents/accounts/switch', async (req) => {
         try { await agents.switchAccount(str(body(req).selectionId, 'selectionId', { max: 300 })); return { ok: true }; } catch (e) { throw agentErr(e); }
     });
+    // A whole-file save of the Agents screens: the version the screen read (unless it overwrites on purpose); 409 when it changed since.
+    const sentVersion = (b: Record<string, unknown>) => (b.force === true ? undefined : b.version);
+    const changedElsewhere = (e: unknown) => (e instanceof ChangedElsewhere ? new Conflict(e.message) : e);
     app.put('/api/agents/settings', async (req) => {
         const b = body(req);
         const s = { ...DEFAULT_AGENT_SETTINGS, ...(b.settings as Partial<AgentSettings>) } as AgentSettings;
+        try { checkAgentVersion(agents.settingsVersion(), sentVersion(b), 'the agent settings'); } catch (e) { throw changedElsewhere(e); }
         if (typeof b.providerKey === 'string') { if (b.providerKey) opts.store.setStudio(PROVIDER_KEY_SECRET, b.providerKey); else opts.store.deleteStudio(PROVIDER_KEY_SECRET); }
         if (typeof b.copilotToken === 'string') { if (b.copilotToken) opts.store.setStudio(COPILOT_TOKEN_SECRET, b.copilotToken); else opts.store.deleteStudio(COPILOT_TOKEN_SECRET); }
         try { await agents.saveSettings(s); } catch (e) { throw agentErr(e); }
@@ -5395,7 +5431,7 @@ export function createServer(opts: ServerOptions): StudioServer {
             servers: listServers(opts.repoRoot, agentHome).map((x) => {
                 const st = states[stateKey(x.scope, x.name)] ?? {};
                 return {
-                    ...x, missing: missingFor(x.server, tsSecret, tsDb),
+                    ...x, version: textVersion(JSON.stringify(x.server)), missing: missingFor(x.server, tsSecret, tsDb),
                     allowed: policy?.enabled !== false && policy?.toolServers !== false && (!Array.isArray(policy?.toolServers) || policy!.toolServers.includes(x.name)),
                     checking: checking.has(stateKey(x.scope, x.name)),
                     state: { known: st.known ?? null, server: st.server ?? null, checkedAt: st.checkedAt ?? null, ok: st.ok ?? null, error: st.error ?? null, diff: st.diff ?? null, session: st.session ?? null },
@@ -5445,6 +5481,8 @@ export function createServer(opts: ServerOptions): StudioServer {
         const editing = typeof b.editing === 'string' ? b.editing : null;
         // The secrets a pasted configuration made stay the server's when it is edited.
         const before = editing ? serversIn(opts.repoRoot, agentHome, scope)[editing] : undefined;
+        // Edited in another tab (or the team file pulled) since this form opened: not replaced silently.
+        if (editing) { try { checkAgentVersion(before ? textVersion(JSON.stringify(before)) : '', sentVersion(b), `the tool server ${editing}`); } catch (e) { throw changedElsewhere(e); } }
         if (before?.pastedSecrets?.length) server.pastedSecrets = before.pastedSecrets;
         // One write: a new name that another server has is refused (a rename never replaces another server).
         try { putServer(opts.repoRoot, agentHome, scope, name, server, editing); } catch (e) { throw new BadRequest((e as Error).message); }
@@ -5650,7 +5688,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     const missionsRef: { current?: MissionEngine } = {};
     knowledgeRef.current = knowledge;
-    app.get('/api/knowledge', async () => { const cur = knowledge.sources(); return { sources: knowledge.status(), building: knowledge.building, file: KNOWLEDGE_FILE, problems: cur.problems, invalid: cur.invalid, unreadable: cur.unreadable === true }; });
+    app.get('/api/knowledge', async () => { const cur = knowledge.sources(); return { sources: knowledge.status(), building: knowledge.building, file: KNOWLEDGE_FILE, problems: cur.problems, invalid: cur.invalid, unreadable: cur.unreadable === true, version: knowledge.version() }; });
     /** Remove an entry of the file that is not right (the others stay as written). */
     app.post('/api/knowledge/sources/remove-invalid', async (req) => {
         const index = Number(body(req).index);
@@ -5660,9 +5698,10 @@ export function createServer(opts: ServerOptions): StudioServer {
         return { sources: knowledge.status() };
     });
     app.put('/api/knowledge/sources', async (req) => {
-        try { knowledge.saveSources(body(req).sources); } catch (e) { throw new BadRequest((e as Error).message); }
+        const b = body(req);
+        try { knowledge.saveSources(b.sources, sentVersion(b) as string | undefined); } catch (e) { const c = changedElsewhere(e); throw c instanceof Conflict ? c : new BadRequest((e as Error).message); }
         log('knowledge.sources', 'Changed the knowledge sources', { file: KNOWLEDGE_FILE });
-        return { sources: knowledge.status() };
+        return { sources: knowledge.status(), version: knowledge.version() };
     });
     let knowledgeBuild: Promise<unknown> | null = null;
     app.post('/api/knowledge/build', async (req) => {
@@ -5708,6 +5747,8 @@ export function createServer(opts: ServerOptions): StudioServer {
         return {
             templates: missionTemplates(opts.repoRoot).map((t) => ({ key: t.key, title: t.title, about: t.about, inputs: t.inputs, ...(t.oneOf ? { oneOf: t.oneOf } : {}), writes: t.writes, budget: t.budget, ...(t.team?.length ? { team: t.team.map((id) => teamMember(opts.repoRoot, id)).filter((x) => !!x).map((x) => ({ id: x!.id, name: x!.name })) } : {}) })),
             runs: missions.list().map(missionSummary), triggers: f.file.triggers ?? [], problems: f.problems, file: MISSIONS_FILE,
+            // Mission agents' own triggers (set in Agent builder): listed and counted with the team's.
+            agentTriggers: listAgents(opts.repoRoot).agents.filter((a) => a.mode === 'mission').flatMap((a) => (a.triggers ?? []).map((t) => ({ agent: a.id, name: a.name, ...t }))),
         };
     });
     app.get('/api/missions/:id', async (req) => missions.get(missionId(req)));
@@ -5728,6 +5769,12 @@ export function createServer(opts: ServerOptions): StudioServer {
             });
             return missionSummary(m);
         } catch (e) { throw new BadRequest((e as Error).message); }
+    });
+    // A finished mission taken off the list (its copy, screenshots and branch go too, unless a pull request uses the branch).
+    app.delete('/api/missions/:id', async (req) => {
+        confirmed(body(req), 'deleting the mission');
+        try { await missions.remove(missionId(req), opts.userName ?? 'you'); } catch (e) { throw new BadRequest((e as Error).message); }
+        return { ok: true };
     });
     app.post('/api/missions/:id/stop', async (req) => { try { await missions.stop(missionId(req), opts.userName ?? 'you'); } catch (e) { throw new BadRequest((e as Error).message); } return { ok: true }; });
     app.post('/api/missions/:id/answer', async (req) => {
@@ -5810,14 +5857,15 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     // Team memory: notes agents read every time; agents propose, people accept.
     const memoryFile = () => path.join(opts.repoRoot, TEAM_MEMORY_FILE);
-    app.get('/api/missions-memory', async () => ({ file: TEAM_MEMORY_FILE, text: fs.existsSync(memoryFile()) ? fs.readFileSync(memoryFile(), 'utf8') : '' }));
+    app.get('/api/missions-memory', async () => ({ file: TEAM_MEMORY_FILE, text: fs.existsSync(memoryFile()) ? fs.readFileSync(memoryFile(), 'utf8') : '', version: agentFileVersion(memoryFile()) }));
     app.put('/api/missions-memory', async (req) => {
         const text = typeof body(req).text === 'string' ? String(body(req).text) : '';
+        try { checkAgentVersion(agentFileVersion(memoryFile()), sentVersion(body(req)), TEAM_MEMORY_FILE); } catch (e) { throw changedElsewhere(e); }
         if (text.length > 20000) throw new BadRequest('Keep the team notes under 20,000 characters: agents read them every time.');
         fs.mkdirSync(path.dirname(memoryFile()), { recursive: true });
         fs.writeFileSync(memoryFile(), maskAll(text));
         log('agent.memory', 'Changed the team notes for agents');
-        return { ok: true };
+        return { ok: true, version: agentFileVersion(memoryFile()) };
     });
     app.post('/api/missions/:id/memory/:note', async (req) => {
         const id = missionId(req);
@@ -5836,7 +5884,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     // ---- Agent Builder: the team's agents (.cs-studio/agents/<id>.json), assistants or missions.
     const builderView = () => {
         const l = listAgents(opts.repoRoot);
-        return { agents: l.agents, problems: l.problems, dir: AGENTS_DIR, templates: AGENT_TEMPLATES, teamCandidates: teamCandidates(opts.repoRoot), groups: TOOL_GROUPS.map(({ id, label, about }) => ({ id, label, about })),
+        return { agents: l.agents, versions: l.versions, problems: l.problems, dir: AGENTS_DIR, templates: AGENT_TEMPLATES, teamCandidates: teamCandidates(opts.repoRoot), groups: TOOL_GROUPS.map(({ id, label, about }) => ({ id, label, about })),
             knowledge: knowledge.sources().sources.map((x) => ({ id: x.id, name: x.name })), reserved: BUILT_IN_MISSIONS.map((t) => t.key), policyModels: agents.policyNow()?.models ?? null };
     };
     app.get('/api/agent-builder', async () => builderView());
@@ -5850,10 +5898,11 @@ export function createServer(opts: ServerOptions): StudioServer {
         const unknown = (Array.isArray(a.team) ? a.team : []).filter((t) => typeof t !== 'string' || !teamMember(opts.repoRoot, t));
         if (unknown.length) throw new BadRequest(`No agent for the team member(s): ${unknown.join(', ')}.`);
         try {
-            const saved = saveAgent(opts.repoRoot, a, opts.userName ?? 'unknown', { knowledgeIds: knowledge.sources().sources.map((x) => x.id), reserved: BUILT_IN_MISSIONS.map((t) => t.key), isNew: b.isNew === true });
+            const v = sentVersion(b);
+            const saved = saveAgent(opts.repoRoot, a, opts.userName ?? 'unknown', { knowledgeIds: knowledge.sources().sources.map((x) => x.id), reserved: BUILT_IN_MISSIONS.map((t) => t.key), isNew: b.isNew === true, ...(typeof v === 'string' ? { version: v } : {}) });
             log('agent.builder', `${b.isNew === true ? 'Made' : 'Changed'} the team agent ${saved.name}`, { file: `${AGENTS_DIR}/${saved.id}.json` });
             return { agent: saved, ...builderView() };
-        } catch (e) { throw new BadRequest((e as Error).message); }
+        } catch (e) { const c = changedElsewhere(e); throw c instanceof Conflict ? c : new BadRequest((e as Error).message); }
     });
     // Evaluations: test cases for an agent, run in safe sessions, compared with the run before.
     const evals = new EvalRunner({ repoRoot: opts.repoRoot, gitDir: gitDirOf(opts.repoRoot), agent: missionAgent, userName: opts.userName, log: (a, t, d) => log(a, t, d) });

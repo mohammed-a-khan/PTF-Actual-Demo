@@ -1,8 +1,9 @@
 import React from 'react';
 import { Alert, App, Badge, Button, Checkbox, Dropdown, Empty, Input, Modal, Popconfirm, Space, Tabs, Tag, Tooltip, Typography } from 'antd';
-import { ClearOutlined, HistoryOutlined, MinusOutlined, PlusOutlined, UndoOutlined, WarningOutlined } from '@ant-design/icons';
+import { ClearOutlined, EditOutlined, HistoryOutlined, MinusOutlined, PlusOutlined, UndoOutlined, WarningOutlined } from '@ant-design/icons';
 import { api, ApiError, FileStatus, GateResult } from '../api';
-import { errText, useStudio } from '../state';
+import { errText, openInEditor, useStudio } from '../state';
+import { useKept } from '../kept';
 import { DiffView, useDiffPrefs } from '../components/DiffView';
 import { DiffToolbar } from '../components/DiffToolbar';
 import { History } from './History';
@@ -80,7 +81,8 @@ function Changes() {
     }, [onTab]);
     const [diff, setDiff] = React.useState('');
     const [loadingDiff, setLoadingDiff] = React.useState(false);
-    const [msg, setMsg] = React.useState('');
+    // A half-typed message is kept while you visit another screen and across a reload of the tab (cleared once committed).
+    const [msg, setMsg] = useKept<string>('git-commit-message', '');
     const [busy, setBusy] = React.useState(false);
     const [gate, setGate] = React.useState<Extract<GateResult, { status: 'blocked' }> | null>(null);
     const [amend, setAmend] = React.useState(false);
@@ -280,6 +282,8 @@ function Changes() {
                     {sel ? <Typography.Text strong className="mono" style={{ flex: '1 1 220px', minWidth: 0 }} ellipsis={{ tooltip: sel.path }}>{sel.path}</Typography.Text> : <Typography.Text type="secondary" style={{ flex: 1 }}>What changed</Typography.Text>}
                     {sel && sel.area !== 'conflict' && <DiffToolbar prefs={prefs} onChange={setPrefs} />}
                     {sel && sel.area !== 'conflict' && <Tag>{sel.area === 'staged' ? 'Staged version' : 'Not staged yet'}</Tag>}
+                    {sel && !(selFile && (selFile.unstaged === 'D' || (selFile.staged === 'D' && selFile.unstaged === '.'))) /* not on disk: nothing to open */ &&
+                        <Tooltip title="Open the file in the Code editor (your working copy)"><Button size="small" icon={<EditOutlined />} onClick={() => openInEditor(sel.path)}>Open in editor</Button></Tooltip>}
                 </div>
                 <div style={{ flex: 1, overflow: sel?.area === 'conflict' ? 'hidden' : 'auto', minHeight: 0 }}>
                     {!sel ? (status?.hasConflicts

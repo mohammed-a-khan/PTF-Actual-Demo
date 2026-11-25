@@ -5,12 +5,13 @@
  */
 import React from 'react';
 import { Alert, App, Button, Card, Empty, Form, Input, List, Modal, Popconfirm, Progress, Select, Space, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
-import { DatabaseOutlined, DeleteOutlined, PlusOutlined, QuestionCircleOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { DatabaseOutlined, DeleteOutlined, EditOutlined, PlusOutlined, WarningFilled, QuestionCircleOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { api, KnowledgeHitDef, KnowledgeKind, KnowledgeSourceDef, KnowledgeStatusDef } from '../api';
 import { errText, openInEditor } from '../state';
 import { useRememberedTab } from '../agents-tabs';
 import { useKept } from '../kept';
-import { agentsApi, InvalidKnowledgeSource } from '../agents-api';
+import { agentsApi, InvalidKnowledgeSource, KnowledgeStatusView } from '../agents-api';
+import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
 
 const KINDS: Record<KnowledgeKind, { label: string; about: string }> = {
     repo: { label: 'This repository', about: 'Features, steps, page objects, data, configuration and documents of this repository.' },
@@ -23,10 +24,11 @@ const KINDS: Record<KnowledgeKind, { label: string; about: string }> = {
 const ago = (iso: string | null) => (!iso ? 'never' : new Date(iso).toLocaleString());
 
 export function Knowledge() {
-    const { message } = App.useApp();
-    const [d, setD] = React.useState<(Awaited<ReturnType<typeof api.knowledge>> & { invalid?: InvalidKnowledgeSource[]; unreadable?: boolean }) | null>(null);
+    const { message, modal } = App.useApp();
+    const [d, setD] = React.useState<(Omit<Awaited<ReturnType<typeof api.knowledge>>, 'sources'> & { sources: KnowledgeStatusView[]; invalid?: InvalidKnowledgeSource[]; unreadable?: boolean; version?: string }) | null>(null);
     const [err, setErr] = React.useState<string | null>(null);
-    const [adding, setAdding] = React.useState<KnowledgeSourceDef | null>(null);
+    // A source being added (no id yet) or changed (its id: e.g. a folder that is not there any more).
+    const [adding, setAdding] = React.useState<(KnowledgeSourceDef & { includeText?: string; urlsText?: string }) | null>(null);
     // The search and its results stay when the person comes back (Back to Knowledge, the browser's Back, the menu).
     const [q, setQ] = useKept('knowledge-search-q', '');
     const [hits, setHits] = useKept<KnowledgeHitDef[] | null>('knowledge-search-hits', null);
@@ -37,7 +39,16 @@ export function Knowledge() {
     React.useEffect(load, [load]);
     React.useEffect(() => { if (!d?.building) return; const t = setInterval(load, 1000); return () => clearInterval(t); }, [d, load]);
     const plain = (s: KnowledgeStatusDef): KnowledgeSourceDef => ({ id: s.id, name: s.name, kind: s.kind, enabled: s.enabled, ...(s.path ? { path: s.path } : {}), ...(s.include?.length ? { include: s.include } : {}), ...(s.query ? { query: s.query } : {}), ...(s.wiki ? { wiki: s.wiki } : {}), ...(s.urls?.length ? { urls: s.urls } : {}), ...(s.project ? { project: s.project } : {}) });
-    const save = async (list: KnowledgeSourceDef[], ok: string) => { try { await api.saveKnowledgeSources(list); message.success(ok); load(); return true; } catch (e) { message.error(errText(e)); return false; } };
+    // The whole list is saved with the version of the file this screen read: changed meanwhile (another tab, a pull) → asked.
+    const save = async (list: KnowledgeSourceDef[], ok: string, force = false): Promise<boolean> => {
+        try { await agentsApi.saveKnowledgeSources(list, d?.version, force); message.success(ok); load(); return true; }
+        catch (e) {
+            if (isChangedElsewhere(e)) {
+                return new Promise<boolean>((resolve) => askChangedElsewhere(modal, e, 'The knowledge sources', { reload: () => { load(); resolve(false); }, overwrite: async () => resolve(await save(list, ok, true)) }));
+            }
+            message.error(errText(e)); return false;
+        }
+    };
     const building = React.useRef(false);
     const build = async (source?: string) => { if (building.current) return; building.current = true; setTimeout(() => { building.current = false; }, 1500); try { await api.buildKnowledge(source); message.info('Building the index…'); setTimeout(load, 300); } catch (e) { message.error(errText(e)); } };
     const MAX_Q = 500;
@@ -64,13 +75,16 @@ export function Knowledge() {
                 <Button size="small" icon={<ReloadOutlined />} disabled={!!d.building} onClick={() => build()}>Rebuild all</Button>
                 <Button size="small" type="primary" icon={<PlusOutlined />} onClick={() => setAdding({ id: '', name: '', kind: 'folder', enabled: true })}>Add a source</Button>
             </Space>}>
-                <Table<KnowledgeStatusDef> size="small" rowKey="id" pagination={false} dataSource={d.sources} columns={[
-                    { title: 'Source', render: (_: unknown, s) => <Space direction="vertical" size={0}><Typography.Text strong>{s.name}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 12 }}>{KINDS[s.kind].label}{s.path ? ` · ${s.path}` : ''}{s.include?.length ? ` · ${s.include.join(', ')}` : ''}{s.urls?.length ? ` · ${s.urls.length} page(s)` : ''}</Typography.Text></Space> },
-                    { title: 'Indexed', width: 220, render: (_: unknown, s) => s.builtAt ? <Space direction="vertical" size={0}><span>{s.docs} documents · {s.chunks} passages</span><Typography.Text type="secondary" style={{ fontSize: 12 }}>{ago(s.builtAt)}</Typography.Text></Space> : <Typography.Text type="secondary">not yet</Typography.Text> },
+                <Table<KnowledgeStatusView> size="small" rowKey="id" pagination={false} dataSource={d.sources} columns={[
+                    { title: 'Source', render: (_: unknown, s) => <Space direction="vertical" size={0} style={{ minWidth: 0 }}><Typography.Text strong>{s.name}</Typography.Text><Typography.Text type="secondary" style={{ fontSize: 12, wordBreak: 'break-all' }}>{KINDS[s.kind].label}{s.path ? ` · ${s.path}` : ''}{s.include?.length ? ` · ${s.include.join(', ')}` : ''}{s.urls?.length ? ` · ${s.urls.length} page(s)` : ''}</Typography.Text>
+                        {/* Only this source is affected: the others work and can be changed; fix its folder or remove it. */}
+                        {s.warning && <Typography.Text type="warning" role="alert" style={{ fontSize: 12 }}><WarningFilled /> {s.warning} It cannot be indexed until its folder is fixed (or remove it).</Typography.Text>}</Space> },
+                    { title: 'Indexed', width: 220, render: (_: unknown, s) => s.warning && !s.builtAt ? <Tag color="warning">folder missing</Tag> : s.builtAt ? <Space direction="vertical" size={0}><span>{s.docs} documents · {s.chunks} passages</span><Typography.Text type="secondary" style={{ fontSize: 12 }}>{ago(s.builtAt)}</Typography.Text></Space> : <Typography.Text type="secondary">not yet</Typography.Text> },
                     { title: '', width: 70, render: (_: unknown, s) => s.errors.length ? <Tooltip title={s.errors.join(' ')}><Tag color="error">problem</Tag></Tooltip> : null },
                     { title: 'On', width: 60, render: (_: unknown, s) => <Switch size="small" checked={s.enabled !== false} onChange={(v) => save(d.sources.map((x) => (x.id === s.id ? { ...plain(x), enabled: v } : plain(x))), v ? 'Source on' : 'Source off')} /> },
-                    { title: '', width: 150, render: (_: unknown, s) => <Space>
-                        <Button size="small" disabled={!!d.building || s.enabled === false} onClick={() => build(s.id)}>Update</Button>
+                    { title: '', width: 190, render: (_: unknown, s) => <Space>
+                        <Tooltip title={s.warning ? 'Fix its folder first' : undefined}><Button size="small" disabled={!!d.building || s.enabled === false || !!s.warning} onClick={() => build(s.id)}>Update</Button></Tooltip>
+                        {s.kind === 'folder' && <Tooltip title="Change the source (its folder)"><Button size="small" type="text" icon={<EditOutlined />} aria-label={`Change ${s.name}`} onClick={() => setAdding({ ...plain(s), includeText: s.include?.join(', ') })} /></Tooltip>}
                         <Popconfirm title={`Remove ${s.name}?`} description="Its index is deleted; agents no longer find it." okText="Remove" okButtonProps={{ danger: true }} onConfirm={() => save(d.sources.filter((x) => x.id !== s.id).map(plain), 'Removed')}>
                             <Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label="Remove" />
                         </Popconfirm></Space> },
@@ -89,7 +103,9 @@ export function Knowledge() {
                     )} />
                 ))}
             </Card>) }]} />
-            {adding && <AddSource s={adding} existing={d.sources.map((x) => x.id)} onClose={() => setAdding(null)} onSave={async (s) => { if (await save([...d.sources.map(plain), s], `Added ${s.name}: building its index`)) { setAdding(null); void build(s.id); } }} />}
+            {adding && (adding.id
+                ? <AddSource s={adding} editing existing={d.sources.map((x) => x.id).filter((x) => x !== adding.id)} onClose={() => setAdding(null)} onSave={async (s) => { if (await save(d.sources.map((x) => (x.id === adding.id ? { ...s, id: adding.id, enabled: x.enabled } : plain(x))), `Saved ${s.name}: building its index`)) { setAdding(null); if (d.sources.find((x) => x.id === adding.id)?.enabled !== false) void build(adding.id); } }} />
+                : <AddSource s={adding} existing={d.sources.map((x) => x.id)} onClose={() => setAdding(null)} onSave={async (s) => { if (await save([...d.sources.map(plain), s], `Added ${s.name}: building its index`)) { setAdding(null); void build(s.id); } }} />)}
             <Modal open={!!open} width={860} title={open?.title} footer={null} onCancel={() => setOpen(null)}>
                 {open && <><Typography.Text type="secondary">{open.path}{open.lines ? `, lines ${open.lines[0]}–${open.lines[1]}` : ''}</Typography.Text>
                     <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 520, overflow: 'auto', fontSize: 12, background: 'rgba(127,127,127,.08)', padding: 10, borderRadius: 6 }}>{open.text}</pre></>}
@@ -98,7 +114,7 @@ export function Knowledge() {
     );
 }
 
-function AddSource({ s, existing, onClose, onSave }: { s: KnowledgeSourceDef; existing: string[]; onClose: () => void; onSave: (s: KnowledgeSourceDef) => void | Promise<void> }) {
+function AddSource({ s, existing, editing, onClose, onSave }: { s: KnowledgeSourceDef & { includeText?: string; urlsText?: string }; existing: string[]; editing?: boolean; onClose: () => void; onSave: (s: KnowledgeSourceDef) => void | Promise<void> }) {
     const [busy, setBusy] = React.useState(false);
     const [v, setV] = React.useState<KnowledgeSourceDef & { urlsText?: string; includeText?: string }>(s);
     // The id from the name (or the kind's label when the name is left empty); a name with no Latin letters or digits gets a short stable code.
@@ -115,9 +131,9 @@ function AddSource({ s, existing, onClose, onSave }: { s: KnowledgeSourceDef; ex
         ...(v.kind === 'ado-wiki' && v.wiki?.trim() ? { wiki: v.wiki.trim() } : {}),
         ...(v.kind === 'url' ? { urls: (v.urlsText ?? '').split(/\s+/).filter(Boolean) } : {}) }); } finally { setBusy(false); } };
     return (
-        <Modal open title="Add a knowledge source" onCancel={onClose} onOk={() => void go()} confirmLoading={busy} okText="Add and index" okButtonProps={{ disabled: !id || clash || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim()) }} width={620}>
+        <Modal open title={editing ? `Change ${s.name}` : 'Add a knowledge source'} onCancel={onClose} onOk={() => void go()} confirmLoading={busy} okText={editing ? 'Save and index' : 'Add and index'} okButtonProps={{ disabled: !id || clash || (v.kind === 'folder' && !v.path?.trim()) || (v.kind === 'url' && !v.urlsText?.trim()) }} width={620}>
             <Form layout="vertical" size="small">
-                <Form.Item label="Kind"><Select value={v.kind} onChange={(k) => setV({ ...v, kind: k })} options={(Object.keys(KINDS) as KnowledgeKind[]).map((k) => ({ value: k, label: KINDS[k].label }))} /><Typography.Text type="secondary" style={{ fontSize: 12 }}>{KINDS[v.kind].about}</Typography.Text></Form.Item>
+                <Form.Item label="Kind"><Select value={v.kind} disabled={editing} aria-label="Kind" onChange={(k) => setV({ ...v, kind: k })} options={(Object.keys(KINDS) as KnowledgeKind[]).map((k) => ({ value: k, label: KINDS[k].label }))} /><Typography.Text type="secondary" style={{ fontSize: 12 }}>{KINDS[v.kind].about}</Typography.Text></Form.Item>
                 <Form.Item label="Name" help={clash ? 'A source with this name exists.' : undefined} validateStatus={clash ? 'error' : undefined}><Input value={v.name} maxLength={80} placeholder={KINDS[v.kind].label} onPressEnter={() => void go()} onChange={(e) => setV({ ...v, name: e.target.value })} /></Form.Item>
                 {v.kind === 'folder' && <Form.Item label="Folder" tooltip="An absolute folder, or one relative to this repository"><Input value={v.path} placeholder="C:\work\shop-app  or  ../shop-app" onChange={(e) => setV({ ...v, path: e.target.value })} /></Form.Item>}
                 {(v.kind === 'repo' || v.kind === 'folder') && <Form.Item label="Only these sub-folders (optional)"><Input value={v.includeText} placeholder="docs, src/orders" onChange={(e) => setV({ ...v, includeText: e.target.value })} /></Form.Item>}

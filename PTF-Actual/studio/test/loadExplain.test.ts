@@ -83,3 +83,16 @@ test('the reports carry it: executive summary first, technical details after; th
     assert.match(cmp, /<h2>Verdict<\/h2><div class="status" style="border-color:#cf222e">/);
     assert.match(cmp, /<td class="v-worse">\+44% <small>▲ worse<\/small><\/td><td>Users waited 44% longer\.<\/td>/);
 });
+
+test('compare: every time measure uses one rule (10% and 20 ms); a big % of a few ms says why it is "same"', () => {
+    // avg 2.5 → 7.5 ms (+200%, 5 ms): same; p95 5 → 15 ms (+200%, 10 ms): same; p99 8 → 24 ms (+200%, 16 ms): same.
+    const c = compareRuns(run(5), run(15), { a: 'A', b: 'B' });
+    for (const k of ['Average response time', 'Median (p50)', '90th percentile (p90)', '95th percentile (p95)', '99th percentile (p99)']) {
+        const m = c.metrics.find((x) => x.label === k)!;
+        assert.equal(m.verdict, 'same', k);
+        assert.match(m.meaning, /^About the same: \+\d+(\.\d)? ms is under 20 ms \(normal variation\)\.$/, k);
+    }
+    // The same % with more than 20 ms: worse for every time measure alike.
+    const d = compareRuns(run(500), run(1500), { a: 'A', b: 'B' });
+    for (const m of d.metrics.filter((x) => /response time|p\d\d|p50/.test(x.label))) assert.equal(m.verdict, 'worse', m.label);
+});

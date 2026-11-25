@@ -14,6 +14,22 @@ import { errText } from '../state';
 import { ago } from '../format';
 import { useRememberedTab } from '../agents-tabs';
 import { useUnsaved } from '../unsaved';
+import { useKept } from '../kept';
+import { agentsApi, AgentStatusView } from '../agents-api';
+import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
+
+/** The longest model or deployment name (the server says the same). */
+const MODEL_MAX = 120;
+/** Why an endpoint address is not right (the server checks the same), or null. */
+export function endpointProblem(v: string): string | null {
+    const t = v.trim();
+    if (!t) return 'The endpoint address is needed (https://…).';
+    if (t.length > 2000) return 'At most 2000 characters.';
+    if (!/^https?:\/\//i.test(t)) return 'A web address starting with http:// or https://, e.g. https://my-resource.openai.azure.com/openai/v1.';
+    if (!/^[\x21-\x7e]+$/.test(t)) return 'A web address has no spaces, emoji or other special characters.';
+    try { if (!new URL(t).hostname) throw new Error(); } catch { return 'Not a web address: http(s)://host[:port]/path.'; }
+    return null;
+}
 
 interface Field { key: string; label: string; placeholder?: string; required?: boolean; multiline?: boolean; kind?: 'project' | 'env' | 'seed' }
 interface Workflow { key: string; title: string; icon: React.ReactNode; about: string; fields: Field[]; task: (v: Record<string, string>) => string; prompt: (v: Record<string, string>) => string }
@@ -110,8 +126,8 @@ For each screen: open it in the Studio browser, read it (snapshot, forms, tables
     },
 ];
 
-function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved: (s: AgentStatus) => void }) {
-    const { message } = App.useApp();
+function SettingsCard({ status, onSaved, onReload }: { status: AgentStatusView | null; onSaved: (s: AgentStatus) => void; onReload: () => void }) {
+    const { message, modal } = App.useApp();
     const [s, setS] = React.useState<AgentSettingsDef | null>(status?.settings ?? null);
     const [keys, setKeys] = React.useState({ providerKey: '', copilotToken: '' });
     const [saving, setSaving] = React.useState(false);
@@ -119,11 +135,14 @@ function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved
     React.useEffect(() => { if (status?.settings) setS(status.settings); }, [status?.settings]);
     const dirty = !!s && !!status?.settings && (JSON.stringify(s) !== JSON.stringify(status.settings) || !!keys.providerKey || !!keys.copilotToken);
     // Opening another screen (or another tab of the browser) asks first, like the agent editor.
-    useUnsaved('agent-settings', dirty, 'agent settings', { lostOnLeave: true });
+    useUnsaved('agent-settings', dirty, 'agent settings', { lostOnLeave: true, discard: () => { if (status?.settings) setS(status.settings); setKeys({ providerKey: '', copilotToken: '' }); } });
     if (!s) return null;
     // A model or deployment name: one word (the server says the same).
     const modelText = s.model === 'auto' ? '' : s.model;
-    const modelProblem = s.provider !== 'custom' ? null : !modelText.trim() ? 'The model or deployment name is needed.' : !/^[\w.:/@-]{1,120}$/.test(modelText.trim()) ? 'Up to 120 letters, digits and . _ : / @ - (no spaces or emoji).' : null;
+    const modelProblem = s.provider !== 'custom' ? null : !modelText.trim() ? 'The model or deployment name is needed.'
+        : modelText.trim().length > MODEL_MAX ? `At most ${MODEL_MAX} characters (it has ${modelText.trim().length}).`
+            : !/^[\w.:/@-]{1,120}$/.test(modelText.trim()) ? `Up to ${MODEL_MAX} letters, digits and . _ : / @ - (no spaces or emoji).` : null;
+    const urlProblem = s.provider !== 'custom' ? null : endpointProblem(s.custom?.baseUrl ?? '');
     const pol = status?.policy;
     const rank = { auto: 0, ask: 1, deny: 2 } as const;
     const ap = (k: keyof AgentSettingsDef['approvals'], label: string, deny = false) => {
@@ -132,12 +151,19 @@ function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved
         return <Col xs={24} md={12} key={k}><Form.Item label={label} tooltip={min ? `The repository's policy: at least "${min === 'deny' ? 'Never' : 'Ask me'}"` : undefined}><Select size="small" style={{ width: '100%' }} value={value} aria-label={label} onChange={(v) => setS({ ...s, approvals: { ...s.approvals, [k]: v } })}
             options={[{ value: 'ask', label: 'Ask me' }, { value: 'auto', label: 'Allow' }, ...(deny || min === 'deny' ? [{ value: 'deny', label: 'Never' }] : [])].map((o) => ({ ...o, disabled: !!min && rank[o.value as keyof typeof rank] < rank[min] }))} /></Form.Item></Col>;
     };
-    const save = async () => {
+    const save = async (force = false) => {
         if (saving) return;
         if (modelProblem) { setSaveErr(`Not saved: ${modelProblem}`); return; }
+        if (urlProblem) { setSaveErr(`Not saved: Endpoint: ${urlProblem}`); return; }
         setSaving(true);
-        try { onSaved(await api.agentSaveSettings({ ...s, model: s.model.trim() || s.model }, { ...(keys.providerKey ? { providerKey: keys.providerKey } : {}), ...(keys.copilotToken ? { copilotToken: keys.copilotToken } : {}) })); setKeys({ providerKey: '', copilotToken: '' }); setSaveErr(null); message.success('Saved.'); }
-        catch (e) { setSaveErr(`Not saved: ${errText(e)}`); } finally { setSaving(false); }
+        try {
+            onSaved(await agentsApi.saveAgentSettings({ ...s, model: s.model.trim() || s.model, ...(s.custom ? { custom: { ...s.custom, baseUrl: s.custom.baseUrl.trim() } } : {}) }, { ...(keys.providerKey ? { providerKey: keys.providerKey } : {}), ...(keys.copilotToken ? { copilotToken: keys.copilotToken } : {}) }, status?.settingsVersion, force));
+            setKeys({ providerKey: '', copilotToken: '' }); setSaveErr(null); message.success('Saved.');
+        } catch (e) {
+            // Saved in another tab meanwhile: reload those settings, or overwrite them with these on purpose.
+            if (isChangedElsewhere(e)) askChangedElsewhere(modal, e, 'The agent settings', { reload: () => { setKeys({ providerKey: '', copilotToken: '' }); setSaveErr(null); onReload(); }, overwrite: () => { setSaving(false); return save(true); } });
+            else setSaveErr(`Not saved: ${errText(e)}`);
+        } finally { setSaving(false); }
     };
     return (
         <Form layout="vertical" size="small">
@@ -155,8 +181,8 @@ function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved
             </Row> : <Row gutter={12}>
                 <Col xs={24} md={12}><Form.Item label="Type"><Select size="small" style={{ width: '100%' }} value={s.custom?.type} aria-label="Endpoint type" onChange={(t) => setS({ ...s, custom: { ...(s.custom ?? { baseUrl: '' }), type: t } })}
                     options={[{ value: 'azure', label: 'Azure OpenAI' }, { value: 'openai', label: 'OpenAI-compatible' }, { value: 'anthropic', label: 'Anthropic' }]} /></Form.Item></Col>
-                <Col xs={24} md={12}><Form.Item label="Model / deployment" validateStatus={modelProblem ? 'error' : undefined} help={modelProblem ?? undefined}><Input size="small" maxLength={120} value={modelText} onChange={(e) => setS({ ...s, model: e.target.value })} aria-label="Model or deployment" /></Form.Item></Col>
-                <Col xs={24} md={12}><Form.Item label="Endpoint"><Input size="small" placeholder="https://my-resource.openai.azure.com/openai/v1" value={s.custom?.baseUrl} onChange={(e) => setS({ ...s, custom: { ...(s.custom ?? { type: 'azure' }), baseUrl: e.target.value } })} aria-label="Endpoint" /></Form.Item></Col>
+                <Col xs={24} md={12}><Form.Item label="Model / deployment" validateStatus={modelProblem ? 'error' : undefined} help={modelProblem ?? undefined}><Input size="small" maxLength={MODEL_MAX} showCount value={modelText} onChange={(e) => setS({ ...s, model: e.target.value })} aria-label="Model or deployment" /></Form.Item></Col>
+                <Col xs={24} md={12}><Form.Item label="Endpoint" validateStatus={urlProblem && (s.custom?.baseUrl ?? '') !== '' ? 'error' : undefined} help={urlProblem && (s.custom?.baseUrl ?? '') !== '' ? urlProblem : undefined}><Input size="small" maxLength={2000} placeholder="https://my-resource.openai.azure.com/openai/v1" value={s.custom?.baseUrl} onChange={(e) => setS({ ...s, custom: { ...(s.custom ?? { type: 'azure' }), baseUrl: e.target.value } })} aria-label="Endpoint" /></Form.Item></Col>
                 <Col xs={24} md={12}><Form.Item label="API key"><Input.Password size="small" placeholder={status?.providerKeySet ? '(saved)' : 'Kept in the Studio\'s secret store'} value={keys.providerKey} onChange={(e) => setKeys({ ...keys, providerKey: e.target.value })} aria-label="API key" autoComplete="new-password" /></Form.Item></Col>
             </Row>}
             <Typography.Text strong style={{ fontSize: 13 }}>Ask before an agent…</Typography.Text>
@@ -164,7 +190,7 @@ function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved
                 {ap('files', 'changes files')}{ap('studio', 'changes in the Studio')}{ap('shell', 'runs commands', true)}{ap('mcp', 'uses MCP tools (your Copilot settings)')}{ap('urls', 'fetches web pages')}
             </Row>
             {saveErr && <Alert type="error" showIcon style={{ marginBottom: 8 }} message={saveErr} closable onClose={() => setSaveErr(null)} />}
-            <Space><Button type="primary" size="small" loading={saving} disabled={!!modelProblem} onClick={() => void save()}>Save</Button>
+            <Space><Button type="primary" size="small" loading={saving} disabled={!!modelProblem || !!urlProblem} onClick={() => void save()}>Save</Button>
                 {dirty && <><Tag color="gold" bordered={false}>unsaved</Tag><Button size="small" type="link" onClick={() => { setS(status!.settings); setKeys({ providerKey: '', copilotToken: '' }); setSaveErr(null); }}>Discard changes</Button></>}</Space>
         </Form>
     );
@@ -172,10 +198,11 @@ function SettingsCard({ status, onSaved }: { status: AgentStatus | null; onSaved
 
 export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }) {
     const { message } = App.useApp();
-    const [status, setStatus] = React.useState<AgentStatus | null>(null);
+    const [status, setStatus] = React.useState<AgentStatusView | null>(null);
     const [meta, setMeta] = React.useState<{ projects: string[]; environments: Record<string, string[]> } | null>(null);
     const [sessions, setSessions] = React.useState<AgentSessionInfo[]>([]);
-    const [open, setOpen] = React.useState<string | null>(null);
+    // The workflow chosen stays chosen when the person comes back (Back, the menu, a reload of the tab).
+    const [open, setOpen] = useKept<string | null>('agents-workflow', null);
     const [values, setValues] = React.useState<Record<string, string>>({});
     const [starting, setStarting] = React.useState(false);
     const [tab, setTab] = useRememberedTab('agents', 'workflows', ['workflows', 'conversations', 'tools', 'setup'], 'agents');
@@ -187,6 +214,9 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
         refresh();
     }, [refresh]);
     const wf = WORKFLOWS.find((w) => w.key === open);
+    // What was typed into the workflow's form is not kept when another screen opens: leaving asks first.
+    const typed = !!wf && Object.entries(values).some(([k, x]) => k !== 'project' && k !== 'env' && typeof x === 'string' && x.trim() !== '');
+    useUnsaved('agents-workflow-form', typed, `the "${wf?.title ?? 'workflow'}" form`, { lostOnLeave: true, discard: () => setValues((v) => ({ project: v.project ?? '', env: v.env ?? '' })) });
     // Plan first: the project's features (style example) and the story read from Azure DevOps.
     // Read for these values only (project | environment | story): a context read for other values is not used.
     const planKey = `${values.project ?? ''}|${values.env ?? ''}|${values.story?.trim() ?? ''}`;
@@ -223,13 +253,16 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
         try {
             const s = await api.agentCreate(`${wf.title}${v.project ? ` (${v.project})` : ''}`, wf.task(v));
             await api.agentSend(s.id, wf.prompt(v));
+            setValues((x) => ({ project: x.project ?? '', env: x.env ?? '' }));
             openPanel(s.id);
             refresh();
         } catch (e) { message.error(errText(e)); } finally { setStarting(false); startingRef.current = false; }
     };
     const envs = meta?.environments[values.project ?? ''] ?? [];
     const ready = !!status?.auth?.isAuthenticated && !status.error && !status.policyProblems?.length;
-    const pick = (key: string) => { setOpen(key); setValues((v) => ({ project: v.project || meta?.projects[0] || '', env: v.env ?? '' })); };
+    const pick = (key: string) => { if (key === open) return; setOpen(key); setValues((v) => ({ project: v.project || meta?.projects[0] || '', env: v.env ?? '' })); };
+    // A workflow kept from before the page was left: its project is filled in again.
+    React.useEffect(() => { if (open && meta && !values.project) setValues((v) => ({ ...v, project: v.project || meta.projects[0] || '' })); }, [open, meta]); // eslint-disable-line react-hooks/exhaustive-deps
     const chats = sessions.filter((s) => !s.id.startsWith('mission-'));
     const workflows = (
         <Row gutter={[12, 12]}>
@@ -295,7 +328,7 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
                                     <Space direction="vertical" style={{ width: '100%' }} size={8}>
                                         <RuntimeSetup status={status} onChange={reload} />
                                         {status.sdk?.installed && !status.error && !status.policyProblems?.length && <AccountSetup status={status} onChange={reload} />}
-                                        {status.auth?.isAuthenticated && <Typography.Text type="secondary" style={{ fontSize: 12 }}>Model: {status.settings.provider === 'copilot' ? `GitHub Copilot, ${status.settings.model === 'auto' ? 'Auto' : status.settings.model}` : `${status.settings.custom?.type} ${status.settings.model}`}</Typography.Text>}
+                                        {status.auth?.isAuthenticated && status.settings.provider === 'copilot' && <Typography.Text type="secondary" style={{ fontSize: 12 }}>Model: GitHub Copilot, {status.settings.model === 'auto' ? 'Auto' : status.settings.model}</Typography.Text>}
                                     </Space>
                                 </Card>}
                                 {status?.policy && <Card size="small" title={<Space><LockOutlined />Team policy <Tooltip title="Set by the team in the repository (changed through pull requests); personal settings can be stricter, not looser."><Typography.Text type="secondary" className="mono" style={{ fontSize: 12 }}>{status.policy.file}</Typography.Text></Tooltip></Space>}>
@@ -312,7 +345,7 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
                                     </Space></Card>}
                             </Space>
                         </Col>
-                        <Col xs={24} xl={12}><Card size="small" title="Settings"><SettingsCard status={status} onSaved={setStatus} /></Card></Col>
+                        <Col xs={24} xl={12}><Card size="small" title="Settings"><SettingsCard status={status} onSaved={setStatus} onReload={reload} /></Card></Col>
                     </Row>) },
             ]} />
         </Space>

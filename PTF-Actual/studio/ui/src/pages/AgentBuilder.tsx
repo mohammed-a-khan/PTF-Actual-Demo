@@ -4,7 +4,7 @@
  * Studio, started by a person or by a trigger (a failed run, a schedule, new work items, new pull requests).
  */
 import React from 'react';
-import { Alert, App, Button, Card, Checkbox, Col, Dropdown, Empty, Form, Input, InputNumber, Modal, Radio, Row, Select, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Card, Checkbox, Col, Dropdown, Empty, Form, Input, Modal, Radio, Row, Select, Space, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { DeleteOutlined, DownOutlined, ExperimentOutlined, MessageOutlined, PlusOutlined, QuestionCircleOutlined, RobotOutlined, RocketOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { AgentBuilderDef, AgentTriggerDef, api, MissionInputDef, TeamAgentDef, ToolGroupId } from '../api';
 import { errText, useStudio } from '../state';
@@ -13,6 +13,9 @@ import { useUnsaved } from '../unsaved';
 import { AgentEvals } from '../components/AgentEvals';
 import { startMissionFor } from './Missions';
 import { useRememberedTab } from '../agents-tabs';
+import { agentsApi, AgentBuilderView } from '../agents-api';
+import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
+import { WholeNumber } from '../components/WholeNumber';
 
 /** "storyId" → "Story id": the label an input gets until someone writes their own. */
 function labelOf(key: string): string {
@@ -34,13 +37,22 @@ const TRIGGER_LABEL: Record<AgentTriggerDef['on'], string> = { 'run-failed': 'Wh
 
 export function AgentBuilder({ openConversation }: { openConversation: (session: string) => void }) {
     const { message } = App.useApp();
-    const [d, setD] = React.useState<AgentBuilderDef | null>(null);
+    const [d, setD] = React.useState<AgentBuilderView | null>(null);
     const [err, setErr] = React.useState<string | null>(null);
     const [editing, setEditing] = React.useState<{ agent: TeamAgentDef; isNew: boolean } | null>(null);
     const [evaluating, setEvaluating] = React.useState<TeamAgentDef | null>(null);
     const [showProblems, setShowProblems] = React.useState(false);
     const [kind, setKind] = useRememberedTab('agent-builder', 'all', ['all', 'assistant', 'mission'], 'agent-builder');
     const load = React.useCallback(() => { api.agentBuilder().then((r) => { setD(r); setErr(null); }).catch((e) => setErr(errText(e))); }, []);
+    // "Reload" after a save refused because the agent changed elsewhere: the editor shows the saved agent.
+    const reloadAgent = React.useCallback(async (id: string) => {
+        try {
+            const r: AgentBuilderView = await api.agentBuilder();
+            setD(r);
+            const fresh = r.agents.find((x) => x.id === id);
+            if (fresh) setEditing({ agent: fresh, isNew: false }); else { setEditing(null); message.warning('That agent was deleted meanwhile.'); }
+        } catch (e) { message.error(errText(e)); }
+    }, [message]);
     React.useEffect(load, [load]);
     const chatting = React.useRef(false);
     const chat = async (a: TeamAgentDef) => { if (chatting.current) return; chatting.current = true; try { const s = await api.agentCreate(a.name, undefined, a.id); openConversation(s.id); } catch (e) { message.error(errText(e)); } finally { chatting.current = false; } };
@@ -83,7 +95,7 @@ export function AgentBuilder({ openConversation }: { openConversation: (session:
                 </Row>
             )}
             {evaluating && <AgentEvals agent={evaluating} onClose={() => setEvaluating(null)} />}
-            {editing && <AgentEditor d={d} agent={editing.agent} isNew={editing.isNew} onClose={() => setEditing(null)} onSaved={(r) => { setD(r); setEditing(null); }} onChat={chat} />}
+            {editing && <AgentEditor key={`${editing.agent.id}:${editing.isNew ? 'new' : d.versions?.[editing.agent.id] ?? ''}`} d={d} agent={editing.agent} isNew={editing.isNew} onClose={() => setEditing(null)} onSaved={(r) => { setD(r); setEditing(null); }} onChat={chat} onReload={(id) => void reloadAgent(id)} />}
         </Space>
     );
 }
@@ -104,11 +116,13 @@ function tabOfError(t: string, mission: boolean): string | null {
     return null;
 }
 
-function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat }: { d: AgentBuilderDef; agent: TeamAgentDef; isNew: boolean; onClose: () => void; onSaved: (r: AgentBuilderDef) => void; onChat: (a: TeamAgentDef) => void }) {
+function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat, onReload }: { d: AgentBuilderView; agent: TeamAgentDef; isNew: boolean; onClose: () => void; onSaved: (r: AgentBuilderDef) => void; onChat: (a: TeamAgentDef) => void; onReload: (id: string) => void }) {
     const { message, modal } = App.useApp();
     const { env } = useStudio();
     const [a, setA] = React.useState<TeamAgentDef>(agent);
     const [busy, setBusy] = React.useState(false);
+    // The version of the agent's file this editor started from: a save over a newer one (another tab) is refused.
+    const [version] = React.useState<string | undefined>(() => (isNew ? undefined : d.versions?.[agent.id]));
     const mission = a.mode === 'mission';
     const tabKeys = mission ? ['basics', 'instructions', 'inputs', 'tools', 'triggers', 'limits'] : ['basics', 'instructions', 'tools'];
     const [tab, setTab] = useRememberedTab('agent-editor', 'basics', tabKeys);
@@ -128,12 +142,18 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat }: { d: AgentBu
         if (mission && !a.goal?.trim()) { fail('instructions', 'Write the mission\'s goal.'); return; }
         if (mission && (a.inputs ?? []).some((x) => !x.key)) { fail('inputs', 'Every input needs a name (or remove the empty one).'); return; }
         setBusy(true);
-        try {
-            const out: TeamAgentDef = { ...a, name: a.name.trim(), id: finalId, ...(mission ? {} : { goal: undefined, inputs: undefined, writes: undefined, budget: undefined, verify: undefined, triggers: undefined, team: undefined }) };
-            const r = await api.saveTeamAgent(out, isNew);
+        const out: TeamAgentDef = { ...a, name: a.name.trim(), id: finalId, ...(mission ? {} : { goal: undefined, inputs: undefined, writes: undefined, budget: undefined, verify: undefined, triggers: undefined, team: undefined }) };
+        const put = async (force: boolean) => {
+            const r = await agentsApi.saveTeamAgent(out, isNew, version, force);
             message.success({ content: `Saved ${r.agent.name}`, key: 'agent-editor-check' });
             onSaved(r);
-        } catch (e) { const t = errText(e); fail(tabOfError(t, mission) ?? tab, t); } finally { setBusy(false); }
+        };
+        try { await put(false); }
+        catch (e) {
+            // Changed in another tab or by someone else since this editor opened: reload it, or overwrite on purpose.
+            if (isChangedElsewhere(e)) askChangedElsewhere(modal, e, `The agent "${agent.name}"`, { reload: () => onReload(agent.id), overwrite: () => put(true).catch((x) => { const t = errText(x); fail(tabOfError(t, mission) ?? tab, t); }) });
+            else { const t = errText(e); fail(tabOfError(t, mission) ?? tab, t); }
+        } finally { setBusy(false); }
     };
     const del = () => modal.confirm({ title: `Delete ${a.name}?`, content: `Its file ${d.dir}/${a.id}.json and its evaluation cases (.cs-studio/evals/${a.id}.json, if any) are deleted (commit to share that).`, okText: 'Delete', okButtonProps: { danger: true },
         onOk: async () => { try { onSaved(await api.deleteTeamAgent(a.id)); message.success('Deleted'); } catch (e) { message.error(errText(e)); } } });
@@ -212,22 +232,22 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat }: { d: AgentBu
             <Space direction="vertical" style={{ width: '100%' }}>
                 {triggers.length === 0 && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No triggers: it starts only when someone starts it under Missions." />}
                 {triggers.map((t, i) => (
-                    <Card key={i} size="small" title={<Space><ThunderboltOutlined />{TRIGGER_LABEL[t.on]}</Space>} extra={<Space><Tooltip title={t.enabled !== false ? 'On' : 'Off'}><Switch size="small" checked={t.enabled !== false} aria-label="Trigger on" onChange={(v) => setTrigger(i, { ...t, enabled: v })} /></Tooltip><Tooltip title="Remove the trigger"><Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label="Remove trigger" onClick={() => up({ triggers: triggers.filter((_, k) => k !== i) })} /></Tooltip></Space>}>
+                    <Card key={i} size="small" title={<Space><ThunderboltOutlined />{TRIGGER_LABEL[t.on]}</Space>} extra={<Space><Tooltip title={t.enabled !== false ? 'On' : 'Off'}><Switch size="small" checked={t.enabled !== false} aria-label={`Trigger ${i + 1} on`} onChange={(v) => setTrigger(i, { ...t, enabled: v })} /></Tooltip><Tooltip title="Remove the trigger"><Button size="small" type="text" danger icon={<DeleteOutlined />} aria-label={`Remove trigger ${i + 1}`} onClick={() => up({ triggers: triggers.filter((_, k) => k !== i) })} /></Tooltip></Space>}>
                         <Form layout="vertical" size="small">
                             <Row gutter={12}>
-                                {t.on === 'run-failed' && <><Col xs={24} md={9}><Form.Item label="Projects"><Select mode="multiple" placeholder="Any project" value={t.projects ?? []} onChange={(v) => setTrigger(i, { ...t, projects: v })} options={projects.map((p) => ({ value: p }))} /></Form.Item></Col>
-                                    <Col xs={24} md={9}><Form.Item label="Environments"><Select mode="tags" placeholder="Any environment" value={t.envs ?? []} onChange={(v) => setTrigger(i, { ...t, envs: v })} open={false} /></Form.Item></Col></>}
-                                {t.on === 'schedule' && <Col xs={24} md={18}><Form.Item label="Schedule (cron)" tooltip="Minute hour day month weekday, on this computer's clock; e.g. 0 2 * * 1-5 is 02:00 on weekdays"><Input className="mono" value={t.cron} onChange={(e) => setTrigger(i, { ...t, cron: e.target.value })} placeholder="0 2 * * 1-5" status={t.cron.trim().split(/\s+/).length !== 5 ? 'warning' : undefined} /></Form.Item></Col>}
-                                {t.on === 'work-item' && <><Col xs={24} md={12}><Form.Item label="WIQL query"><Input.TextArea autoSize={{ minRows: 1, maxRows: 5 }} value={t.query} onChange={(e) => setTrigger(i, { ...t, query: e.target.value })} placeholder="SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS 'automate'" /></Form.Item></Col>
-                                    <Col xs={24} md={6}><Form.Item label="The work item fills"><Select value={t.input ?? 'story'} onChange={(v) => setTrigger(i, { ...t, input: v })} options={inputs.filter((x) => x.key).map((x) => ({ value: x.key, label: x.key }))} /></Form.Item></Col></>}
-                                {t.on === 'pull-request' && <><Col xs={24} md={9}><Form.Item label="Into branch"><Input value={t.target} placeholder="main" onChange={(e) => setTrigger(i, { ...t, target: e.target.value })} /></Form.Item></Col>
-                                    <Col xs={24} md={9}><Form.Item label="Repository"><Input value={t.repository} placeholder="Any" onChange={(e) => setTrigger(i, { ...t, repository: e.target.value || undefined })} /></Form.Item></Col></>}
-                                <Col xs={24} md={6}><Form.Item label="At most"><InputNumber min={1} max={50} precision={0} value={t.maxPerDay ?? 3} onChange={(v) => setTrigger(i, { ...t, maxPerDay: v ?? 3 })} addonAfter="a day" style={{ width: '100%' }} /></Form.Item></Col>
+                                {t.on === 'run-failed' && <><Col xs={24} md={9}><Form.Item label="Projects"><Select mode="multiple" placeholder="Any project" aria-label={`Trigger ${i + 1}: projects`} value={t.projects ?? []} onChange={(v) => setTrigger(i, { ...t, projects: v })} options={projects.map((p) => ({ value: p }))} /></Form.Item></Col>
+                                    <Col xs={24} md={9}><Form.Item label="Environments"><Select mode="tags" placeholder="Any environment" aria-label={`Trigger ${i + 1}: environments`} value={t.envs ?? []} onChange={(v) => setTrigger(i, { ...t, envs: v })} open={false} /></Form.Item></Col></>}
+                                {t.on === 'schedule' && <Col xs={24} md={18}><Form.Item label="Schedule (cron)" tooltip="Minute hour day month weekday, on this computer's clock; e.g. 0 2 * * 1-5 is 02:00 on weekdays"><Input className="mono" aria-label={`Trigger ${i + 1}: schedule (cron)`} value={t.cron} onChange={(e) => setTrigger(i, { ...t, cron: e.target.value })} placeholder="0 2 * * 1-5" status={t.cron.trim().split(/\s+/).length !== 5 ? 'warning' : undefined} /></Form.Item></Col>}
+                                {t.on === 'work-item' && <><Col xs={24} md={12}><Form.Item label="WIQL query"><Input.TextArea autoSize={{ minRows: 1, maxRows: 5 }} aria-label={`Trigger ${i + 1}: WIQL query`} value={t.query} onChange={(e) => setTrigger(i, { ...t, query: e.target.value })} placeholder="SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS 'automate'" /></Form.Item></Col>
+                                    <Col xs={24} md={6}><Form.Item label="The work item fills"><Select aria-label={`Trigger ${i + 1}: the work item fills`} value={t.input ?? 'story'} onChange={(v) => setTrigger(i, { ...t, input: v })} options={inputs.filter((x) => x.key).map((x) => ({ value: x.key, label: x.key }))} /></Form.Item></Col></>}
+                                {t.on === 'pull-request' && <><Col xs={24} md={9}><Form.Item label="Into branch"><Input aria-label={`Trigger ${i + 1}: into branch`} value={t.target} placeholder="main" onChange={(e) => setTrigger(i, { ...t, target: e.target.value })} /></Form.Item></Col>
+                                    <Col xs={24} md={9}><Form.Item label="Repository"><Input aria-label={`Trigger ${i + 1}: repository`} value={t.repository} placeholder="Any" onChange={(e) => setTrigger(i, { ...t, repository: e.target.value || undefined })} /></Form.Item></Col></>}
+                                <Col xs={24} md={6}><Form.Item label="At most"><WholeNumber min={1} max={50} fallback={3} label={`Trigger ${i + 1}: at most, a day`} value={t.maxPerDay ?? 3} onChange={(v) => setTrigger(i, { ...t, maxPerDay: v })} suffix="a day" style={{ width: '100%' }} /></Form.Item></Col>
                             </Row>
                             {(t.on === 'schedule' || t.on === 'work-item' || t.on === 'pull-request') && inputs.some((x) => x.key) && (
                                 <Form.Item label="Inputs given by this trigger" style={{ marginBottom: 0 }}>
                                     <Row gutter={[8, 8]}>{inputs.filter((x) => x.key && !(t.on === 'work-item' && x.key === (t.input ?? 'story')) && !(t.on === 'pull-request' && (x.key === 'pr' || x.key === 'repository'))).map((x) => (
-                                        <Col key={x.key} xs={24} md={8}><Input size="small" addonBefore={x.key} value={(t as { inputs?: Record<string, string> }).inputs?.[x.key] ?? ''} onChange={(e) => setTrigger(i, { ...t, inputs: { ...((t as { inputs?: Record<string, string> }).inputs ?? {}), [x.key]: e.target.value } } as AgentTriggerDef)} /></Col>
+                                        <Col key={x.key} xs={24} md={8}><Input size="small" addonBefore={x.key} aria-label={`Trigger ${i + 1}: input ${x.key}`} value={(t as { inputs?: Record<string, string> }).inputs?.[x.key] ?? ''} onChange={(e) => setTrigger(i, { ...t, inputs: { ...((t as { inputs?: Record<string, string> }).inputs ?? {}), [x.key]: e.target.value } } as AgentTriggerDef)} /></Col>
                                     ))}</Row>
                                 </Form.Item>
                             )}
@@ -257,9 +277,9 @@ function AgentEditor({ d, agent, isNew, onClose, onSaved, onChat }: { d: AgentBu
                 </Row>
                 <Form.Item label="Budget" tooltip="The mission stops when it uses more; time waiting for a person does not count.">
                     <Row gutter={8}>
-                        <Col xs={24} md={8}><InputNumber min={5} max={480} precision={0} value={a.budget?.minutes ?? 45} aria-label="Minutes" onChange={(v) => up({ budget: { ...a.budget, minutes: v ?? 45 } })} addonAfter="min" style={{ width: '100%' }} /></Col>
-                        <Col xs={24} md={8}><InputNumber min={10} max={2000} precision={0} value={a.budget?.modelCalls ?? 120} aria-label="Model calls" onChange={(v) => up({ budget: { ...a.budget, modelCalls: v ?? 120 } })} addonAfter="model calls" style={{ width: '100%' }} /></Col>
-                        <Col xs={24} md={8}><InputNumber min={1} max={10} precision={0} value={a.budget?.attempts ?? 3} aria-label="Attempts" onChange={(v) => up({ budget: { ...a.budget, attempts: v ?? 3 } })} addonAfter="attempts" style={{ width: '100%' }} /></Col>
+                        <Col xs={24} md={8}><WholeNumber min={5} max={480} fallback={45} value={a.budget?.minutes ?? 45} label="Minutes" onChange={(v) => up({ budget: { ...a.budget, minutes: v } })} suffix="min" style={{ width: '100%' }} /></Col>
+                        <Col xs={24} md={8}><WholeNumber min={10} max={2000} fallback={120} value={a.budget?.modelCalls ?? 120} label="Model calls" onChange={(v) => up({ budget: { ...a.budget, modelCalls: v } })} suffix="model calls" style={{ width: '100%' }} /></Col>
+                        <Col xs={24} md={8}><WholeNumber min={1} max={10} fallback={3} value={a.budget?.attempts ?? 3} label="Attempts" onChange={(v) => up({ budget: { ...a.budget, attempts: v } })} suffix="attempts" style={{ width: '100%' }} /></Col>
                     </Row>
                 </Form.Item>
             </Form>

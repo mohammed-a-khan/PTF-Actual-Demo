@@ -3,7 +3,7 @@
  * private mode tolerated), and a section title with its help in a tooltip instead of a paragraph.
  */
 import React from 'react';
-import { Tooltip, Typography } from 'antd';
+import { App, Button, Space, Tooltip, Typography } from 'antd';
 import { QuestionCircleOutlined } from '@ant-design/icons';
 import './styles-apiperf.css';
 
@@ -71,4 +71,60 @@ export function apiRoute(route: string[]): { file: string | null; request: strin
     const j = parts.findIndex((s) => s.endsWith('.json'));
     if (j < 0) return { file: parts.join('/'), request: null };
     return { file: parts.slice(0, j + 1).join('/'), request: parts[j + 1] ?? null };
+}
+
+type ModalApi = ReturnType<typeof App.useApp>['modal'];
+
+/** Save inside a dialog: busy while it saves; off (with the reason in a tooltip) while the item cannot be saved. */
+function DialogSave({ problem, onSave }: { problem: string | null; onSave: () => Promise<void> }) {
+    const [busy, setBusy] = React.useState(false);
+    if (problem) return <Tooltip title={`Cannot be saved yet: ${problem}`}><Button type="primary" disabled>Save</Button></Tooltip>;
+    return <Button type="primary" loading={busy} onClick={() => { setBusy(true); void onSave().finally(() => setBusy(false)); }}>Save</Button>;
+}
+
+/**
+ * Unsaved changes on a screen that is about to show something else (another item chosen in its list): the same words
+ * as the app's own prompt. Stay (also Escape and the close button), Discard (the edits are dropped), Save (then goes on;
+ * off with the reason while the item is not valid).
+ */
+export function askUnsaved(modal: ModalApi, o: { what: string; problem: string | null; save: () => Promise<boolean>; discard: () => void; then: () => void; stay?: () => void }): void {
+    const h: { inst?: { destroy: () => void } } = {};
+    h.inst = modal.confirm({
+        title: 'Unsaved changes', content: `Not saved: ${o.what}.`, closable: true, onCancel: () => o.stay?.(),
+        footer: () => <Space style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+            <Button onClick={() => { h.inst?.destroy(); o.stay?.(); }}>Stay</Button>
+            <Button danger onClick={() => { h.inst?.destroy(); o.discard(); o.then(); }}>Discard</Button>
+            <DialogSave problem={o.problem} onSave={async () => { if (await o.save()) { h.inst?.destroy(); o.then(); } }} />
+        </Space>,
+    });
+}
+
+/** A save refused because the file changed since it was read (409 from the server). */
+// (Not ApiError itself: api.ts needs a browser, and these helpers are tested without one.)
+export const isChangedElsewhere = (e: unknown) => !!e && typeof e === 'object' && (e as { status?: unknown }).status === 409;
+/** The item with the version it was read at (the server refuses the save when the file is not that version any more), or forced. */
+export function withBase<T extends object>(x: T, base: string | undefined, force = false): T {
+    if (!base && !force) return x;
+    return { ...x, $studio: { ...(base ? { base } : {}), ...(force ? { force: true } : {}) } } as T;
+}
+/** The version the server gives with an item it read or saved. */
+export const versionOf = (r: unknown): string | undefined => {
+    const v = r && typeof r === 'object' ? (r as { version?: unknown }).version : undefined;
+    return typeof v === 'string' ? v : undefined;
+};
+/** "Changed in another tab or by someone else": Reload (that version, these edits dropped), Overwrite (these edits over it), or Cancel. */
+export function askChangedElsewhere(modal: ModalApi, what: string): Promise<'reload' | 'overwrite' | null> {
+    return new Promise((resolve) => {
+        const h: { inst?: { destroy: () => void } } = {};
+        const done = (v: 'reload' | 'overwrite' | null) => { h.inst?.destroy(); resolve(v); };
+        h.inst = modal.confirm({
+            title: 'Changed in another tab or by someone else', closable: true, onCancel: () => resolve(null),
+            content: `${what} was saved somewhere else after you opened it here. Reload shows that version (your changes here are dropped); Overwrite saves your version over it.`,
+            footer: () => <Space style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
+                <Button onClick={() => done(null)}>Cancel</Button>
+                <Button onClick={() => done('reload')}>Reload</Button>
+                <Button type="primary" danger onClick={() => done('overwrite')}>Overwrite</Button>
+            </Space>,
+        });
+    });
 }

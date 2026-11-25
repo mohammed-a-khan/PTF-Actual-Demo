@@ -8,8 +8,8 @@ import {
 } from '@ant-design/icons';
 import { api, GateResult, hasToken, setProtectedRunConfirm } from './api';
 import { errText, StudioProvider, useStudio } from './state';
-import { canSaveLost, lostOnLeave, saveLost } from './unsaved';
-import { cameFrom, goBack, navigate, setPopGuard, useRoute } from './route';
+import { canSaveLost, discardLost, lostOnLeave, saveLost } from './unsaved';
+import { cameFrom, goBack, navigate, questionClosed, setPopGuard, useRoute } from './route';
 import { SourceControl } from './pages/SourceControl';
 import { RepoSwitcher } from './components/RepoSwitcher';
 import { Environments } from './pages/Environments';
@@ -68,7 +68,7 @@ const PAGE_INFO: Record<Page, { title: string; about: string }> = {
     'perf-runs': { title: 'Load test runs', about: 'Live progress, results per step, service levels, comparison with an earlier run.' },
     'perf-compare': { title: 'Compare load test runs', about: 'Two runs of a scenario side by side: what got better or worse, by how much, and whether it matters.' },
     'perf-trends': { title: 'Performance trends', about: 'How a scenario\'s response time, errors and throughput change from run to run.' },
-    pdf: { title: 'PDF checks', about: 'See what a PDF says and compare it with a data file, a database query, another PDF or expected values; save the check as a test.' },
+    pdf: { title: 'PDF checks', about: 'Compare a PDF with data, a query, another PDF or values, and save the check as a test.' },
     db: { title: 'Database', about: 'Query the project\'s databases with its own settings, browse tables, save queries and turn them into tests.' },
     git: { title: 'Source control', about: 'Commit your changes, switch branches, look at history and stashes.' },
     prs: { title: 'Pull requests', about: 'Review a pull request, run its tests and vote.' },
@@ -79,7 +79,7 @@ const PAGE_INFO: Record<Page, { title: string; about: string }> = {
     secrets: { title: 'Secrets', about: 'Passwords and tokens, kept on this computer only.' },
     pipeline: { title: 'Pipeline secrets', about: 'Secret variables your Azure DevOps pipeline must provide.' },
     health: { title: 'Health check', about: 'What a test run needs on this computer and in this repository, with a fix where the Studio has one.' },
-    notify: { title: 'Notifications', about: 'A message to Teams, Slack or a webhook when a run ends. Kept on this computer; webhook addresses in your secrets.' },
+    notify: { title: 'Notifications', about: 'A message to Teams, Slack or a webhook when a run ends; webhook addresses stay in your secrets.' },
     settings: { title: 'Settings', about: 'Your name on commits, Azure DevOps and network. Kept on this computer only.' },
     activity: { title: 'Activity', about: 'What was done with the Studio in this project.' },
 };
@@ -138,8 +138,12 @@ function BranchMenu() {
         catch (e) { modal.error({ title: `Could not switch to ${b}`, content: errText(e) }); }
     };
 
+    // The server takes branch names up to 255 characters; a longer one is refused here, with a message.
+    const BRANCH_MAX = 255;
+    const tooLong = finalName.length > BRANCH_MAX;
+    const shortName = finalName.length > 40 ? `${finalName.slice(0, 37)}…` : finalName;
     const createBranch = async () => {
-        if (!finalName) return;
+        if (!finalName || tooLong) return;
         try { await api.createBranch(finalName); message.success(`Created ${finalName} and switched to it`); setDialog(null); await refresh(); } catch (e) { message.error(errText(e)); }
     };
     return (
@@ -162,11 +166,11 @@ function BranchMenu() {
             }}>
                 <Button icon={<BranchesOutlined />}>{status?.branch ?? (status?.head ? `detached at ${status.head.slice(0, 7)}` : 'no commits yet')} <DownOutlined /></Button>
             </Dropdown>
-            <Modal open={dialog === 'new'} title="New branch" okText={finalName ? `Create ${finalName} and switch` : 'Create and switch'} onCancel={() => setDialog(null)} okButtonProps={{ disabled: !finalName }} destroyOnClose
+            <Modal open={dialog === 'new'} title="New branch" okText={finalName && !tooLong ? <span title={finalName}>Create {shortName} and switch</span> : 'Create and switch'} onCancel={() => setDialog(null)} okButtonProps={{ disabled: !finalName || tooLong, style: { maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis' } }} destroyOnClose
                 afterOpenChange={(o) => { if (o) document.getElementById('cs-new-branch')?.focus(); }}
                 onOk={createBranch}>
-                <Form layout="vertical"><Form.Item label="Branch name" htmlFor="cs-new-branch" help={<>{finalName && finalName !== name.trim() ? <><Typography.Text type="warning">It will be created as <Typography.Text code>{finalName}</Typography.Text> (branch names have no spaces or {'~ ^ : ? * [ \\'}).</Typography.Text><br /></> : null}Starts from {status?.branch ?? 'the current commit'}. Example: feature/login-tests</>}>
-                    <Input id="cs-new-branch" value={name} onChange={(e) => setName(e.target.value)} onPressEnter={() => { if (finalName) void createBranch(); }} /></Form.Item></Form>
+                <Form layout="vertical"><Form.Item label="Branch name" htmlFor="cs-new-branch" validateStatus={tooLong ? 'error' : undefined} help={<div style={{ overflowWrap: 'anywhere', wordBreak: 'break-word' }}>{tooLong ? <><Typography.Text type="danger">Too long: at most {BRANCH_MAX} characters (it has {finalName.length}).</Typography.Text><br /></> : null}{finalName && !tooLong && finalName !== name.trim() ? <><Typography.Text type="warning">It will be created as <Typography.Text code style={{ wordBreak: 'break-all' }}>{finalName}</Typography.Text> (branch names have no spaces or {'~ ^ : ? * [ \\'}).</Typography.Text><br /></> : null}Starts from {status?.branch ?? 'the current commit'}. Example: feature/login-tests</div>}>
+                    <Input id="cs-new-branch" value={name} onChange={(e) => setName(e.target.value)} onPressEnter={() => { if (finalName && !tooLong) void createBranch(); }} /></Form.Item></Form>
             </Modal>
             <MergeDialog open={dialog === 'merge'} onClose={() => setDialog(null)} />
         </>
@@ -289,11 +293,12 @@ function Shell({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => vo
     const askLeave = (lose: string[], leave: () => void) => {
         const canSave = canSaveLost();
         const inst = shellModal.confirm({
-            title: 'Leave without saving?', content: `Not saved: ${lose.join(', ')}. Its changes are lost if you leave without saving.`,
+            title: 'Unsaved changes', content: `Not saved: ${lose.join(', ')}.`,
+            afterClose: questionClosed,
             footer: () => <Space style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 16 }}>
-                <Button onClick={() => inst.destroy()}>Stay</Button>
-                <Button danger onClick={() => { inst.destroy(); leave(); }}>{canSave ? 'Discard' : 'Leave'}</Button>
-                {canSave && <Button type="primary" onClick={() => { void saveLost().then((ok) => { if (ok) { inst.destroy(); leave(); } }); }}>Save and leave</Button>}
+                <Button onClick={() => { inst.destroy(); questionClosed(); }}>Stay</Button>
+                <Button danger onClick={() => { inst.destroy(); questionClosed(); discardLost(); leave(); }}>Discard</Button>
+                {canSave && <Button type="primary" onClick={() => { void saveLost().then((ok) => { if (ok) { inst.destroy(); questionClosed(); leave(); } }); }}>Save</Button>}
             </Space>,
         });
     };

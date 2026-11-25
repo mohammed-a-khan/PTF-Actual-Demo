@@ -23,8 +23,11 @@ export function MonitorsPanel({ collections, environments, file }: { collections
     const project = (f: string) => f.split('/')[1];
     const [saving, setSaving] = React.useState(false);
     const savingRef = React.useRef(false);
+    // The name is the person's own (never filled in from the collection): an empty one is said under the field and Save stays off.
+    const [nameTouched, setNameTouched] = React.useState(false);
     const save = async () => {
-        if (!edit || !edit.name.trim() || savingRef.current) return;
+        if (edit && !edit.name.trim()) { setNameTouched(true); return; }
+        if (!edit || savingRef.current) return;
         savingRef.current = true; setSaving(true);
         try { await api.apiSaveMonitor({ ...edit, name: edit.name.trim() }); setEdit(null); load(); message.success('Saved: it runs while the Studio is open.'); }
         catch (e) { message.error(errText(e)); }
@@ -37,7 +40,7 @@ export function MonitorsPanel({ collections, environments, file }: { collections
             <div className="side-section" style={{ display: 'flex', alignItems: 'center' }}>
                 <span style={{ flex: 1 }}>Monitors</span>
                 <Tooltip title="Run a collection on a schedule while the Studio is open, with an alert"><Button size="small" type="text" icon={<PlusOutlined />} aria-label="New monitor"
-                    onClick={() => { const f = file ?? collections[0]?.file; if (!f) { message.info('Choose a collection first.'); return; } setEdit({ name: collections.find((c) => c.file === f)?.name ?? 'Monitor', file: f, env: environments[project(f)]?.[0] ?? 'dev', everyMinutes: 60, enabled: true, alertOn: 'failure' }); }} /></Tooltip>
+                    onClick={() => { const f = file ?? collections[0]?.file; if (!f) { message.info('Choose a collection first.'); return; } setNameTouched(false); setEdit({ name: '', file: f, env: environments[project(f)]?.[0] ?? 'dev', everyMinutes: 60, enabled: true, alertOn: 'failure' }); }} /></Tooltip>
             </div>
             {!list.length ? <Typography.Text type="secondary" style={{ display: 'block', padding: '4px 14px', fontSize: 12 }}>None yet: + runs a collection on a schedule, with an alert.</Typography.Text> : list.map((m) => (
                 <div key={m.id} className="item-row" onClick={() => m.last?.runId && navigate(['api-runner', 'run', m.last.runId])}>
@@ -49,13 +52,13 @@ export function MonitorsPanel({ collections, environments, file }: { collections
                     <div className="item-meta">{m.env} · {every(m.everyMinutes)}{m.last ? ` · ${ago(m.last.at)} ${m.last.passed ? 'passed' : `${m.last.failed} failed`}` : ''}{m.last?.alert ? ` · ${m.last.alert}` : ''}</div>
                     <div style={{ display: 'flex', gap: 4, marginTop: 2 }} onClick={(e) => e.stopPropagation()}>
                         <Button size="small" icon={<CaretRightOutlined />} onClick={() => void api.apiRunMonitor(m.id).then((j) => { load(); navigate(['api-runner', 'run', j.id]); }).catch((e) => message.error(errText(e)))}>Run now</Button>
-                        <Button size="small" onClick={() => setEdit({ ...m })}>Edit</Button>
+                        <Button size="small" onClick={() => { setNameTouched(true); setEdit({ ...m }); }}>Edit</Button>
                         <Popconfirm title={`Delete the monitor "${m.name.trim() || '(no name)'}"?`} okText="Delete" okButtonProps={{ danger: true }} onConfirm={() => void api.apiDeleteMonitor(m.id).then(load).catch((e) => message.error(errText(e)))}><Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Delete the monitor" /></Popconfirm>
                     </div>
                 </div>))}
-            <Modal open={!!edit} title={edit?.id ? 'Monitor' : 'New monitor'} okText="Save" okButtonProps={{ disabled: !edit?.name.trim(), loading: saving }} onOk={() => void save()} onCancel={() => setEdit(null)}>
+            <Modal open={!!edit} title={edit?.id ? 'Monitor' : 'New monitor'} okText="Save" okButtonProps={{ disabled: !edit?.name.trim(), loading: saving, title: edit && !edit.name.trim() ? 'Give the monitor a name first.' : undefined }} onOk={() => void save()} onCancel={() => setEdit(null)}>
                 {edit && <Form layout="vertical" size="small">
-                    <Form.Item label="Name" validateStatus={edit.name.trim() ? undefined : 'error'} help={edit.name.trim() ? undefined : 'Give the monitor a name.'}><Input value={edit.name} maxLength={120} onChange={(e) => setEdit({ ...edit, name: e.target.value })} onPressEnter={() => void save()} aria-label="Monitor name" /></Form.Item>
+                    <Form.Item label="Name" required validateStatus={nameTouched && !edit.name.trim() ? 'error' : undefined} help={!edit.name.trim() ? (nameTouched ? 'Give the monitor a name.' : 'Required: the monitor is saved (and starts) once it has a name.') : undefined}><Input value={edit.name} maxLength={120} autoFocus placeholder={`e.g. ${collections.find((c) => c.file === edit.file)?.name ?? 'Shop'} health`} onChange={(e) => { setNameTouched(true); setEdit({ ...edit, name: e.target.value }); }} onBlur={() => setNameTouched(true)} onPressEnter={() => void save()} aria-label="Monitor name" /></Form.Item>
                     <Form.Item label="Collection"><Select value={edit.file} onChange={(f) => setEdit({ ...edit, file: f, env: environments[project(f)]?.[0] ?? 'dev' })} options={collections.map((c) => ({ value: c.file, label: `${c.name} · ${c.project}` }))} aria-label="Collection" /></Form.Item>
                     <Row gutter={12}>
                         <Col span={12}><Form.Item label="Environment"><Select style={{ width: '100%' }} value={edit.env} onChange={(v) => setEdit({ ...edit, env: v })} options={(environments[project(edit.file)] ?? ['dev']).map((e) => ({ value: e, label: e }))} aria-label="Environment" /></Form.Item></Col>

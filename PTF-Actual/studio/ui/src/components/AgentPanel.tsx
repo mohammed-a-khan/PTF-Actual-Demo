@@ -144,7 +144,7 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
                 onClick={() => modal.confirm({ title: 'Delete this conversation?', okText: 'Delete', okButtonProps: { danger: true }, onOk: async () => { try { await api.agentDelete(current!); setCurrent(null); await refresh(); } catch (e) { message.error(errText(e)); } } })} /></Tooltip>
             <Tooltip title="Export the conversation (Markdown: messages, tools, approvals, changed files, usage)"><Button size="small" icon={<DownloadOutlined />} aria-label="Export conversation" disabled={!current} onClick={() => void exportTranscript()} /></Tooltip>
             <Tooltip title="Replay the conversation step by step"><Button size="small" icon={<HistoryOutlined />} aria-label="Replay conversation" disabled={!current} onClick={() => setReplaying(true)} /></Tooltip>
-            <Tooltip title="Agents: workflows and settings"><Button size="small" icon={<SettingOutlined />} aria-label="Agent settings" onClick={() => navigate(['agents'])} /></Tooltip>
+            <Tooltip title="Agents: setup & settings"><Button size="small" icon={<SettingOutlined />} aria-label="Agent settings" onClick={() => navigate(['agents', 'setup'])} /></Tooltip>
         </div>
     );
 

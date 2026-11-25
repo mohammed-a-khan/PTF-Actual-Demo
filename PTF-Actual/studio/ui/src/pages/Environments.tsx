@@ -4,7 +4,7 @@ import { DiffOutlined, DownOutlined, EditOutlined, SearchOutlined, LockOutlined,
 import { api, EffectiveEntry, Problem, ResolveResult } from '../api';
 import { errText, useStudio } from '../state';
 import { NewProjectWizard } from '../components/NewProjectWizard';
-import { useStoredTab } from '../datagit-common';
+import { useRouteTab } from '../datagit-common';
 
 const SEV_COLOR = { error: 'red', warning: 'gold', info: 'default' } as const;
 
@@ -138,14 +138,16 @@ function Provenance({ e }: { e: EffectiveEntry }) {
     );
 }
 
-type EnvTab = 'settings' | 'problems' | 'files';
+const ENV_TABS = ['settings', 'problems', 'files'] as const;
+type EnvTab = typeof ENV_TABS[number];
 
 export function Environments() {
     const { message } = App.useApp();
     const { env: disc, refresh: refreshStudio } = useStudio();
     const projects = disc?.projects ?? [];
     // The list of things to fix can be long: shown on demand (remembered), the count always.
-    const [tab, setTab] = useStoredTab<EnvTab>('environments', ['settings', 'problems', 'files'], 'settings');
+    // The tab is in the address (#/env/files): Back and Forward move between tabs, a link opens one.
+    const [tab, setTab] = useRouteTab<EnvTab>('env', 'environments', ENV_TABS, 'settings', { setting: 'settings', values: 'settings', problem: 'problems', issues: 'problems', file: 'files' });
     const [project, setProject] = React.useState<string>('');
     const [env, setEnv] = React.useState<string>('');
     const [data, setData] = React.useState<ResolveResult | null>(null);

@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert/strict';
 import './support/browser-stub';
-import { asciiDigits, charCount, plural } from '../src/datagit-common';
+import { asciiDigits, charCount, plural, resolveRouteTab } from '../src/datagit-common';
 import { tagNameProblem } from '../src/pages/Branches';
 import { networkToSave, pacUrlProblem, proxyUrlProblem } from '../src/pages/NetworkSettings';
 import { settingNameProblem } from '../src/pages/Environments';
 import { webhookProblem } from '../src/pages/Notifications';
-import { queryNameProblem } from '../src/pages/Database';
+import { dbHome, parseDbRoute, queryNameDropped, queryNameProblem } from '../src/pages/Database';
+import { variableGroupProblem } from '../src/pages/PipelineSecrets';
+import { identityEmailProblem, identityNameProblem } from '../src/pages/Settings';
 import type { NetworkSettings } from '../src/api';
 
 test('words and counts: "1 day", characters as people count them, digits of other scripts', () => {
@@ -41,4 +43,37 @@ test('network: a hidden, invalid proxy address goes back as saved, so Off and PA
     assert.equal(networkToSave(typed, saved).proxyUrl, '');
     assert.equal(networkToSave({ ...typed, proxyUrl: 'http://ok:1' }, saved).proxyUrl, 'http://ok:1');
     assert.equal(networkToSave({ ...typed, proxyMode: 'manual' }, saved).proxyUrl, typed.proxyUrl);
+});
+
+test('pipeline variable group: what is allowed, said as you type', () => {
+    assert.equal(variableGroupProblem('{project}-{env}-secrets'), null);
+    assert.match(variableGroupProblem('{bogus}-x')!, /\{bogus\} is not a placeholder/);
+    assert.match(variableGroupProblem('订单-{env}')!, /"订" is not allowed: use Latin letters/);
+    assert.match(variableGroupProblem('bad/name')!, /"\/" is not allowed/);
+    assert.match(variableGroupProblem('x'.repeat(500))!, /at most 120 characters \(it has 500\)/);
+    assert.match(variableGroupProblem('   ')!, /Give the variable group a name/);
+    assert.match(variableGroupProblem('a{env')!, /on its own/);
+});
+
+test('git identity: the same limits as the server', () => {
+    assert.equal(identityNameProblem('Ann 订单'), null);
+    assert.match(identityNameProblem('x'.repeat(101))!, /at most 100 characters/);
+    assert.match(identityNameProblem('Ann\u202Eevil')!, /direction marks/);
+    assert.match(identityEmailProblem('')!, /Enter your email address/);
+    assert.equal(identityEmailProblem('ann@lab.test'), null);
+});
+
+test('addresses: Database tabs are not query names; old query links still open; inner tabs fall back to a valid one', () => {
+    assert.deepEqual(parseDbRoute(['history']), { kind: 'tabs', side: null, result: 'history', valid: false });
+    assert.deepEqual(parseDbRoute(['saved']), { kind: 'tabs', side: 'saved', result: 'result', valid: true });
+    assert.deepEqual(parseDbRoute(['objects', 'history']), { kind: 'tabs', side: 'objects', result: 'history', valid: true });
+    assert.deepEqual(parseDbRoute(['q', 'test', 'shop', 'queries', 'a.sql']), { kind: 'query', file: 'test/shop/queries/a.sql' });
+    assert.deepEqual(parseDbRoute(['test', 'shop', 'queries', 'a.sql']), { kind: 'query', file: 'test/shop/queries/a.sql', legacy: true });
+    assert.equal(parseDbRoute(['bogus']).kind, 'tabs');
+    assert.deepEqual(dbHome('saved', 'history'), ['db', 'saved', 'history']);
+    assert.deepEqual(queryNameDropped('qa4 订单 😀'), ['😀']);
+    assert.deepEqual(resolveRouteTab('recent', ['channels', 'recent'], 'channels'), { tab: 'recent', fix: false });
+    assert.deepEqual(resolveRouteTab(undefined, ['channels', 'recent'], 'recent'), { tab: 'recent', fix: true });
+    assert.deepEqual(resolveRouteTab('bogus', ['channels', 'recent'], 'recent'), { tab: 'channels', fix: true });
+    assert.deepEqual(resolveRouteTab('log', ['channels', 'recent'], 'channels', { log: 'recent' }), { tab: 'recent', fix: true });
 });

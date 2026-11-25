@@ -37,3 +37,13 @@
 .dg-history .dg-narrow .log-row .log-meta { width: 72px; }
 .dg-commit-desc .ant-descriptions-item-label { white-space: nowrap; }
 .dg-commit-desc .ant-descriptions-item-content { min-width: 0; overflow-wrap: anywhere; }
+
+/* A long message (a refused path, a server error) wraps inside the window instead of running off its right edge. */
+.ant-message .ant-message-notice-content {
+    max-width: min(720px, calc(100vw - 32px));
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    text-align: start;
+}
+.ant-message .ant-message-notice-content .ant-message-custom-content { display: inline-flex; align-items: flex-start; }
+.ant-message .ant-message-notice-content .ant-message-custom-content > .anticon { margin-top: 3px; flex: none; }

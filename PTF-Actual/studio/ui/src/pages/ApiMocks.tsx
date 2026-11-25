@@ -13,7 +13,7 @@ import { useKept } from '../kept';
 import { errText } from '../state';
 import { navigate, useRoute } from '../route';
 import { Split } from '../components/Split';
-import { httpUrlProblem, SectionTitle, shownTab, useEscapeCloses, useRememberedTab } from '../apiperf-ui';
+import { askUnsaved, httpUrlProblem, SectionTitle, shownTab, useEscapeCloses, useRememberedTab } from '../apiperf-ui';
 
 const FAULTS: Array<{ value: MockFaultKind; label: string; help: string }> = [
     { value: 'none', label: 'None', help: 'Answers as set' },
@@ -39,7 +39,13 @@ export function ApiMocks() {
     const [project, setProject] = React.useState('');
     const [list, setList] = React.useState<MockInfo[] | null>(null);
     const [cur, setCur] = React.useState<{ file: string; mock: MockDef; dirty: boolean } | null>(null);
-    useUnsaved('api-mock', !!cur?.dirty, 'a mock', { lostOnLeave: true, save: async () => !!(await save()) });
+    // Loads answer in any order: only the last one asked for is shown (a Discard's reload never replaces the next mock).
+    const loadSeq = React.useRef(0);
+    // Why the mock cannot be saved now (Save is then not offered in the prompts), or null.
+    const problem = cur && !cur.mock.name.trim() ? 'give the mock a name.' : null;
+    /** Discard: the saved mock again (no changes). */
+    const discard = () => { const f = cur?.file; if (!f) return; setCur((c) => (c ? { ...c, dirty: false } : c)); void load(project, f); };
+    useUnsaved('api-mock', !!cur?.dirty, `the mock "${cur?.mock.name || cur?.file.split('/').pop() || ''}"`, { lostOnLeave: true, save: problem ? undefined : async () => !!(await save()), discard });
     const [url, setUrl] = React.useState<string | null>(null);
     const [log, setLog] = React.useState<MockLogEntryDef[]>([]);
     const [port, setPort] = React.useState<number | null>(null);
@@ -61,7 +67,7 @@ export function ApiMocks() {
 
     React.useEffect(() => { if (here) api.apiCollections().then((r) => { setProjects(r.projects); setProject((p) => p || (projectInRoute && r.projects.includes(projectInRoute) ? projectInRoute : r.projects[0]) || ''); }).catch((e) => setErr(errText(e))); }, [here]); // eslint-disable-line react-hooks/exhaustive-deps
     const refresh = React.useCallback(() => { if (project) api.mocks(project).then((r) => setList(r.mocks)).catch((e) => setErr(errText(e))); }, [project]);
-    React.useEffect(() => { setCur(null); setList(null); refresh(); }, [project, refresh]);
+    React.useEffect(() => { loadSeq.current++; setCur(null); setList(null); refresh(); }, [project, refresh]);
     // The running mock's requests, live.
     React.useEffect(() => {
         if (!cur || !url) return;
@@ -71,7 +77,7 @@ export function ApiMocks() {
         return () => { stop = true; };
     }, [cur?.file, url, project]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    const load = (p: string, file: string) => api.mockGet(p, file).then((r) => { setLastFile(r.file); setCur({ file: r.file, mock: r.mock, dirty: false }); setUrl(r.url ?? null); setLog([]); setPort(r.mock.port ? r.mock.port : null); setErr(null); }).catch((e) => { setErr(errText(e)); setLastFile(null); });
+    const load = (p: string, file: string) => { const n = ++loadSeq.current; return api.mockGet(p, file).then((r) => { if (n !== loadSeq.current) return; setLastFile(r.file); setCur({ file: r.file, mock: r.mock, dirty: false }); setUrl(r.url ?? null); setLog([]); setPort(r.mock.port ? r.mock.port : null); setErr(null); }).catch((e) => { setErr(errText(e)); setLastFile(null); }); };
     /** A mock chosen in the list: its address (the address then opens it, below). */
     const open = (m: MockInfo) => {
         if (cur?.file === m.file) return;
@@ -85,8 +91,17 @@ export function ApiMocks() {
         const back = cur?.file;
         leave(() => void load(projectInRoute, fileInRoute), () => navigate(back ? ['api-mocks', ...back.split('/')] : ['api-mocks'], true));
     }, [fileInRoute, project, projects.length]); // eslint-disable-line react-hooks/exhaustive-deps
-    // Back on the screen from the menu (#/api-mocks): the open mock's address again.
-    React.useEffect(() => { const f = cur?.file ?? lastFile; if (here && !fileInRoute && f) navigate(['api-mocks', ...f.split('/')], true); }, [here, fileInRoute, cur?.file]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Back on the screen from the menu (#/api-mocks): the open mock's address again. Back from a mock to #/api-mocks
+    // within the screen shows the list with none open (the address says so), and Forward opens it again.
+    const prevFileInRoute = React.useRef(fileInRoute);
+    React.useEffect(() => {
+        const prev = prevFileInRoute.current;
+        prevFileInRoute.current = fileInRoute;
+        if (!here || fileInRoute) return;
+        if (prev && cur?.file === prev && !cur.dirty) { loadSeq.current++; setCur(null); setLastFile(null); setUrl(null); setLog([]); return; }
+        const f = cur?.file ?? lastFile;
+        if (f) navigate(['api-mocks', ...f.split('/')], true);
+    }, [here, fileInRoute, cur?.file]); // eslint-disable-line react-hooks/exhaustive-deps
     const route = (i: number, patch: Partial<MockRouteDef>) => cur && setCur({ ...cur, dirty: true, mock: { ...cur.mock, routes: cur.mock.routes.map((r, j) => (j === i ? { ...r, ...patch } : r)) } });
     const fault = (i: number, patch: Partial<NonNullable<MockRouteDef['fault']>>) => cur && route(i, { fault: { kind: 'none', ...(cur.mock.routes[i].fault ?? {}), ...patch } });
     const saving = React.useRef(false);
@@ -144,9 +159,7 @@ export function ApiMocks() {
     /** Save, Discard or Stay before the open mock is left (Escape and the close button stay). */
     function leave(then: () => void, stay?: () => void) {
         if (!cur?.dirty) { then(); return; }
-        const inst = modal.confirm({ title: `Save the changes to "${cur.mock.name || 'the mock'}"?`, okText: 'Save', closable: true, onOk: async () => { if (await save()) then(); else stay?.(); },
-            onCancel: () => stay?.(),
-            footer: (_: React.ReactNode, { OkBtn }: { OkBtn: React.FC }) => <><Button onClick={() => { inst.destroy(); stay?.(); }}>Stay</Button><Button danger onClick={() => { inst.destroy(); setCur(null); setUrl(null); setLog([]); then(); }}>Discard</Button><OkBtn /></> });
+        askUnsaved(modal, { what: `the mock "${cur.mock.name || cur.file.split('/').pop()}"`, problem, save: async () => !!(await save()), discard, then, stay });
     }
     const cancelCreate = () => { setCreateErr(null); if (recording) void api.mockRecordStop().catch(() => undefined); setRecording(null); setCreating(null); };
     useEscapeCloses(!!creating, cancelCreate);
@@ -163,7 +176,7 @@ export function ApiMocks() {
         <Split id="api-mocks" initial={300} min={240} max={460} style={{ height: 'calc(100vh - var(--chrome))' }}>
             <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
                 <div className="toolbar">
-                    <Select size="small" style={{ flex: 1 }} value={project || undefined} onChange={(p) => leave(() => { setCur(null); setLastFile(null); setUrl(null); setLog([]); setProject(p); navigate(['api-mocks'], true); })} options={projects.map((p) => ({ value: p, label: p }))} placeholder="Project" aria-label="Project" />
+                    <Select size="small" style={{ flex: 1 }} value={project || undefined} onChange={(p) => leave(() => { loadSeq.current++; setCur(null); setLastFile(null); setUrl(null); setLog([]); setProject(p); navigate(['api-mocks'], true); })} options={projects.map((p) => ({ value: p, label: p }))} placeholder="Project" aria-label="Project" />
                     <Button size="small" type="primary" icon={<PlusOutlined />} disabled={!project} onClick={() => leave(() => setCreating({ text: '', name: '' }))}>New</Button>
                 </div>
                 <div style={{ flex: 1, overflow: 'auto' }}>

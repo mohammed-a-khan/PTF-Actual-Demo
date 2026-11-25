@@ -20,6 +20,8 @@
 .tests-panel-tabs > .ant-tabs-content-holder > .ant-tabs-content, .tests-panel-tabs > .ant-tabs-content-holder > .ant-tabs-content > .ant-tabs-tabpane { height: 100%; }
 /* Health check rows. */
 .tests-check { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--panel-border); }
+.tests-check-group { padding-top: 10px; }
+.tests-check-group > .ant-typography { display: block; text-transform: none; font-weight: 600; }
 .tests-check:last-child { border-bottom: 0; }
 .tests-check-icon { font-size: 16px; line-height: 22px; }
 .tests-check-body { flex: 1; min-width: 0; }
@@ -36,3 +38,11 @@
 /* Evidence tabs of a scenario: tighter, so all of them fit in a narrow results pane. */
 .evidence .ant-tabs-tab + .ant-tabs-tab { margin-inline-start: 14px; }
 .tests-results .run-scenario-body { padding-inline-start: 24px; }
+/* Visual review drawer: a long snapshot name fits the header (ellipsis, the full name in a tooltip). */
+.visual-drawer .ant-drawer-header-title, .visual-drawer .ant-drawer-title { min-width: 0; overflow: hidden; }
+.visual-drawer .ant-drawer-title { flex: 1 1 auto; }
+.visual-drawer-title { display: flex; align-items: center; min-width: 0; max-width: 100%; }
+.visual-drawer-title > .ant-typography { flex: 0 1 auto; min-width: 0; max-width: 100%; margin: 0; }
+.visual-drawer-title > .ant-tag { flex: none; }
+/* Healed locators: on a narrow screen a line says the table scrolls sideways. */
+.h-scroll-hint { display: block; font-size: 12px; padding: 2px 12px 6px; }

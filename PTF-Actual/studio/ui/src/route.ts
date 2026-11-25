@@ -11,37 +11,57 @@ import React from 'react';
 const EVENT = 'cs-route';
 
 /**
- * Back/Forward to another screen while the current one has work it would lose: the step is undone and
- * the guard asks; `leave()` then goes on to where the person was going.
+ * Back/Forward while the shown screen has work it would lose: the step is undone (exactly, so the
+ * browser's history stays as it was) and the guard asks; `leave()` then makes the same step again.
+ * Every history entry carries its place (`idx`), so a step of any size can be undone and redone.
  */
 type PopGuard = (to: string[], from: string[], leave: () => void) => boolean;
 let popGuard: PopGuard | null = null;
 export function setPopGuard(g: PopGuard | null): void { popGuard = g; }
 let shownHash = typeof window !== 'undefined' ? window.location.hash : '';
-let passThrough = false;
+let shownIdx = 0;
+/** Pop events the guard itself caused (undoing a refused step, or making it again after "leave"). */
+let ownPops = 0;
+/** The guard's question is open (closed by stay/leave: see questionClosed). */
+let asking = false;
+/** The guard's question was answered "Stay" (or dismissed): further steps may ask again. */
+export function questionClosed(): void { asking = false; }
+const idxOf = (st: unknown) => (st && typeof (st as { idx?: unknown }).idx === 'number' ? (st as { idx: number }).idx : null);
 if (typeof window !== 'undefined') {
+    // The first entry gets its place too.
+    if (idxOf(history.state) === null) history.replaceState({ ...(history.state ?? {}), idx: 0 }, '');
+    shownIdx = idxOf(history.state) ?? 0;
     // Registered before any screen listens, so a refused step never reaches them.
     window.addEventListener('popstate', (e) => {
         const toHash = window.location.hash;
-        if (passThrough) { passThrough = false; shownHash = toHash; return; }
+        const toIdx = idxOf(history.state);
+        if (ownPops > 0) {
+            ownPops--;
+            // Undoing a refused step: nothing changed for the screens.
+            if (toHash === shownHash) { e.stopImmediatePropagation(); shownIdx = toIdx ?? shownIdx; return; }
+            shownHash = toHash; shownIdx = toIdx ?? shownIdx;
+            return;
+        }
         const from = routeOf(shownHash), to = currentRoute();
-        if (popGuard && from[0] && to[0] !== from[0]) {
-            const target = { hash: toHash, state: history.state as unknown };
-            const asked = popGuard(to, from, () => {
-                history.replaceState(target.state, '', window.location.pathname + window.location.search + target.hash);
-                shownHash = target.hash;
-                window.dispatchEvent(new Event(EVENT));
-            });
+        // An address typed in the address bar makes a new entry without a place: it is the next one.
+        let typed = false;
+        if (toIdx === null) { typed = true; history.replaceState({ ...(history.state ?? {}), idx: shownIdx + 1 }, ''); }
+        const delta = typed ? 1 : (toIdx as number) - shownIdx;
+        if (popGuard && from[0] && to.join('\0') !== from.join('\0') && delta) {
+            // A second Back/Forward while the question is open: undone quietly (one question at a time).
+            if (asking) { e.stopImmediatePropagation(); ownPops++; history.go(-delta); return; }
+            const asked = popGuard(to, from, () => { asking = false; ownPops++; history.go(delta); });
             if (asked) {
+                asking = true;
                 e.stopImmediatePropagation();
-                // Undo the step: the address shows the screen the person is still on.
-                history.pushState(history.state, '', window.location.pathname + window.location.search + shownHash);
+                ownPops++;
+                history.go(-delta);
                 return;
             }
         }
-        shownHash = toHash;
+        shownHash = toHash; shownIdx = idxOf(history.state) ?? shownIdx;
     });
-    window.addEventListener(EVENT, () => { shownHash = window.location.hash; });
+    window.addEventListener(EVENT, () => { shownHash = window.location.hash; shownIdx = idxOf(history.state) ?? shownIdx; });
     window.addEventListener('hashchange', () => { shownHash = window.location.hash; });
 }
 function routeOf(hash: string): string[] {
@@ -67,7 +87,7 @@ export function routeHash(parts: Array<string | number | undefined | null>): str
 export function navigate(parts: Array<string | number | undefined | null>, replace = false, o: { menu?: boolean } = {}): void {
     const h = routeHash(parts);
     if (window.location.hash === h) return;
-    if (replace) history.replaceState(history.state, '', window.location.pathname + window.location.search + h);
+    if (replace) history.replaceState({ ...(history.state ?? {}), idx: idxOf(history.state) ?? shownIdx }, '', window.location.pathname + window.location.search + h);
     else {
         // A jump from one screen to another (not the menu): the new entry remembers where it came from,
         // so the screen can offer "Back to …" (Back returns there as it was: filters, selection, scroll).
@@ -78,7 +98,7 @@ export function navigate(parts: Array<string | number | undefined | null>, repla
         if (!o.menu && from[0] && next[0] && from[0] !== next[0]) state = { cameFrom: { hash: window.location.hash, route: from }, depth: 0 };
         // Moving within the screen it was opened on keeps the way back (one more step to go back).
         else if (!o.menu && here?.cameFrom && from[0] === next[0]) state = { cameFrom: here.cameFrom, depth: (here.depth ?? 0) + 1 };
-        history.pushState(state, '', window.location.pathname + window.location.search + h);
+        history.pushState({ ...(state ?? {}), idx: (idxOf(history.state) ?? shownIdx) + 1 }, '', window.location.pathname + window.location.search + h);
     }
     window.dispatchEvent(new Event(EVENT));
 }

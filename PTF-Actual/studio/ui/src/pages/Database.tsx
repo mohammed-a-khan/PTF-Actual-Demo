@@ -26,7 +26,37 @@ import { useKept } from '../kept';
 
 const pref = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : d; } catch { return d; } };
 const savePref = (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* ignore */ } };
-type DbSideTab = 'connections' | 'objects' | 'saved';
+const DB_SIDE_TABS = ['connections', 'objects', 'saved'] as const;
+type DbSideTab = typeof DB_SIDE_TABS[number];
+type DbResultTab = 'result' | 'history';
+/**
+ * What the address (#/db/…) says. A saved query: #/db/q/<file> (older links, #/db/test/<project>/queries/<name>.sql,
+ * still open it: `legacy`, the address is then corrected). Otherwise the tabs shown: #/db/<side tab>[/history].
+ * `valid` false: the address is to be replaced with a valid one (a missing or wrong tab).
+ */
+export type DbAddress = { kind: 'query'; file: string; legacy?: boolean } | { kind: 'tabs'; side: DbSideTab | null; result: DbResultTab | null; valid: boolean };
+export function parseDbRoute(parts: string[]): DbAddress {
+    const isSide = (x: string | undefined): x is DbSideTab => (DB_SIDE_TABS as readonly string[]).includes(x ?? '');
+    const isResult = (x: string | undefined): x is DbResultTab => x === 'result' || x === 'history';
+    if (parts[0] === 'q') return parts.length > 1 ? { kind: 'query', file: parts.slice(1).join('/') } : { kind: 'tabs', side: null, result: null, valid: false };
+    if (!parts.length) return { kind: 'tabs', side: null, result: null, valid: false };
+    const [a, b] = parts;
+    if (isSide(a)) {
+        if (parts.length === 1) return { kind: 'tabs', side: a, result: 'result', valid: true };
+        if (parts.length === 2 && isResult(b)) return { kind: 'tabs', side: a, result: b, valid: b === 'history' };
+        return { kind: 'tabs', side: a, result: null, valid: false };
+    }
+    if (isResult(a) && parts.length === 1) return { kind: 'tabs', side: null, result: a, valid: false };
+    // An older link to a saved query (#/db/test/<project>/queries/<name>.sql).
+    if (parts.length > 1 || /\.sql$/i.test(a)) return { kind: 'query', file: parts.join('/'), legacy: true };
+    return { kind: 'tabs', side: null, result: null, valid: false };
+}
+/** The address of the Database screen with no query open: its tabs. */
+export const dbHome = (side: DbSideTab, result: DbResultTab) => ['db', side, ...(result === 'history' ? ['history'] : [])];
+/** Characters of a query name that do not reach its file name (emoji, punctuation), to say so before saving. */
+export function queryNameDropped(name: string): string[] {
+    return [...new Set(Array.from(name.normalize('NFC')).filter((c) => !/[\p{L}\p{M}\p{N}\s_-]/u.test(c)))];
+}
 
 /** The file name a query name becomes (as the server makes it). */
 export const queryFileOf = (name: string) => name.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 120).replace(/-+$/, '');
@@ -474,7 +504,8 @@ export function Database() {
     const { message, modal } = App.useApp();
     const route = useRoute();
     const here = route[0] === 'db';
-    const fileInRoute = here && route[1] ? decodeURIComponent(route.slice(1).join('/')) : null;
+    const addr = here ? parseDbRoute(route.slice(1)) : null;
+    const fileInRoute = addr?.kind === 'query' ? addr.file : null;
     const [meta, setMeta] = React.useState<DbConnections | null>(null);
     const [project, setProjectRaw] = React.useState<string>(() => pref('cs-studio-db-project', ''));
     const [env, setEnvRaw] = React.useState<string | undefined>(() => pref<string | undefined>('cs-studio-db-env', undefined));
@@ -495,18 +526,42 @@ export function Database() {
     const agentRoute = useRoute();
     useAgentContext('db', { project, environment: env, connection: alias, queryFile: ed.file, query: ed.text.slice(0, 2000), lastResult: result ? { connection: result.alias, rows: result.r.total, columns: result.r.columns.map((c) => c.name).slice(0, 40) } : null }, agentRoute[0] === 'db');
     const [error, setError] = React.useState<{ text: string; code?: string } | null>(null);
-    const [tab, setTab] = useKept<string>('db-result-tab', 'result');
-    const [sideTab, setSideTab] = useStoredTab<DbSideTab>('db-side', ['connections', 'objects', 'saved'], 'connections');
+    const [tab, setTab] = useKept<DbResultTab>('db-result-tab', 'result');
+    const [sideTab, setSideTab] = useStoredTab<DbSideTab>('db-side', DB_SIDE_TABS, 'connections');
+    // The tabs are in the address while no saved query is open (#/db/saved, #/db/connections/history), so Back and
+    // Forward move between them; a wrong or missing tab is replaced with a valid address.
+    const home = (side: DbSideTab = sideTab, result: DbResultTab = tab) => dbHome(side, result);
+    React.useEffect(() => {
+        if (!addr) return;
+        // Back on the screen from the menu (#/db) with a saved query open: the address names it again.
+        if (route.length === 1 && ed.file) { navigate(['db', 'q', ...ed.file.split('/')], true); return; }
+        if (addr.kind === 'query') { if (addr.legacy) navigate(['db', 'q', ...addr.file.split('/')], true); return; }
+        const side = addr.side ?? sideTab, result = addr.result ?? (addr.side ? 'result' : tab === 'history' ? 'history' : 'result');
+        if (side !== sideTab) setSideTab(side);
+        if (result !== tab) setTab(result);
+        if (!addr.valid) navigate(dbHome(side, result), true);
+    }, [here, route.join('/')]); // eslint-disable-line react-hooks/exhaustive-deps
+    const chooseSideTab = (k: DbSideTab) => { setSideTab(k); if (!fileInRoute) navigate(home(k, tab)); };
+    const chooseResultTab = (k: DbResultTab) => { setTab(k); if (!fileInRoute) navigate(home(sideTab, k)); };
+    /** Show the result (after a run): the address follows when it holds the tabs. */
+    const showResult = () => { setTab('result'); if (here && !fileInRoute && tab !== 'result') navigate(home(sideTab, 'result'), true); };
     const [history, setHistory] = React.useState<DbHistoryItem[] | null>(null);
     const [feature, setFeature] = React.useState(false);
     const [comparing, setComparing] = React.useState(false);
     const [err, setErr] = React.useState<string | null>(null);
     const editor = React.useRef<CodeEditorHandle>(null);
+    // The screen stays loaded when hidden: a drawer or dialog left open closes when the screen is left (Back, the menu).
+    React.useEffect(() => { if (!here) { setComparing(false); setFeature(false); setInserting(false); setScript(null); } }, [here]);
 
     const environment = env ?? meta?.environments[project]?.[0];
     const conns = meta?.connections ?? [];
     const conn: DbConnection | undefined = conns.find((c) => c.alias === alias);
     const locked = !!meta?.protected || !!conn?.readOnlyByConfig;
+    /** Why Run is off, in words (on the button's tooltip, not only on the small ⚠ by the connection). */
+    const runBlocked: string | null = !conn ? 'Choose a connection first.'
+        : conn.problems.length ? `${conn.alias} cannot run queries yet: ${conn.problems.join(' ')}`
+        : !conn.driverInstalled ? `${conn.alias} needs its database driver${conn.driver ? ` (${conn.driver})` : ''}, which is not installed.`
+        : null;
     const load = React.useCallback(async (p?: string, e?: string) => {
         try {
             const first = p ? null : await api.dbConnections();
@@ -539,7 +594,7 @@ export function Database() {
             .catch((e) => {
                 // A link to a query that is gone: the editor must not keep showing another query under its name.
                 setEd({ file: null, text: '', dirty: false }); setResult(null); setError(null);
-                navigate(['db'], true);
+                navigate(home(), true);
                 message.error(`${errText(e)} The editor is empty: pick a query under Saved, or write a new one.`);
                 api.dbQueries(project).then((x) => setQueries(x.queries)).catch(() => {});
             });
@@ -555,7 +610,7 @@ export function Database() {
         const sql = text ?? (sel.trim() ? sel : ed.text);
         if (!sql.trim()) { message.info('Write a query first.'); return; }
         const usedParams = withParams ?? (sel.trim() || text !== undefined ? [] : params);
-        setRunning(true); setError(null); setTab('result');
+        setRunning(true); setError(null); showResult();
         try {
             const r = await api.dbQuery({ project, env: environment, alias: conn.alias, sql, params: usedParams, maxRows, confirmed });
             setResult({ r, sql, params: usedParams, alias: conn.alias });
@@ -596,7 +651,7 @@ export function Database() {
     };
     /** Put a script in the editor (as a new, unsaved query). */
     const toEditor = (text: string) => {
-        const put = () => { setEd({ file: null, text, dirty: true }); setResult(null); setError(null); navigate(['db'], true); setScript(null); setInserting(false); };
+        const put = () => { setEd({ file: null, text, dirty: true }); setResult(null); setError(null); navigate(home(), true); setScript(null); setInserting(false); };
         if (ed.dirty && ed.text.trim()) modal.confirm({ title: 'Replace the current query?', okText: 'Replace', onOk: put }); else put();
     };
     const stop = async () => { if (environment) { await api.dbStop(project, environment).catch(() => {}); } };
@@ -608,7 +663,7 @@ export function Database() {
                 const r = await api.dbSaveQuery({ project, text, ...(asNew || !ed.file ? { name: name! } : { file: ed.file }) });
                 setEd({ file: r.file, text, dirty: false });
                 message.success(`Saved ${r.file}`);
-                navigate(['db', ...r.file.split('/')], true);
+                navigate(['db', 'q', ...r.file.split('/')], true);
                 api.dbQueries(project).then((x) => setQueries(x.queries)).catch(() => {});
                 return null;
             } catch (e) { return errText(e); }
@@ -621,6 +676,7 @@ export function Database() {
                 onChange={(e) => { name = e.target.value; const p = queryNameProblem(name); inst.update({ okButtonProps: { disabled: !name.trim() || !!p }, content: body(p) }); }} onPressEnter={() => submit(() => inst.destroy())} aria-label="Query name" />
             {problem && <Typography.Text type="danger" style={{ fontSize: 12 }}>{problem}</Typography.Text>}
             {!problem && name.trim() && <Typography.Text type="secondary" style={{ fontSize: 12 }}>File: <Typography.Text code>{queryFileOf(name)}.sql</Typography.Text></Typography.Text>}
+            {!problem && queryNameDropped(name).length > 0 && <Typography.Text type="warning" style={{ fontSize: 12 }}>Left out of the file name: {queryNameDropped(name).join(' ')} (a file name keeps letters of any script, digits, spaces, - and _).</Typography.Text>}
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>Saved as test/{project}/queries/&lt;name&gt;.sql: in the project, reviewed through Git, run by the framework's "user executes query from file" step.</Typography.Text>
         </Space>;
         let saving = false;
@@ -635,7 +691,7 @@ export function Database() {
             onOk: (close: () => void) => submit(close) });
     };
     const openQuery = (q: DbSavedQuery) => {
-        const go = () => navigate(['db', ...q.file.split('/')]);
+        const go = () => navigate(['db', 'q', ...q.file.split('/')]);
         if (ed.dirty) modal.confirm({ title: 'Discard the changes to the current query?', okText: 'Discard', onOk: go }); else go();
     };
     const toggleCols = (o: DbObject) => {
@@ -649,7 +705,7 @@ export function Database() {
         if (!conn) return;
         // A Redis key group: its keys with their type and value (Redis has no query for that).
         if (conn.type === 'redis' && environment) {
-            setRunning(true); setError(null); setTab('result');
+            setRunning(true); setError(null); showResult();
             api.dbRows(project, environment, conn.alias, o.name, maxRows)
                 .then((r) => setResult({ r, sql: `keys ${o.name}`, params: [], alias: conn.alias }))
                 .catch((e) => { setError({ text: errText(e) }); setResult(null); })
@@ -657,7 +713,7 @@ export function Database() {
             return;
         }
         const text = selectSql(conn.type, o.schema, o.name, 100);
-        const put = () => { setEd({ file: null, text, dirty: true }); if (fileInRoute) navigate(['db'], true); void run(false, text); };
+        const put = () => { setEd({ file: null, text, dirty: true }); if (fileInRoute) navigate(home(), true); void run(false, text); };
         if (ed.dirty && ed.text.trim()) modal.confirm({ title: 'Replace the current query?', okText: 'Replace', onOk: put }); else put();
     };
     React.useEffect(() => { if (here && tab === 'history') api.dbHistory().then((r) => setHistory(r.items)).catch(() => setHistory([])); }, [here, tab, result]);
@@ -677,7 +733,7 @@ export function Database() {
                 {err && <Alert type="error" showIcon closable onClose={() => setErr(null)} style={{ margin: 8 }} message={err} />}
                 {meta?.protected && <Alert type="info" showIcon icon={<LockOutlined />} style={{ margin: '6px 8px', padding: '4px 10px' }} message={<Tooltip title={`Changes are never run here: ${meta.protected}.`}><span>Read only: changes are never run here</span></Tooltip>} />}
                 {meta && meta.frameworkInstalled === false && <Alert type="error" showIcon style={{ margin: '6px 8px' }} message="The framework is not installed in this repository (npm install)." />}
-                <Tabs size="small" className="dg-db-side-tabs" tabBarGutter={14} activeKey={sideTab} onChange={(k) => setSideTab(k as DbSideTab)} items={[
+                <Tabs size="small" className="dg-db-side-tabs" tabBarGutter={14} activeKey={sideTab} onChange={(k) => chooseSideTab(k as DbSideTab)} items={[
                     {
                         key: 'connections', label: `Connections${conns.length ? ` (${conns.length})` : ''}`, children: <div>
                     {meta && !conns.length && <Typography.Text type="secondary" style={{ display: 'block', padding: '2px 12px 8px', fontSize: 12 }}>None for {project}/{environment}. A connection is a set of settings DB_&lt;NAME&gt;_TYPE, _HOST, _DATABASE, _USERNAME, _PASSWORD (Environments).</Typography.Text>}
@@ -731,15 +787,15 @@ export function Database() {
                     <Select size="small" style={{ width: 118 }} value={maxRows} onChange={(v) => { setMaxRows(v); savePref('cs-studio-db-rows', v); }} aria-label="Rows to show"
                         options={[100, 500, 1000, 5000, 20000, 100000].map((n) => ({ value: n, label: `${n.toLocaleString()} rows` }))} />
                     {running ? <Button size="small" danger icon={<StopOutlined />} onClick={(e) => { if (e.detail > 1) return; /* the second click of a double-click on Run */ void stop(); }}>Stop</Button>
-                        : <Tooltip title="Ctrl+Enter (the selected text only, when there is a selection)"><Button size="small" type="primary" icon={<CaretRightOutlined />} disabled={!conn || !!conn.problems.length || !conn.driverInstalled} onClick={(e) => { if (e.detail > 1) return; void run(); }}>Run</Button></Tooltip>}
+                        : <Tooltip title={runBlocked ?? 'Ctrl+Enter (the selected text only, when there is a selection)'}><Button size="small" type="primary" icon={<CaretRightOutlined />} disabled={!!runBlocked} onClick={(e) => { if (e.detail > 1) return; void run(); }}>Run</Button></Tooltip>}
                     <Button size="small" icon={<SaveOutlined />} type={ed.dirty && ed.file ? 'primary' : 'default'} disabled={!ed.text.trim()} onClick={() => void save()}>Save</Button>
                     <Tooltip title="Compare this query's data with another query (another connection, or another table): rows by key, values, vital checks"><Button size="small" icon={<DiffOutlined />} disabled={!conns.length} onClick={() => setComparing(true)}>Compare</Button></Tooltip>
                     <Tooltip title={!r || r.kind === 'change' ? 'Run a query first: the test checks its result' : undefined}><Button size="small" icon={<ExperimentOutlined />} disabled={!r || r.kind === 'change' || !result} onClick={() => setFeature(true)}>Create test</Button></Tooltip>
                     <Dropdown menu={{ items: [{ key: 'new', label: 'New query' }, { key: 'saveas', label: 'Save as…', disabled: !ed.text.trim() }, ...(ed.file ? [{ key: 'del', danger: true, label: 'Delete this saved query…' }] : [])],
                         onClick: ({ key }) => {
-                            if (key === 'new') { const go = () => { setEd({ file: null, text: '', dirty: false }); setResult(null); setError(null); navigate(['db'], true); }; if (ed.dirty) modal.confirm({ title: 'Discard the changes?', okText: 'Discard', onOk: go }); else go(); }
+                            if (key === 'new') { const go = () => { setEd({ file: null, text: '', dirty: false }); setResult(null); setError(null); navigate(home(), true); }; if (ed.dirty) modal.confirm({ title: 'Discard the changes?', okText: 'Discard', onOk: go }); else go(); }
                             if (key === 'saveas') void save(true);
-                            if (key === 'del' && ed.file) modal.confirm({ title: `Delete ${ed.file}?`, okButtonProps: { danger: true }, okText: 'Delete', onOk: async () => { const f = ed.file!; try { await api.dbDeleteQuery(f); } catch (e) { message.error(errText(e)); return; } message.success(`Deleted ${f}. The text stays in the editor (not saved).`); setEd({ file: null, text: ed.text, dirty: true }); navigate(['db'], true); api.dbQueries(project).then((x) => setQueries(x.queries)).catch(() => {}); } });
+                            if (key === 'del' && ed.file) modal.confirm({ title: `Delete ${ed.file}?`, okButtonProps: { danger: true }, okText: 'Delete', onOk: async () => { const f = ed.file!; try { await api.dbDeleteQuery(f); } catch (e) { message.error(errText(e)); return; } message.success(`Deleted ${f}. The text stays in the editor (not saved).`); setEd({ file: null, text: ed.text, dirty: true }); navigate(home(), true); api.dbQueries(project).then((x) => setQueries(x.queries)).catch(() => {}); } });
                         } }}><Button size="small" aria-label="More">⋯</Button></Dropdown>
                 </div>
                 <Split id="db-editor" direction="column" sizeOf="second" initial={340} min={120} max={900} style={{ flex: 1, minHeight: 0 }}>
@@ -753,7 +809,7 @@ export function Database() {
                         </div>}
                     </div>
                     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', minHeight: 0, borderTop: '1px solid var(--panel-border)' }}>
-                        <Tabs size="small" activeKey={tab} onChange={setTab} style={{ padding: '0 10px' }} items={[{ key: 'result', label: 'Result' }, { key: 'history', label: 'History' }]}
+                        <Tabs size="small" activeKey={tab} onChange={(k) => chooseResultTab(k as DbResultTab)} style={{ padding: '0 10px' }} items={[{ key: 'result', label: 'Result' }, { key: 'history', label: 'History' }]}
                             tabBarExtraContent={tab === 'result' && r && r.columns.length > 0 ? <Space size={4}>
                                 {!['mongodb', 'redis'].includes(r.type) && <Tooltip title="INSERT statements for these rows"><Button size="small" type="text" icon={<FileTextOutlined />} onClick={() => setInserting(true)}>INSERT script</Button></Tooltip>}
                                 <Tooltip title="Copy as CSV"><Button size="small" type="text" icon={<CopyOutlined />} onClick={() => void navigator.clipboard?.writeText(csv(r.columns, r.rows)).then(() => message.success('Copied'))} aria-label="Copy" /></Tooltip>
@@ -765,7 +821,7 @@ export function Database() {
                         <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
                             {tab === 'history' ? (!history ? <Spin style={{ margin: 16 }} /> : !history.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Queries you run appear here (on this computer)." />
                                 : history.map((h, i) => (
-                                    <div key={i} className="item-row" onClick={() => { setEd({ file: null, text: h.sql, dirty: true }); navigate(['db'], true); setTab('result'); }}>
+                                    <div key={i} className="item-row" onClick={() => { setEd({ file: null, text: h.sql, dirty: true }); setTab('result'); navigate(home(sideTab, 'result'), true); }}>
                                         <div className="item-title">{h.ok ? null : <WarningFilled style={{ color: '#cf222e' }} />}<span className="t mono" style={{ fontSize: 12 }}>{h.sql.replace(/\s+/g, ' ').slice(0, 160)}</span>{h.kind === 'change' && <Tag color="orange" bordered={false}>change</Tag>}</div>
                                         <div className="item-meta">{ago(h.at)} · {h.alias} · {h.env}{h.ok ? ` · ${plural(h.rows ?? 0, 'row')}${h.affected ? ` · ${h.affected} affected` : ''} · ${h.ms} ms` : ` · ${h.error}`}</div>
                                     </div>)))

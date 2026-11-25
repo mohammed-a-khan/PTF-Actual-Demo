@@ -173,9 +173,12 @@ export function compareRuns(a: RunResult, b: RunResult, names: { a: string; b: s
     const metrics: ComparedMetric[] = [];
     const time = (k: 'avg' | 'p50' | 'p90' | 'p95' | 'p99', label: string) => {
         // The same rule as the transactions: a change counts from 10% and 20 ms (3.5 ms → 2.7 ms is noise).
-        const c = ch(a.total[k], b.total[k]), v = Math.abs(b.total[k] - a.total[k]) < MIN_MS ? 'same' : judge(c, true);
+        // Every time measure is judged alike; a large % of a few ms says so (it is "same" because of the ms).
+        const d = b.total[k] - a.total[k];
+        const c = ch(a.total[k], b.total[k]), small = Math.abs(d) < MIN_MS, v = small ? 'same' : judge(c, true);
+        const dMs = `${d >= 0 ? '+' : '−'}${Math.abs(d) < MIN_MS ? Math.abs(d).toFixed(1) : Math.round(Math.abs(d))} ms`;
         metrics.push({ label, a: sec(a.total[k]), b: sec(b.total[k]), change: fmtC(c), verdict: v,
-            meaning: v === 'same' ? 'About the same (within normal variation).' : v === 'worse' ? `Users waited ${Math.abs(c).toFixed(0)}% longer.` : `Users waited ${Math.abs(c).toFixed(0)}% less.` });
+            meaning: v === 'same' ? (small && Math.abs(c) >= NOISE ? `About the same: ${dMs} is under ${MIN_MS} ms (normal variation).` : `About the same: under ${NOISE}% (normal variation).`) : v === 'worse' ? `Users waited ${Math.abs(c).toFixed(0)}% longer.` : `Users waited ${Math.abs(c).toFixed(0)}% less.` });
     };
     const cThr = ch(a.total.throughput, b.total.throughput);
     metrics.push({ label: 'Throughput', a: `${a.total.throughput.toFixed(1)}/s`, b: `${b.total.throughput.toFixed(1)}/s`, change: fmtC(cThr), verdict: judge(cThr, false), meaning: Math.abs(cThr) < NOISE ? 'Same amount of work delivered.' : cThr < 0 ? 'Less work delivered per second (if the load was the same, the system was slower to answer).' : 'More work delivered per second.' });

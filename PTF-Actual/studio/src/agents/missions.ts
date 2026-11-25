@@ -922,7 +922,9 @@ export class MissionEngine {
             } catch (e) { m.timeline.push({ at: now(), text: `Could not collect the changes: ${(e as Error).message}`, kind: 'error' }); }
         }
         m.state = state; m.reason = reason; m.endedAt = now();
-        m.timeline.push({ at: now(), text: `${label(state)}: ${reason}${m.commit ? ` ${m.changes.length} file(s) on ${m.copy!.branch}.` : ''}`, kind: 'phase' });
+        // The reason may already start with the state's name ("Over budget: …"): said once.
+        const said = reason.toLowerCase().startsWith(`${label(state).toLowerCase()}:`) ? reason : `${label(state)}: ${reason}`;
+        m.timeline.push({ at: now(), text: `${said}${m.commit ? ` ${m.changes.length} file(s) on ${m.copy!.branch}.` : ''}`, kind: 'phase' });
         this.live.delete(m.id);
         this.changed(m);
         this.d.log('mission.end', `The mission ${m.title} ended: ${label(state)}`, { mission: m.id, state });
@@ -1027,6 +1029,22 @@ export class MissionEngine {
         if (m.copy && m.result?.kind !== 'pr') await runGit(['branch', '-D', m.copy.branch], { cwd: this.d.repoRoot, allowFailure: true });
         if (!m.result) m.result = { kind: 'discarded', at: now(), detail: by };
         this.note(m, `${by} discarded the mission's copy${m.result.kind === 'pr' ? ' (the branch stays: it has a pull request)' : ' and branch'}.`, 'phase');
+    }
+
+    /**
+     * Delete a finished mission from the list: its copy, its screenshots and (unless a pull request uses it) its branch
+     * go too. Work never brought in or published is lost: the screen asks first.
+     */
+    async remove(id: string, by: string): Promise<void> {
+        const m = this.get(id);
+        if (!m) throw new Error('No such mission.');
+        if (!FINISHED.includes(m.state)) throw new Error('Stop the mission first: only a finished mission can be deleted.');
+        await this.removeCopy(m);
+        if (m.copy && m.result?.kind !== 'pr') await runGit(['branch', '-D', m.copy.branch], { cwd: this.d.repoRoot, allowFailure: true });
+        try { fs.rmSync(this.shotsDir(m.id), { recursive: true, force: true }); } catch { /* gone */ }
+        this.runs = this.runs.filter((x) => x.id !== id);
+        this.save();
+        this.d.log('mission.delete', `${by} deleted the mission ${m.title}`, { mission: m.id });
     }
 
     private async removeCopy(m: MissionRun) {

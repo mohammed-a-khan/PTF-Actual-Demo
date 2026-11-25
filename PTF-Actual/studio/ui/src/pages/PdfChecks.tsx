@@ -12,6 +12,7 @@ import { Split } from '../components/Split';
 import { errText, openInEditor, showRun } from '../state';
 import { ago } from '../format';
 import { usePageHeadTooltip, useStoredTab } from '../datagit-common';
+import { navigate, useRoute } from '../route';
 
 const pref = <T,>(k: string, d: T): T => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : d; } catch { return d; } };
 const keep = (k: string, v: unknown) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
@@ -65,7 +66,16 @@ export function PdfChecks() {
     const [files, setFiles] = React.useState<PdfFileDef[] | null>(null);
     const [engine, setEngine] = React.useState<'project' | 'studio' | null>(null);
     const [filter, setFilter] = React.useState('');
-    const [sel, setSel] = React.useState<string | null>(() => pref('cs-studio-pdf-file', null));
+    // The chosen PDF is in the address (#/pdf/<path>): a link opens it, Back returns to the PDF before.
+    const route = useRoute();
+    const routeFile = route[0] === 'pdf' && route.length > 1 ? route.slice(1).join('/') : null;
+    const [sel, setSelState] = React.useState<string | null>(() => routeFile ?? pref('cs-studio-pdf-file', null));
+    const setSel = (p: string) => { setSelState(p); navigate(['pdf', p]); };
+    React.useEffect(() => {
+        if (route[0] !== 'pdf') return;
+        if (!routeFile) { if (sel) navigate(['pdf', sel], true); return; } // #/pdf: the PDF shown last
+        if (routeFile !== sel) setSelState(routeFile);
+    }, [route.join('/')]); // eslint-disable-line react-hooks/exhaustive-deps
     // The chosen PDF as an object URL (fetched with the token), for View and Open PDF.
     const [pdfUrl, setPdfUrl] = React.useState<string | null>(null);
     React.useEffect(() => {
@@ -99,8 +109,18 @@ export function PdfChecks() {
     usePageHeadTooltip();
     const [detailTab, setDetailTab] = useStoredTab<'compare' | 'read' | 'view'>('pdf-detail', ['compare', 'read', 'view'], 'compare');
 
-    const refresh = React.useCallback(() => { api.pdfList().then((r) => { setFiles(r.files); setEngine(r.engine); }).catch((e) => message.error(errText(e))); }, [message]);
-    React.useEffect(() => { refresh(); }, [refresh]);
+    const refresh = React.useCallback(() => api.pdfList().then((r) => { setFiles(r.files); setEngine(r.engine); }).catch((e) => message.error(errText(e))), [message]);
+    React.useEffect(() => { void refresh(); }, [refresh]);
+    // A PDF the address names that is not in the repository: said, and the address replaced with one that is.
+    const lastGood = React.useRef<string | null>(null);
+    React.useEffect(() => {
+        if (!files || !sel) return;
+        if (files.some((f) => f.path === sel)) { lastGood.current = sel; return; }
+        const fallback = lastGood.current && files.some((f) => f.path === lastGood.current) ? lastGood.current : files[0]?.path ?? null;
+        message.error({ key: 'pdf-missing', content: `There is no PDF ${sel} in this repository${fallback ? `: showing ${fallback.split('/').pop()}` : ''}.` });
+        setSelState(fallback);
+        if (route[0] === 'pdf') navigate(fallback ? ['pdf', fallback] : ['pdf'], true);
+    }, [files, sel]); // eslint-disable-line react-hooks/exhaustive-deps
     React.useEffect(() => {
         api.dbConnections(project || undefined, env).then((m) => {
             setMeta(m);
@@ -139,7 +159,7 @@ export function PdfChecks() {
         const buf = new Uint8Array(await f.arrayBuffer());
         let bin = '';
         for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-        const send = async (replace: boolean) => { const r = await api.pdfUpload(project, f.name, btoa(bin), replace); message.success(`${replace ? 'Replaced' : 'Added'} ${r.path}`); refresh(); setSel(r.path); };
+        const send = async (replace: boolean) => { const r = await api.pdfUpload(project, f.name, btoa(bin), replace); message.success(`${replace ? 'Replaced' : 'Added'} ${r.path}`); await refresh(); setSel(r.path); };
         try { await send(false); }
         catch (e) {
             // A PDF with that name is there: replace it only when the person says so.
@@ -159,7 +179,7 @@ export function PdfChecks() {
             <div className="pdf-list" style={{ display: 'flex', flexDirection: 'column', gap: 8, height: 'calc(100vh - 150px)' }}>
                 <Space.Compact>
                     <Input size="small" allowClear prefix={<SearchOutlined />} placeholder="Find a PDF" value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Find a PDF" />
-                    <Tooltip title="Look again"><Button size="small" icon={<ReloadOutlined />} onClick={refresh} aria-label="Refresh" /></Tooltip>
+                    <Tooltip title="Look again"><Button size="small" icon={<ReloadOutlined />} onClick={() => void refresh()} aria-label="Refresh" /></Tooltip>
                     <Upload accept=".pdf,application/pdf" showUploadList={false} beforeUpload={(f) => upload(f)}><Tooltip title="Add a PDF to the project (test/<project>/data/pdf)"><Button size="small" icon={<UploadOutlined />} aria-label="Add a PDF" /></Tooltip></Upload>
                 </Space.Compact>
                 {engine === 'studio' && <Typography.Text type="secondary" style={{ fontSize: 12 }}>Using the Studio's framework: update the project's framework to use its PDF steps in tests.</Typography.Text>}

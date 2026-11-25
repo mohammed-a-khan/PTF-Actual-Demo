@@ -80,3 +80,27 @@ test('server: settings save returns the whole view; mocks need a unique name; PD
         assert.deepEqual(fs.readdirSync(path.join(dir, 'test/mk/data/pdf')), ['INVOICE.pdf']);
     } finally { await s.app.close(); fs.rmSync(tmp, { recursive: true, force: true }); }
 });
+
+test('run configurations: a save over a newer file (another tab) is refused with 409', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-rc-'));
+    const dir = path.join(tmp, 'repo');
+    await runGit(['init', '-q', '-b', 'main', dir], { cwd: tmp });
+    fs.mkdirSync(path.join(dir, 'config', 'mk'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'config', 'mk', 'common.env'), 'PROJECT_NAME=mk\n');
+    const store = new SecretStore(path.join(tmp, 'home'), new KeyFileProtector(path.join(tmp, 'home', 'keys', 'secrets.key')));
+    const s = createServer({ repoRoot: dir, store, userName: 'T', token: 'tk', home: path.join(tmp, 'home2') });
+    const auth = { authorization: 'Bearer tk' };
+    try {
+        const v0 = (await s.app.inject({ method: 'GET', url: '/api/run-configs', headers: auth })).json().version;
+        const cfg = (name: string) => ({ name, request: { project: 'mk', env: 'dev' } });
+        const a = await s.app.inject({ method: 'PUT', url: '/api/run-configs', headers: auth, payload: { configs: [cfg('A')], version: v0 } });
+        assert.equal(a.statusCode, 200, a.body);
+        // The second tab still has the first version.
+        const b = await s.app.inject({ method: 'PUT', url: '/api/run-configs', headers: auth, payload: { configs: [cfg('B')], version: v0 } });
+        assert.equal(b.statusCode, 409);
+        assert.match(b.json().error, /another tab/);
+        // Saving from the version it got back works.
+        const c = await s.app.inject({ method: 'PUT', url: '/api/run-configs', headers: auth, payload: { configs: [cfg('A'), cfg('C')], version: a.json().version } });
+        assert.equal(c.statusCode, 200, c.body);
+    } finally { await s.app.close(); fs.rmSync(tmp, { recursive: true, force: true }); }
+});

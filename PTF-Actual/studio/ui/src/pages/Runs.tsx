@@ -55,7 +55,14 @@ export function Runs() {
     const [target, setTarget] = React.useState({ project: saved?.project ?? '', env: saved?.env ?? '', browser: saved?.browser ?? 'chromium', headless: saved?.headless ?? true, workers: saved?.workers ?? 1,
         retries: saved?.retries ?? 0, device: saved?.device ?? '', width: saved?.width, height: saved?.height, vars: saved?.vars ?? '' });
     const [configs, setConfigs] = React.useState<RunConfigDef[]>([]);
-    React.useEffect(() => { api.runConfigs().then((r) => setConfigs(r.configs)).catch(() => undefined); }, []);
+    // The version read: saving over a newer file (another tab, a teammate's pull) is refused, and the screen offers to reload.
+    const configsVersion = React.useRef<string | undefined>(undefined);
+    const loadConfigs = React.useCallback(() => { api.runConfigs().then((r) => { setConfigs(r.configs); configsVersion.current = r.version; }).catch(() => undefined); }, []);
+    React.useEffect(loadConfigs, [loadConfigs]);
+    const configsError = (e: unknown) => {
+        if ((e as { status?: number }).status === 409) message.warning({ key: 'run-configs-stale', content: <span>{errText(e)} <Button size="small" type="link" onClick={() => { message.destroy('run-configs-stale'); loadConfigs(); }}>Reload</Button></span>, duration: 8 });
+        else message.error(errText(e));
+    };
     const [pick, setPick] = React.useState<Picked>(EMPTY_PICK);
     const [catalog, setCatalog] = React.useState<RunCatalog | null>(null);
     const loadCatalog = React.useCallback(() => api.runCatalog().then(setCatalog).catch(() => undefined), []);
@@ -123,7 +130,8 @@ export function Runs() {
             flush();
         } catch (e) {
             if (ctrl.signal.aborted) return;
-            if ((e as { status?: number }).status === 404) { message.warning('That run is not in this Studio (it was removed, or it belongs to another repository).'); navigate(['runs'], true); }
+            // A wrong run in the address is replaced (by the latest run): forget it first, or the list would select it again.
+            if ((e as { status?: number }).status === 404) { message.warning('That run is not in this Studio (it was removed, or it belongs to another repository).'); setSel((s) => (s === id ? null : s)); setLog([]); navigate(['runs'], true); }
             else message.error(errText(e));
         }
     }, [message]);
@@ -197,18 +205,21 @@ export function Runs() {
     });
     const saveConfig = () => {
         let name = '', saving = false;
+        let nameInput: { focus: () => void } | null = null;
         const inst = modal.confirm({ title: 'Save this run for the team', icon: null, okText: 'Save', autoFocusButton: null,
-            content: <Space direction="vertical" style={{ width: '100%' }}><Typography.Text type="secondary">Saved in .cs-studio/run-configurations.json in the repository: commit it to share it.</Typography.Text><Input autoFocus ref={(el) => { if (el) setTimeout(() => el.focus(), 60); }} placeholder="Name, e.g. Smoke on QA (mobile)" maxLength={120} showCount onChange={(e) => { name = e.target.value; }} aria-label="Run configuration name"
+            content: <Space direction="vertical" style={{ width: '100%' }}><Typography.Text type="secondary">Saved in .cs-studio/run-configurations.json in the repository: commit it to share it.</Typography.Text><Input autoFocus ref={(el) => { const first = !nameInput; if (el) nameInput = el; if (el && first) setTimeout(() => el.focus(), 60); }} placeholder="Name, e.g. Smoke on QA (mobile)" maxLength={120} showCount onChange={(e) => { name = e.target.value; }} aria-label="Run configuration name"
                 onPressEnter={(e) => (e.currentTarget.closest('.ant-modal-content')?.querySelector('.ant-modal-confirm-btns .ant-btn-primary') as HTMLButtonElement | null)?.click()} /></Space>,
             // The dialog closes itself only when saved (a missing name or a declined replace keeps it open, without errors).
             onOk: (close: () => void) => { void (async () => {
                 if (!name.trim()) { message.warning({ content: 'Give it a name.', key: 'save-run-name' }); return; }
                 if (configs.some((c) => c.name.toLowerCase() === name.trim().toLowerCase())
-                    && !(await new Promise<boolean>((ok) => modal.confirm({ title: `A saved run named "${name.trim()}" exists`, content: 'Replace it with this run?', okText: 'Replace', onOk: () => ok(true), onCancel: () => ok(false) })))) return;
+                    && !(await new Promise<boolean>((ok) => modal.confirm({ title: `A saved run named "${name.trim()}" exists`, content: 'Replace it with this run?', okText: 'Replace', onOk: () => ok(true), onCancel: () => ok(false),
+                        // Focus goes back into the Save dialog under it, so Esc then closes that one too.
+                        focusTriggerAfterClose: false, afterClose: () => { if (!saving) nameInput?.focus(); } })))) return;
                 const next = [...configs.filter((c) => c.name.toLowerCase() !== name.trim().toLowerCase()), { name: name.trim(), request: request() }];
                 if (saving) return; // a double click saves once
                 saving = true; inst.update({ okButtonProps: { loading: true } });
-                try { const r = await api.saveRunConfigs(next); setConfigs(r.configs); message.success(`Saved "${name.trim()}"`); close(); } catch (e) { message.error(errText(e)); }
+                try { const r = await api.saveRunConfigs(next, configsVersion.current); setConfigs(r.configs); configsVersion.current = r.version; message.success(`Saved "${name.trim()}"`); close(); } catch (e) { configsError(e); }
                 finally { saving = false; inst.update({ okButtonProps: { loading: false } }); }
             })(); } });
     };
@@ -226,7 +237,7 @@ export function Runs() {
         catch (e) { modal.error({ title: `Could not start "${c.name}"`, content: errText(e) }); }
         finally { setStarting(false); }
     };
-    const removeConfig = async (c: RunConfigDef) => { try { const r = await api.saveRunConfigs(configs.filter((x) => x !== c)); setConfigs(r.configs); } catch (e) { message.error(errText(e)); } };
+    const removeConfig = async (c: RunConfigDef) => { try { const r = await api.saveRunConfigs(configs.filter((x) => x !== c), configsVersion.current); setConfigs(r.configs); configsVersion.current = r.version; } catch (e) { configsError(e); } };
     // The form's concerns, one per tab (remembered on this computer).
     type SetupTab = 'what' | 'options' | 'saved';
     const [setupTab, setSetupTabRaw] = React.useState<SetupTab>(() => { try { const v = localStorage.getItem('cs-studio-runs-setup-tab'); return (v === 'options' || v === 'saved' ? v : 'what'); } catch { return 'what'; } });

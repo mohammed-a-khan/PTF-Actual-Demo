@@ -2,6 +2,7 @@
  * Where collections live: test/<project>/api/<name>.collection.json (in the repository, shared
  * through Git), and the feature made from one: <project's feature folder>/api/<name>.feature.
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { ApiCollection, slug, validCollection } from './model';
@@ -44,4 +45,27 @@ export function writeCollection(root: string, project: string, c: ApiCollection,
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, JSON.stringify(c, null, 2) + '\n');
     return rel;
+}
+
+/**
+ * Saving over a file someone else changed meanwhile (another tab, a teammate's pull): the version read is sent back
+ * with the save, and a different version on disk refuses it. The version is a hash of the file's bytes.
+ */
+export const CHANGED_ELSEWHERE = 'Changed in another tab or by someone else';
+export function fileVersion(abs: string): string | null {
+    try { return crypto.createHash('sha1').update(fs.readFileSync(abs)).digest('hex').slice(0, 16); } catch { return null; }
+}
+/** What a save carries besides the item: `$studio: { base, force }` inside it (taken out before it is checked). */
+export interface SaveMeta { base?: string; force?: boolean }
+export function takeSaveMeta(x: unknown): { item: unknown; meta: SaveMeta } {
+    if (!x || typeof x !== 'object' || Array.isArray(x) || !('$studio' in x)) return { item: x, meta: {} };
+    const { $studio, ...item } = x as Record<string, unknown>;
+    const m = ($studio && typeof $studio === 'object' ? $studio : {}) as Record<string, unknown>;
+    return { item, meta: { ...(typeof m.base === 'string' && m.base ? { base: m.base.slice(0, 64) } : {}), ...(m.force === true ? { force: true } : {}) } };
+}
+/** The reason a save must not go ahead (the file is not the version that was read), or null. */
+export function staleSave(abs: string, meta: SaveMeta): string | null {
+    if (!meta.base || meta.force) return null;
+    const now = fileVersion(abs);
+    return now !== null && now !== meta.base ? CHANGED_ELSEWHERE : null;
 }

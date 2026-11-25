@@ -7,9 +7,9 @@
 import React from 'react';
 import { Alert, App, Button, Checkbox, Descriptions, Drawer, Dropdown, Empty, Form, Input, List, Modal, Radio, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd';
 import type { MenuProps } from 'antd';
-import { ArrowLeftOutlined, CopyOutlined, DownOutlined, HistoryOutlined, InfoCircleOutlined, MoreOutlined, ReloadOutlined, RollbackOutlined, SearchOutlined, UpOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, CopyOutlined, EditOutlined, DownOutlined, HistoryOutlined, InfoCircleOutlined, MoreOutlined, ReloadOutlined, RollbackOutlined, SearchOutlined, UpOutlined } from '@ant-design/icons';
 import { api, Backup, CommitDetails, HistoryQuery, LogCommit, NameStatus, GraphRow } from '../api';
-import { errText, useStudio } from '../state';
+import { errText, openInEditor, useStudio } from '../state';
 import { GraphCell, LANE, ROW } from '../components/Graph';
 import { DiffView, useDiffPrefs } from '../components/DiffView';
 import { DiffToolbar } from '../components/DiffToolbar';
@@ -127,6 +127,21 @@ export function History() {
         return () => ro.disconnect();
     }, [file, sel]);
     const short = (s: string) => s.slice(0, 7);
+    /**
+     * The Code editor edits your working copy, not a commit: open the current file, and say when it is not the version
+     * shown here (changed since that commit) or is not there any more.
+     */
+    const openCurrent = async (path: string) => {
+        const rev = sel2 === 'WORKTREE' ? null : sel;
+        if (!rev) { openInEditor(path); return; }
+        try {
+            const d = (await api.compareDiff(rev, 'WORKTREE', path)).diff;
+            const goneNow = /^\+\+\+ \/dev\/null/m.test(d) || (!d.trim() && file?.status === 'D' && !sel2);
+            if (goneNow) { message.warning(`${path} is not in your working copy any more: there is nothing to open. Use "Restore this version" to bring it back.`); return; }
+            openInEditor(path);
+            if (d.trim()) message.info(`Opened your current ${path}: it has changed since ${short(rev)}, so the editor shows a newer version than this commit.`, 6);
+        } catch (e) { message.error(errText(e)); }
+    };
 
     const op = async (label: string, fn: () => Promise<{ status: string; message?: string; conflicts?: string[] } | void>) => {
         try {
@@ -229,6 +244,7 @@ export function History() {
                             <Tooltip title="Next file ( ] )"><Button aria-label="Next file ( ] )" size="small" icon={<DownOutlined />} disabled={fileIndex >= files.length - 1} onClick={() => openFile(files[fileIndex + 1])} /></Tooltip>
                         </Space.Compact>
                         <DiffToolbar prefs={prefs} onChange={setPrefs} />
+                        <Tooltip title="Open your current version of this file in the Code editor"><Button size="small" icon={<EditOutlined />} onClick={() => void openCurrent(file.path)}>Open in editor</Button></Tooltip>
                         {!sel2 && file.status !== 'D' && (
                                                 <Button size="small" icon={<HistoryOutlined />} onClick={() => modal.confirm({
                                                     title: `Restore ${file.path} as it was in ${short(sel)}?`,

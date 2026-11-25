@@ -14,7 +14,8 @@ import { Alert, App, Button, Checkbox, Col, Dropdown, Empty, Form, Input, Modal,
 import { CheckCircleFilled, CloseCircleFilled, DeleteOutlined, DownOutlined, EditOutlined, PlusOutlined, ReloadOutlined, SyncOutlined, WarningFilled } from '@ant-design/icons';
 import { api, ToolServerDef, ToolServerImport, ToolServerRow, ToolServersView } from '../api';
 import { errText } from '../state';
-import { agentsApi } from '../agents-api';
+import { agentsApi, ToolServerRowView } from '../agents-api';
+import { askChangedElsewhere, isChangedElsewhere } from './ChangedElsewhere';
 import { ago } from '../format';
 
 type Scope = 'team' | 'personal';
@@ -41,8 +42,8 @@ const customOf = (s?: ToolServerDef): Custom => ({
 });
 
 /** Add from the ready list or your own; or edit a server (its settings as fields). */
-function ServerForm({ view, editing, onClose, onSaved }: { view: ToolServersView; editing?: ToolServerRow; onClose: () => void; onSaved: (v: ToolServersView) => void }) {
-    const { message } = App.useApp();
+function ServerForm({ view, editing, onClose, onSaved, onReload }: { view: ToolServersView; editing?: ToolServerRowView; onClose: () => void; onSaved: (v: ToolServersView) => void; onReload: (name: string, scope: Scope) => void }) {
+    const { message, modal } = App.useApp();
     const [from, setFrom] = React.useState<string>(editing ? CUSTOM : view.catalog[0]?.id ?? CUSTOM);
     const [name, setName] = React.useState(editing?.name ?? view.catalog[0]?.id ?? '');
     const [scope, setScope] = React.useState<Scope>(editing?.scope ?? 'personal');
@@ -51,7 +52,7 @@ function ServerForm({ view, editing, onClose, onSaved }: { view: ToolServersView
     const [saving, setSaving] = React.useState(false);
     const entry = editing ? undefined : view.catalog.find((c) => c.id === from);
     const pick = (id: string) => { setFrom(id); setValues({}); if (!name || view.catalog.some((c) => c.id === name)) setName(id === CUSTOM ? '' : id); };
-    const save = async () => {
+    const save = async (force = false) => {
         setSaving(true);
         try {
             let server: ToolServerDef | undefined;
@@ -65,10 +66,14 @@ function ServerForm({ view, editing, onClose, onSaved }: { view: ToolServersView
                         : { url: custom.url.trim(), headers: pairs(custom.headers, 'Headers') }),
                 };
             }
-            onSaved(await api.saveToolServer(entry ? { scope, name: name.trim(), from: entry.id, values } : { scope, name: name.trim(), server, ...(editing ? { editing: editing.name } : {}) }));
+            // An edit sends the version of the server it started from: one changed meanwhile (another tab) is not replaced silently.
+            onSaved(await agentsApi.saveToolServer(entry ? { scope, name: name.trim(), from: entry.id, values } : { scope, name: name.trim(), server, ...(editing ? { editing: editing.name } : {}) }, editing?.version, force));
             message.success(`${editing ? 'Saved' : 'Added'} ${name.trim()}`);
             onClose();
-        } catch (e) { message.error(errText(e)); } finally { setSaving(false); }
+        } catch (e) {
+            if (editing && isChangedElsewhere(e)) askChangedElsewhere(modal, e, `The tool server ${editing.name}`, { reload: () => onReload(editing.name, editing.scope), overwrite: () => save(true) });
+            else message.error(errText(e));
+        } finally { setSaving(false); }
     };
     return (
         <Modal open title={editing ? `Edit ${editing.name}` : 'Add a tool server'} onCancel={onClose} onOk={() => void save()} okText={editing ? 'Save' : 'Add'} confirmLoading={saving} width={620} destroyOnClose>
@@ -313,7 +318,8 @@ export function ToolServers() {
                         </div>}
                     </div>);
             })}
-            {form && <ServerForm view={view} editing={form.editing} onClose={() => setForm(null)} onSaved={setView} />}
+            {form && <ServerForm key={form.editing ? `${form.editing.scope}:${form.editing.name}:${(form.editing as ToolServerRowView).version ?? ''}` : 'new'} view={view} editing={form.editing} onClose={() => setForm(null)} onSaved={setView}
+                onReload={(name, scope) => { api.toolServers().then((v) => { setView(v); const x = v.servers.find((y) => y.name === name && y.scope === scope); setForm(x ? { editing: x } : null); if (!x) message.warning(`${name} was removed meanwhile.`); }).catch((e) => message.error(errText(e))); }} />}
             {pasting && <PasteConfig onClose={() => setPasting(false)} onSaved={setView} />}
         </Space>
     );

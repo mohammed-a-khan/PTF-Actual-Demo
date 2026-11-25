@@ -48,6 +48,9 @@ export function Healing() {
     const [loading, setLoading] = React.useState(false);
     const [status, setStatus] = useKept<HealStatus | 'all'>('healing.status', 'review');
     const [open, setOpen] = useKept<string | null>('healing.open', null);
+    const [drawerTab, setDrawerTab] = useKept('healing.drawer-tab', 'change');
+    // The screen has no sub-pages: a wrong address (#/healing/bogus) is replaced by #/healing.
+    React.useEffect(() => { if (here && route.length > 1) navigate(['healing'], true); }, [here, route.length]); // eslint-disable-line react-hooks/exhaustive-deps
     const [choice, setChoice] = React.useState<string | null>(null);
     const [preview, setPreview] = React.useState<HealPreview | { error: string } | null>(null);
     const [busy, setBusy] = React.useState(false);
@@ -112,6 +115,8 @@ export function Healing() {
         try { await api.healDismiss(g.key, choice ?? g.healed, undo); await load(); if (!undo) setOpen(null); } catch (e) { message.error(errText(e)); }
     };
 
+    // Below about 1280 px the table is wider than the screen: say so (the fixed first and last columns show its edges).
+    const narrow = window.innerWidth < 1280;
     if (!data) return <div className="panel" style={{ padding: 24 }}>{loading ? 'Loading…' : null}</div>;
     const counts = (s: HealStatus) => data.groups.filter((g) => g.status === s).length;
     const shown = data.groups.filter((g) => status === 'all' || g.status === status);
@@ -126,19 +131,20 @@ export function Healing() {
                 <span style={{ flex: 1 }} />
                 <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()} aria-label="Refresh" />
             </div>
+            {narrow && data.groups.length > 0 && <Typography.Text type="secondary" className="h-scroll-hint">The table scrolls sideways: How, Seen and the status are on the right.</Typography.Text>}
             <div style={{ flex: 1, overflow: 'auto' }}>
                 {!data.groups.length
                     ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 60 }} description="No healed locators in the recent runs: every page object locator found its element." />
-                    : <Table<HealGroup> size="small" rowKey="key" dataSource={shown} pagination={false} sticky tableLayout="fixed" scroll={{ x: 1100 }}
+                    : <Table<HealGroup> size="small" rowKey="key" dataSource={shown} pagination={false} sticky tableLayout="fixed" scroll={{ x: 1040 }} className="h-table"
                         onRow={(g) => ({ onClick: () => { setChoice(null); setOpen(g.key); }, style: { cursor: 'pointer' } })}
                         locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`Nothing ${STATUS[status as HealStatus]?.label.toLowerCase() ?? ''}.`} /> }}
                         columns={[
-                            { title: 'Element', key: 'el', ellipsis: true, width: 220, render: (_, g) => <div className="q-name" title={`${g.element}${g.pageClass && g.property ? ` (${g.pageClass}.${g.property})` : ''}`}><span>{g.element}</span><Typography.Text type="secondary" className="mono" style={{ fontSize: 12 }}>{g.pageClass && g.property ? `${g.pageClass}.${g.property}` : 'page object not recorded'}</Typography.Text></div> },
-                            { title: 'Page object locator', dataIndex: 'original', ellipsis: { showTitle: false }, width: 220, render: (v: string) => <Tooltip title={<span className="mono">{v}</span>}><span className="mono h-broken">{v}</span></Tooltip> },
-                            { title: 'Found with', key: 'healed', ellipsis: { showTitle: false }, width: 220, render: (_, g) => <span title={g.healed}><span className="mono h-found">{g.healed}</span>{g.variants.length > 1 && <Typography.Text type="secondary" style={{ fontSize: 12 }}> +{g.variants.length - 1} other</Typography.Text>}</span> },
-                            { title: 'How', key: 'how', width: 200, ellipsis: true, render: (_, g) => <Space size={4}><Tag bordered={false}>{HOW[g.strategy] ?? g.strategy}</Tag><Typography.Text type="secondary" style={{ fontSize: 12 }}>{g.confidence}%</Typography.Text></Space> },
+                            { title: 'Element', key: 'el', ellipsis: true, width: 200, fixed: 'left', render: (_, g) => <div className="q-name" title={`${g.element}${g.pageClass && g.property ? ` (${g.pageClass}.${g.property})` : ''}`}><span>{g.element}</span><Typography.Text type="secondary" className="mono" style={{ fontSize: 12 }}>{g.pageClass && g.property ? `${g.pageClass}.${g.property}` : 'page object not recorded'}</Typography.Text></div> },
+                            { title: 'Page object locator', dataIndex: 'original', ellipsis: { showTitle: false }, width: 210, render: (v: string) => <Tooltip title={<span className="mono">{v}</span>}><span className="mono h-broken">{v}</span></Tooltip> },
+                            { title: 'Found with', key: 'healed', ellipsis: { showTitle: false }, width: 210, render: (_, g) => <span title={g.healed}><span className="mono h-found">{g.healed}</span>{g.variants.length > 1 && <Typography.Text type="secondary" style={{ fontSize: 12 }}> +{g.variants.length - 1} other</Typography.Text>}</span> },
+                            { title: 'How', key: 'how', width: 180, ellipsis: true, render: (_, g) => <Space size={4}><Tag bordered={false}>{HOW[g.strategy] ?? g.strategy}</Tag><Typography.Text type="secondary" style={{ fontSize: 12 }}>{g.confidence}%</Typography.Text></Space> },
                             { title: 'Seen', key: 'seen', width: 110, render: (_, g) => <Tooltip title={`First ${new Date(g.firstSeen).toLocaleString()}, last ${new Date(g.lastSeen).toLocaleString()}`}><span>{g.count}× in {g.runs} run{g.runs === 1 ? '' : 's'}<br /><Typography.Text type="secondary" style={{ fontSize: 12 }}>{ago(g.lastSeen)}</Typography.Text></span></Tooltip> },
-                            { title: 'Status', dataIndex: 'status', width: 150, render: (s: HealStatus) => <Tooltip title={STATUS[s].about}><Tag bordered={false} color={STATUS[s].color}>{STATUS[s].label}</Tag></Tooltip> },
+                            { title: 'Status', dataIndex: 'status', width: 130, fixed: 'right', render: (s: HealStatus) => <Tooltip title={STATUS[s].about}><Tag bordered={false} color={STATUS[s].color}>{STATUS[s].label}</Tag></Tooltip> },
                         ]} />}
             </div>
 
@@ -163,7 +169,7 @@ export function Healing() {
                     </div>
                     {current.strategy !== 'alternative' && current.status === 'review' && <Alert type="info" showIcon style={{ marginBottom: 12 }} message="Found by the self-healing engine: check it is the right element before updating the page object (open the run's evidence, or run it once with the new locator)." />}
 
-                    <Tabs size="small" defaultActiveKey="change" items={[
+                    <Tabs size="small" activeKey={drawerTab} onChange={setDrawerTab} items={[
                         { key: 'change', label: 'Change', children: <>
                     {current.variants.length > 1 && <Card size="small" title="Locators it was found with" style={{ marginBottom: 12 }}>
                         <Radio.Group value={choice ?? current.healed} onChange={(e) => setChoice(e.target.value)}>

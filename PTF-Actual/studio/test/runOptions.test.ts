@@ -43,7 +43,9 @@ test('runs against a protected environment need a confirmation; run configuratio
         const uat = await call('POST', '/api/runs', { project: 'shop', env: 'uat' });
         assert.equal(uat.status, 409, 'STUDIO_PROTECTED=true in the environment');
         assert.equal((await call('POST', '/api/runs', { project: 'shop', env: 'qa', variables: { PATH: 'x' } })).status, 400);
-        assert.deepEqual((await call('GET', '/api/run-configs')).json, { configs: [], file: '.cs-studio/run-configurations.json' });
+        const none = (await call('GET', '/api/run-configs')).json;
+        assert.deepEqual({ configs: none.configs, file: none.file }, { configs: [], file: '.cs-studio/run-configurations.json' });
+        assert.equal(typeof none.version, 'string', 'the version a save sends back (two tabs)');
         const saved = await call('PUT', '/api/run-configs', { configs: [{ name: 'Smoke on QA (mobile)', request: { project: 'shop', env: 'qa', tags: '@smoke', device: 'Pixel 7', retries: 1, debug: { steps: true } } }] });
         assert.equal(saved.status, 200, JSON.stringify(saved.json));
         assert.deepEqual(saved.json.configs[0].request, { project: 'shop', env: 'qa', tags: '@smoke', device: 'Pixel 7', retries: 1 }, 'debug settings are not saved');

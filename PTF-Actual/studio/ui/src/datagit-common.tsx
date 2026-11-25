@@ -4,9 +4,11 @@
  *  - AdoNotSetUp: one short, calm "not set up" state for the Azure DevOps screens.
  */
 import React from 'react';
-import { Button, Result, Space, Typography } from 'antd';
+import { App, Button, Result, Space, Typography } from 'antd';
 import { CloudServerOutlined, LockOutlined, ReloadOutlined, SettingOutlined } from '@ant-design/icons';
-import { navigate } from './route';
+import { navigate, useRoute } from './route';
+import { errText } from './state';
+import { isStale } from './datagit-api';
 import './styles-datagit.css';
 
 const STORED_TAB_EVENT = 'cs-stored-tab';
@@ -94,4 +96,43 @@ export function AdoNotSetUp({ what, error, onRetry, compact }: { what: string; e
                 </Space>} />
         </div>
     );
+}
+
+/**
+ * A save refused because another tab (or someone else) changed the same thing since this screen read it: said, with a
+ * Reload action (the screen reads it again; what was typed here is dropped only then). Other errors: the usual toast.
+ */
+export function saveErrorToast(message: ReturnType<typeof App.useApp>['message'], e: unknown, reload: () => void): void {
+    if (!isStale(e)) { message.error(errText(e)); return; }
+    const key = 'cs-stale-save';
+    message.warning({
+        key, duration: 0,
+        content: <span>{errText(e)}{' '}
+            <Button size="small" type="primary" onClick={() => { message.destroy(key); reload(); }}>Reload</Button>{' '}
+            <Button size="small" type="text" aria-label="Close" onClick={() => message.destroy(key)}>Close</Button></span>,
+    });
+}
+
+/**
+ * The inner tab of a screen, in the address (#/<page>/<tab>) so Back and Forward move between tabs and a link opens
+ * one: the address wins; no tab in it, the one used last (remembered); a wrong one is replaced with a valid address.
+ * `aliases`: other spellings people type (#/notify/log → recent). Only while the screen is shown (`page` is route[0]).
+ */
+export function resolveRouteTab<T extends string>(segment: string | undefined, tabs: readonly T[], stored: T, aliases: Record<string, T> = {}): { tab: T; fix: boolean } {
+    if (segment === undefined || segment === '') return { tab: stored, fix: true };
+    if ((tabs as readonly string[]).includes(segment)) return { tab: segment as T, fix: false };
+    const a = aliases[segment.toLowerCase()];
+    if (a) return { tab: a, fix: true };
+    return { tab: tabs[0], fix: true };
+}
+export function useRouteTab<T extends string>(page: string, key: string, tabs: readonly T[], fallback: T, aliases: Record<string, T> = {}): [T, (t: T) => void] {
+    const route = useRoute();
+    const [stored, store] = useStoredTab<T>(key, tabs, fallback);
+    const here = route[0] === page;
+    const r = resolveRouteTab(route[1], tabs, stored, aliases);
+    // A wrong or missing tab: the address is corrected (replaced, so Back does not stop on it).
+    React.useEffect(() => { if (here && r.fix) navigate([page, r.tab, ...route.slice(2)], true); }, [here, r.fix, r.tab, route.join('/')]); // eslint-disable-line react-hooks/exhaustive-deps
+    React.useEffect(() => { if (here && r.tab !== stored) store(r.tab); }, [here, r.tab]); // eslint-disable-line react-hooks/exhaustive-deps
+    const set = React.useCallback((t: T) => { store(t); navigate([page, t]); }, [page, store]);
+    return [here ? r.tab : stored, set];
 }

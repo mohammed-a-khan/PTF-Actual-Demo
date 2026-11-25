@@ -18,6 +18,7 @@ import { isReadOnlyCall, studioTools, ToolDeps, ToolDef } from './tools';
 import { getAgent, profileOf, TOOL_GROUPS, type AgentProfile } from './builder';
 import { EXTERNAL_TOOLS, INJECTION_RULE, RUNTIME_EXTERNAL, scanForInjection, untrusted, warning, type InjectionFinding } from './injection';
 import { installedVersion, RuntimeInstaller, SDK_TESTED_VERSION } from './runtime';
+import { checkVersion, fileVersion } from './version';
 
 export type Approval = 'ask' | 'auto';
 export interface AgentSettings {
@@ -483,17 +484,25 @@ export class AgentHost {
         catch { return { ...DEFAULT_AGENT_SETTINGS }; }
     }
 
-    async saveSettings(s: AgentSettings) {
+    /** The version of the settings file (the screen sends it back when it saves). */
+    settingsVersion(): string { return fileVersion(this.settingsFile); }
+
+    /** Save the settings; `version`: the one the screen read (refused when they changed since, e.g. in another tab). */
+    async saveSettings(s: AgentSettings, version?: string) {
+        checkVersion(this.settingsVersion(), version, 'the agent settings');
         if (!['copilot', 'custom'].includes(s.provider)) throw new Error('Model provider: copilot or custom.');
         if (s.provider === 'custom') {
             if (!s.custom || !['openai', 'azure', 'anthropic'].includes(s.custom.type)) throw new Error('Custom model: type openai, azure or anthropic.');
-            try { const u = new URL(s.custom.baseUrl); if (!/^https?:$/.test(u.protocol)) throw new Error(); } catch { throw new Error('Custom model: the endpoint address (https://…).'); }
+            const problem = endpointProblem(s.custom.baseUrl);
+            if (problem) throw new Error(`Endpoint: ${problem}`);
+            s.custom = { ...s.custom, baseUrl: String(s.custom.baseUrl).trim() };
             s.model = String(s.model ?? '').trim();
             if (!s.model || s.model === 'auto') throw new Error('Custom model: the model or deployment name.');
         }
         if (s.provider === 'copilot') s.model = String(s.model ?? '').trim() || 'auto';
-        // A model or deployment name: one word of letters, digits and . _ : / @ - (no spaces or emoji).
-        if (!/^[\w.:/@-]{1,120}$/.test(s.model)) throw new Error(`Model: a model or deployment name, up to 120 letters, digits and . _ : / @ - (no spaces), not "${s.model.slice(0, 40)}${s.model.length > 40 ? '…' : ''}".`);
+        // A model or deployment name: one word of letters, digits and . _ : / @ - (no spaces or emoji), at most 120.
+        if (String(s.model).length > MODEL_MAX) throw new Error(`Model: at most ${MODEL_MAX} characters (it has ${String(s.model).length}).`);
+        if (!/^[\w.:/@-]{1,120}$/.test(s.model)) throw new Error(`Model: a model or deployment name, up to ${MODEL_MAX} letters, digits and . _ : / @ - (no spaces), not "${s.model.slice(0, 40)}${s.model.length > 40 ? '…' : ''}".`);
         for (const [k, v] of Object.entries(s.approvals ?? {})) if (!['ask', 'auto', 'deny'].includes(String(v))) throw new Error(`Approval for ${k}: ask or auto.`);
         fs.mkdirSync(this.d.home, { recursive: true });
         fs.writeFileSync(this.settingsFile, JSON.stringify(s, null, 2));
@@ -540,7 +549,7 @@ export class AgentHost {
         const out: Record<string, unknown> = {
             sdk: loaded ? { installed: true, version: loaded.version, source: loaded.source } : { installed: false },
             runtime: this.runtime(), signIn: this.signin.state,
-            settings: this.settings(), effective: s, policy: policy ? { file: POLICY_FILE, ...policy } : null, policyProblems: problems, providerKeySet: !!this.d.secret(PROVIDER_KEY_SECRET), copilotTokenSet: !!this.d.secret(COPILOT_TOKEN_SECRET),
+            settings: this.settings(), settingsVersion: this.settingsVersion(), effective: s, policy: policy ? { file: POLICY_FILE, ...policy } : null, policyProblems: problems, providerKeySet: !!this.d.secret(PROVIDER_KEY_SECRET), copilotTokenSet: !!this.d.secret(COPILOT_TOKEN_SECRET),
             browser: { running: this.d.browser.running },
         };
         if (!loaded || problems.length) return out;
@@ -1078,4 +1087,17 @@ How to work:
     }
 
     async stop() { await this.stopClient(); }
+}
+
+/** The longest model or deployment name the settings take (the screen says the same). */
+export const MODEL_MAX = 120;
+/** Why an endpoint address is not right (a web address: http:// or https://, a host, no spaces), or null. */
+export function endpointProblem(v: unknown): string | null {
+    const t = typeof v === 'string' ? v.trim() : '';
+    if (!t) return 'the endpoint address is needed (https://…).';
+    if (t.length > 2000) return 'the endpoint address has at most 2000 characters.';
+    if (!/^https?:\/\//i.test(t)) return `the endpoint address is a web address starting with http:// or https:// (not "${t.slice(0, 40)}").`;
+    if (!/^[\x21-\x7e]+$/.test(t)) return 'the endpoint address has no spaces, emoji or other special characters.';
+    try { const u = new URL(t); if (!u.hostname) throw new Error(); } catch { return `the endpoint address is not a web address: "${t.slice(0, 60)}".`; }
+    return null;
 }

@@ -26,7 +26,7 @@ import { errText, openInEditor, showRun } from '../state';
 import { navigate, useRoute } from '../route';
 import { askCopilot, useAgentContext } from '../agentContext';
 import { Split } from '../components/Split';
-import { apiRoute, SectionTitle, shownTab, useRememberedTab } from '../apiperf-ui';
+import { apiRoute, askChangedElsewhere, askUnsaved, isChangedElsewhere, SectionTitle, shownTab, useRememberedTab, versionOf, withBase } from '../apiperf-ui';
 
 const METHODS: HttpMethod[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 /** Other methods (PURGE, PROPFIND…) in grey. */
@@ -586,7 +586,8 @@ function CorrelateModal({ open, onClose, project, env, collection, onApply }: { 
         </Modal>);
 }
 
-interface Open { file: string | null; project: string; collection: ApiCollectionDef; dirty: boolean }
+/** version: the file as it was read (a save over a version changed elsewhere is refused: Reload / Overwrite). */
+interface Open { file: string | null; project: string; collection: ApiCollectionDef; dirty: boolean; version?: string }
 
 export function ApiWorkspace() {
     const { message, modal } = App.useApp();
@@ -635,7 +636,30 @@ export function ApiWorkspace() {
     const [importing, setImporting] = React.useState<ImportKind | null>(null);
     const [harOpen, setHarOpen] = React.useState(false);
     const [naming, setNaming] = React.useState(false);
-    useUnsaved('api-collection', !!open?.dirty, `the API collection "${open?.collection.name ?? ''}"`);
+    // Unsaved changes are asked about before another screen, another collection or Back/Forward shows something else
+    // (Stay / Discard / Save, the same as the other screens); Save is not offered while the collection cannot be saved.
+    const saveProblem = open ? collectionNameProblem(open.collection.name, open.project, (meta?.collections ?? []).filter((c) => c.project === open.project), open.file) : null;
+    // Loads answer in any order: only the last one asked for is shown (a Discard's reload never replaces the next collection).
+    const loadSeq = React.useRef(0);
+    const loadFile = (file: string, want: string | null, quiet = false) => {
+        const n = ++loadSeq.current;
+        return api.apiCollection(file).then((r) => {
+            if (n !== loadSeq.current) return;
+            setOpen({ file: r.file, project: r.file.split('/')[1], collection: r.collection, dirty: false, version: versionOf(r) });
+            const ok = !!want && findItem(r.collection.items, want)?.kind === 'request';
+            // A request id in the address that the collection does not have: said, and dropped from the address.
+            if (want && !ok && !quiet) { message.warning(`The collection "${r.collection.name}" has no request "${want}": showing its settings.`); }
+            setSel(ok ? want : null); setResult({});
+        }).catch((e) => setErr(errText(e)));
+    };
+    /** Discard: the saved collection again (no changes), or nothing for one never saved. */
+    const discard = () => {
+        if (!open) return;
+        if (!open.file) { loadSeq.current++; setOpen(null); setSel(null); navigate(['api'], true); return; }
+        setOpen((o) => (o ? { ...o, dirty: false } : o));
+        void loadFile(open.file, sel, true);
+    };
+    useUnsaved('api-collection', !!open?.dirty, `the API collection "${open?.collection.name ?? ''}"`, { lostOnLeave: true, save: saveProblem ? undefined : () => save(), discard });
     const [find, setFind] = React.useState('');
     const [feature, setFeature] = React.useState(false);
     const [correlating, setCorrelating] = React.useState(false);
@@ -656,25 +680,32 @@ export function ApiWorkspace() {
     const { file: fileInRoute, request: reqInRoute } = apiRoute(here ? route : []);
     React.useEffect(() => {
         if (!fileInRoute || open?.file === fileInRoute) return;
-        const load = () => api.apiCollection(fileInRoute).then((r) => {
-            setOpen({ file: r.file, project: r.file.split('/')[1], collection: r.collection, dirty: false });
-            setSel(reqInRoute && findItem(r.collection.items, reqInRoute)?.kind === 'request' ? reqInRoute : null); setResult({});
-        }).catch((e) => setErr(errText(e)));
+        const load = () => loadFile(fileInRoute, reqInRoute);
         // Another collection in the address (Back, a link from another screen) while this one has unsaved changes:
         // Save, Discard or Stay (Stay puts the address back on this collection).
         const keep = open;
         if (keep?.dirty) leave(() => void load(), () => navigate(keep.file ? ['api', ...keep.file.split('/'), sel ?? undefined] : ['api'], true));
         else void load();
     }, [fileInRoute]); // eslint-disable-line react-hooks/exhaustive-deps
-    // Address → selection (Back / Forward within the collection).
+    // The selection and the address follow each other, one way at a time: the request id this screen last wrote to the
+    // address is not read back as a choice (otherwise a selection made while an older write is on its way, such as a
+    // request restored from History, makes the two chase each other for ever).
+    const wrote = React.useRef<string | null | undefined>(undefined);
+    // Address → selection (Back / Forward within the collection, a link).
     React.useEffect(() => {
         if (!open?.file || fileInRoute !== open.file || reqInRoute === sel) return;
-        if (reqInRoute === null || findItem(open.collection.items, reqInRoute)?.kind === 'request') setSel(reqInRoute);
+        if (reqInRoute === wrote.current) return;
+        wrote.current = undefined;
+        if (reqInRoute === null || findItem(open.collection.items, reqInRoute)?.kind === 'request') { setSel(reqInRoute); return; }
+        // A request id the collection does not have: said, and the address is put back on what is shown.
+        message.warning(`The collection "${open.collection.name}" has no request "${reqInRoute}".`);
+        wrote.current = sel;
+        navigate(['api', ...open.file.split('/'), sel ?? undefined], true);
     }, [reqInRoute]); // eslint-disable-line react-hooks/exhaustive-deps
     // Selection → address (in place: choosing requests does not fill the browser's history).
     React.useEffect(() => {
         if (!here || !open?.file || (fileInRoute && fileInRoute !== open.file)) return;
-        if (fileInRoute !== open.file || reqInRoute !== sel) navigate(['api', ...open.file.split('/'), sel ?? undefined], true);
+        if (fileInRoute !== open.file || reqInRoute !== sel) { wrote.current = sel; navigate(['api', ...open.file.split('/'), sel ?? undefined], true); }
     }, [here, sel, open?.file, fileInRoute]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // A request restored from History: a copy of it as it was sent, added to its collection (nothing replaced), and sent.
@@ -703,35 +734,40 @@ export function ApiWorkspace() {
         saving.current = true;
         try { return await saveNow(); } finally { saving.current = false; }
     };
-    const saveNow = async (): Promise<boolean> => {
+    const saveNow = async (force = false): Promise<boolean> => {
         if (!open) return false;
         const problem = collectionNameProblem(open.collection.name, open.project, collections, open.file);
         if (problem) { message.error(problem); setSel(null); return false; }
         try {
-            const r = await api.apiSaveCollection(open.project, open.collection, open.file ?? undefined);
-            setOpen({ ...open, file: r.file, dirty: false });
+            const r = await api.apiSaveCollection(open.project, withBase(open.collection, open.version, force), open.file ?? undefined);
+            setOpen({ ...open, file: r.file, dirty: false, version: versionOf(r) });
             message.success('Saved');
             await loadMeta();
             if (!open.file) navigate(['api', ...r.file.split('/')], true);
             return true;
-        } catch (e) { message.error(errText(e)); return false; }
+        } catch (e) {
+            // Saved in another tab (or by a teammate) since it was opened here: Reload or Overwrite, never silently lost.
+            if (isChangedElsewhere(e) && open.file && !force) {
+                const how = await askChangedElsewhere(modal, `The collection "${open.collection.name}"`);
+                if (how === 'overwrite') return saveNow(true);
+                if (how === 'reload') { await loadFile(open.file, sel, true); message.info('Showing the version saved elsewhere.'); }
+                return false;
+            }
+            message.error(errText(e)); return false;
+        }
     };
+    /** Before another collection is shown: Stay, Discard or Save (Escape and the close button stay; Save is off while it cannot be saved). */
     function leave(then: () => void, stay?: () => void) {
         if (!open?.dirty) { then(); return; }
-        (() => {
-            // Save, Discard or Stay (Escape and the close button stay: unsaved changes are never dropped by accident).
-            const inst = modal.confirm({ title: `Save the changes to "${open.collection.name}"?`, okText: 'Save', closable: true, onOk: async () => { if (await save()) then(); else stay?.(); },
-                onCancel: () => stay?.(),
-                footer: (_: React.ReactNode, { OkBtn }: { OkBtn: React.FC }) => <><Button onClick={() => { inst.destroy(); stay?.(); }}>Stay</Button><Button danger onClick={() => { inst.destroy(); then(); }}>Discard</Button><OkBtn /></> });
-        })();
+        askUnsaved(modal, { what: `the API collection "${open.collection.name}"`, problem: saveProblem, save, discard, then, stay });
     }
-    const openFile = (file: string) => leave(() => { setOpen(null); navigate(['api', ...file.split('/')]); });
+    const openFile = (file: string) => leave(() => { loadSeq.current++; setOpen(null); navigate(['api', ...file.split('/')]); });
     /** Open a collection that is not saved yet; an imported one opens on its settings (base URL, variables). */
     const startNew = (c0: ApiCollectionDef, settings = false) => leave(() => {
         // An imported collection whose name is in use (the same host imported again) gets the next free one ("… 2").
         let c = c0;
         if (collectionNameProblem(c.name, project, collections)) for (let n = 2; n < 100; n++) { const name = `${c0.name} ${n}`; if (!collectionNameProblem(name, project, collections)) { c = { ...c0, name }; break; } }
-        setOpen({ file: null, project, collection: c, dirty: true }); setSel(settings ? null : c.items.find((x) => x.kind === 'request')?.id ?? null); setResult({}); navigate(['api'], true); });
+        loadSeq.current++; setOpen({ file: null, project, collection: c, dirty: true }); setSel(settings ? null : c.items.find((x) => x.kind === 'request')?.id ?? null); setResult({}); navigate(['api'], true); });
 
     /** The test data row each request sends with (its scenario's <column> values). */
     const [dataRow, setDataRow] = React.useState<Record<string, { index: number; row?: Record<string, string> }>>({});
@@ -913,7 +949,7 @@ export function ApiWorkspace() {
                         <Typography.Text strong ellipsis style={{ flex: 1, minWidth: 0 }} title="Click to rename"
                             editable={{ tooltip: 'Rename the collection', triggerType: ['text', 'icon'], onChange: (v) => { const p = nameProblem(v); if (p) { message.error(p); return; } if (v.trim() !== open.collection.name) update({ ...open.collection, name: v.trim() }); },
                                 onEnd: () => { if (open.file) message.info(`Renamed. The file stays ${open.file}; Save to keep the new name.`, 4); } }}>{open.collection.name}</Typography.Text>
-                        {open.dirty && <Tooltip title="Not saved. The changes are kept while the Studio is open in this tab, also when you use other screens; Save writes them to the project. Reloading or closing the tab asks first."><Tag bordered={false} color="warning" style={{ marginInline: 0 }} aria-label="Not saved, kept while the Studio is open">not saved · kept</Tag></Tooltip>}
+                        {open.dirty && <Tooltip title="Not saved: Save writes the changes to the project. Opening another collection or screen, Back and Forward, and reloading or closing the tab ask first (Stay, Discard or Save)."><Tag bordered={false} color="warning" style={{ marginInline: 0 }} aria-label="Not saved">not saved</Tag></Tooltip>}
                         <Tooltip title="Collection settings: base URL, variables, authentication"><Button aria-label="Collection settings: base URL, variables, authentication" size="small" icon={<SettingOutlined />} type={sel === null ? 'primary' : 'default'} ghost={sel === null} onClick={() => setSel(null)} /></Tooltip>
                         <Tooltip title="New request"><Button aria-label="New request" size="small" icon={<FileAddOutlined />} onClick={() => addItem('request')} /></Tooltip>
                         <Tooltip title="New folder"><Button aria-label="New folder" size="small" icon={<FolderAddOutlined />} onClick={() => addItem('folder')} /></Tooltip>

@@ -17,7 +17,8 @@ function Root() {
             algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
             token: { colorPrimary: '#93186C', borderRadius: 6, fontSize: 13 },
         }}>
-            <AntApp>
+            {/* Toasts below the 56 px top bar (never over its buttons) and for the usual 3 s, at most 3 at once. */}
+            <AntApp message={{ top: 64, duration: 3, maxCount: 3 }}>
                 <StudioApp dark={dark} onToggleTheme={toggle} />
             </AntApp>
         </ConfigProvider>

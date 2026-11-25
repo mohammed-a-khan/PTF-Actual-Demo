@@ -15,6 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { Budget, MissionInput, MissionTrigger, TeamMission } from './missions';
 import { parseCron } from './cron';
+import { checkVersion, fileVersion, textVersion } from './version';
 
 export type ToolGroup = 'studio-read' | 'studio-change' | 'browser' | 'tests' | 'app-code' | 'files' | 'shell' | 'tool-servers' | 'knowledge';
 export const TOOL_GROUPS: Array<{ id: ToolGroup; label: string; about: string; tools?: string[]; kinds?: string[] }> = [
@@ -121,27 +122,36 @@ export function validateAgent(v: unknown, o: { knowledgeIds?: string[] } = {}): 
     };
 }
 
-export function listAgents(repoRoot: string): { agents: TeamAgent[]; problems: string[] } {
+/** The team's agents, the files that could not be read, and each agent file's version (sent back when it is saved). */
+export function listAgents(repoRoot: string): { agents: TeamAgent[]; problems: string[]; versions: Record<string, string> } {
     const dir = path.join(repoRoot, AGENTS_DIR);
     const agents: TeamAgent[] = [], problems: string[] = [];
+    const versions: Record<string, string> = {};
     let files: string[] = [];
-    try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort(); } catch { return { agents, problems }; }
+    try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort(); } catch { return { agents, problems, versions }; }
     for (const f of files) {
         try {
-            const a = validateAgent(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')));
+            const text = fs.readFileSync(path.join(dir, f), 'utf8');
+            const a = validateAgent(JSON.parse(text));
             if (`${a.id}.json` !== f) throw new Error(`its id is "${a.id}" (the file must be ${a.id}.json)`);
             agents.push(a);
+            versions[a.id] = textVersion(text);
         } catch (e) { problems.push(`${AGENTS_DIR}/${f}: ${(e as Error).message}`); }
     }
-    return { agents, problems };
+    return { agents, problems, versions };
 }
 export function getAgent(repoRoot: string, id: string): TeamAgent | undefined { return ID.test(id) ? listAgents(repoRoot).agents.find((a) => a.id === id) : undefined; }
 
-export function saveAgent(repoRoot: string, v: unknown, by: string, o: { knowledgeIds?: string[]; reserved?: string[]; isNew?: boolean } = {}): TeamAgent {
+/**
+ * Save an agent. `version`: the version of its file the screen read (listAgents): when the file has changed since
+ * (another tab, someone else), the save is refused with ChangedElsewhere; no version: saved over whatever is there.
+ */
+export function saveAgent(repoRoot: string, v: unknown, by: string, o: { knowledgeIds?: string[]; reserved?: string[]; isNew?: boolean; version?: string } = {}): TeamAgent {
     const a = validateAgent(v, o);
     if (o.reserved?.includes(a.id)) throw new Error(`"${a.id}" is the name of a built-in mission: choose another id.`);
     const file = path.join(repoRoot, AGENTS_DIR, `${a.id}.json`);
     if (o.isNew && fs.existsSync(file)) throw new Error(`An agent "${a.id}" exists.`);
+    if (!o.isNew) checkVersion(fileVersion(file), o.version, `the agent "${a.id}"`);
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const out = { ...a, updatedAt: new Date().toISOString(), updatedBy: by };
     fs.writeFileSync(file, `${JSON.stringify(out, null, 2)}\n`);

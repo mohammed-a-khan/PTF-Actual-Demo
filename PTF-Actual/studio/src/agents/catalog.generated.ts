@@ -2771,16 +2771,16 @@ export const CALLS: CatalogCall[] = [
   "method": "GET",
   "path": "/api/run-configs",
   "args": "",
-  "result": "{ configs: RunConfigDef[]; file: string }"
+  "result": "{ configs: RunConfigDef[]; file: string; version?: string }"
  },
  {
   "name": "saveRunConfigs",
   "area": "run-configs",
   "method": "PUT",
   "path": "/api/run-configs",
-  "args": "configs: RunConfigDef[]",
-  "body": "{ configs }",
-  "result": "{ configs: RunConfigDef[]; file: string }"
+  "args": "configs: RunConfigDef[], version?: string",
+  "body": "{ configs, ...(version ? { version } : {}) }",
+  "result": "{ configs: RunConfigDef[]; file: string; version?: string }"
  },
  {
   "name": "stopRun",

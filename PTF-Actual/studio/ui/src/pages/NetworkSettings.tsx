@@ -8,6 +8,8 @@ import { Alert, App, Button, Card, Collapse, Descriptions, Form, Input, Radio, S
 import { CheckCircleFilled, CloseCircleFilled, InfoCircleOutlined } from '@ant-design/icons';
 import { api, ClientCert, ConnectionCheck, GitConnectionCheck, GitNetworkChange, GitNetworkState, NetworkSettings, StudioSettings } from '../api';
 import { errText } from '../state';
+import { datagitApi } from '../datagit-api';
+import { saveErrorToast } from '../datagit-common';
 
 function Result({ r }: { r: { ok: boolean; message: string; detail?: string; certificateChain?: ConnectionCheck['certificateChain'] } }) {
     return (
@@ -107,8 +109,9 @@ export function StudioNetworkCard({ s, onChange }: { s: StudioSettings; onChange
     const save = async () => {
         if (problem) return;
         setBusy('save');
-        try { onChange(await api.saveNetwork(networkToSave(n, s.network))); message.success('Network settings saved'); setCheck(null); }
-        catch (e) { message.error(errText(e)); }
+        // The version this tab read: a save over network settings changed since (another tab) is refused, not merged away.
+        try { onChange(await datagitApi.saveNetwork(networkToSave(n, s.network), (s as StudioSettings & { networkVersion?: string }).networkVersion)); message.success('Network settings saved'); setCheck(null); }
+        catch (e) { saveErrorToast(message, e, () => { void api.settings().then((x) => { onChange(x); setN(x.network); }).catch((x) => message.error(errText(x))); }); }
         finally { setBusy(null); }
     };
     return (

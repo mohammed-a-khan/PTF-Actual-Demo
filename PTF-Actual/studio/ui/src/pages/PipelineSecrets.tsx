@@ -9,7 +9,25 @@ import { CheckCircleTwoTone, CloseCircleTwoTone, CloudUploadOutlined, Exclamatio
 import { api, PipelineRow, PipelineSecrets as PS } from '../api';
 import { errText, useStudio } from '../state';
 import { navigate } from '../route';
-import { isAdoNotSetUp, useStoredTab } from '../datagit-common';
+import { charCount, isAdoNotSetUp, saveErrorToast, useRouteTab } from '../datagit-common';
+import { datagitApi } from '../datagit-api';
+
+const PIPELINE_TABS = ['secrets', 'setup'] as const;
+type PipelineTab = typeof PIPELINE_TABS[number];
+export const VARIABLE_GROUP_MAX = 120;
+/** Why the server would refuse this variable group name (the same rules), or null. */
+export function variableGroupProblem(raw: string): string | null {
+    const v = raw.trim();
+    if (!v) return 'Give the variable group a name, for example {project}-{env}-secrets.';
+    const n = charCount(v);
+    if (n > VARIABLE_GROUP_MAX) return `Too long: at most ${VARIABLE_GROUP_MAX} characters (it has ${n}).`;
+    const unknown = (v.match(/\{[^{}]*\}/g) ?? []).find((p) => p !== '{project}' && p !== '{env}');
+    if (unknown) return `Only {project} and {env} are filled in: ${unknown} is not a placeholder.`;
+    if (/[{}]/.test(v.replace(/\{(project|env)\}/g, ''))) return 'A { or } on its own: the only placeholders are {project} and {env}.';
+    const bad = Array.from(v.replace(/\{(project|env)\}/g, '')).find((c) => !/[A-Za-z0-9_ .-]/.test(c));
+    if (bad) return `"${bad}" is not allowed: use Latin letters (A-Z), digits, spaces, - _ . and {project} / {env}.`;
+    return null;
+}
 
 const yes = <CheckCircleTwoTone twoToneColor="#52c41a" />;
 const no = <CloseCircleTwoTone twoToneColor="#cf1322" />;
@@ -27,12 +45,15 @@ export function PipelineSecrets() {
     const [adding, setAdding] = React.useState<{ name: string; value: string } | null>(null);
     const [savingValue, setSavingValue] = React.useState(false);
     const [savingPattern, setSavingPattern] = React.useState(false);
-    const [tab, setTab] = useStoredTab<'secrets' | 'setup'>('pipeline-secrets', ['secrets', 'setup'], 'secrets');
+    // The tab is in the address (#/pipeline/setup): Back and Forward move between tabs, a link opens one.
+    const [tab, setTab] = useRouteTab<PipelineTab>('pipeline', 'pipeline-secrets', PIPELINE_TABS, 'secrets', { 'set-up': 'setup', settings: 'setup', 'variable-group': 'setup' });
+    const [saved, setSaved] = React.useState<{ variableGroup: string; version?: string } | null>(null);
 
     React.useEffect(() => { if (!project && projects.length) setProject(projects[0]); }, [projects, project]);
     const envs = project ? (disc?.environments[project] ?? []) : [];
     React.useEffect(() => { if (project && envs.length && !envs.includes(env)) setEnv(envs[0]); }, [project, envs.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
-    React.useEffect(() => { api.pipelineSettings().then((s) => setPattern(s.variableGroup)).catch(() => undefined); }, []);
+    const readSettings = React.useCallback(() => { api.pipelineSettings().then((s) => { setSaved(s); setPattern(s.variableGroup); }).catch(() => undefined); }, []);
+    React.useEffect(() => { readSettings(); }, [readSettings]);
 
     const load = React.useCallback(async (check: boolean) => {
         if (!project || !env) return;
@@ -42,11 +63,12 @@ export function PipelineSecrets() {
         finally { setLoading(false); }
     }, [project, env, message]);
     React.useEffect(() => { void load(false); }, [load]);
+    const patternProblem = variableGroupProblem(pattern);
     const savePattern = async () => {
-        if (!pattern.trim() || savingPattern) return;
+        if (patternProblem || savingPattern || pattern.trim() === saved?.variableGroup) return;
         setSavingPattern(true);
-        try { await api.setPipelineSettings(pattern.trim()); message.success('Saved in .cs-studio/pipeline.json — commit it so your team uses the same name'); await load(false); await refreshStudio(); }
-        catch (e) { message.error(errText(e)); }
+        try { const r = await datagitApi.setPipelineSettings(pattern.trim(), saved?.version); setSaved(r); setPattern(r.variableGroup); message.success('Saved in .cs-studio/pipeline.json — commit it so your team uses the same name'); await load(false); await refreshStudio(); }
+        catch (e) { saveErrorToast(message, e, readSettings); }
         finally { setSavingPattern(false); }
     };
 
@@ -96,7 +118,7 @@ export function PipelineSecrets() {
                     <Tooltip title={<>On your computer the Studio gives each secret to the test run. In an ADO pipeline the same names come from the environment&apos;s variable group, and the pipeline passes them to the test step. Your config files stay the same in both places.</>}><InfoCircleOutlined /></Tooltip></span>
             </div>
 
-            <Tabs size="small" className="dg-tabs" activeKey={tab} onChange={(k) => setTab(k as 'secrets' | 'setup')} items={[
+            <Tabs size="small" className="dg-tabs" activeKey={tab} onChange={(k) => setTab(k as PipelineTab)} items={[
                 {
                     key: 'secrets', label: `Secrets${data ? ` (${data.rows.length})` : ''}`, children: <>
                         {data?.adoError && (notSetUp
@@ -122,10 +144,13 @@ export function PipelineSecrets() {
                 {
                     key: 'setup', label: 'Pipeline set-up', children: <Card size="small" style={{ maxWidth: 900 }}>
                         <Form layout="vertical">
-                            <Form.Item label="Variable group name for each environment" htmlFor="cs-pipeline-pattern" tooltip="{project} and {env} are filled in. Saved in .cs-studio/pipeline.json: commit it so your team uses the same name.">
-                                <Space.Compact style={{ width: '100%', maxWidth: 420 }}>
-                                    <Input id="cs-pipeline-pattern" aria-label="Variable name pattern" value={pattern} maxLength={200} onChange={(e) => setPattern(e.target.value)} onPressEnter={() => void savePattern()} className="mono" placeholder="{project}-{env}-secrets" />
-                                    <Button loading={savingPattern} disabled={!pattern.trim()} onClick={() => void savePattern()}>Save</Button>
+                            <Form.Item label="Variable group name for each environment" htmlFor="cs-pipeline-pattern" tooltip="{project} and {env} are filled in. Saved in .cs-studio/pipeline.json: commit it so your team uses the same name."
+                                validateStatus={patternProblem ? 'error' : undefined}
+                                help={patternProblem ?? (saved && pattern.trim() !== saved.variableGroup ? <span>Not saved yet: the pipeline still uses <Typography.Text code>{saved.variableGroup}</Typography.Text>.{' '}<Typography.Link onClick={() => setPattern(saved.variableGroup)}>Put it back</Typography.Link></span> : 'Latin letters (A-Z), digits, spaces, - _ . and the placeholders {project} and {env}.')}>
+                                <Space.Compact style={{ width: '100%', maxWidth: 520 }}>
+                                    <Input id="cs-pipeline-pattern" aria-label="Variable name pattern" value={pattern} count={{ show: true, max: VARIABLE_GROUP_MAX, strategy: charCount }} status={patternProblem ? 'error' : undefined}
+                                        onChange={(e) => setPattern(e.target.value)} onPressEnter={() => void savePattern()} className="mono" placeholder="{project}-{env}-secrets" />
+                                    <Tooltip title={patternProblem ?? undefined}><Button loading={savingPattern} disabled={!!patternProblem || pattern.trim() === saved?.variableGroup} onClick={() => void savePattern()}>Save</Button></Tooltip>
                                 </Space.Compact>
                             </Form.Item>
                             <Form.Item label={<span>Parameters for the <Typography.Text code>ado-playwright-shared</Typography.Text> stage template</span>} style={{ marginBottom: 0 }}

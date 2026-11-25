@@ -6,7 +6,8 @@ import { api, NotifyChannelDef, NotifyDef } from '../api';
 import { errText, useStudio } from '../state';
 import { markUnsaved } from '../unsaved';
 import { navigate } from '../route';
-import { usePageHeadTooltip, useStoredTab } from '../datagit-common';
+import { saveErrorToast, usePageHeadTooltip, useRouteTab } from '../datagit-common';
+import { datagitApi, Versioned } from '../datagit-api';
 
 const KIND_HELP: Record<NotifyChannelDef['kind'], string> = {
     teams: 'In the Teams channel: ••• → Workflows → "Post to a channel when a webhook request is received". Paste the address it gives.',
@@ -14,7 +15,7 @@ const KIND_HELP: Record<NotifyChannelDef['kind'], string> = {
     webhook: 'Any address that accepts a POST with the run as JSON ({ event: "run.finished", run }).',
 };
 /** Unsaved changes, kept while the person visits another screen (and asked about when the tab closes). */
-let draft: { chans: NotifyChannelDef[]; hooks: Record<string, string> } | null = null;
+let draft: { chans: NotifyChannelDef[]; hooks: Record<string, string>; version?: string } | null = null;
 /** Why the server would refuse this webhook address (the same rules), or null. */
 export function webhookProblem(kind: NotifyChannelDef['kind'], raw: string): string | null {
     const h = raw.trim();
@@ -28,32 +29,38 @@ export function webhookProblem(kind: NotifyChannelDef['kind'], raw: string): str
     return null;
 }
 
+const NOTIFY_TABS = ['channels', 'recent'] as const;
+type NotifyTab = typeof NOTIFY_TABS[number];
+
 const newId = () => Math.random().toString(36).slice(2, 10).padEnd(8, '0');
 
 export function Notifications() {
     const { message } = App.useApp();
     const { env } = useStudio();
-    const [d, setD] = React.useState<NotifyDef | null>(null);
+    const [d, setD] = React.useState<Versioned<NotifyDef> | null>(null);
     const [chans, setChans] = React.useState<NotifyChannelDef[]>([]);
     const [hooks, setHooks] = React.useState<Record<string, string>>({});
     const [err, setErr] = React.useState<string | null>(null);
     const [busy, setBusy] = React.useState<string | null>(null);
     usePageHeadTooltip();
-    const [tab, setTab] = useStoredTab<'channels' | 'log'>('notifications', ['channels', 'log'], 'channels');
+    // The tab is in the address (#/notify/recent), so Back and Forward move between tabs and a link opens one.
+    const [tab, setTab] = useRouteTab<NotifyTab>('notify', 'notifications', NOTIFY_TABS, 'channels', { log: 'recent', messages: 'recent', deliveries: 'recent', channel: 'channels' });
     const load = React.useCallback((keepDraft = false) => {
         api.notifications().then((r) => {
-            setD(r);
-            if (keepDraft && draft) { setChans(draft.chans); setHooks(draft.hooks); } else { draft = null; setChans(r.channels); setHooks({}); }
+            // A draft keeps the version it was made from: saving it over channels changed since is refused (409), not merged away.
+            if (keepDraft && draft) { setD({ ...r, version: draft.version ?? (r as Versioned<NotifyDef>).version }); setChans(draft.chans); setHooks(draft.hooks); } else { draft = null; setD(r); setChans(r.channels); setHooks({}); }
         }).catch((e) => setErr(errText(e)));
     }, []);
     React.useEffect(() => load(true), [load]);
     const up = (i: number, p: Partial<NotifyChannelDef>) => setChans(chans.map((c, j) => (j === i ? { ...c, ...p } : c)));
     const dirty = !!d && (JSON.stringify(chans) !== JSON.stringify(d.channels) || Object.values(hooks).some(Boolean));
     // The draft outlives this screen; reloading from any screen asks while it exists.
-    React.useEffect(() => { if (d) { draft = dirty ? { chans, hooks } : null; markUnsaved('notifications-draft', dirty ? 'notification channels' : null); } }, [d, dirty, chans, hooks]);
+    React.useEffect(() => { if (d) { draft = dirty ? { chans, hooks, version: d.version } : null; markUnsaved('notifications-draft', dirty ? 'notification channels' : null); } }, [d, dirty, chans, hooks]);
     const save = async () => {
         setBusy('save');
-        try { const r = await api.saveNotifications(chans.map(({ hasWebhook: _h, ...c }) => c), hooks); setD(r); setChans(r.channels); setHooks({}); message.success('Saved'); } catch (e) { message.error(errText(e)); } finally { setBusy(null); }
+        // The version this tab read: a save over channels changed since (another tab) is refused, never silently merged away.
+        try { const r = await datagitApi.saveNotifications(chans.map(({ hasWebhook: _h, ...c }) => c), hooks, d?.version); setD(r); setChans(r.channels); setHooks({}); message.success('Saved'); }
+        catch (e) { saveErrorToast(message, e, () => load(false)); } finally { setBusy(null); }
     };
     const test = async (id: string) => {
         setBusy(id);
@@ -111,10 +118,10 @@ export function Notifications() {
                 {dirty && <Button onClick={() => load(false)}>Discard</Button>}
                 {dirty && <Typography.Text type="warning" style={{ fontSize: 12 }}>Not saved yet</Typography.Text>}
             </div>
-            <Tabs size="small" className="dg-tabs" activeKey={tab} onChange={(k) => setTab(k as 'channels' | 'log')} items={[
+            <Tabs size="small" className="dg-tabs" activeKey={tab} onChange={(k) => setTab(k as NotifyTab)} items={[
                 { key: 'channels', label: `Channels (${chans.length})`, children: channels },
                 {
-                    key: 'log', label: `Recent messages (${d.deliveries.length})`, children: d.deliveries.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No messages sent yet." /> : (
+                    key: 'recent', label: `Recent messages (${d.deliveries.length})`, children: d.deliveries.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No messages sent yet." /> : (
                         <Table size="small" pagination={false} rowKey={(r) => r.at + r.channel} dataSource={d.deliveries} style={{ maxWidth: 1000 }} columns={[
                             { title: 'When', dataIndex: 'at', render: (v: string) => new Date(v).toLocaleString(), width: 190 },
                             { title: 'Channel', dataIndex: 'channel' },

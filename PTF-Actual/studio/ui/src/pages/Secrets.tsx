@@ -98,7 +98,7 @@ export function Secrets() {
                         <Space size={4} style={{ whiteSpace: 'nowrap' }}>
                             <Button size="small" onClick={() => setAdding({ name: r.name, value: '', env: r.env ?? '', scope: r.project ? 'project' : 'all-projects', replace: true })}>Replace</Button>
                             <Popconfirm title={`Delete ${r.name}${r.env ? ` (${r.env})` : ''}?`} description={(() => { const u = usesOf(r); return u?.uses.length ? `${u.uses.length} place${u.uses.length === 1 ? '' : 's'} read it: they will get an empty value.` : 'Nothing in this repository reads it.'; })()} okText="Delete" okButtonProps={{ danger: true }}
-                                onConfirm={async () => { try { await api.deleteSecret(r.name, r.env, r.project ? undefined : 'all-projects'); load(); } catch (e) { message.error(errText(e)); } }}>
+                                onConfirm={async () => { try { const x = await api.deleteSecret(r.name, r.env, r.project ? undefined : 'all-projects'); if (x.removed) message.success(`Deleted ${r.name}${r.env ? ` (${r.env})` : ''}`); else message.info(`${r.name} was already gone.`); load(); } catch (e) { message.error(errText(e)); } }}>
                                 <Button size="small" danger type="text" icon={<DeleteOutlined />} aria-label={`Delete ${r.name}`} title={`Delete ${r.name}`} />
                             </Popconfirm>
                         </Space>) },

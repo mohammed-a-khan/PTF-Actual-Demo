@@ -25,6 +25,29 @@ function Detail({ text }: { text: string }) {
     );
 }
 
+/** A group's tab in the address: "This computer" → this-computer, "cart / qa" → cart-qa. */
+export function groupSlug(g: string): string {
+    return g.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'group';
+}
+const isProjectGroup = (g: string) => /^[a-z0-9_.-]+ \/ [a-z0-9_.-]+$/i.test(g);
+/** The tab a key in the address means: a friendly name, or an old key ("g:<group>", "project"). */
+export function tabFor(key: string, groups: string[]): string {
+    if (key === 'problems') return key;
+    if (key === 'project') { const g = groups.find(isProjectGroup); return g ? groupSlug(g) : 'problems'; }
+    const name = key.startsWith('g:') ? key.slice(2) : null;
+    const g = groups.find((x) => (name !== null ? x === name : groupSlug(x) === groupSlug(key)));
+    return g ? groupSlug(g) : 'problems';
+}
+const RANK = { error: 0, warning: 1, info: 2, ok: 3 } as const;
+/** "Needs attention": one heading per group, the groups with an error first, errors before warnings in each. */
+export function problemGroups<T extends { group: string; level: keyof typeof RANK }>(problems: T[]): Array<{ group: string; list: T[] }> {
+    const out: Array<{ group: string; list: T[] }> = [];
+    for (const c of problems) { const g = out.find((x) => x.group === c.group); if (g) g.list.push(c); else out.push({ group: c.group, list: [c] }); }
+    for (const g of out) g.list.sort((a, b) => RANK[a.level] - RANK[b.level]);
+    const worst = (g: { list: T[] }) => Math.min(...g.list.map((c) => RANK[c.level]));
+    return out.sort((a, b) => worst(a) - worst(b));
+}
+
 function CheckRow({ c, fixing, onFix }: { c: Check; fixing: string | null; onFix: (action: string) => void }) {
     return (
         <div className="tests-check">
@@ -54,7 +77,8 @@ export function Health() {
         setLoading(true); setErr(null);
         api.doctor(t).then((r) => { setD(r); setTarget({ project: r.project, env: r.env }); }).catch((e) => setErr(errText(e))).finally(() => setLoading(false));
     }, []);
-    React.useEffect(() => { load({}); }, [load]);
+    // The project/environment chosen last is kept across a reload.
+    React.useEffect(() => { load(target); }, [load]); // eslint-disable-line react-hooks/exhaustive-deps
     const fix = async (action: string) => {
         if (fixing) return;
         setFixing(action);
@@ -64,23 +88,31 @@ export function Health() {
     const groups = [...new Set(checks.map((c) => c.group))];
     const bad = checks.filter((c) => c.level === 'error').length, warn = checks.filter((c) => c.level === 'warning').length;
     const problems = checks.filter((c) => c.level === 'error' || c.level === 'warning');
+    // A tab's badge counts what needs attention (errors and warnings), as "Needs attention" does: red when one is an error.
     const count = (list: Check[]) => {
         const e = list.filter((c) => c.level === 'error').length, w = list.filter((c) => c.level === 'warning').length;
-        return e ? <span className="q-count" style={{ color: '#c62828' }}>{e}</span> : w ? <span className="q-count" style={{ color: '#d48806' }}>{w}</span> : <CheckCircleFilled style={{ color: '#2e7d32', marginInlineStart: 6 }} />;
+        return e + w ? <span className="q-count" style={{ color: e ? '#c62828' : '#d48806' }}>{e + w}</span> : <CheckCircleFilled style={{ color: '#2e7d32', marginInlineStart: 6 }} />;
     };
     // Tabs: what needs attention first, then one per group (this computer, the repository, the project/environment).
-    const groupKey = (g: string) => (/^[a-z0-9_.-]+ \/ [a-z0-9_.-]+$/i.test(g) ? 'project' : `g:${g}`);
     const items = [
         { key: 'problems', label: <span>Needs attention{problems.length ? <span className="q-count" style={{ color: bad ? '#c62828' : '#d48806' }}>{problems.length}</span> : null}</span>,
             children: problems.length
-                ? problems.map((c) => <div key={c.id}><Typography.Text type="secondary" style={{ fontSize: 11 }}>{c.group}</Typography.Text><CheckRow c={c} fixing={fixing} onFix={(a) => void fix(a)} /></div>)
+                ? problemGroups(problems).map(({ group, list }) => <div key={group} className="tests-check-group">
+                    <Typography.Text type="secondary" style={{ fontSize: 11 }}>{group}</Typography.Text>
+                    {list.map((c) => <CheckRow key={c.id} c={c} fixing={fixing} onFix={(a) => void fix(a)} />)}</div>)
                 : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Everything a run needs is ready." /> },
         ...groups.map((g) => {
             const list = checks.filter((c) => c.group === g);
-            return { key: groupKey(g), label: <span title={`${list.filter((c) => c.level === 'error' || c.level === 'warning').length} of ${list.length} check${list.length === 1 ? '' : 's'} need attention`}>{g}{count(list)}</span>, children: list.map((c) => <CheckRow key={c.id} c={c} fixing={fixing} onFix={(a) => void fix(a)} />) };
+            return { key: groupSlug(g), label: <span title={`${list.filter((c) => c.level === 'error' || c.level === 'warning').length} of ${list.length} check${list.length === 1 ? '' : 's'} need attention`}>{g}{count(list)}</span>, children: list.map((c) => <CheckRow key={c.id} c={c} fixing={fixing} onFix={(a) => void fix(a)} />) };
         }),
     ];
-    const active = items.some((i) => i.key === tab) ? tab : 'problems';
+    // Old links (#/health/g%3ARepository, #/health/project) still open their tab; the address then shows the friendly name.
+    const wanted = d ? tabFor(tab, groups) : tab;
+    const active = items.some((i) => i.key === wanted) ? wanted : 'problems';
+    // A link to a tab that is not there (or an old key) is replaced by the tab shown.
+    React.useEffect(() => {
+        if (d && route[0] === 'health' && route[1] && route[1] !== active) navigate(['health', active], true);
+    }, [d, route[0], route[1], active]); // eslint-disable-line react-hooks/exhaustive-deps
     return (
         <div style={{ maxWidth: 1040 }}>
             <Card size="small" style={{ marginBottom: 12 }}>

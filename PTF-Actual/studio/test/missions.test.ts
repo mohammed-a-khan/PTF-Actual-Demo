@@ -200,7 +200,15 @@ test('model-call budget: every session stops at the call that reaches it (never 
         assert.equal(a.calls(), 10, 'no call beyond the budget');
         assert.equal(m.used.modelCalls, 10);
         assert.match(m.reason!, /all 10 model calls of the budget are used \(10\)/);
+        // The timeline says the state once ("Over budget: …", not "Over budget: Over budget: …").
+        assert.ok(m.timeline.some((x) => /^Over budget: all 10 model calls/.test(x.text)), JSON.stringify(m.timeline.at(-1)));
+        assert.ok(!m.timeline.some((x) => /Over budget: Over budget/.test(x.text)), 'said once');
         await e.discard(m.id, 'Tester');
+        // A finished mission can be deleted from the list (and stays deleted after a restart).
+        await assert.rejects(e.remove('nope', 'Tester'), /No such mission/);
+        await e.remove(m.id, 'Tester');
+        assert.equal(e.get(m.id), undefined);
+        assert.ok(!fs.readFileSync(path.join(gitDir, 'cs-studio', 'missions.json'), 'utf8').includes(m.id), 'gone from the file');
         // The last call of the budget made the report: verified, not over budget.
         const b = looping(10);
         const e2 = new MissionEngine({ repoRoot: dir, gitDir, agent: b.agent, log: () => undefined, tickMs: 5000, runInfo: () => undefined, runTests: async () => ({ id: 'r', state: 'passed', summary: summary([['Pay', 'passed']]) }) });
