@@ -9,6 +9,7 @@
  *   cs-test-studio load-merge <part1.json> <part2.json> … (the parts of a distributed run)
  *                                                       (a load test in a pipeline: exit 0 passed, 1 failed)
  */
+import * as os from 'os';
 import * as path from 'path';
 import { GitService } from './git/service';
 import { installHooks, runHook, uninstallHooks } from './git/hooks';
@@ -193,6 +194,34 @@ export async function main(argv: string[]): Promise<number> {
 
     // A mission without a person (a pipeline): unattended, the result as JUnit/Markdown/JSON, the exit code from the result.
     // An agent's evaluation cases (a pipeline gate): JUnit, the exit code from the result (and regressions).
+    // A real check of Copilot in the editor, run from a terminal: install, sign in (a code on github.com),
+    // suggestions in a sample project; prints a report (see lang/copilotCheck.ts).
+    if (cmd === 'copilot-check') {
+        const { copilotCheck, makeSampleProject } = await import('./lang/copilotCheck');
+        const home = studioHome();
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-copilot-check-'));
+        await runGit(['init', '-q', root], { cwd: os.tmpdir() });
+        makeSampleProject(root);
+        const store = openStore();
+        const server = createServer({ repoRoot: root, store, userName: 'copilot-check', home, activity: new ActivityLog(home, () => (store.exists ? store.knownSecrets().map((k) => k.value) : [])) });
+        const call = async (method: 'GET' | 'POST', url: string, payload?: unknown) => {
+            const r = await server.app.inject({ method, url, headers: { authorization: `Bearer ${server.token}` }, ...(payload !== undefined ? { payload: payload as Record<string, unknown> } : {}) });
+            return { status: r.statusCode, json: (() => { try { return r.json(); } catch { return r.body; } })() as any }; // eslint-disable-line @typescript-eslint/no-explicit-any
+        };
+        let ok = false;
+        try {
+            const minutes = Number(arg(argv, '--sign-in-minutes') ?? 10);
+            const r = await copilotCheck(call, { out: (t) => process.stdout.write(t), signInMinutes: Number.isFinite(minutes) && minutes > 0 ? minutes : 10, meta: { studio: (() => { try { return String(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', 'package.json'), 'utf8')).version ?? ''); } catch { return ''; } })() } });
+            ok = r.ok;
+            const file = path.resolve(arg(argv, '--report') ?? 'copilot-check-report.txt');
+            try { fs.writeFileSync(file, r.report + '\n'); process.stdout.write(`\nReport written to ${file}\n`); } catch { /* read-only folder: printed above */ }
+        } finally {
+            await server.app.close().catch(() => undefined);
+            fs.rmSync(root, { recursive: true, force: true });
+        }
+        return ok ? 0 : 1;
+    }
+
     if (cmd === 'mission' || cmd === 'eval') {
         const key = sub;
         if (cmd === 'eval' && (!key || key.startsWith('--'))) { process.stderr.write('Usage: cs-test-studio eval <agent id> [--case <id>]… [--junit <file>] [--json <file>] [--allow-failures] [--repo <dir>]\n  Exit 1 when a case fails (or, with --allow-failures, only when a case that passed in the previous run fails now).\n'); return 2; }
