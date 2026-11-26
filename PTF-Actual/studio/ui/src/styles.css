@@ -1,5 +1,11 @@
 html, body, #root { height: 100%; margin: 0; }
-body { font-family: -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+body { font-family: -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+/* Menus, tabs, labels, buttons and headings in a medium weight: at the normal weight they read thin (Windows). */
+.ant-menu-item, .ant-menu-submenu-title, .ant-tabs-tab-btn, .ant-form-item-label > label, .ant-btn, .ant-card-head-title,
+.ant-table-thead > tr > th, .ant-radio-button-wrapper, .ant-segmented-item-label, .ant-modal-title, .ant-drawer-title,
+.ant-collapse-header-text, .ant-descriptions-item-label, .page-head h1, .page-head h2 { font-weight: 500; }
+.ant-menu-item-group-title { font-weight: 600; letter-spacing: .02em; }
+.ant-menu-item-selected, .ant-tabs-tab-active .ant-tabs-tab-btn { font-weight: 600; }
 :root { --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, 'Liberation Mono', monospace;
   --add-bg: #e6ffec; --add-fg: #116329; --del-bg: #ffebe9; --del-fg: #82071e; --hunk-bg: #ddf4ff; --hunk-fg: #0550ae; --gutter: #8c959f; --panel-border: #e5e7eb; }
 :root[data-theme="dark"] { --add-bg: #12261e; --add-fg: #7ee2a8; --del-bg: #2d1416; --del-fg: #ffa198; --hunk-bg: #0f2540; --hunk-fg: #79c0ff; --gutter: #6e7681; --panel-border: #303030; }

@@ -261,8 +261,14 @@ export function repairFrameworkReport(html: string): string {
     return out.replace(/(<video\b[^>]*?)\s+crossorigin="anonymous"/g, '$1');
 }
 /** An HTML report file, repaired; other files as they are. */
+/**
+ * A path relative to a folder, as a URL path ("videos/page.webm"). On Windows path.relative gives
+ * "videos\\page.webm", and the static file server refuses any "\\" as Forbidden: every screenshot, video
+ * and file in a sub-folder of a run's results failed there (the report itself, at the top, opened).
+ */
+export const urlPathOf = (rel: string, sep: string = path.sep) => rel.split(sep).join('/');
 const sendReportFile = (reply: FastifyReply, rel: string, root: string) => {
-    if (!/\.html?$/i.test(rel)) return reply.sendFile(rel, root);
+    if (!/\.html?$/i.test(rel)) return reply.sendFile(urlPathOf(rel), root);
     const html = fs.readFileSync(path.join(root, rel), 'utf8');
     return reply.type('text/html; charset=utf-8').send(repairFrameworkReport(html));
 };

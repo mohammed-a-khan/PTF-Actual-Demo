@@ -8,7 +8,7 @@ import { currentRoute, navigate, useRoute } from '../route';
 import { Alert, App, Badge, Button, Empty, Input, List, Modal, Radio, Space, Tabs, Tag, Tooltip, Tree, Typography } from 'antd';
 import { BlameView } from '../components/BlameView';
 import type { DataNode } from 'antd/es/tree';
-import { BugOutlined, FileAddOutlined, UserOutlined, FileOutlined, FolderAddOutlined, FolderOutlined, LoadingOutlined, ReloadOutlined, SaveOutlined, SearchOutlined } from '@ant-design/icons';
+import { BugOutlined, FileAddOutlined, UserOutlined, FileOutlined, FolderAddOutlined, FolderOutlined, LoadingOutlined, ReloadOutlined, SaveOutlined, SearchOutlined, UndoOutlined } from '@ant-design/icons';
 import { api, Breakpoint, Diag, SearchHit, StepPlan, StepRename } from '../api';
 import { useUnsaved } from '../unsaved';
 import { errText, loadRunTarget, saveRunTarget, showRun, unsavedFiles, useStudio } from '../state';
@@ -351,6 +351,17 @@ export function Code() {
      * Save a tab. Resolves to true only once the file is really written; false when the save failed
      * or the user chose not to overwrite a newer version (callers must not close / run then).
      */
+    /** Back to the saved version: the changes made since the last save are thrown away (asked first). */
+    const discardTab = (path: string) => {
+        const t = tabsNow.current.find((x) => x.path === path);
+        if (!t || t.content === t.savedContent) return;
+        modal.confirm({
+            title: `Discard your changes to ${path.split('/').pop()}?`,
+            content: 'The file goes back to how it was last saved. This cannot be undone.',
+            okText: 'Discard changes', okButtonProps: { danger: true },
+            onOk: () => { setTabs((ts) => ts.map((x) => (x.path === path ? { ...x, content: x.savedContent } : x))); message.info('Changes discarded'); },
+        });
+    };
     const save = async (path: string, force = false): Promise<boolean> => {
         const t = tabsRef.current.find((x) => x.path === path); if (!t) return false;
         try {
@@ -683,11 +694,13 @@ export function Code() {
         const dirtyCount = paths.filter(isDirty).length;
         ctx.show({
             x, y, label: `Actions for the tab ${path.split('/').pop()}`,
-            entries: tabMenu({ count: paths.length, index: paths.indexOf(path), dirtyCount, cleanCount: paths.length - dirtyCount }),
+            entries: tabMenu({ count: paths.length, index: paths.indexOf(path), dirtyCount, cleanCount: paths.length - dirtyCount, dirty: isDirty(path) }),
             onDismiss: () => editors.current.get(activeRef.current ?? '')?.focus(),
             onPick: (k) => {
                 if (k === 'copyPath') { copyText({ message }, path, 'Path'); return; }
                 if (k === 'reveal') { revealInTree(path); return; }
+                if (k === 'save') { void save(path); return; }
+                if (k === 'discard') { discardTab(path); return; }
                 close(...tabsToClose(k as TabClose, tabsRef.current.map((t) => t.path), path, isDirty));
             },
         });
@@ -897,6 +910,7 @@ export function Code() {
                                         {counts.error > 0 && <Tag color="red">{counts.error} error{counts.error === 1 ? '' : 's'}</Tag>}
                                         {counts.warning > 0 && <Tag color="gold">{counts.warning} warning{counts.warning === 1 ? '' : 's'}</Tag>}
                                         <Tooltip title="Who last changed each line (git blame)"><Button size="small" type="text" icon={<UserOutlined />} aria-label="Who changed this file" onClick={() => setBlame({ file: cur.path })} /></Tooltip>
+                                        {dirty(cur) && <Tooltip title="Throw away the changes made here since the last save"><Button size="small" icon={<UndoOutlined />} onClick={() => discardTab(cur.path)}>Discard</Button></Tooltip>}
                                         <Tooltip title="Save (Ctrl+S)"><Button size="small" icon={<SaveOutlined />} disabled={!dirty(cur)} onClick={() => void save(cur.path)}>Save</Button></Tooltip>
                                     </Space>
                                 ) : null}

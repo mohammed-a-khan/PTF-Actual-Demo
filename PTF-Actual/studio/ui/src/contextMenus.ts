@@ -208,8 +208,11 @@ export function fullPath(repoRoot: string, rel: string): string {
 // ------------------------------------------------------------------ editor tabs
 export type TabClose = 'close' | 'others' | 'right' | 'saved' | 'all';
 
-export function tabMenu(s: { count: number; index: number; dirtyCount: number; cleanCount: number }): MenuEntry[] {
+export function tabMenu(s: { count: number; index: number; dirtyCount: number; cleanCount: number; dirty?: boolean }): MenuEntry[] {
     return [
+        { key: 'save', label: 'Save', shortcut: 'Ctrl+S', disabled: !s.dirty },
+        { key: 'discard', label: 'Discard changes…', disabled: !s.dirty },
+        'divider',
         { key: 'close', label: 'Close' },
         { key: 'others', label: 'Close others', disabled: s.count < 2 },
         { key: 'right', label: 'Close to the right', disabled: s.index >= s.count - 1 },

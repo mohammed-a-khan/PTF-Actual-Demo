@@ -15,7 +15,8 @@ function Root() {
     return (
         <ConfigProvider theme={{
             algorithm: dark ? theme.darkAlgorithm : theme.defaultAlgorithm,
-            token: { colorPrimary: '#93186C', borderRadius: 6, fontSize: 13 },
+            // 14 px and darker secondary text: 13 px Segoe UI at normal weight read thin on Windows screens.
+            token: { colorPrimary: '#93186C', borderRadius: 6, fontSize: 14, ...(dark ? { colorTextSecondary: 'rgba(255,255,255,0.72)', colorTextTertiary: 'rgba(255,255,255,0.55)' } : { colorText: 'rgba(0,0,0,0.9)', colorTextSecondary: 'rgba(0,0,0,0.66)', colorTextTertiary: 'rgba(0,0,0,0.5)' }) },
         }}>
             {/* Toasts below the 56 px top bar (never over its buttons) and for the usual 3 s, at most 3 at once. */}
             <AntApp message={{ top: 64, duration: 3, maxCount: 3 }}>

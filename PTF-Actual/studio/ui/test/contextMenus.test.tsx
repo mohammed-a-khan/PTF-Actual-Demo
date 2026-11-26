@@ -117,8 +117,12 @@ test('tab menu: which tabs each close command closes', () => {
     assert.deepEqual(tabsToClose('saved', tabs, 'b', dirty), ['a', 'c']);
     assert.deepEqual(tabsToClose('all', tabs, 'b', dirty), tabs);
     const m = tabMenu({ count: 4, index: 3, dirtyCount: 2, cleanCount: 2 });
-    assert.deepEqual(keys(m), ['close', 'others', 'right', 'saved', 'all', '|', 'copyPath', 'reveal']);
+    assert.deepEqual(keys(m), ['save', 'discard', '|', 'close', 'others', 'right', 'saved', 'all', '|', 'copyPath', 'reveal']);
     assert.ok(item(m, 'right')!.disabled);
+    // Save and Discard changes are for a tab with unsaved changes only.
+    assert.ok(item(m, 'save')!.disabled && item(m, 'discard')!.disabled);
+    const dirtyTab = tabMenu({ count: 4, index: 1, dirtyCount: 2, cleanCount: 2, dirty: true });
+    assert.ok(!item(dirtyTab, 'save')!.disabled && !item(dirtyTab, 'discard')!.disabled);
     const one = tabMenu({ count: 1, index: 0, dirtyCount: 1, cleanCount: 0 });
     assert.ok(item(one, 'others')!.disabled && item(one, 'right')!.disabled && item(one, 'saved')!.disabled && !item(one, 'all')!.disabled);
 });
