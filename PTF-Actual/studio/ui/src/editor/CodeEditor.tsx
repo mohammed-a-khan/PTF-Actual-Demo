@@ -16,6 +16,8 @@ import React from 'react';
 import { Button, Checkbox, Input, Space, Tooltip } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, CloseOutlined } from '@ant-design/icons';
 import { commentPrefix, Highlighter, Lang } from './highlight';
+import { editorMenu, MenuEntry } from '../contextMenus';
+import { useContextMenu } from '../components/ContextMenu';
 
 export interface EditorDiagnostic { line: number; column: number; endLine: number; endColumn: number; message: string; severity: 'error' | 'warning' | 'info' | string; source?: string }
 export interface CompletionItem { name: string; kind: string; sortText?: string; insertText?: string; detail?: string }
@@ -49,6 +51,11 @@ export interface CodeEditorProps {
     eol?: '\n' | '\r\n';
     /** False while the editor is kept mounted behind another tab (keeps undo history, scroll and caret). */
     active?: boolean;
+    /**
+     * The page's own items for the right-click menu: `actions` (run, debug, …) after the language items,
+     * `file` (copy path, history, …) at the end. The editor's own items (clipboard, find, format, …) are always there.
+     */
+    contextMenu?: (at: { line: number; offset: number; text: string }) => { actions?: MenuEntry[]; file?: MenuEntry[] };
 }
 
 export interface CodeEditorHandle {
@@ -66,7 +73,7 @@ const PAD_T = 8;
 const PAD_L = 12;
 const TAB = 4;
 /** A line nothing runs on (empty, a comment, a closing brace): no breakpoint there. */
-const blankOrComment = (l: string) => /^\s*($|\/\/|#|\*|\/\*|[})\]];?\s*$)/.test(l);
+export const blankOrComment = (l: string) => /^\s*($|\/\/|#|\*|\/\*|[})\]];?\s*$)/.test(l);
 /** The file's own indentation: 2 or 4 spaces (the most common step between indented lines), or 0 for tabs. */
 export function indentOf(lines: string[]): number {
     const counts = new Map<number, number>();
@@ -155,6 +162,12 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
     const [gotoOpen, setGotoOpen] = React.useState(false);
     const hoverTimer = React.useRef<number>();
     const findInput = React.useRef<HTMLInputElement | null>(null);
+    const menu = useContextMenu();
+    // A short notice in the status bar (e.g. "Use Ctrl+V to paste" when the browser does not let the menu read the clipboard).
+    const [note, setNote] = React.useState<string | null>(null);
+    const noteTimer = React.useRef<number>();
+    const say = (text: string) => { setNote(text); window.clearTimeout(noteTimer.current); noteTimer.current = window.setTimeout(() => setNote(null), 5000); };
+    React.useEffect(() => () => window.clearTimeout(noteTimer.current), []);
 
     const lines = React.useMemo(() => value.split('\n'), [value]);
     // The indentation step of this file (2 or 4 spaces), for Tab, Enter and the status bar.
@@ -437,6 +450,92 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
         replaceText(find.re ? value.replace(re, r) : value.replace(re, () => r));
     };
 
+    const openFind = (replace: boolean) => {
+        const el = ta.current; if (!el) return;
+        const sel = el.value.slice(el.selectionStart, el.selectionEnd);
+        findOpenNonce.current++;
+        setFind((f) => ({ ...f, open: true, replace: replace || f.replace, q: sel && !sel.includes('\n') ? sel : f.q }));
+    };
+
+    // ---------------------------------------------------------------- right-click menu
+    /** The text offset under a point (clamped to the text: a click past a line's end is its end). */
+    const offsetAtPoint = (clientX: number, clientY: number) => {
+        const el = ta.current!, r = el.getBoundingClientRect();
+        const y = clientY - r.top + el.scrollTop - PAD_T, x = clientX - r.left + el.scrollLeft - PAD_L;
+        const l = Math.max(0, Math.min(lines.length - 1, Math.floor(y / LH)));
+        return starts[l] + Math.min(lines[l].length, Math.max(0, chAtX(lines[l], Math.max(0, x))));
+    };
+    // The native menu event that follows a keyboard opening (some systems send one): ignored.
+    const keyMenuAt = React.useRef(0);
+    const showMenu = (x: number, y: number) => {
+        const el = ta.current; if (!el) return;
+        window.clearTimeout(hoverTimer.current);
+        setComp(null); setTip(null);
+        const offset = el.selectionStart;
+        const line = posOf(starts, offset).line;
+        const hasSel = el.selectionStart !== el.selectionEnd;
+        const page = props.contextMenu?.({ line: line + 1, offset, text: el.value }) ?? {};
+        const bp = props.onToggleBreakpoint ? { allowed: !blankOrComment(lines[line] ?? ''), has: (props.breakpoints ?? []).includes(line + 1) } : undefined;
+        menu.show({
+            x, y, label: 'Editor actions',
+            entries: editorMenu({
+                readOnly: !!readOnly, hasSelection: hasSel, canDefinition: !!props.definition, canUsages: !!props.usages,
+                canRename: !!props.rename, canComment: !!commentPrefix(lang), canFormat: !!props.format, breakpoint: bp,
+            }, page),
+            onDismiss: () => el.focus(),
+            onPick: (key) => menuCommand(key, line),
+        });
+    };
+    const openMenuAtCaret = () => {
+        const el = ta.current; if (!el) return;
+        keyMenuAt.current = Date.now();
+        const r = el.getBoundingClientRect();
+        const p = posOf(starts, el.selectionStart);
+        const x = r.left + PAD_L + xAt(lines[p.line] ?? '', p.col) - el.scrollLeft;
+        const y = r.top + PAD_T + (p.line + 1) * LH - el.scrollTop;
+        showMenu(Math.max(r.left, Math.min(x, r.right - 8)), Math.max(r.top, Math.min(y, r.bottom - 8)));
+    };
+    const onContextMenu = (e: React.MouseEvent<HTMLTextAreaElement>) => {
+        e.preventDefault();
+        const el = e.currentTarget;
+        if (e.button !== 2 && Date.now() - keyMenuAt.current < 600) return; // a mouse right-click is button 2
+        // As in other editors: a right-click inside the selection keeps it; elsewhere the caret moves there.
+        const off = offsetAtPoint(e.clientX, e.clientY);
+        const inSel = el.selectionStart !== el.selectionEnd && off >= el.selectionStart && off <= el.selectionEnd;
+        if (!inSel) { el.focus(); el.setSelectionRange(off, off); setCaret(off); }
+        showMenu(e.clientX, e.clientY);
+    };
+    const menuCommand = (key: string, line: number) => {
+        const el = ta.current; if (!el) return;
+        const s0 = el.selectionStart, e0 = el.selectionEnd, sel = el.value.slice(s0, e0);
+        const clip = navigator.clipboard;
+        switch (key) {
+            case 'definition': props.definition?.(el.value, s0); break;
+            case 'usages': props.usages?.(el.value, s0); break;
+            case 'rename': if (!readOnly) props.rename?.(el.value, s0); break;
+            case 'breakpoint': props.onToggleBreakpoint?.(line + 1); el.focus(); break;
+            case 'copy':
+            case 'cut': {
+                const done = () => { if (key === 'cut') insert('', s0, e0); else el.focus(); };
+                const viaBrowser = () => { el.focus(); el.setSelectionRange(s0, e0); if (!document.execCommand(key)) say(`Use Ctrl+${key === 'cut' ? 'X' : 'C'} to ${key}`); };
+                if (!clip?.writeText) { viaBrowser(); break; }
+                clip.writeText(sel).then(done, viaBrowser);
+                break;
+            }
+            case 'paste':
+                if (readOnly) break;
+                if (!clip?.readText) { el.focus(); say('Use Ctrl+V to paste'); break; }
+                clip.readText().then((t) => insert(t.replace(/\r\n?/g, '\n'), s0, e0), () => { el.focus(); say('Use Ctrl+V to paste'); });
+                break;
+            case 'selectAll': el.focus(); el.select(); setCaret(el.selectionStart); break;
+            case 'comment': if (!readOnly) { el.focus(); toggleComment(); } break;
+            case 'format': if (!readOnly) props.format?.(el.value); break;
+            case 'find': openFind(false); break;
+            case 'replace': if (!readOnly) openFind(true); break;
+            case 'gotoLine': setGotoOpen(true); break;
+        }
+    };
+
     // ---------------------------------------------------------------- keyboard
     const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         // Never act while an input method (Chinese, Japanese, …) is composing text.
@@ -457,12 +556,12 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
         if (mod && (e.key === ' ' || e.code === 'Space')) { e.preventDefault(); void openCompletion(); return; }
         if (mod && !e.altKey && !e.shiftKey && (letter === 'f' || letter === 'h')) {
             e.preventDefault();
-            const sel = el.value.slice(el.selectionStart, el.selectionEnd);
-            findOpenNonce.current++;
-            setFind((f) => ({ ...f, open: true, replace: letter === 'h' || f.replace, q: sel && !sel.includes('\n') ? sel : f.q }));
+            openFind(letter === 'h');
             return; // focus moves to the find box when it renders (below), before the next key arrives
         }
         if (mod && !e.altKey && letter === 'g') { e.preventDefault(); setGotoOpen(true); return; }
+        // The menu key and Shift+F10: the right-click menu at the caret.
+        if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey && !mod && !e.altKey)) { e.preventDefault(); openMenuAtCaret(); return; }
         if (e.key === 'F3') { e.preventDefault(); goMatch(e.shiftKey ? -1 : 1); return; }
         if (e.key === 'F12' && e.shiftKey) { e.preventDefault(); props.usages?.(el.value, el.selectionStart); return; }
         if (e.key === 'F12') { e.preventDefault(); props.definition?.(el.value, el.selectionStart); return; }
@@ -519,7 +618,7 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
     };
     const onMouseMove = (e: React.MouseEvent<HTMLTextAreaElement>) => {
         window.clearTimeout(hoverTimer.current);
-        if (!props.hover && !diagnostics.length) return;
+        if (menu.open || (!props.hover && !diagnostics.length)) return;
         const off = offsetAtMouse(e);
         const x = e.clientX, y = e.clientY;
         if (off < 0) { setTip(null); return; }
@@ -632,7 +731,8 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                     onScroll={(e) => { const el = e.currentTarget; if (!el.clientHeight) return; savedScroll.current = { top: el.scrollTop, left: el.scrollLeft }; setScroll({ top: el.scrollTop, left: el.scrollLeft, height: el.clientHeight }); setComp(null); setTip(null); }}
                     onKeyDown={onKeyDown} onKeyUp={onKeyUp} onClick={(e) => { setCaret(e.currentTarget.selectionStart); setComp(null); }}
                     onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
-                    onMouseMove={onMouseMove} onMouseDown={onMouseDown} />
+                    onMouseMove={onMouseMove} onMouseDown={onMouseDown} onContextMenu={onContextMenu} />
+                {menu.element}
                 {comp && filtered.length > 0 && (
                     <div className="ed-complete" role="listbox" ref={compRef}>
                         {filtered.map((it, i) => (
@@ -702,6 +802,7 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
             </div>
             <div className="ed-status">
                 Ln {caretPos.line + 1}, Col {caretPos.col + 1} · {lang === 'ts' ? 'TypeScript/JavaScript' : lang === 'feature' ? 'Gherkin' : lang.toUpperCase()} · {props.eol === '\r\n' ? 'CRLF' : 'LF'} · {useTabs ? 'Tabs' : `Spaces: ${step}`}
+                {note && <span className="ed-note" role="status">{note}</span>}
             </div>
         </div>
     );

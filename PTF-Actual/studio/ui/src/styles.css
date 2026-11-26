@@ -116,6 +116,11 @@ mark.intraline { background: var(--m-mark); color: inherit; padding: 0; border-r
 .ed-tip pre { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
 .ed-tip-doc { margin-top: 6px; font-size: 12px; opacity: .85; white-space: pre-wrap; }
 .ed-status { grid-column: 1 / span 2; border-top: 1px solid var(--panel-border); padding: 2px 10px; font-size: 11px; color: var(--ed-gutter); }
+.ed-note { margin-left: 12px; color: var(--ant-color-warning, #d48806); }
+/* Right-click menus (ContextMenu.tsx): shortcut hints on the right, compact rows. */
+.ctx-menu .ant-dropdown-menu { min-width: 220px; max-height: calc(100vh - 16px); overflow: auto; }
+.ctx-menu .ant-dropdown-menu-item { padding-block: 3px !important; }
+.ctx-key { margin-left: 24px; font-size: 11px; opacity: .65; white-space: nowrap; }
 .tree-M, .tree-A { color: #0969da; } .tree-U { color: #1a7f37; } .tree-D { color: #cf222e; text-decoration: line-through; } .tree-\! { color: #cf222e; font-weight: 600; }
 .tree-mark { margin-left: 6px; font-size: 11px; opacity: .8; }
 .run-log { flex: 1; min-height: 0; overflow: auto; font-family: var(--mono); font-size: 12px; line-height: 18px; padding: 8px 10px; background: var(--ed-bg); }

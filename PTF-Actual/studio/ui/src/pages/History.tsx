@@ -17,6 +17,7 @@ import { Split } from '../components/Split';
 import { VirtualRows } from '../components/VirtualRows';
 import { TidyCommits } from '../components/TidyCommits';
 import { navigate, useRoute } from '../route';
+import { HISTORY_PATH_EVENT, takeHistoryPath } from '../gitActions';
 import { plural } from '../datagit-common';
 
 const REF_COLOR: Record<string, string> = { head: 'magenta', branch: 'green', remote: 'orange', tag: 'gold', stash: 'default' };
@@ -48,8 +49,15 @@ function FileList({ files, selected, onSelect }: { files: NameStatus[]; selected
 export function History() {
     const { message, modal } = App.useApp();
     const { status, refresh } = useStudio();
-    const [query, setQuery] = React.useState<HistoryQuery>({ all: false, field: 'message', limit: 300 });
-    const [text, setText] = React.useState('');
+    // "Show file history" (Code, Source control): opened filtered to that file or folder.
+    const [initialPath] = React.useState(takeHistoryPath);
+    const [query, setQuery] = React.useState<HistoryQuery>(initialPath ? { all: false, field: 'path', text: initialPath, limit: 300 } : { all: false, field: 'message', limit: 300 });
+    const [text, setText] = React.useState(initialPath ?? '');
+    React.useEffect(() => {
+        const h = (e: Event) => { const p = (e as CustomEvent<{ path: string }>).detail.path; takeHistoryPath(); setText(p); setQuery((q) => ({ ...q, field: 'path', text: p })); };
+        window.addEventListener(HISTORY_PATH_EVENT, h);
+        return () => window.removeEventListener(HISTORY_PATH_EVENT, h);
+    }, []);
     const [data, setData] = React.useState<{ commits: LogCommit[]; graph: GraphRow[]; more: boolean } | null>(null);
     const [loading, setLoading] = React.useState(false);
     // The commit and the open file come from the address (#/git/history/<sha>/<file>), so the

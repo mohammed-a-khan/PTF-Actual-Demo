@@ -96,6 +96,17 @@ export class Workspace {
         fs.renameSync(a, b);
     }
 
+    /** Copy a file (Duplicate in the file tree): same path rules as rename; never overwrites. */
+    copy(from: string, to: string): void {
+        const a = this.abs(from, true), b = this.abs(to, true);
+        if (!fs.existsSync(a)) throw new UserError(`${from} does not exist.`);
+        if (!fs.statSync(a).isFile()) throw new UserError(`${from} is not a file: only files can be duplicated.`);
+        if (fs.existsSync(b)) throw new UserError(`${to} already exists.`);
+        this.checkNew(to);
+        fs.mkdirSync(path.dirname(b), { recursive: true });
+        fs.copyFileSync(a, b, fs.constants.COPYFILE_EXCL);
+    }
+
     /** Delete a file or folder; a copy goes to .git/cs-studio/recovery/<time>/ first. */
     async remove(rel: string): Promise<{ recoveryDir: string }> {
         const a = this.abs(rel, true);

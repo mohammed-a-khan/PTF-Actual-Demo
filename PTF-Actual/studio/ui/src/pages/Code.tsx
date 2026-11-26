@@ -5,8 +5,7 @@
 import React from 'react';
 import { Split } from '../components/Split';
 import { currentRoute, navigate, useRoute } from '../route';
-import { Alert, App, Badge, Button, Dropdown, Empty, Input, List, Modal, Radio, Space, Tabs, Tag, Tooltip, Tree, Typography } from 'antd';
-import type { MenuProps } from 'antd';
+import { Alert, App, Badge, Button, Empty, Input, List, Modal, Radio, Space, Tabs, Tag, Tooltip, Tree, Typography } from 'antd';
 import { BlameView } from '../components/BlameView';
 import type { DataNode } from 'antd/es/tree';
 import { BugOutlined, FileAddOutlined, UserOutlined, FileOutlined, FolderAddOutlined, FolderOutlined, LoadingOutlined, ReloadOutlined, SaveOutlined, SearchOutlined } from '@ant-design/icons';
@@ -21,6 +20,9 @@ import { codeTarget } from '../codeRoute';
 import { splitTab, TAB_MARK, withTab } from '../apiperf-ui';
 import { langOf } from '../editor/highlight';
 import { newPathProblem } from '../../../src/workspace/newName';
+import { useContextMenu } from '../components/ContextMenu';
+import { areaOf, duplicateName, featuresIn, folderGlob, fullPath, gitStateOf, MenuEntry, scenarioAt, scenarioRef, tabMenu, TabClose, tabsToClose, treeMenu } from '../contextMenus';
+import { confirmDiscard, copyText, openChanges, showHistory } from '../gitActions';
 
 /** `content` / `savedContent` always use "\n"; `eol` is the file's own line ending, restored on save. */
 interface OpenFile { path: string; content: string; savedContent: string; hash: string | null; binary: boolean; eol: '\n' | '\r\n' }
@@ -44,6 +46,8 @@ interface TabHandlers {
     rename: (path: string, text: string, offset: number) => void;
     editors: Map<string, CodeEditorHandle>;
     toggleBreakpoint: (path: string, line: number) => void;
+    /** The page's items in the editor's right-click menu. */
+    editorMenu: (path: string, at: { line: number; offset: number; text: string }) => { actions?: MenuEntry[]; file?: MenuEntry[] };
 }
 const NO_DIAGS: Diag[] = [];
 /** The bottom panel's tabs (also the address's last segment, ~<tab>). */
@@ -74,7 +78,8 @@ const TabEditor = React.memo(function TabEditor({ tab, active, diagnostics, reve
             definition={(text, off) => h.current.goTo(path, text, off)}
             format={(text) => h.current.format(path, text)}
             usages={(text, off) => h.current.usages(path, text, off)}
-            rename={(text, off) => h.current.rename(path, text, off)} />
+            rename={(text, off) => h.current.rename(path, text, off)}
+            contextMenu={(at) => h.current.editorMenu(path, at)} />
     );
 });
 
@@ -98,16 +103,16 @@ function buildTree(files: string[], filter: string, marks: Map<string, string>):
             const key = prefix ? `${prefix}/${name}` : name;
             if (typeof v === 'string') {
                 const m = marks.get(v);
-                return { key: v, isLeaf: true, title: <span className={m ? `tree-${m}` : ''}>{name}{m && <span className="tree-mark">{m}</span>}</span> };
+                return { key: v, isLeaf: true, title: <span data-tree-key={v} className={m ? `tree-${m}` : ''}>{name}{m && <span className="tree-mark">{m}</span>}</span> };
             }
-            return { key: `dir:${key}`, title: name, children: toNodes(v as Record<string, unknown>, key) };
+            return { key: `dir:${key}`, title: <span data-tree-key={`dir:${key}`}>{name}</span>, children: toNodes(v as Record<string, unknown>, key) };
         });
     return toNodes(root, '');
 }
 
 export function Code() {
     const { message, modal } = App.useApp();
-    const { status, refresh } = useStudio();
+    const { status, refresh, repoRoot } = useStudio();
     const [files, setFiles] = React.useState<string[]>([]);
     // What is typed, and the filter applied a moment later (large repositories: not on every key).
     const [filterText, setFilterText] = React.useState('');
@@ -184,8 +189,20 @@ export function Code() {
     const editors = React.useRef(new Map<string, CodeEditorHandle>());
     const handlers = React.useRef<TabHandlers>(null!);
     const openRef = React.useRef<(path: string, line?: number, column?: number, soft?: boolean) => Promise<void>>(null!);
-    const treeMenuRef = React.useRef<(key: string) => MenuProps>(null!);
-    const [closing, setClosing] = React.useState<{ path: string; saving: boolean } | null>(null);
+    const treeMenuRef = React.useRef<(key: string | null, x: number, y: number) => void>(null!);
+    const treeKeyRef = React.useRef<(e: React.KeyboardEvent) => void>(null!);
+    const tabMenuRef = React.useRef<(path: string, x: number, y: number) => void>(null!);
+    // The tree node the keyboard is on (or last clicked): F2, Delete and the menu key act on it.
+    const treeNode = React.useRef<string | null>(null);
+    const [treeActive, setTreeActive] = React.useState<string | null>(null);
+    /** The tree's own focus target (rc-tree keeps the keyboard on a hidden input). */
+    const focusTree = () => (treeBox.current?.querySelector('.ant-tree input') as HTMLElement | null)?.focus({ preventScroll: true });
+    const treeRef = React.useRef<{ scrollTo: (o: { key: React.Key; align?: 'top' | 'bottom' | 'auto' }) => void } | null>(null);
+    // A node shown by "Reveal in file tree" (selected until another one is clicked).
+    const [revealed, setRevealed] = React.useState<string | null>(null);
+    const ctx = useContextMenu();
+    /** Closing a tab with unsaved edits asks first; `rest`: more tabs to close after this one (Close others, Close all, …). */
+    const [closing, setClosing] = React.useState<{ path: string; saving: boolean; rest: string[] } | null>(null);
     /** TypeScript language features warm up on the first request (can take seconds on big projects). */
     const [tsState, setTsState] = React.useState<'idle' | 'starting' | 'ready'>('idle');
     const quickInput = React.useRef<import('antd').InputRef>(null);
@@ -394,25 +411,34 @@ export function Code() {
         const off = handlesSaveFiles();
         return () => { off(); window.removeEventListener(SAVE_FILES_EVENT, h); };
     }, []);
-    const forceClose = (path: string) => {
-        const rest = tabsRef.current.filter((x) => x.path !== path);
-        setTabs((ts) => ts.filter((x) => x.path !== path));
-        setActive((a) => (a === path ? rest[rest.length - 1]?.path ?? null : a));
-        void api.closeFile(path).catch(() => undefined);
+    /** Close tabs without asking. */
+    const forceClose = (...paths: string[]) => {
+        const gone = new Set(paths);
+        const rest = tabsRef.current.filter((x) => !gone.has(x.path));
+        tabsRef.current = rest;
+        setTabs((ts) => ts.filter((x) => !gone.has(x.path)));
+        setActive((a) => (a && gone.has(a) ? rest[rest.length - 1]?.path ?? null : a));
+        for (const p of paths) void api.closeFile(p).catch(() => undefined);
     };
 
-    const close = (path: string) => {
-        const t = tabsRef.current.find((x) => x.path === path);
-        if (t && t.content !== t.savedContent) setClosing({ path, saving: false });
-        else forceClose(path);
+    const isDirty = (path: string) => { const t = tabsRef.current.find((x) => x.path === path); return !!t && t.content !== t.savedContent; };
+    /** Close tabs: the saved ones at once, then each one with unsaved edits asks (Save / Don't save / Cancel stops). */
+    const close = (...paths: string[]) => {
+        const dirtyOnes = paths.filter(isDirty);
+        const clean = paths.filter((p) => !isDirty(p) && tabsRef.current.some((t) => t.path === p));
+        if (clean.length) forceClose(...clean);
+        if (dirtyOnes.length) setClosing({ path: dirtyOnes[0], saving: false, rest: dirtyOnes.slice(1) });
     };
+    /** The next tab waiting to be closed, if any. */
+    const closeNext = (rest: string[]) => { const next = rest.filter(isDirty); setClosing(next.length ? { path: next[0], saving: false, rest: next.slice(1) } : null); };
     const closeWithSave = async () => {
         if (!closing) return;
-        const path = closing.path;
-        setClosing({ path, saving: true });
+        const { path, rest } = closing;
+        setClosing({ path, saving: true, rest });
         const ok = await save(path);
-        setClosing(null);
-        if (ok) forceClose(path);
+        if (!ok) { setClosing(null); return; }
+        forceClose(path);
+        closeNext(rest);
     };
 
     const goTo = async (path: string, text: string, offset: number) => {
@@ -488,7 +514,7 @@ export function Code() {
         }
         setBottom('usages');
     };
-    const [blame, setBlame] = React.useState<string | null>(null);
+    const [blame, setBlame] = React.useState<{ file: string; line?: number } | null>(null);
     const [renaming, setRenaming] = React.useState<{ path: string; text: string; offset: number; from: string; to: string; preview?: StepRename; busy?: boolean; error?: string } | null>(null);
     const startRename = async (path: string, text: string, offset: number) => {
         const t = tabsRef.current.find((x) => x.path === path);
@@ -523,11 +549,11 @@ export function Code() {
         } catch (e) { setRenaming((x) => (x ? { ...x, busy: false, error: errText(e) } : x)); }
     };
 
-    const runSearch = async () => {
+    const runSearch = async (o: typeof search = search) => {
         // An empty query or one that fails clears the results (old results under a new query mislead).
-        if (!search.q.trim()) { setHits(null); return; }
+        if (!o.q.trim()) { setHits(null); return; }
         setBottom('search');
-        try { setHits(await api.search(search.q, search)); } catch (e) { setHits(null); message.error(errText(e)); }
+        try { setHits(await api.search(o.q, o)); } catch (e) { setHits(null); message.error(errText(e)); }
     };
 
     // Global shortcuts: Ctrl+P quick open, Ctrl+Shift+F search.
@@ -548,31 +574,132 @@ export function Code() {
         return files.map((p) => [p, score(p)] as const).filter(([, s]) => s > 0).sort((a, b) => b[1] - a[1] || a[0].length - b[0].length).slice(0, 50).map(([p]) => p);
     }, [files, quick.q]);
 
-    const treeMenu = (key: string): MenuProps => {
-        const isDir = key.startsWith('dir:');
-        const path = isDir ? key.slice(4) : key;
-        const dir = isDir ? path : path.split('/').slice(0, -1).join('/');
-        return {
-            items: [
-                { key: 'nf', label: 'New file…' }, { key: 'nd', label: 'New folder…' }, { type: 'divider' as const },
-                { key: 'rn', label: 'Rename…' }, { key: 'cp', label: 'Copy path' }, { type: 'divider' as const },
-                { key: 'rm', label: 'Delete…', danger: true },
-            ],
-            onClick: ({ key: k }: { key: string }) => {
-                if (k === 'nf') setDialog({ kind: 'file', path: dir ? `${dir}/` : '' });
-                if (k === 'nd') setDialog({ kind: 'folder', path: dir ? `${dir}/` : '' });
-                if (k === 'rn') setDialog({ kind: 'rename', path, base: path });
-                if (k === 'cp') { void navigator.clipboard?.writeText(path); message.success('Path copied'); }
-                if (k === 'rm') modal.confirm({
-                    title: `Delete ${path}?`, okText: 'Delete', okButtonProps: { danger: true },
-                    content: (() => {
-                        // Unsaved edits are not in the recovery copy (it holds the file as saved): said before deleting.
-                        const unsaved = tabsNow.current.filter((t) => (t.path === path || t.path.startsWith(path + '/')) && t.content !== t.savedContent).map((t) => t.path);
-                        return <>{unsaved.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`Unsaved changes in ${unsaved.length === 1 ? unsaved[0] : `${unsaved.length} open files`} are lost: the recovery copy has the saved version only.`} />}A copy of the saved file{path.includes('.') ? '' : 's'} is kept in .git/cs-studio/recovery/ in case you need it back.</>;
-                    })(),
-                    onOk: async () => { try { await api.deletePath(path); setTabs((ts) => ts.filter((t) => !(t.path === path || t.path.startsWith(path + '/')))); loadFiles(); void refresh(); } catch (e) { message.error(errText(e)); } },
-                });
+    /** Delete a file or folder (asks first; a recovery copy is kept). */
+    const confirmDelete = (path: string) => modal.confirm({
+        title: `Delete ${path}?`, okText: 'Delete', okButtonProps: { danger: true },
+        content: (() => {
+            // Unsaved edits are not in the recovery copy (it holds the file as saved): said before deleting.
+            const unsaved = tabsNow.current.filter((t) => (t.path === path || t.path.startsWith(path + '/')) && t.content !== t.savedContent).map((t) => t.path);
+            return <>{unsaved.length > 0 && <Alert type="warning" showIcon style={{ marginBottom: 8 }} message={`Unsaved changes in ${unsaved.length === 1 ? unsaved[0] : `${unsaved.length} open files`} are lost: the recovery copy has the saved version only.`} />}A copy of the saved file{path.includes('.') ? '' : 's'} is kept in .git/cs-studio/recovery/ in case you need it back.</>;
+        })(),
+        onOk: async () => { try { await api.deletePath(path); setTabs((ts) => ts.filter((t) => !(t.path === path || t.path.startsWith(path + '/')))); loadFiles(); void refresh(); } catch (e) { message.error(errText(e)); } },
+    });
+
+    /** Show a file in the tree: its folders opened, scrolled to and selected. */
+    const revealInTree = (path: string) => {
+        if (filter && !path.toLowerCase().includes(filter.toLowerCase())) { setFilterText(''); setFilter(''); }
+        const dirs = path.split('/').slice(0, -1).map((_, i, a) => `dir:${a.slice(0, i + 1).join('/')}`);
+        setExpanded((ex) => [...new Set([...ex, ...dirs])]);
+        setRevealed(path);
+        setTreeActive(path);
+        treeNode.current = path;
+        window.setTimeout(() => treeRef.current?.scrollTo({ key: path, align: 'auto' }), 60);
+    };
+
+    /** Search in all files, only in a folder (the search's "Only in" filter). */
+    const findInFolder = (dir: string) => {
+        const next = { ...search, glob: folderGlob(dir) };
+        setSearch(next);
+        setBottom('search', true);
+        if (next.q.trim()) void runSearch(next);
+        window.setTimeout(() => { const el = document.getElementById('cs-global-search') as HTMLInputElement | null; el?.focus(); el?.select(); }, 0);
+    };
+
+    const duplicate = async (path: string) => {
+        const to = duplicateName(path, files);
+        try { await api.copyPath(path, to); loadFiles(); void refresh(); await open(to); message.success(`Duplicated as ${to.split('/').pop()}`, 1.5); }
+        catch (e) { message.error(errText(e)); }
+    };
+
+    /** The file tree's right-click menu: for a file or folder (`dir:` keys), or for empty space (null). */
+    const showTreeMenu = (key: string | null, x: number, y: number) => {
+        const isDir = !!key?.startsWith('dir:');
+        const path = key === null ? null : isDir ? key.slice(4) : key;
+        const dir = path === null ? '' : isDir ? path : path.split('/').slice(0, -1).join('/');
+        const changed = status?.files ?? [];
+        const fstat = path && !isDir ? changed.find((f) => f.path === path) : undefined;
+        const inside = path && isDir ? changed.filter((f) => f.path.startsWith(path + '/')).map((f) => f.path) : [];
+        if (key !== null) { treeNode.current = key; setTreeActive(key); }
+        ctx.show({
+            x, y, label: path ? `Actions for ${path}` : 'File tree actions',
+            entries: treeMenu({ path, isDir, featuresInside: isDir && path !== null ? featuresIn(files, path).length : undefined, git: path ? gitStateOf(changed, path, isDir) : null }),
+            onDismiss: focusTree,
+            onPick: (k) => {
+                const at = dir ? `${dir}/` : '';
+                const targets = isDir ? inside : path ? [path] : [];
+                switch (k) {
+                    case 'open': if (path) goFileRef.current(path); break;
+                    case 'run': if (path) void runFrom(path); break;
+                    case 'debug': if (path) void runFrom(path, undefined, true); break;
+                    case 'runFolder': if (path !== null) void runFrom(featuresIn(files, path)); break;
+                    case 'newFile': setDialog({ kind: 'file', path: at }); break;
+                    case 'newFolder': setDialog({ kind: 'folder', path: at }); break;
+                    case 'rename': if (path) setDialog({ kind: 'rename', path, base: path }); break;
+                    case 'duplicate': if (path) void duplicate(path); break;
+                    case 'delete': if (path) confirmDelete(path); break;
+                    case 'copyName': if (path) copyText({ message }, path.split('/').pop()!, 'Name'); break;
+                    case 'copyPath': if (path) copyText({ message }, path, 'Path'); break;
+                    case 'copyFullPath': if (path) copyText({ message }, fullPath(repoRoot, path), 'Full path'); break;
+                    case 'findInFolder': findInFolder(dir); break;
+                    case 'openChanges': if (fstat) openChanges(fstat.path, areaOf(fstat)); break;
+                    case 'stage': void api.stage(targets.filter((p) => { const f = changed.find((c) => c.path === p); return f && (f.untracked || f.unstaged !== '.') && !f.conflicted; })).then(() => refresh(), (e) => message.error(errText(e))); break;
+                    case 'unstage': void api.unstage(targets.filter((p) => { const f = changed.find((c) => c.path === p); return f && !f.untracked && f.staged !== '.'; })).then(() => refresh(), (e) => message.error(errText(e))); break;
+                    case 'discard': confirmDiscard({ modal, message }, targets.filter((p) => { const f = changed.find((c) => c.path === p); return f && (f.untracked || f.unstaged !== '.') && !f.conflicted; }), async () => { loadFiles(); await refresh(); }); break;
+                    case 'history': if (path) showHistory(path); break;
+                    case 'collapse': setExpanded([]); break;
+                    case 'refresh': loadFiles(); break;
+                }
             },
+        });
+    };
+    /** Keys on the focused tree: F2 rename, Delete, and the menu key / Shift+F10 for the menu. */
+    const onTreeKey = (e: React.KeyboardEvent) => {
+        const key = treeNode.current ?? active;
+        if (!key) return;
+        const path = key.startsWith('dir:') ? key.slice(4) : key;
+        if (e.key === 'F2') { e.preventDefault(); setDialog({ kind: 'rename', path, base: path }); return; }
+        if (e.key === 'Delete') { e.preventDefault(); confirmDelete(path); return; }
+        if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+            e.preventDefault();
+            const el = document.querySelector(`[data-tree-key="${CSS.escape(key)}"]`);
+            const r = (el ?? treeBox.current)?.getBoundingClientRect();
+            showTreeMenu(key, (r?.left ?? 0) + 12, (r?.bottom ?? 0));
+        }
+    };
+
+    /** An editor tab's right-click menu. */
+    const showTabMenu = (path: string, x: number, y: number) => {
+        const paths = tabsRef.current.map((t) => t.path);
+        const dirtyCount = paths.filter(isDirty).length;
+        ctx.show({
+            x, y, label: `Actions for the tab ${path.split('/').pop()}`,
+            entries: tabMenu({ count: paths.length, index: paths.indexOf(path), dirtyCount, cleanCount: paths.length - dirtyCount }),
+            onDismiss: () => editors.current.get(activeRef.current ?? '')?.focus(),
+            onPick: (k) => {
+                if (k === 'copyPath') { copyText({ message }, path, 'Path'); return; }
+                if (k === 'reveal') { revealInTree(path); return; }
+                close(...tabsToClose(k as TabClose, tabsRef.current.map((t) => t.path), path, isDirty));
+            },
+        });
+    };
+
+    /** The Code page's items in the editor's right-click menu. */
+    const editorMenu = (path: string, at: { line: number; offset: number; text: string }): { actions?: MenuEntry[]; file?: MenuEntry[] } => {
+        const feature = path.endsWith('.feature');
+        const sc = feature ? scenarioAt(at.text, at.line) : null;
+        const untracked = marks.get(path) === 'U' || !files.includes(path);
+        return {
+            actions: feature ? [
+                { key: 'runScenario', label: 'Run this scenario', disabled: !sc, onClick: () => sc && void runFrom(path, sc) },
+                { key: 'debugScenario', label: 'Debug this scenario', disabled: !sc, onClick: () => sc && void runFrom(path, sc, true) },
+                { key: 'runFeature', label: 'Run this feature', onClick: () => void runFrom(path) },
+            ] : [],
+            file: [
+                { key: 'copyPath', label: 'Copy path', onClick: () => copyText({ message }, path, 'Path') },
+                { key: 'copyPathLine', label: 'Copy path:line', onClick: () => copyText({ message }, `${path}:${at.line}`, 'Path and line') },
+                { key: 'lineHistory', label: 'Show line history', disabled: untracked, onClick: () => setBlame({ file: path, line: at.line }) },
+                { key: 'reveal', label: 'Reveal in file tree', onClick: () => revealInTree(path) },
+            ],
         };
     };
 
@@ -600,7 +727,11 @@ export function Code() {
     // ▶ Run buttons for feature files: whole feature, or one scenario (in that feature).
     const { env: disc } = useStudio();
     const starting = React.useRef(false);
-    const runFrom = async (path: string, scenario?: { name: string; outline: boolean; alsoMatches?: string[] }, debug?: boolean) => {
+    /** Run (or debug, with the breakpoints) feature files, or one scenario of a feature file. */
+    const runFrom = async (target: string | string[], scenario?: { name: string; outline: boolean; alsoMatches?: string[] }, debug?: boolean) => {
+        const paths = Array.isArray(target) ? target : [target];
+        const path = paths[0];
+        if (!path) return;
         // A double click starts one run (the second would only say that a run is already in progress).
         if (starting.current) return;
         starting.current = true;
@@ -616,18 +747,20 @@ export function Code() {
             if (!go) return;
         }
         const projects = disc?.projects ?? [];
+        const inProjects = new Set(paths.map((p) => /^test\/([^/]+)\//.exec(p)?.[1]).filter((p): p is string => !!p && projects.includes(p)));
+        if (inProjects.size > 1) { message.warning(`These features belong to ${inProjects.size} projects (${[...inProjects].join(', ')}). Run a folder inside one project.`); return; }
         const fromPath = /^test\/([^/]+)\//.exec(path)?.[1];
         const saved = loadRunTarget();
         const project = fromPath && projects.includes(fromPath) ? fromPath : saved?.project ?? projects[0];
         if (!project) { message.warning('No framework project found under config/.'); return; }
         const envs = disc?.environments[project] ?? [];
         const env = saved?.project === project && saved.env ? saved.env : saved?.env && envs.includes(saved.env) ? saved.env : envs[0] ?? 'dev';
-        const t = tabsRef.current.find((x) => x.path === path);
+        const dirtyOnes = paths.filter((p) => { const t = tabsRef.current.find((x) => x.path === p); return t && t.content !== t.savedContent; });
         // The framework runs the file on disk: ask before saving unsaved edits (never save silently).
-        if (t && t.content !== t.savedContent) {
+        if (dirtyOnes.length) {
             const choice = await new Promise<'save' | 'disk' | 'cancel'>((resolve) => {
                 const inst = modal.confirm({
-                    title: `${path.split('/').pop()} has unsaved changes`,
+                    title: dirtyOnes.length === 1 ? `${dirtyOnes[0].split('/').pop()} has unsaved changes` : `${dirtyOnes.length} files have unsaved changes`,
                     content: <>The test runs the file as saved on disk.
                         <div style={{ marginTop: 12 }}><Button size="small" onClick={() => { resolve('disk'); inst.destroy(); }}>Run the saved version (keep my edits unsaved)</Button></div></>,
                     okText: 'Save and run', cancelText: 'Cancel',
@@ -635,11 +768,11 @@ export function Code() {
                 });
             });
             if (choice === 'cancel') return;
-            if (choice === 'save' && !(await save(path))) return;
+            if (choice === 'save') for (const p of dirtyOnes) if (!(await save(p))) return;
         }
         try {
             const run = await api.startRun({
-                project, env, features: [path], browser: saved?.browser, headless: saved?.headless, workers: 1,
+                project, env, features: paths, browser: saved?.browser, headless: saved?.headless, workers: 1,
                 ...(scenario ? (scenario.outline ? { scenario: scenario.name } : { scenarios: [scenario.name] }) : {}),
                 // Debugging: the breakpoints, and a pause when a step fails (the browser shown)
                 ...(debug ? { debug: { pauseOnFailure: true } } : {}),
@@ -652,17 +785,11 @@ export function Code() {
     const gutterActions = React.useMemo(() => {
         if (!cur || !cur.path.endsWith('.feature')) return undefined;
         const acts: Array<{ line: number; title: string; onClick: () => void }> = [];
-        const names = cur.content.split(/\r?\n/).map((l) => /^\s*(?:Scenario Outline|Scenario Template|Scenario|Example):\s*(.+?)\s*$/.exec(l)?.[1]).filter((n): n is string => !!n);
-        cur.content.split(/\r?\n/).forEach((l, i) => {
+        const lines = cur.content.split(/\r?\n/);
+        lines.forEach((l, i) => {
             if (/^\s*Feature:/.test(l)) acts.push({ line: i + 1, title: 'Run this feature', onClick: () => void runFrom(cur.path) });
-            const m = /^\s*(Scenario Outline|Scenario Template|Scenario|Example):\s*(.+?)\s*$/.exec(l);
-            if (m && !m[2].includes(',')) acts.push({ line: i + 1, title: `Run "${m[2]}"`, onClick: () => {
-                const outline = m[1] !== 'Scenario' && m[1] !== 'Example';
-                // --scenario: name contains it; --scenarios: either name contains the other (CSBDDRunner).
-                const me = m[2].toLowerCase();
-                const alsoMatches = names.filter((n) => n !== m[2] && (n.toLowerCase().includes(me) || (!outline && me.includes(n.toLowerCase()))));
-                void runFrom(cur.path, { name: m[2], outline, alsoMatches });
-            } });
+            const sc = scenarioRef(lines, i);
+            if (sc) acts.push({ line: i + 1, title: `Run "${sc.name}"`, onClick: () => void runFrom(cur.path, sc) });
         });
         return acts;
     }, [cur?.path, cur?.content, disc]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -680,9 +807,12 @@ export function Code() {
         format: (path, text) => void formatTab(path, text),
         usages: (path, text, off) => void findUsages(path, text, off),
         rename: (path, text, off) => void startRename(path, text, off),
+        editorMenu,
     };
     openRef.current = open;
-    treeMenuRef.current = treeMenu;
+    treeMenuRef.current = showTreeMenu;
+    treeKeyRef.current = onTreeKey;
+    tabMenuRef.current = showTabMenu;
 
     // The file tree does not depend on the text being typed: keep it out of the per-keystroke render.
     const treePanel = React.useMemo(() => (
@@ -693,22 +823,27 @@ export function Code() {
                     <Tooltip title="New folder"><Button aria-label="New folder" size="small" type="text" icon={<FolderAddOutlined />} onClick={() => setDialog({ kind: 'folder', path: '' })} /></Tooltip>
                     <Tooltip title="Refresh"><Button aria-label="Refresh" size="small" type="text" icon={<ReloadOutlined />} onClick={loadFiles} /></Tooltip>
                 </div>
-                <div ref={treeBox} style={{ flex: 1, overflow: 'hidden', padding: '4px 0', minHeight: 0 }}>
+                <div ref={treeBox} className="code-tree" style={{ flex: 1, overflow: 'hidden', padding: '4px 0', minHeight: 0 }}
+                    onContextMenu={(e) => {
+                        // Empty space (a node has its own menu: onRightClick below).
+                        e.preventDefault();
+                        if (!(e.target as HTMLElement).closest('.ant-tree-treenode')) treeMenuRef.current(null, e.clientX, e.clientY);
+                    }}>
                     {files.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 40 }} description="No files" />
                         : filterText.trim() && !tree.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 40 }} description={`No file matches "${filterText.trim()}"`} /> : (
-                        <Tree.DirectoryTree treeData={tree} height={treeHeight} virtual selectedKeys={active ? [active] : []} expandedKeys={filterOpen ?? expanded}
-                            onExpand={(k) => setExpanded(k)} expandAction="click"
-                            onSelect={(keys) => { const k = String(keys[0] ?? ''); if (k && !k.startsWith('dir:')) goFileRef.current(k); }}
-                            titleRender={(n) => (
-                                <Dropdown trigger={['contextMenu']} menu={treeMenuRef.current(String(n.key))}>
-                                    <span>{n.title as React.ReactNode}</span>
-                                </Dropdown>
-                            )}
+                        <Tree.DirectoryTree ref={treeRef as never} treeData={tree} height={treeHeight} virtual selectedKeys={revealed ? [revealed] : active ? [active] : []} expandedKeys={filterOpen ?? expanded}
+                            onExpand={(k) => setExpanded(k)} expandAction="click" aria-label="Files"
+                            onSelect={(keys) => { const k = String(keys[0] ?? ''); setRevealed(null); if (k && !k.startsWith('dir:')) goFileRef.current(k); }}
+                            activeKey={treeActive}
+                            onClick={(_, n) => { treeNode.current = String(n.key); setTreeActive(String(n.key)); if (!n.isLeaf) focusTree(); }}
+                            onActiveChange={(k) => { if (k !== null && k !== undefined) { treeNode.current = String(k); setTreeActive(String(k)); } }}
+                            onRightClick={({ event, node }) => { event.preventDefault(); treeMenuRef.current(String(node.key), event.clientX, event.clientY); }}
+                            onKeyDown={(e) => treeKeyRef.current(e)}
                             icon={(p: { isLeaf?: boolean }) => p.isLeaf ? <FileOutlined /> : <FolderOutlined />} />
                     )}
                 </div>
             </div>
-    ), [filterText, files.length, tree, active, expanded, loadFiles, filterOpen, treeHeight]);
+    ), [filterText, files.length, tree, active, expanded, loadFiles, filterOpen, treeHeight, revealed, treeActive]);
 
     const curDiags = cur ? diags[cur.path] ?? NO_DIAGS : NO_DIAGS;
     const bpLines = (path: string) => breakpoints.filter((b) => b.file === path).map((b) => b.line);
@@ -726,6 +861,20 @@ export function Code() {
                         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ margin: 'auto' }} description={<>Open a file from the tree, or press <Typography.Text keyboard>Ctrl</Typography.Text>+<Typography.Text keyboard>P</Typography.Text></>} />
                     ) : (
                         <>
+                            <div onContextMenu={(e) => {
+                                const tab = (e.target as HTMLElement).closest('[data-node-key]');
+                                if (!tab) return;
+                                e.preventDefault();
+                                tabMenuRef.current(tab.getAttribute('data-node-key')!, e.clientX, e.clientY);
+                            }} onKeyDown={(e) => {
+                                // The menu key / Shift+F10 on a focused tab: its menu.
+                                if (!(e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey))) return;
+                                const tab = (e.target as HTMLElement).closest('[data-node-key]');
+                                if (!tab) return;
+                                e.preventDefault();
+                                const r = tab.getBoundingClientRect();
+                                tabMenuRef.current(tab.getAttribute('data-node-key')!, r.left + 8, r.bottom);
+                            }}>
                             <Tabs type="editable-card" hideAdd size="small" activeKey={active ?? undefined} onChange={(k) => goFileRef.current(k)} style={{ marginBottom: 0 }}
                                 onEdit={(k, action) => { if (action === 'remove') close(String(k)); }}
                                 tabBarExtraContent={cur && !cur.binary ? (
@@ -737,7 +886,7 @@ export function Code() {
                                         )}
                                         {counts.error > 0 && <Tag color="red">{counts.error} error{counts.error === 1 ? '' : 's'}</Tag>}
                                         {counts.warning > 0 && <Tag color="gold">{counts.warning} warning{counts.warning === 1 ? '' : 's'}</Tag>}
-                                        <Tooltip title="Who last changed each line (git blame)"><Button size="small" type="text" icon={<UserOutlined />} aria-label="Who changed this file" onClick={() => setBlame(cur.path)} /></Tooltip>
+                                        <Tooltip title="Who last changed each line (git blame)"><Button size="small" type="text" icon={<UserOutlined />} aria-label="Who changed this file" onClick={() => setBlame({ file: cur.path })} /></Tooltip>
                                         <Tooltip title="Save (Ctrl+S)"><Button size="small" icon={<SaveOutlined />} disabled={!dirty(cur)} onClick={() => void save(cur.path)}>Save</Button></Tooltip>
                                     </Space>
                                 ) : null}
@@ -748,6 +897,7 @@ export function Code() {
                                     const dir = t.path.split('/').slice(-2, -1)[0];
                                     return { key: t.path, label: <Tooltip title={t.path}><span>{name}{twin && dir && <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>{t.path.split('/').slice(-3, -1).join('/')}</Typography.Text>}{dirty(t) && <Badge status="processing" style={{ marginLeft: 6 }} />}</span></Tooltip>, closable: true };
                                 })} />
+                            </div>
                             <div style={{ flex: 1, minHeight: 0 }}>
                                 {cur?.binary && <Alert style={{ margin: 16 }} type="info" showIcon message="This is a binary file and cannot be edited as text." />}
                                 {/* One editor per open tab, kept mounted: undo history, scroll and caret survive tab switches. */}
@@ -801,12 +951,12 @@ export function Code() {
                         ) : (
                             <Space direction="vertical" style={{ width: '100%' }} size={4}>
                                 <Space wrap size={6}>
-                                    <Input id="cs-global-search" size="small" placeholder="Search in all files (Ctrl+Shift+F)" style={{ width: 300 }} value={search.q} onChange={(e) => setSearch({ ...search, q: e.target.value })} onPressEnter={runSearch} />
-                                    <Input size="small" placeholder="Only in (e.g. *.feature)" style={{ width: 170 }} value={search.glob} onChange={(e) => setSearch({ ...search, glob: e.target.value })} onPressEnter={runSearch} />
+                                    <Input id="cs-global-search" size="small" placeholder="Search in all files (Ctrl+Shift+F)" style={{ width: 300 }} value={search.q} onChange={(e) => setSearch({ ...search, q: e.target.value })} onPressEnter={() => void runSearch()} />
+                                    <Input size="small" placeholder="Only in (e.g. *.feature)" style={{ width: 170 }} value={search.glob} onChange={(e) => setSearch({ ...search, glob: e.target.value })} onPressEnter={() => void runSearch()} />
                                     <Button size="small" type={search.case ? 'primary' : 'default'} onClick={() => setSearch({ ...search, case: !search.case })}>Aa</Button>
                                     <Button size="small" type={search.word ? 'primary' : 'default'} onClick={() => setSearch({ ...search, word: !search.word })}>Word</Button>
                                     <Button size="small" type={search.regex ? 'primary' : 'default'} onClick={() => setSearch({ ...search, regex: !search.regex })}>.*</Button>
-                                    <Button size="small" type="primary" onClick={runSearch}>Search</Button>
+                                    <Button size="small" type="primary" onClick={() => void runSearch()}>Search</Button>
                                     {hits && (() => { const n = new Set(hits.map((h) => h.path)).size; return <Typography.Text type="secondary">{hits.length ? `${hits.length} result${hits.length === 1 ? '' : 's'} in ${n} file${n === 1 ? '' : 's'}` : 'No matches'}</Typography.Text>; })()}
                                 </Space>
                                 {hits?.map((h, i) => (
@@ -860,7 +1010,8 @@ export function Code() {
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>Only step files the framework loads are listed (the folders in STEP_DEFINITIONS_PATH). The new method throws "not implemented" until you fill it in, so the scenario cannot pass by accident.</Typography.Text>
                 </Space>}
             </Modal>
-            {blame && <BlameView file={blame} onClose={() => setBlame(null)} />}
+            {blame && <BlameView file={blame.file} line={blame.line} onClose={() => setBlame(null)} />}
+            {ctx.element}
             <Modal open={!!renaming} title="Rename step" width={760} destroyOnClose onCancel={() => setRenaming(null)}
                 footer={<Space>
                     <Button onClick={() => setRenaming(null)}>Cancel</Button>
@@ -893,10 +1044,11 @@ export function Code() {
                 onCancel={() => { if (!closing?.saving) setClosing(null); }} maskClosable={false}
                 footer={[
                     <Button key="cancel" disabled={closing?.saving} onClick={() => setClosing(null)}>Cancel</Button>,
-                    <Button key="discard" danger disabled={closing?.saving} onClick={() => { const p = closing!.path; setClosing(null); forceClose(p); }}>Don't save</Button>,
+                    <Button key="discard" danger disabled={closing?.saving} onClick={() => { const { path: p, rest } = closing!; forceClose(p); closeNext(rest); }}>Don't save</Button>,
                     <Button key="save" type="primary" loading={closing?.saving} onClick={() => void closeWithSave()}>Save</Button>,
                 ]}>
                 <Typography.Paragraph>Your changes are lost if you don't save them.</Typography.Paragraph>
+                {closing && closing.rest.length > 0 && <Typography.Paragraph type="secondary">{closing.rest.length} more file{closing.rest.length === 1 ? '' : 's'} with unsaved changes after this one. Cancel keeps {closing.rest.length === 1 ? 'it' : 'them'} open.</Typography.Paragraph>}
             </Modal>
             <Modal open={!!dialog} title={dialog?.kind === 'file' ? 'New file' : dialog?.kind === 'folder' ? 'New folder' : 'Rename'} okText={dialog?.kind === 'rename' ? 'Rename' : 'Create'}
                 onCancel={() => setDialog(null)} onOk={submitDialog} okButtonProps={{ disabled: !dialog?.path.trim() || dialog.path.endsWith('/') || !!dialogProblem }}

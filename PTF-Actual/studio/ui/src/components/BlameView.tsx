@@ -1,13 +1,15 @@
 /** Who last changed each line of a file (git blame), grouped into runs of lines from the same commit. */
 import React from 'react';
-import { Modal, Spin, Table, Typography } from 'antd';
+import { Button, Modal, Spin, Table, Typography } from 'antd';
 import { api } from '../api';
 import { errText } from '../state';
 
 interface Run { from: number; to: number; sha: string; author: string; date: string; summary: string }
 
-export function BlameView({ file, onClose }: { file: string; onClose: () => void }) {
+/** `line`: start with the history of that line only (its last change), with a way to see all lines. */
+export function BlameView({ file, line, onClose }: { file: string; line?: number; onClose: () => void }) {
     const [rows, setRows] = React.useState<Run[] | null>(null);
+    const [only, setOnly] = React.useState<number | undefined>(line);
     const [err, setErr] = React.useState<string | null>(null);
     React.useEffect(() => {
         api.blame(file).then((lines) => {
@@ -21,9 +23,13 @@ export function BlameView({ file, onClose }: { file: string; onClose: () => void
         }).catch((e) => setErr(errText(e)));
     }, [file]);
     return (
-        <Modal open width={900} footer={null} onCancel={onClose} title={`Who changed ${file}`}>
+        <Modal open width={900} footer={null} onCancel={onClose} title={only ? `Line ${only} of ${file}` : `Who changed ${file}`}>
+            {only && rows && <div style={{ marginBottom: 8 }}>
+                <Typography.Text type="secondary">{rows.some((r) => r.from <= only && only <= r.to) ? 'The last change to this line (and the lines changed with it).' : 'This line is not in the saved file.'}</Typography.Text>
+                <Button type="link" size="small" onClick={() => setOnly(undefined)}>Show all lines</Button>
+            </div>}
             {err ? <Typography.Text type="danger">{err}</Typography.Text> : !rows ? <Spin /> : (
-                <Table<Run> size="small" rowKey={(r) => `${r.from}`} dataSource={rows} pagination={{ pageSize: 50, hideOnSinglePage: true }}
+                <Table<Run> size="small" rowKey={(r) => `${r.from}`} dataSource={only ? rows.filter((r) => r.from <= only && only <= r.to) : rows} pagination={{ pageSize: 50, hideOnSinglePage: true }}
                     columns={[
                         { title: 'Lines', width: 90, render: (_, r) => (r.from === r.to ? r.from : `${r.from}–${r.to}`) },
                         { title: 'Commit', width: 90, render: (_, r) => (/^0+$/.test(r.sha) ? <Typography.Text type="warning">not committed</Typography.Text> : <Typography.Text code>{r.sha.slice(0, 7)}</Typography.Text>) },

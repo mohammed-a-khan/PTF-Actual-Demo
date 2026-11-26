@@ -1041,6 +1041,7 @@ export const api = {
     saveFile: (path: string, content: string, expectedHash: string | null) => request<{ hash: string }>('PUT', '/api/file', { path, content, expectedHash }),
     newFolder: (path: string) => request<{ ok: boolean }>('POST', '/api/file/folder', { path }),
     renamePath: (from: string, to: string) => request<{ ok: boolean }>('POST', '/api/file/rename', { from, to }),
+    copyPath: (from: string, to: string) => request<{ ok: boolean }>('POST', '/api/file/copy', { from, to }),
     deletePath: (path: string) => request<{ recoveryDir: string }>('DELETE', '/api/file' + q({ path })),
     search: (query: string, o: { regex?: boolean; case?: boolean; word?: boolean; glob?: string }) => request<SearchHit[]>('GET', '/api/search' + q({ q: query, regex: o.regex, case: o.case, word: o.word, glob: o.glob })),
     diagnostics: (path: string, content: string) => request<{ diagnostics: Diag[] }>('POST', '/api/lang/diagnostics', { path, content }),

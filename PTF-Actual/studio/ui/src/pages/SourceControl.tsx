@@ -14,6 +14,9 @@ import { VirtualRows } from '../components/VirtualRows';
 import { navigate, useRoute } from '../route';
 import { ScanGate } from '../components/ScanGate';
 import { setStoredTab } from '../datagit-common';
+import { useContextMenu } from '../components/ContextMenu';
+import { changesMenu } from '../contextMenus';
+import { confirmDiscard, copyText, showHistory } from '../gitActions';
 
 type Sel = { path: string; area: 'staged' | 'changes' | 'conflict' } | null;
 
@@ -25,11 +28,17 @@ const STATE_LABEL: Record<string, { label: string; color: string }> = {
 
 function split(p: string) { const i = p.lastIndexOf('/'); return i < 0 ? { name: p, dir: '' } : { name: p.slice(i + 1), dir: p.slice(0, i) }; }
 
-function FileRow({ f, code, selected, onSelect, action }: { f: FileStatus; code: string; selected: boolean; onSelect: () => void; action?: React.ReactNode }) {
+function FileRow({ f, code, selected, onSelect, action, onMenu }: { f: FileStatus; code: string; selected: boolean; onSelect: () => void; action?: React.ReactNode; onMenu?: (x: number, y: number) => void }) {
     const { name, dir } = split(f.path);
     const st = STATE_LABEL[code] ?? { label: code, color: 'default' };
     return (
-        <div className={`file-row${selected ? ' selected' : ''}`} onClick={onSelect} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && onSelect()} title={f.path}>
+        <div className={`file-row${selected ? ' selected' : ''}`} onClick={onSelect} role="button" tabIndex={0} title={f.path} aria-haspopup={onMenu ? 'menu' : undefined}
+            onContextMenu={onMenu ? (e) => { e.preventDefault(); onMenu(e.clientX, e.clientY); } : undefined}
+            onKeyDown={(e) => {
+                if (e.key === 'Enter') onSelect();
+                // The menu key and Shift+F10: the right-click menu, under the row.
+                if (onMenu && (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey))) { e.preventDefault(); const r = e.currentTarget.getBoundingClientRect(); onMenu(r.left + 16, r.bottom); }
+            }}>
             <span className="name">{name}<span className="dir">{dir}</span></span>
             <span className="acts" onClick={(e) => e.stopPropagation()}>{action}</span>
             <Tooltip title={st.label}><Tag color={st.color} style={{ marginInlineEnd: 0, minWidth: 22, textAlign: 'center' }}>{code === '?' ? 'U' : code}</Tag></Tooltip>
@@ -197,19 +206,27 @@ function Changes() {
         if (on && !msg.trim()) { try { const m = await api.messages(); if (m[0]) setMsg(m[0]); } catch { /* ignore */ } }
     };
 
-    const discard = (paths: string[]) => modal.confirm({
-        title: paths.length === 1 ? `Discard your changes to ${paths[0]}?` : `Discard changes in ${paths.length} files?`,
-        content: 'The files go back to their last committed version (new files are removed). A copy of your version is kept in the recovery folder, just in case.',
-        okText: 'Discard', okButtonProps: { danger: true },
-        onOk: async () => {
-            try {
-                const r = await api.discard(paths);
-                const short = r.recoveryDir.replace(/\\/g, '/').replace(/^.*?(\.git\/)/, '$1');
-                message.success(`Discarded. A copy of your version is in ${short}`);
-                setSel(null); await refresh();
-            } catch (e) { message.error(errText(e)); }
-        },
-    });
+    const discard = (paths: string[]) => confirmDiscard({ modal, message }, paths, async () => { setSel(null); await refresh(); });
+
+    // Right-click on a changed file: its own menu.
+    const ctx = useContextMenu();
+    const rowMenu = (f: FileStatus, area: 'staged' | 'changes' | 'conflict') => (x: number, y: number) => {
+        const onDisk = !(f.unstaged === 'D' || (f.staged === 'D' && f.unstaged === '.'));
+        const back = document.activeElement as HTMLElement | null;
+        ctx.show({
+            x, y, label: `Actions for ${f.path}`, entries: changesMenu({ area, onDisk, untracked: f.untracked }),
+            onDismiss: () => back?.focus(),
+            onPick: (k) => {
+                if (k === 'open') openInEditor(f.path);
+                if (k === 'openChanges') setSel({ path: f.path, area });
+                if (k === 'stage') void act(() => api.stage([f.path]));
+                if (k === 'unstage') void act(() => api.unstage([f.path]));
+                if (k === 'discard') discard([f.path]);
+                if (k === 'copyPath') copyText({ message }, f.path, 'Path');
+                if (k === 'history') showHistory(f.path);
+            },
+        });
+    };
 
     const stageHunk = async (h: number) => {
         if (!sel) return;
@@ -298,11 +315,11 @@ function Changes() {
                         extra={ps ? (ps.headMoved ? undefined : <Button size="small" danger type="text" onClick={undoPull}>Undo pull</Button>)
                             : op ? <Popconfirm title={`Stop the ${op} and go back to how things were before it?`} onConfirm={() => act(async () => { const r = await api.abortOp(); if (r.message) message.info(r.message); else message.success(`Stopped the ${op}`); })}><Button size="small" danger type="text">Abort {op}</Button></Popconfirm>
                             : undefined}>
-                        <VirtualRows items={conflicts} rowHeight={30} keyOf={(f) => 'c' + f.path} render={(f) => <FileRow f={f} code="!" selected={sel?.path === f.path && sel.area === 'conflict'} onSelect={() => setSel({ path: f.path, area: 'conflict' })} />} />
+                        <VirtualRows items={conflicts} rowHeight={30} keyOf={(f) => 'c' + f.path} render={(f) => <FileRow f={f} code="!" selected={sel?.path === f.path && sel.area === 'conflict'} onSelect={() => setSel({ path: f.path, area: 'conflict' })} onMenu={rowMenu(f, 'conflict')} />} />
                     </Section>
                     <Section title="Staged — in the next commit" count={staged.length}
                         extra={<Tooltip title="Unstage all"><Button aria-label="Unstage all" size="small" type="text" icon={<MinusOutlined />} onClick={() => act(() => api.unstage(staged.map((f) => f.path)))} /></Tooltip>}>
-                        <VirtualRows items={staged} rowHeight={30} height="35vh" keyOf={(f) => 's' + f.path} render={(f) => <FileRow f={f} code={f.staged} selected={sel?.path === f.path && sel.area === 'staged'} onSelect={() => setSel({ path: f.path, area: 'staged' })}
+                        <VirtualRows items={staged} rowHeight={30} height="35vh" keyOf={(f) => 's' + f.path} render={(f) => <FileRow f={f} code={f.staged} selected={sel?.path === f.path && sel.area === 'staged'} onSelect={() => setSel({ path: f.path, area: 'staged' })} onMenu={rowMenu(f, 'staged')}
                             action={<Tooltip title="Unstage"><Button aria-label="Unstage" size="small" type="text" icon={<MinusOutlined />} onClick={() => act(() => api.unstage([f.path]))} /></Tooltip>} />} />
                     </Section>
                     <Section title="Changes" count={changes.length}
@@ -313,7 +330,7 @@ function Changes() {
                             </Dropdown>
                             <Tooltip title="Stage all"><Button aria-label="Stage all" size="small" type="text" icon={<PlusOutlined />} onClick={() => act(() => api.stage(changes.map((f) => f.path)))} /></Tooltip>
                         </Space>}>
-                        <VirtualRows items={changes} rowHeight={30} height="35vh" keyOf={(f) => 'u' + f.path} render={(f) => <FileRow f={f} code={f.untracked ? '?' : f.unstaged} selected={sel?.path === f.path && sel.area === 'changes'} onSelect={() => setSel({ path: f.path, area: 'changes' })}
+                        <VirtualRows items={changes} rowHeight={30} height="35vh" keyOf={(f) => 'u' + f.path} render={(f) => <FileRow f={f} code={f.untracked ? '?' : f.unstaged} selected={sel?.path === f.path && sel.area === 'changes'} onSelect={() => setSel({ path: f.path, area: 'changes' })} onMenu={rowMenu(f, 'changes')}
                             action={<Space size={0}>
                                 <Tooltip title="Discard changes"><Button aria-label="Discard changes" size="small" type="text" icon={<UndoOutlined />} onClick={() => discard([f.path])} /></Tooltip>
                                 <Tooltip title="Stage"><Button aria-label="Stage" size="small" type="text" icon={<PlusOutlined />} onClick={() => act(() => api.stage([f.path]))} /></Tooltip>
@@ -351,6 +368,7 @@ function Changes() {
                         options={clean.files.map((f) => ({ value: f, label: <Typography.Text className="mono">{f}</Typography.Text> }))} />
                 </>}
             </Modal>}
+            {ctx.element}
             {gate && <ScanGate mode="commit" blocked={gate} message={msg} amend={amend} signoff={signoff} proceed={sequencing ? (ov) => api.continueOp(ov) : undefined} onClose={() => { setGate(null); void refresh(); }}
                 onDone={async (sha) => { setGate(null); await afterCommit(sha); }} />}
         </div>

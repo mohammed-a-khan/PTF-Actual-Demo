@@ -2408,6 +2408,15 @@ export const CALLS: CatalogCall[] = [
   "result": "{ ok: boolean }"
  },
  {
+  "name": "copyPath",
+  "area": "file",
+  "method": "POST",
+  "path": "/api/file/copy",
+  "args": "from: string, to: string",
+  "body": "{ from, to }",
+  "result": "{ ok: boolean }"
+ },
+ {
   "name": "deletePath",
   "area": "file",
   "method": "DELETE",

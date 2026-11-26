@@ -1510,6 +1510,14 @@ export function createServer(opts: ServerOptions): StudioServer {
         stepCache = null;
         return { ok: true };
     });
+    app.post('/api/file/copy', async (req) => {
+        const b = body(req);
+        const from = filePath(b.from), to = filePath(b.to);
+        ws.copy(from, to);
+        log('file.copy', `Copied ${from} to ${to}`, { from, to });
+        stepCache = null;
+        return { ok: true };
+    });
     app.delete('/api/file', async (req) => {
         const p = filePath((req.query as Record<string, string>).path);
         const r = await ws.remove(p);
