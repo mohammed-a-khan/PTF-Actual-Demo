@@ -27,6 +27,21 @@ let expect: number | null = null;
 let asking = false;
 /** The guard's question was answered or dismissed: further steps may ask again. */
 export function questionClosed(): void { asking = false; }
+/**
+ * The addresses of this tab's history, by place (idx): what the Studio's own Back / Forward buttons offer and
+ * name. Kept in this tab's session storage, so a reload keeps them. A new step drops what lay ahead, as the
+ * browser does.
+ */
+const NAV_KEY = 'cs-nav-entries';
+let entries: string[] = [];
+try { const v = JSON.parse(sessionStorage.getItem(NAV_KEY) ?? '[]'); if (Array.isArray(v)) entries = v.map(String); } catch { /* no storage */ }
+const NAV_EVENT = 'cs-nav';
+function remember(idx: number, hash: string, dropAhead: boolean): void {
+    if (dropAhead) entries = entries.slice(0, idx);
+    entries[idx] = hash;
+    try { sessionStorage.setItem(NAV_KEY, JSON.stringify(entries.slice(-300))); } catch { /* no storage */ }
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event(NAV_EVENT));
+}
 const idxOf = (st: unknown) => (st && typeof (st as { idx?: unknown }).idx === 'number' ? (st as { idx: number }).idx : null);
 /** Move the browser to history place `idx` (from wherever it is now). */
 function goTo(idx: number): void {
@@ -39,6 +54,7 @@ if (typeof window !== 'undefined') {
     // The first entry gets its place too.
     if (idxOf(history.state) === null) history.replaceState({ ...(history.state ?? {}), idx: 0 }, '');
     shownIdx = idxOf(history.state) ?? 0;
+    remember(shownIdx, shownHash, false);
     // Registered before any screen listens, so a refused step never reaches them.
     window.addEventListener('popstate', (e) => {
         const toHash = window.location.hash;
@@ -48,11 +64,12 @@ if (typeof window !== 'undefined') {
             // Back where the screens are: nothing changed for them.
             if (toHash === shownHash) { e.stopImmediatePropagation(); shownIdx = toIdx; return; }
             shownHash = toHash; shownIdx = toIdx;
+            remember(shownIdx, shownHash, false);
             return;
         }
         const from = routeOf(shownHash), to = currentRoute();
         // An address typed in the address bar makes a new entry without a place: it is the next one.
-        if (toIdx === null) { toIdx = shownIdx + 1; history.replaceState({ ...(history.state ?? {}), idx: toIdx }, ''); }
+        if (toIdx === null) { toIdx = shownIdx + 1; history.replaceState({ ...(history.state ?? {}), idx: toIdx }, ''); remember(toIdx, toHash, true); }
         const target = toIdx;
         const delta = target - shownIdx;
         if (popGuard && from[0] && to.join('\0') !== from.join('\0') && delta) {
@@ -68,8 +85,9 @@ if (typeof window !== 'undefined') {
         }
         expect = null;
         shownHash = toHash; shownIdx = target;
+        remember(shownIdx, shownHash, false);
     });
-    window.addEventListener(EVENT, () => { shownHash = window.location.hash; shownIdx = idxOf(history.state) ?? shownIdx; });
+    window.addEventListener(EVENT, () => { shownHash = window.location.hash; shownIdx = idxOf(history.state) ?? shownIdx; remember(shownIdx, shownHash, false); });
     // The browser also says "hashchange" for a step the guard refused (before its undoing lands): held back,
     // or the screens would switch under the open question and lose the work (popstate already says the rest).
     window.addEventListener('hashchange', (e) => {
@@ -111,7 +129,9 @@ export function navigate(parts: Array<string | number | undefined | null>, repla
         if (!o.menu && from[0] && next[0] && from[0] !== next[0]) state = { cameFrom: { hash: window.location.hash, route: from }, depth: 0 };
         // Moving within the screen it was opened on keeps the way back (one more step to go back).
         else if (!o.menu && here?.cameFrom && from[0] === next[0]) state = { cameFrom: here.cameFrom, depth: (here.depth ?? 0) + 1 };
-        history.pushState({ ...(state ?? {}), idx: (idxOf(history.state) ?? shownIdx) + 1 }, '', window.location.pathname + window.location.search + h);
+        const idx = (idxOf(history.state) ?? shownIdx) + 1;
+        history.pushState({ ...(state ?? {}), idx }, '', window.location.pathname + window.location.search + h);
+        remember(idx, h, true);
     }
     window.dispatchEvent(new Event(EVENT));
 }
@@ -143,3 +163,24 @@ export function useRoute(): string[] {
     }, []);
     return r;
 }
+
+/**
+ * The Studio's own Back and Forward: where each goes in this tab's history (an address, or "" for a place
+ * whose address is not known, e.g. before this tab kept them), or null when there is nowhere to go.
+ * They step the browser's history, so unsaved work is asked about exactly as with the browser's buttons.
+ */
+export function useBackForward(): { back: string | null; forward: string | null; go: (delta: -1 | 1) => void } {
+    const read = () => {
+        const i = idxOf(history.state) ?? shownIdx;
+        return { back: i > 0 ? entries[i - 1] ?? '' : null, forward: i + 1 < entries.length ? entries[i + 1] ?? '' : null };
+    };
+    const [st, setSt] = React.useState(read);
+    React.useEffect(() => {
+        const h = () => setSt((o) => { const n = read(); return o.back === n.back && o.forward === n.forward ? o : n; });
+        for (const ev of ['popstate', 'hashchange', EVENT, NAV_EVENT]) window.addEventListener(ev, h);
+        return () => { for (const ev of ['popstate', 'hashchange', EVENT, NAV_EVENT]) window.removeEventListener(ev, h); };
+    }, []);
+    return { ...st, go: (delta) => history.go(delta) };
+}
+/** The route parts of an address ("#/runs/123" → ["runs", "123"]). */
+export function routeOfHash(hash: string): string[] { return routeOf(hash); }

@@ -1,7 +1,7 @@
 import React from 'react';
 import { Alert, App, Badge, Button, Divider, Drawer, Dropdown, Form, Input, Layout, Menu, Modal, Result, Select, Space, Tooltip, Typography } from 'antd';
 import {
-    ArrowLeftOutlined,
+    ArrowLeftOutlined, LeftOutlined, RightOutlined,
     ApiOutlined, ArrowDownOutlined, DashboardOutlined, DatabaseOutlined, FilePdfOutlined, FieldTimeOutlined, LineChartOutlined, PlayCircleOutlined, RiseOutlined, SwapOutlined, ArrowUpOutlined, BranchesOutlined, CloudSyncOutlined, DownOutlined, EnvironmentOutlined,
     VideoCameraOutlined, RobotOutlined, CloudServerOutlined, CodeOutlined, MenuFoldOutlined, MenuUnfoldOutlined, PullRequestOutlined, ExperimentOutlined, SafetyCertificateOutlined, CheckSquareOutlined, AimOutlined, BuildOutlined, ReadOutlined, BellOutlined, MedicineBoxOutlined, EyeOutlined, HistoryOutlined, LockOutlined, MergeCellsOutlined, MoonOutlined, PlusOutlined, ProfileOutlined, DeploymentUnitOutlined, SettingOutlined, SunOutlined,
     InboxOutlined,
@@ -9,7 +9,7 @@ import {
 import { api, GateResult, hasToken, setProtectedRunConfirm } from './api';
 import { errText, StudioProvider, useStudio } from './state';
 import { canSaveLost, discardLost, lostOnLeave, saveLost } from './unsaved';
-import { cameFrom, goBack, navigate, questionClosed, setPopGuard, useRoute } from './route';
+import { cameFrom, goBack, navigate, questionClosed, routeOfHash, setPopGuard, useBackForward, useRoute } from './route';
 import { remoteSynced, tagNews } from './datagit-common';
 import { SourceControl } from './pages/SourceControl';
 import { RepoSwitcher } from './components/RepoSwitcher';
@@ -117,6 +117,32 @@ function IndexLockPrompt() {
         return () => window.removeEventListener('cs-studio:index-lock', h);
     }, [message, modal]);
     return null;
+}
+
+/** Where an address goes, in words: "Run tests › 20261125-ab12", "Code › shop.feature". */
+function placeName(hash: string): string {
+    const r = routeOfHash(hash);
+    const page = PAGE_INFO[r[0] as Page]?.title;
+    if (!page) return 'the previous screen';
+    const parts = r.slice(1).filter((x) => !x.startsWith('~') && x !== '@');
+    const last = parts.length ? parts[parts.length - 1].split('/').pop()! : '';
+    const item = last && !/^\d+$/.test(last) ? last : parts.length > 1 ? parts[parts.length - 2].split('/').pop()! : last;
+    return item ? `${page} › ${item.length > 40 ? item.slice(0, 39) + '…' : item}` : page;
+}
+
+/** The Studio's own Back and Forward (the browser's buttons and Alt+← / Alt+→ do the same). */
+function BackForward() {
+    const { back, forward, go } = useBackForward();
+    return (
+        <Space.Compact>
+            <Tooltip title={back === null ? 'Nothing to go back to' : `Back to ${back ? placeName(back) : 'the previous screen'} (Alt+←)`}>
+                <Button icon={<LeftOutlined />} aria-label={back === null ? 'Back (nothing to go back to)' : `Back to ${back ? placeName(back) : 'the previous screen'}`} disabled={back === null} onClick={() => go(-1)} />
+            </Tooltip>
+            <Tooltip title={forward === null ? 'Nothing to go forward to' : `Forward to ${forward ? placeName(forward) : 'the next screen'} (Alt+→)`}>
+                <Button icon={<RightOutlined />} aria-label={forward === null ? 'Forward (nothing to go forward to)' : `Forward to ${forward ? placeName(forward) : 'the next screen'}`} disabled={forward === null} onClick={() => go(1)} />
+            </Tooltip>
+        </Space.Compact>
+    );
 }
 
 function BranchMenu() {
@@ -426,6 +452,7 @@ function Shell({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => vo
                     <Typography.Text strong style={{ fontSize: 15 }}>Test Studio</Typography.Text>
                 </Space>
                 <Divider type="vertical" />
+                <BackForward />
                 <RepoSwitcher repoRoot={repoRoot} />
                 <BranchMenu />
                 {status?.upstreamGone && <Tooltip title={`${status.upstream ?? 'The remote branch'} was deleted on the server (often after its pull request was merged). Push publishes it again; or switch to another branch.`}><Badge status="warning" text="remote branch deleted" /></Tooltip>}
