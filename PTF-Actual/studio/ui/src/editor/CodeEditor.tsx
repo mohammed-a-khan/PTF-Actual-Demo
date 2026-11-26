@@ -904,8 +904,19 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
         if ((e.ctrlKey || e.metaKey) && props.definition) {
             const off = offsetAtMouse(e);
             if (off >= 0) { e.preventDefault(); props.definition(value, off); }
+            return;
+        }
+        // Pressing inside a selection starts a new selection here (as in other editors), instead of the browser
+        // picking the selected text up to drag it somewhere else: the text being moved cannot be seen in this
+        // editor, so code moved without anyone noticing. Double / triple clicks keep selecting words / lines.
+        const el = e.currentTarget;
+        if (e.button === 0 && !e.shiftKey && e.detail <= 1 && el.selectionStart !== el.selectionEnd) {
+            const off = offsetAtMouse(e);
+            if (off >= el.selectionStart && off <= el.selectionEnd) el.setSelectionRange(el.selectionStart, el.selectionStart);
         }
     };
+    /** No drag-and-drop of text in or into the editor (see onMouseDown). */
+    const noDrag = (e: React.DragEvent<HTMLTextAreaElement>) => { e.preventDefault(); };
 
     // ---------------------------------------------------------------- render
     const first = Math.max(0, Math.floor(scroll.top / LH) - 5);
@@ -973,7 +984,7 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                             onClick={props.onToggleBreakpoint && (bpSet.has(l + 1) || !blankOrComment(lines[l] ?? '')) ? () => props.onToggleBreakpoint!(l + 1) : undefined}
                             title={props.onToggleBreakpoint ? (bpSet.has(l + 1) ? 'Remove the breakpoint' : blankOrComment(lines[l] ?? '') ? 'No breakpoint on an empty line or a comment' : 'Add a breakpoint') : undefined}>
                             {bpSet.has(l + 1) && <span className="ed-bp" aria-label="Breakpoint" />}
-                            {diagByLine.has(l + 1) && <span className={`ed-dot ${diagByLine.get(l + 1)}`} />}
+                            {diagByLine.has(l + 1) && <span className={`ed-dot ${diagByLine.get(l + 1)}`} title={diagnostics.filter((d) => d.line === l + 1).map((d) => `${d.severity === 'info' ? 'Note' : d.severity === 'warning' ? 'Warning' : 'Error'}: ${d.message}`).join('\n')} />}
                             {l + 1}
                         </div>
                     ))}
@@ -1046,7 +1057,8 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                         // The caret left the inserted call: snippet mode ends.
                         if (m && (el.selectionStart < m.start || el.selectionEnd > m.end)) setSnip(null);
                     }}
-                    onMouseMove={onMouseMove} onMouseDown={onMouseDown} onContextMenu={onContextMenu} />
+                    onMouseMove={onMouseMove} onMouseDown={onMouseDown} onContextMenu={onContextMenu}
+                    onDragStart={noDrag} onDrop={noDrag} onDragOver={noDrag} />
                 {menu.element}
                 {comp && filtered.length > 0 && (
                     <div className="ed-complete" role="listbox" ref={compRef}>
