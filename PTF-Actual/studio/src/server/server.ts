@@ -134,7 +134,8 @@ import { getIdentity, setIdentity } from '../git/identity';
 import { ConflictError, Workspace } from '../workspace/files';
 import { checkVersion, contentVersion, StaleSaveError } from '../core/version';
 import { TsService } from '../lang/tsService';
-import { TsClient } from '../lang/tsClient';
+import { StaleCall, TsClient } from '../lang/tsClient';
+import { CopilotInline } from '../lang/copilot';
 import { projectFeatureFolder, readCatalog } from '../run/catalog';
 import { publishTargets, resultsToPublish, scenarioTestSteps, tagsToPublishTo, TestPlans } from '../ado/testPlans';
 import { filesDeclaring, groupHeals, HealDecision, HealEvent, healedOption, healsInReport, proposeEdit } from '../quality/healing';
@@ -1561,7 +1562,10 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.post('/api/lang/completions', async (req) => {
         const b = body(req);
         const p = filePath(b.path); const text = content(b.content); const offset = offsetOf(b.offset);
-        if (TsService.supports(p)) { const s = await ts(ws.abs(p), text); return { items: await s.completions(ws.abs(p), offset) }; }
+        if (TsService.supports(p)) {
+            const s = await ts(ws.abs(p), text);
+            try { return { items: await s.completions(ws.abs(p), offset) }; } catch (e) { if (e instanceof StaleCall) return { items: [], stale: true }; throw e; }
+        }
         if (p.endsWith('.feature')) {
             const lineText = text.split(/\r?\n/)[lineAt(text, offset) - 1] ?? '';
             if (!/^\s*(Given|When|Then|And|But|\*)\s/.test(lineText)) return { items: [] };
@@ -1572,6 +1576,25 @@ export function createServer(opts: ServerOptions): StudioServer {
             return { items };
         }
         return { items: [] };
+    });
+    /** One completion's signature and documentation, its call snippet, and edits that go with it (an import). */
+    app.post('/api/lang/completion-details', async (req) => {
+        const b = body(req);
+        const p = filePath(b.path); const text = content(b.content); const offset = offsetOf(b.offset);
+        const name = str(b.name, 'name', { max: 500 });
+        const source = b.source === undefined ? undefined : str(b.source, 'source', { max: 2000 });
+        if (!TsService.supports(p)) return {};
+        const s = await ts(ws.abs(p), text);
+        try { return (await s.completionDetails(ws.abs(p), offset, name, source, b.data)) ?? {}; } catch (e) { if (e instanceof StaleCall) return { stale: true }; throw e; }
+    });
+    /** Parameter hints while typing a call's arguments. */
+    app.post('/api/lang/signature', async (req) => {
+        const b = body(req);
+        const p = filePath(b.path); const text = content(b.content); const offset = offsetOf(b.offset);
+        const trigger = typeof b.trigger === 'string' && /^[(,<]$/.test(b.trigger) ? b.trigger : undefined;
+        if (!TsService.supports(p)) return { help: null };
+        const s = await ts(ws.abs(p), text);
+        try { return { help: await s.signatureHelp(ws.abs(p), offset, trigger) }; } catch (e) { if (e instanceof StaleCall) return { help: null, stale: true }; throw e; }
     });
     app.post('/api/lang/hover', async (req) => {
         const b = body(req);
@@ -1656,7 +1679,13 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     app.post('/api/lang/close', async (req) => { const p = filePath(body(req).path); if (TsService.supports(p)) await tsc.update(ws.abs(p), undefined); return { ok: true }; });
     // The Code page calls this when it opens: TypeScript builds the project in the background.
-    app.post('/api/lang/warmup', async () => { void tsc.warmUp().catch(() => undefined); return { ok: true }; });
+    app.post('/api/lang/warmup', async (req) => {
+        // The project of the file being edited (its nearest tsconfig.json), so its first completion does not build it.
+        const b = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<string, unknown>;
+        const p = typeof b.path === 'string' && b.path ? filePath(b.path) : undefined;
+        void tsc.warmUp(p && TsService.supports(p) ? ws.abs(p) : undefined).catch(() => undefined);
+        return { ok: true };
+    });
     // ---- "Create step definition" for an undefined step
     /** The undefined step on a line of a feature file, with what follows it (table / doc string). */
     const stepAt = (text: string, line: number) => {
@@ -5369,6 +5398,26 @@ export function createServer(opts: ServerOptions): StudioServer {
     };
     const studioBrowser = new StudioBrowser({ repoRoot: opts.repoRoot, ...(() => { const n = personal().network; return n.proxyMode === 'manual' && n.proxyUrl ? { proxy: { server: n.proxyUrl, bypass: n.bypass.join(',') } } : {}; })() });
     const knowledgeRef: { current?: KnowledgeBase } = {}, ensureKnowledgeRef: { current?: () => void } = {};
+    // The company network for the Copilot runtime and language server: proxy (with its sign-in) and certificates.
+    const agentNetworkEnv = (): Record<string, string> => {
+        const n = personal().network;
+        const out: Record<string, string> = { ...runEnvFor({ ...n, certsForTestRuns: true }, process.env) };
+        if (n.proxyMode === 'manual' && n.proxyUrl) {
+            let u = n.proxyUrl;
+            if (n.proxyUser) {
+                try {
+                    const url = new URL(u);
+                    url.username = encodeURIComponent(n.proxyUser);
+                    const pw = opts.store.exists ? opts.store.getStudio(PROXY_PASSWORD_SECRET) : undefined;
+                    if (pw) url.password = encodeURIComponent(pw);
+                    u = url.toString();
+                } catch { /* the address as written */ }
+            }
+            out.HTTPS_PROXY = out.HTTP_PROXY = out.https_proxy = out.http_proxy = u;
+            out.NO_PROXY = out.no_proxy = n.bypass.join(',');
+        }
+        return out;
+    };
     const agents = new AgentHost({
         repoRoot: opts.repoRoot, home: agentHome, browser: studioBrowser,
         // On a build agent the model key or Copilot token comes from the pipeline's secret variables (environment).
@@ -5395,26 +5444,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         onToolServer: (e) => onToolServer(e),
         probeToolServer: (name, ms) => probeToolServer(name, ms),
         knowledge: (sources) => { ensureKnowledgeRef.current?.(); return knowledgeRef.current?.tools(sources) ?? []; },
-        // The company network for the Copilot runtime: proxy (with its sign-in) and certificates.
-        runtimeEnv: () => {
-            const n = personal().network;
-            const out: Record<string, string> = { ...runEnvFor({ ...n, certsForTestRuns: true }, process.env) };
-            if (n.proxyMode === 'manual' && n.proxyUrl) {
-                let u = n.proxyUrl;
-                if (n.proxyUser) {
-                    try {
-                        const url = new URL(u);
-                        url.username = encodeURIComponent(n.proxyUser);
-                        const pw = opts.store.exists ? opts.store.getStudio(PROXY_PASSWORD_SECRET) : undefined;
-                        if (pw) url.password = encodeURIComponent(pw);
-                        u = url.toString();
-                    } catch { /* the address as written */ }
-                }
-                out.HTTPS_PROXY = out.HTTP_PROXY = out.https_proxy = out.http_proxy = u;
-                out.NO_PROXY = out.no_proxy = n.bypass.join(',');
-            }
-            return out;
-        },
+        runtimeEnv: agentNetworkEnv,
         mask: (t) => maskAll(t),
     });
     app.addHook('onClose', async () => { await agents.stop().catch(() => undefined); await studioBrowser.close(); });
@@ -5467,6 +5497,65 @@ export function createServer(opts: ServerOptions): StudioServer {
         } catch (e) { throw agentErr(e); }
     });
     app.delete('/api/agents/signin', async () => { await agents.signInCancel(); return agents.signInState(); });
+
+    // ---- Copilot inline suggestions in the editor (GitHub's Copilot language server; see lang/copilot.ts).
+    const copilot = new CopilotInline({
+        home: agentHome, repoRoot: opts.repoRoot,
+        studioVersion: (() => { try { return String(JSON.parse(fs.readFileSync(path.join(__dirname, '..', '..', '..', 'package.json'), 'utf8')).version ?? ''); } catch { return ''; } })(),
+        env: agentNetworkEnv,
+        proxy: () => agentNetworkEnv().HTTPS_PROXY,
+        token: () => (opts.store.exists ? opts.store.getStudio(COPILOT_TOKEN_SECRET) : undefined),
+        knownSecrets: () => (opts.store.exists ? opts.store.knownSecrets().map((k) => k.value) : []),
+        blocked: () => (agents.policyNow()?.enabled === false ? 'Turned off by this repository\'s agent policy.' : null),
+        log: (action, text) => log(action, text),
+    });
+    app.addHook('onClose', async () => { await copilot.stop().catch(() => undefined); });
+    const copilotErr = (e: unknown) => new BadRequest((e as Error).message.split('\n')[0]);
+    app.get('/api/agents/inline', async (req) => {
+        // The editor asks with start=1: the language server starts on demand (in the background).
+        // Once: after an idle stop it starts again with the next suggestion asked for.
+        if ((req.query as Record<string, string>).start === '1') copilot.startOnce();
+        return copilot.status();
+    });
+    app.post('/api/agents/inline/settings', async (req) => { const b = body(req); if (typeof b.enabled !== 'boolean') throw new BadRequest('"enabled" must be true or false.'); await copilot.setEnabled(b.enabled); return copilot.status(); });
+    app.post('/api/agents/inline/install', async (req) => {
+        const b = body(req);
+        try { return copilot.install(b.version === undefined ? undefined : str(b.version, 'version', { max: 40 })); } catch (e) { throw copilotErr(e); }
+    });
+    app.post('/api/agents/inline/install/cancel', async () => { copilot.installer.cancel(); return copilot.status(); });
+    app.delete('/api/agents/inline/install', async () => { try { return await copilot.remove(); } catch (e) { throw copilotErr(e); } });
+    app.post('/api/agents/inline/restart', async () => { try { return await copilot.restart(); } catch (e) { throw copilotErr(e); } });
+    app.post('/api/agents/inline/check', async () => { try { return await copilot.checkStatus(); } catch (e) { throw copilotErr(e); } });
+    app.post('/api/agents/inline/signin', async () => { try { return await copilot.signIn(); } catch (e) { throw copilotErr(e); } });
+    app.delete('/api/agents/inline/signin', async () => copilot.cancelSignIn());
+    app.post('/api/agents/inline/signout', async () => { try { return await copilot.signOut(); } catch (e) { throw copilotErr(e); } });
+    app.post('/api/agents/inline/use-existing', async (req) => {
+        const id = Number(body(req).tokenId);
+        if (!Number.isInteger(id)) throw new BadRequest('"tokenId" is invalid.');
+        try { return await copilot.useExisting(id); } catch (e) { throw copilotErr(e); }
+    });
+    app.post('/api/agents/inline/suggest', async (req, reply) => {
+        const b = body(req);
+        const p = filePath(b.path); const text = content(b.content); const offset = offsetOf(b.offset);
+        // The editor typed on (it aborts the request): the language server's request is cancelled too.
+        const ac = new AbortController();
+        reply.raw.on('close', () => { if (!reply.raw.writableFinished) ac.abort(); });
+        try {
+            return await copilot.inline(p, text, offset, {
+                signal: ac.signal, invoked: b.invoked === true,
+                tabSize: typeof b.tabSize === 'number' && b.tabSize > 0 && b.tabSize <= 16 ? b.tabSize : 4, insertSpaces: b.insertSpaces !== false,
+            });
+        } catch (e) { throw copilotErr(e); }
+    });
+    app.post('/api/agents/inline/shown', async (req) => { copilot.shown(str(body(req).id, 'id', { max: 40 })); return { ok: true }; });
+    app.post('/api/agents/inline/accepted', async (req) => {
+        const b = body(req);
+        const n = b.acceptedLength === undefined ? undefined : Number(b.acceptedLength);
+        if (n !== undefined && (!Number.isInteger(n) || n < 1)) throw new BadRequest('"acceptedLength" is invalid.');
+        await copilot.accepted(str(b.id, 'id', { max: 40 }), n);
+        return { ok: true };
+    });
+    app.post('/api/agents/inline/close', async (req) => { copilot.close(filePath(body(req).path)); return { ok: true }; });
     app.post('/api/agents/signout', async (req) => {
         // Forget a token kept in the Studio too, when asked.
         if (body(req).forgetToken === true && opts.store.exists) opts.store.deleteStudio(COPILOT_TOKEN_SECRET);

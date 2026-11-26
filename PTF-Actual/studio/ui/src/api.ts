@@ -72,9 +72,9 @@ export class ApiError extends Error {
     constructor(message: string, public status: number, public code?: string) { super(message); }
 }
 
-async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const res = await fetch(url, {
-        method,
+        method, signal,
         headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
         body: body !== undefined ? JSON.stringify(body) : undefined,
     });
@@ -248,7 +248,16 @@ export interface StepUsages { step: { pattern: string; file: string; line: numbe
 export interface StepRename { step: { pattern: string; file: string; line: number }; pattern?: string; changes: Array<{ path: string; line: number; before: string; after: string }>; files: string[]; skipped: StepUsage[] }
 export interface Loc { path: string; line: number; column: number; endLine: number; endColumn: number; text?: string }
 export interface SearchHit { path: string; line: number; column: number; text: string }
-export interface CompletionItem { name: string; kind: string; sortText?: string; insertText?: string; detail?: string }
+export interface CompletionItem { name: string; kind: string; sortText?: string; insertText?: string; detail?: string; isSnippet?: boolean; replace?: { start: number; length: number }; hasAction?: boolean; source?: string; data?: unknown; kindModifiers?: string }
+export interface CompletionDetailsDef { detail?: string; doc?: string; snippet?: string; edits?: Array<{ start: number; length: number; newText: string }>; stale?: boolean }
+export interface SignatureHelpDef { signatures: Array<{ label: string; params: Array<[number, number]>; doc: string; paramDocs: string[] }>; active: number; param: number; start: number }
+export type CopilotStateDef = 'off' | 'not-installed' | 'installing' | 'stopped' | 'starting' | 'sign-in' | 'ready' | 'working' | 'error';
+export interface CopilotStatusDef {
+    state: CopilotStateDef; reason?: string; enabled: boolean; installed: boolean; version: string | null; tested: string; folder: string; custom: boolean;
+    install: { running: boolean; target?: string; startedAt?: number; finishedAt?: number; ok?: boolean; error?: string; log: string[] };
+    user?: string; signIn?: { userCode: string; verificationUri: string; expiresAt: number }; existing?: Array<{ tokenId: number; login: string; host?: string }>; message?: string;
+}
+export interface InlineSuggestionDef { id: string; text: string; start: number; end: number }
 
 // ---- API workspace (same shapes as src/api/model.ts)
 /** GET, POST… or any other method the API uses (PURGE, PROPFIND…), upper case. */
@@ -1035,7 +1044,7 @@ export const api = {
     queuePipeline: (pipelineId: number, branch: string, parameters: Record<string, string> = {}, adoProject?: string) => request<PipelineRun>('POST', `/api/ado/pipelines/${pipelineId}/run`, { branch, parameters, confirm: true, adoProject }),
     untrackedRunOutput: () => request<{ paths: string[] }>('GET', '/api/runs/untracked-output'),
     ignoreRunOutput: (paths: string[]) => request<{ added: string[] }>('POST', '/api/runs/ignore-output', { paths }),
-    warmUpLanguage: () => request<{ ok: boolean }>('POST', '/api/lang/warmup'),
+    warmUpLanguage: (path?: string) => request<{ ok: boolean }>('POST', '/api/lang/warmup', path ? { path } : {}),
     files: () => request<string[]>('GET', '/api/files'),
     readFile: (path: string) => request<FileData>('GET', '/api/file' + q({ path })),
     saveFile: (path: string, content: string, expectedHash: string | null) => request<{ hash: string }>('PUT', '/api/file', { path, content, expectedHash }),
@@ -1045,7 +1054,24 @@ export const api = {
     deletePath: (path: string) => request<{ recoveryDir: string }>('DELETE', '/api/file' + q({ path })),
     search: (query: string, o: { regex?: boolean; case?: boolean; word?: boolean; glob?: string }) => request<SearchHit[]>('GET', '/api/search' + q({ q: query, regex: o.regex, case: o.case, word: o.word, glob: o.glob })),
     diagnostics: (path: string, content: string) => request<{ diagnostics: Diag[] }>('POST', '/api/lang/diagnostics', { path, content }),
-    completions: (path: string, content: string, offset: number) => request<{ items: CompletionItem[] }>('POST', '/api/lang/completions', { path, content, offset }),
+    completions: (path: string, content: string, offset: number, signal?: AbortSignal) => request<{ items: CompletionItem[]; stale?: boolean }>('POST', '/api/lang/completions', { path, content, offset }, signal),
+    completionDetails: (path: string, content: string, offset: number, name: string, source?: string, data?: unknown, signal?: AbortSignal) => request<CompletionDetailsDef>('POST', '/api/lang/completion-details', { path, content, offset, name, source, data }, signal),
+    signatureHelp: (path: string, content: string, offset: number, trigger?: string, signal?: AbortSignal) => request<{ help: SignatureHelpDef | null }>('POST', '/api/lang/signature', { path, content, offset, trigger }, signal),
+    copilotStatus: (start?: boolean) => request<CopilotStatusDef>('GET', '/api/agents/inline' + (start ? '?start=1' : '')),
+    copilotSetEnabled: (enabled: boolean) => request<CopilotStatusDef>('POST', '/api/agents/inline/settings', { enabled }),
+    copilotInstall: (version?: string) => request<CopilotStatusDef>('POST', '/api/agents/inline/install', { version }),
+    copilotInstallCancel: () => request<CopilotStatusDef>('POST', '/api/agents/inline/install/cancel'),
+    copilotRemove: () => request<CopilotStatusDef>('DELETE', '/api/agents/inline/install'),
+    copilotRestart: () => request<CopilotStatusDef>('POST', '/api/agents/inline/restart'),
+    copilotCheck: () => request<CopilotStatusDef>('POST', '/api/agents/inline/check'),
+    copilotSignIn: () => request<CopilotStatusDef>('POST', '/api/agents/inline/signin'),
+    copilotSignInCancel: () => request<CopilotStatusDef>('DELETE', '/api/agents/inline/signin'),
+    copilotSignOut: () => request<CopilotStatusDef>('POST', '/api/agents/inline/signout'),
+    copilotUseExisting: (tokenId: number) => request<CopilotStatusDef>('POST', '/api/agents/inline/use-existing', { tokenId }),
+    copilotSuggest: (path: string, content: string, offset: number, o: { invoked?: boolean; tabSize?: number; insertSpaces?: boolean }, signal?: AbortSignal) => request<{ items: InlineSuggestionDef[]; skipped?: string }>('POST', '/api/agents/inline/suggest', { path, content, offset, ...o }, signal),
+    copilotShown: (id: string) => request<{ ok: boolean }>('POST', '/api/agents/inline/shown', { id }),
+    copilotAccepted: (id: string, acceptedLength?: number) => request<{ ok: boolean }>('POST', '/api/agents/inline/accepted', { id, acceptedLength }),
+    copilotClose: (path: string) => request<{ ok: boolean }>('POST', '/api/agents/inline/close', { path }),
     hover: (path: string, content: string, offset: number) => request<{ text?: string; doc?: string }>('POST', '/api/lang/hover', { path, content, offset }),
     definition: (path: string, content: string, offset: number) => request<{ locations: Loc[] }>('POST', '/api/lang/definition', { path, content, offset }),
     references: (path: string, content: string, offset: number) => request<{ locations: Loc[] }>('POST', '/api/lang/references', { path, content, offset }),

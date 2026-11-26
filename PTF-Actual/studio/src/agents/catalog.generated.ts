@@ -2360,7 +2360,8 @@ export const CALLS: CatalogCall[] = [
   "area": "lang",
   "method": "POST",
   "path": "/api/lang/warmup",
-  "args": "",
+  "args": "path?: string",
+  "body": "path ? { path } : {}",
   "result": "{ ok: boolean }"
  },
  {
@@ -2450,7 +2451,25 @@ export const CALLS: CatalogCall[] = [
   "path": "/api/lang/completions",
   "args": "path: string, content: string, offset: number",
   "body": "{ path, content, offset }",
-  "result": "{ items: CompletionItem[] }"
+  "result": "{ items: CompletionItem[]; stale?: boolean }"
+ },
+ {
+  "name": "completionDetails",
+  "area": "lang",
+  "method": "POST",
+  "path": "/api/lang/completion-details",
+  "args": "path: string, content: string, offset: number, name: string, source?: string, data?: unknown",
+  "body": "{ path, content, offset, name, source, data }",
+  "result": "CompletionDetailsDef"
+ },
+ {
+  "name": "signatureHelp",
+  "area": "lang",
+  "method": "POST",
+  "path": "/api/lang/signature",
+  "args": "path: string, content: string, offset: number, trigger?: string",
+  "body": "{ path, content, offset, trigger }",
+  "result": "{ help: SignatureHelpDef | null }"
  },
  {
   "name": "hover",
@@ -3181,7 +3200,12 @@ export const TYPES: Record<string, string> = {
  "StepRename": "export interface StepRename { step: { pattern: string; file: string; line: number }; pattern?: string; changes: Array<{ path: string; line: number; before: string; after: string }>; files: string[]; skipped: StepUsage[] }",
  "Loc": "export interface Loc { path: string; line: number; column: number; endLine: number; endColumn: number; text?: string }",
  "SearchHit": "export interface SearchHit { path: string; line: number; column: number; text: string }",
- "CompletionItem": "export interface CompletionItem { name: string; kind: string; sortText?: string; insertText?: string; detail?: string }",
+ "CompletionItem": "export interface CompletionItem { name: string; kind: string; sortText?: string; insertText?: string; detail?: string; isSnippet?: boolean; replace?: { start: number; length: number }; hasAction?: boolean; source?: string; data?: unknown; kindModifiers?: string }",
+ "CompletionDetailsDef": "export interface CompletionDetailsDef { detail?: string; doc?: string; snippet?: string; edits?: Array<{ start: number; length: number; newText: string }>; stale?: boolean }",
+ "SignatureHelpDef": "export interface SignatureHelpDef { signatures: Array<{ label: string; params: Array<[number, number]>; doc: string; paramDocs: string[] }>; active: number; param: number; start: number }",
+ "CopilotStateDef": "export type CopilotStateDef = 'off' | 'not-installed' | 'installing' | 'stopped' | 'starting' | 'sign-in' | 'ready' | 'working' | 'error';",
+ "CopilotStatusDef": "export interface CopilotStatusDef {\n    state: CopilotStateDef; reason?: string; enabled: boolean; installed: boolean; version: string | null; tested: string; folder: string; custom: boolean;\n    install: { running: boolean; target?: string; startedAt?: number; finishedAt?: number; ok?: boolean; error?: string; log: string[] };\n    user?: string; signIn?: { userCode: string; verificationUri: string; expiresAt: number }; existing?: Array<{ tokenId: number; login: string; host?: string }>; message?: string;\n}",
+ "InlineSuggestionDef": "export interface InlineSuggestionDef { id: string; text: string; start: number; end: number }",
  "HttpMethod": "export type HttpMethod = string;",
  "ApiKV": "export interface ApiKV { key: string; value: string; enabled?: boolean; description?: string; secret?: boolean }",
  "ApiBodyMode": "export type ApiBodyMode = 'none' | 'json' | 'text' | 'xml' | 'form' | 'multipart' | 'file' | 'graphql';",

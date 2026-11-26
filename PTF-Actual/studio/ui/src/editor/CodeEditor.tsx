@@ -4,7 +4,8 @@
  * A transparent <textarea> sits exactly on top of a highlighted rendering of the same text, so the
  * browser provides typing, selection, IME, accessibility, clipboard and native undo/redo; this
  * component adds what a code editor needs:
- *   highlighting · line numbers · problem underlines · completion (Ctrl+Space, ".") · hover info ·
+ *   highlighting · line numbers · problem underlines · completion (Ctrl+Space, ".": a method inserts its call, with
+ *   placeholders for its parameters to Tab through) · parameter hints · Copilot inline suggestions (ghost text) · hover info ·
  *   go to definition (F12 / Ctrl+click) · usages (Shift+F12) · rename a step (F2) · find & replace (Ctrl+F / Ctrl+H) · go to line (Ctrl+G) ·
  *   format (Shift+Alt+F) · toggle comment (Ctrl+/) · indent/outdent (Tab / Shift+Tab) ·
  *   auto-indent · bracket and quote pairing · only visible lines are drawn (large files stay fast).
@@ -16,11 +17,21 @@ import React from 'react';
 import { Button, Checkbox, Input, Space, Tooltip } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, CloseOutlined } from '@ant-design/icons';
 import { commentPrefix, Highlighter, Lang } from './highlight';
+import { completionText, editBetween, ghostOf, inlineFits, InlineSuggestion, needsDetails, nextWordLength, parseSnippet, snippetAfterEdit, SnippetMode } from './assist';
 import { editorMenu, MenuEntry } from '../contextMenus';
 import { useContextMenu } from '../components/ContextMenu';
 
 export interface EditorDiagnostic { line: number; column: number; endLine: number; endColumn: number; message: string; severity: 'error' | 'warning' | 'info' | string; source?: string }
-export interface CompletionItem { name: string; kind: string; sortText?: string; insertText?: string; detail?: string }
+export interface CompletionItem { name: string; kind: string; sortText?: string; insertText?: string; detail?: string; isSnippet?: boolean; replace?: { start: number; length: number }; hasAction?: boolean; source?: string; data?: unknown; kindModifiers?: string }
+export interface CompletionDetails { detail?: string; doc?: string; snippet?: string; edits?: Array<{ start: number; length: number; newText: string }> }
+export interface SignatureHelp { signatures: Array<{ label: string; params: Array<[number, number]>; doc: string; paramDocs: string[] }>; active: number; param: number; start: number }
+/** Where ghost text comes from (Copilot): asked after a pause in typing; told what was shown and taken. */
+export interface InlineProvider {
+    suggest: (text: string, offset: number, o: { invoked: boolean; signal: AbortSignal; tabSize: number; insertSpaces: boolean }) => Promise<InlineSuggestion[]>;
+    shown: (id: string) => void;
+    /** acceptedLength: part of it (from the suggestion's start to the end of what was taken). */
+    accepted: (id: string, acceptedLength?: number) => void;
+}
 
 export interface CodeEditorProps {
     value: string;
@@ -28,7 +39,15 @@ export interface CodeEditorProps {
     onChange: (text: string) => void;
     onSave?: () => void;
     diagnostics?: EditorDiagnostic[];
-    completions?: (text: string, offset: number) => Promise<CompletionItem[]>;
+    completions?: (text: string, offset: number, signal?: AbortSignal) => Promise<CompletionItem[]>;
+    /** The signature and documentation of one completion, its call snippet and edits that go with it (asked for the highlighted one). */
+    completionDetails?: (text: string, offset: number, item: CompletionItem, signal?: AbortSignal) => Promise<CompletionDetails | null>;
+    /** Parameter hints while typing a call's arguments (after "(" and ","). */
+    signatureHelp?: (text: string, offset: number, trigger?: string, signal?: AbortSignal) => Promise<SignatureHelp | null>;
+    /** Copilot inline suggestions (ghost text). */
+    inline?: InlineProvider | null;
+    /** Extra items at the end of the status bar (e.g. Copilot's status). */
+    statusItems?: React.ReactNode;
     hover?: (text: string, offset: number) => Promise<{ text?: string; doc?: string } | null>;
     definition?: (text: string, offset: number) => void;
     /** Format request; apply the result with the handle's applyEdit so it can be undone. */
@@ -137,6 +156,20 @@ function clustersOf(line: string): Array<{ segment: string; index: number }> {
     return out;
 }
 
+/** A line's tokens cut at a character column: [before, after]. */
+function splitTokens<T extends { s: string }>(toks: T[], col: number): [T[], T[]] {
+    const before: T[] = [], after: T[] = [];
+    let n = 0;
+    for (const t of toks) {
+        const end = n + t.s.length;
+        if (end <= col) before.push(t);
+        else if (n >= col) after.push(t);
+        else { before.push({ ...t, s: t.s.slice(0, col - n) }); after.push({ ...t, s: t.s.slice(col - n) }); }
+        n = end;
+    }
+    return [before, after];
+}
+
 const PAIRS: Record<string, string> = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'", '`': '`' };
 
 export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(function CodeEditor(props, ref) {
@@ -145,6 +178,7 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
     const mainRef = React.useRef<HTMLDivElement>(null);
     const compRef = React.useRef<HTMLDivElement>(null);
     const tipRef = React.useRef<HTMLDivElement>(null);
+    const sigRef = React.useRef<HTMLDivElement>(null);
     const ctxRef = React.useRef<CanvasRenderingContext2D | null>(null);
     const widths = React.useRef(new Map<string, number>());
     const savedScroll = React.useRef({ top: 0, left: 0 });
@@ -152,7 +186,27 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
     const [scroll, setScroll] = React.useState({ top: 0, left: 0, height: 600 });
     const [cw, setCw] = React.useState(7.8);
     const [caret, setCaret] = React.useState(0);
-    const [comp, setComp] = React.useState<{ items: CompletionItem[]; index: number; from: number; line: number; col: number } | null>(null);
+    const [comp, setComp] = React.useState<{ items: CompletionItem[]; index: number; from: number; line: number; col: number; reqOff: number; details: Map<string, CompletionDetails | null> } | null>(null);
+    const compAbort = React.useRef<AbortController | null>(null);
+    const compOpen = React.useRef(false);
+    compOpen.current = !!comp;
+    const [, bumpDetails] = React.useReducer((x: number) => x + 1, 0);
+    // Snippet mode (placeholders to Tab through), parameter hints, Copilot's ghost text.
+    const [snip, setSnipState] = React.useState<SnippetMode | null>(null);
+    const snipRef = React.useRef<SnippetMode | null>(null);
+    const setSnip = (m: SnippetMode | null) => { snipRef.current = m; setSnipState(m); };
+    const [sig, setSig] = React.useState<SignatureHelp | null>(null);
+    const sigAbort = React.useRef<AbortController | null>(null);
+    const sigTimer = React.useRef<number>();
+    const [ghost, setGhostState] = React.useState<{ items: InlineSuggestion[]; index: number; invoked: boolean } | null>(null);
+    const ghostRef = React.useRef<typeof ghost>(null);
+    const setGhost = (g: typeof ghost) => { ghostRef.current = g; setGhostState(g); };
+    const ghostTimer = React.useRef<number>();
+    const ghostAbort = React.useRef<AbortController | null>(null);
+    const ghostShown = React.useRef(new Set<string>());
+    /** The text and caret after the last edit (a caret move without an edit dismisses the ghost text). */
+    const lastText = React.useRef(value);
+    const lastEditCaret = React.useRef(-1);
     const [tip, setTip] = React.useState<{ x: number; y: number; text: string; doc?: string } | null>(null);
     const [find, setFind] = React.useState<{ open: boolean; replace: boolean; q: string; r: string; cs: boolean; re: boolean; word: boolean; idx: number }>({ open: false, replace: false, q: '', r: '', cs: false, re: false, word: false, idx: 0 });
     // Opening Find (Ctrl+F/H) moves the focus into its box in the same render, so keys typed right
@@ -170,6 +224,8 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
     React.useEffect(() => () => window.clearTimeout(noteTimer.current), []);
 
     const lines = React.useMemo(() => value.split('\n'), [value]);
+    // A text change that did not come from typing here (another tab saved it, a reload): the next edit compares with it.
+    React.useEffect(() => { if (!ta.current || ta.current.value === value) lastText.current = value; }, [value]);
     // The indentation step of this file (2 or 4 spaces), for Tab, Enter and the status bar.
     const fileIndent = React.useMemo(() => indentOf(lines), [lines]);
     const useTabs = fileIndent === 0;
@@ -341,24 +397,34 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
     };
 
     // ---------------------------------------------------------------- completion
-    const wordStart = (offset: number) => {
+    const wordStartIn = (text: string, offset: number) => {
         if (lang === 'feature') {
-            const { line, col } = posOf(starts, offset);
-            const m = /^(\s*(?:Given|When|Then|And|But|\*)\s+)/.exec(lines[line] ?? '');
-            return m && col >= m[1].length ? starts[line] + m[1].length : offset;
+            const ls = text.lastIndexOf('\n', offset - 1) + 1;
+            const m = /^(\s*(?:Given|When|Then|And|But|\*)\s+)/.exec(text.slice(ls, offset));
+            return m ? ls + m[1].length : offset;
         }
         let i = offset;
-        while (i > 0 && /[\w$]/.test(value[i - 1])) i--;
+        while (i > 0 && /[\w$]/.test(text[i - 1])) i--;
         return i;
     };
 
+    /** Ask for completions at the caret: at once (no wait), an older request still on its way is dropped. */
     const openCompletion = async () => {
         if (!props.completions || !ta.current) return;
-        const off = ta.current.selectionStart;
-        const items = await props.completions(ta.current.value, off).catch(() => []);
+        compAbort.current?.abort();
+        const ac = new AbortController();
+        compAbort.current = ac;
+        dismissGhost();
+        const el = ta.current;
+        const off = el.selectionStart, text = el.value;
+        const items = await props.completions(text, off, ac.signal).catch(() => [] as CompletionItem[]);
+        const now = ta.current;
+        if (ac.signal.aborted || !now) return;
+        // Still where it was asked (the person may have typed on: the list filters by what they typed).
+        if (now.value.slice(0, off) !== text.slice(0, off) || now.selectionStart < off) return;
         if (!items.length) { setComp(null); return; }
-        const p = posOf(starts, off);
-        setComp({ items, index: 0, from: wordStart(off), line: p.line, col: p.col });
+        const p = posOf(lineStarts(text), off);
+        setComp({ items, index: 0, from: wordStartIn(text, off), line: p.line, col: p.col, reqOff: off, details: new Map() });
     };
 
     const filtered = React.useMemo(() => {
@@ -369,16 +435,189 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
             const n = it.name.toLowerCase();
             return lang === 'feature' ? words.every((w) => n.includes(w.replace(/"[^"]*"?/g, ''))) : n.startsWith(typed) || (typed.length > 1 && n.includes(typed));
         });
-        return list.sort((a, b) => (a.sortText ?? '').localeCompare(b.sortText ?? '') || a.name.localeCompare(b.name)).slice(0, 200);
+        // Names that start with what was typed first; then the language service's order.
+        return list.sort((a, b) => (typed && lang !== 'feature' ? Number(!a.name.toLowerCase().startsWith(typed)) - Number(!b.name.toLowerCase().startsWith(typed)) : 0) || (a.sortText ?? '').localeCompare(b.sortText ?? '') || a.name.localeCompare(b.name)).slice(0, 200);
     }, [comp, value, caret, lang]);
+    const selItem = comp && filtered.length ? filtered[Math.min(comp.index, filtered.length - 1)] : null;
+    const detailKey = (it: CompletionItem) => `${it.name}\0${it.source ?? ''}`;
 
-    const accept = (it: CompletionItem) => {
+    // The highlighted completion's signature and documentation (asked for that one only, shortly after it is highlighted).
+    React.useEffect(() => {
+        if (!comp || !selItem || !props.completionDetails || lang !== 'ts' || selItem.insertText !== undefined && !selItem.hasAction) return;
+        const k = detailKey(selItem);
+        if (comp.details.has(k)) return;
+        const ac = new AbortController();
+        const t = window.setTimeout(() => {
+            const el = ta.current; if (!el) return;
+            props.completionDetails!(el.value, comp.reqOff, selItem, ac.signal).then((d) => { if (!ac.signal.aborted) { comp.details.set(k, d); bumpDetails(); } }, () => undefined);
+        }, 50);
+        return () => { window.clearTimeout(t); ac.abort(); };
+    }, [comp, selItem?.name, selItem?.source]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    /** Select a snippet's tab stop (the last one, $0, ends snippet mode). */
+    const gotoStop = (m: SnippetMode, i: number) => {
+        const el = ta.current; if (!el) return;
+        const st = m.stops[i]; if (!st) { setSnip(null); return; }
+        el.setSelectionRange(st.start, st.end);
+        setCaret(st.start);
+        setSnip(st.index === 0 || i >= m.stops.length - 1 ? null : { ...m, cur: i });
+    };
+
+    const accept = async (it: CompletionItem) => {
         if (!comp || !ta.current) return;
-        const text = it.insertText ?? it.name;
-        const end = lang === 'feature' ? (starts[comp.line + 1] !== undefined ? starts[comp.line + 1] - 1 : value.length) : caret;
-        const q = text.indexOf('""');
-        insert(text, comp.from, end, q >= 0 ? comp.from + q + 1 : undefined);
+        const el = ta.current;
+        const c = comp;
         setComp(null);
+        if (lang === 'feature') {
+            const text = it.insertText ?? it.name;
+            const end = starts[c.line + 1] !== undefined ? starts[c.line + 1] - 1 : value.length;
+            const q = text.indexOf('""');
+            insert(text, c.from, end, q >= 0 ? c.from + q + 1 : undefined);
+            return;
+        }
+        let details = c.details.get(detailKey(it));
+        // A method's call snippet comes from its signature: asked for now if it was not yet (it takes a few ms).
+        if (details === undefined && props.completionDetails && (needsDetails(it) || it.hasAction)) {
+            const textAt = el.value;
+            details = await Promise.race([props.completionDetails(textAt, c.reqOff, it).catch(() => null), new Promise<undefined>((r) => setTimeout(() => r(undefined), 600))]);
+            if (!ta.current || ta.current.value !== textAt) return;
+        }
+        const caretNow = el.selectionStart;
+        const from = it.replace ? it.replace.start : c.from;
+        const end = it.replace ? Math.max(caretNow, it.replace.start + it.replace.length + Math.max(0, caretNow - c.reqOff)) : caretNow;
+        const text = el.value;
+        const ls = text.lastIndexOf('\n', from - 1) + 1;
+        const plan = completionText(it, details, { nextChar: text[end] ?? '', lineBefore: text.slice(ls, from) });
+        const parsed = plan.snippet ? parseSnippet(plan.text) : { text: plan.text, stops: [{ index: 0, start: plan.text.length, end: plan.text.length }] };
+        const edits = it.hasAction ? (details?.edits ?? []).filter((e) => e.start + e.length <= from || e.start >= end) : [];
+        let base = from;
+        if (edits.length) {
+            // The import (or other edit) and the completion as one change: one Ctrl+Z undoes both.
+            const all = [...edits.map((e) => ({ start: e.start, end: e.start + e.length, text: e.newText })), { start: from, end, text: parsed.text }].sort((x, y) => y.start - x.start);
+            let next = text;
+            for (const e of all) next = next.slice(0, e.start) + e.text + next.slice(e.end);
+            base = from + edits.filter((e) => e.start < from).reduce((n, e) => n + e.newText.length - e.length, 0);
+            replaceText(next);
+        } else insert(parsed.text, from, end);
+        const stops = parsed.stops.map((x) => ({ ...x, start: x.start + base, end: x.end + base }));
+        const m: SnippetMode = { stops, cur: 0, start: base, end: base + parsed.text.length };
+        if (stops.length > 1) gotoStop(m, 0);
+        else { el.setSelectionRange(stops[0].start, stops[0].end); setCaret(stops[0].start); setSnip(null); }
+        // A call was inserted: its parameter hints.
+        if (plan.snippet && it.insertText === undefined && parsed.text.includes('(')) requestSig('(');
+    };
+
+    // ---------------------------------------------------------------- parameter hints
+    const requestSig = (trigger?: string) => {
+        if (!props.signatureHelp || lang !== 'ts') return;
+        window.clearTimeout(sigTimer.current);
+        sigAbort.current?.abort();
+        const ac = new AbortController();
+        sigAbort.current = ac;
+        // After the editor applied the change (the caret is where the hint is for).
+        window.setTimeout(() => {
+            const el = ta.current; if (!el || ac.signal.aborted) return;
+            const text = el.value, off = el.selectionStart;
+            props.signatureHelp!(text, off, trigger, ac.signal).then((h) => {
+                if (ac.signal.aborted || !ta.current || ta.current.value !== text) return;
+                setSig(h && h.signatures.length ? h : null);
+            }, () => undefined);
+        }, 0);
+    };
+    // While the hint shows, it follows the caret (the active parameter); before its "(" it closes.
+    React.useEffect(() => {
+        if (!sig) return;
+        if (caret < sig.start) { setSig(null); return; }
+        window.clearTimeout(sigTimer.current);
+        sigTimer.current = window.setTimeout(() => requestSig(), 120);
+        return () => window.clearTimeout(sigTimer.current);
+    }, [caret, value]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    // ---------------------------------------------------------------- Copilot inline suggestions (ghost text)
+    const dismissGhost = () => { window.clearTimeout(ghostTimer.current); ghostAbort.current?.abort(); if (ghostRef.current) setGhost(null); };
+    const requestInline = async (invoked: boolean) => {
+        const el = ta.current, provider = props.inline;
+        if (!el || !provider || readOnly) return;
+        // Never while the completion list is open (it wins Tab) or while Tabbing through a snippet.
+        if (compOpen.current || snipRef.current || el.selectionStart !== el.selectionEnd) return;
+        const off = el.selectionStart, text = el.value;
+        const le = text.indexOf('\n', off);
+        if (!invoked && !inlineFits(text.slice(off, le < 0 ? text.length : le))) return;
+        ghostAbort.current?.abort();
+        const ac = new AbortController();
+        ghostAbort.current = ac;
+        const items = await provider.suggest(text, off, { invoked, signal: ac.signal, tabSize: step, insertSpaces: !useTabs }).catch(() => [] as InlineSuggestion[]);
+        const now = ta.current;
+        if (ac.signal.aborted || !now || now.value !== text || now.selectionStart !== off || now.selectionEnd !== off || compOpen.current || snipRef.current) return;
+        const fit = items.filter((x) => ghostOf(x, text, off));
+        if (!fit.length) { if (!invoked) setGhost(null); return; }
+        const cur = ghostRef.current?.items[ghostRef.current.index];
+        const idx = invoked && cur ? Math.max(0, fit.findIndex((x) => x.text !== cur.text)) : 0;
+        lastEditCaret.current = off;
+        setGhost({ items: fit, index: idx, invoked });
+    };
+    const scheduleInline = () => {
+        window.clearTimeout(ghostTimer.current);
+        ghostAbort.current?.abort();
+        if (!props.inline || readOnly) return;
+        ghostTimer.current = window.setTimeout(() => { void requestInline(false); }, 350);
+    };
+    React.useEffect(() => () => { window.clearTimeout(ghostTimer.current); ghostAbort.current?.abort(); compAbort.current?.abort(); sigAbort.current?.abort(); }, []);
+    // No provider any more (Copilot turned off, signed out): no ghost text.
+    React.useEffect(() => { if (!props.inline) dismissGhost(); }, [props.inline]); // eslint-disable-line react-hooks/exhaustive-deps
+    const ghostItem = ghost ? ghost.items[ghost.index] : null;
+    const ghostView = ghostItem && !(comp && filtered.length) && !snip && caret === lastEditCaret.current && ta.current?.selectionStart === ta.current?.selectionEnd ? ghostOf(ghostItem, value, caret) : null;
+    // A caret move (click, arrows) without an edit, or text that no longer fits: the ghost text goes.
+    React.useEffect(() => { if (ghost && !ghostView) setGhost(null); }); // eslint-disable-line react-hooks/exhaustive-deps
+    React.useEffect(() => {
+        if (ghostView && ghostItem && props.inline && !ghostShown.current.has(ghostItem.id)) { ghostShown.current.add(ghostItem.id); props.inline.shown(ghostItem.id); }
+    }, [ghostItem?.id, !!ghostView]); // eslint-disable-line react-hooks/exhaustive-deps
+    const acceptGhost = (word: boolean) => {
+        const el = ta.current;
+        if (!el || !ghostItem || !ghostView || !props.inline) return false;
+        const at = el.selectionStart;
+        if (!word) {
+            insert(ghostItem.text, ghostItem.start, ghostView.replaceEnd, ghostItem.start + ghostItem.text.length);
+            props.inline.accepted(ghostItem.id);
+            setGhost(null);
+            return true;
+        }
+        const n = nextWordLength(ghostView.ghost);
+        const piece = ghostView.ghost.slice(0, n);
+        if (n >= ghostView.ghost.length) {
+            insert(ghostItem.text, ghostItem.start, ghostView.replaceEnd, ghostItem.start + ghostItem.text.length);
+            props.inline.accepted(ghostItem.id);
+            setGhost(null);
+            return true;
+        }
+        insert(piece, at, at);
+        lastEditCaret.current = at + n;
+        props.inline.accepted(ghostItem.id, at + n - ghostItem.start);
+        return true;
+    };
+    const cycleGhost = (dir: 1 | -1) => {
+        const g = ghostRef.current;
+        if (g && g.items.length > 1) { setGhost({ ...g, index: (g.index + dir + g.items.length) % g.items.length }); return; }
+        void requestInline(true);
+    };
+
+    /** Every edit (typed, pasted, inserted by the editor): snippet stops follow it; "." asks for completions, "(" and "," for parameter hints; a pause asks Copilot. */
+    const onEdit = (el: HTMLTextAreaElement, ev: Event) => {
+        const prev = lastText.current, next = el.value;
+        lastText.current = next;
+        const d = editBetween(prev, next);
+        if (d && snipRef.current) setSnip(snippetAfterEdit(snipRef.current, d.at, d.removed, d.inserted));
+        lastEditCaret.current = el.selectionStart;
+        const data = (ev as InputEvent).data ?? null;
+        const typed = (ev as InputEvent).inputType === 'insertText';
+        if (lang === 'ts' && typed && data === '.' && !readOnly) void openCompletion();
+        if (lang === 'ts' && typed && (data === '(' || data === '()' || data === ',')) requestSig(data[0]);
+        // Typing what the ghost text shows keeps it; anything else asks again after a pause.
+        const g = ghostRef.current;
+        if (g && ghostOf(g.items[g.index], next, el.selectionStart)) return;
+        if (g) setGhost(null);
+        if (typed || (ev as InputEvent).inputType === 'insertLineBreak' || (ev as InputEvent).inputType?.startsWith('delete')) scheduleInline();
+        else { window.clearTimeout(ghostTimer.current); ghostAbort.current?.abort(); }
     };
 
     // ---------------------------------------------------------------- find
@@ -546,12 +785,36 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
         // else (Option+F on macOS gives "ƒ"/"Ï", a Cyrillic layout gives "а", …).
         const letter = /^[a-z]$/i.test(e.key) ? e.key.toLowerCase() : (/^Key([A-Z])$/.exec(e.code)?.[1].toLowerCase() ?? '');
         setTip(null);
+        // Ghost text: Tab takes it, Ctrl+→ its next word (the completion list, when open, wins Tab).
+        if (ghostView && !readOnly) {
+            if (e.key === 'Tab' && !e.shiftKey && !mod && !e.altKey) { e.preventDefault(); acceptGhost(false); return; }
+            if (e.key === 'ArrowRight' && mod && !e.shiftKey && !e.altKey) { e.preventDefault(); acceptGhost(true); return; }
+        }
+        // Alt+] / Alt+[: the next / previous suggestion (asks Copilot when none is shown).
+        if (props.inline && e.altKey && !mod && !e.shiftKey && (e.code === 'BracketRight' || e.code === 'BracketLeft' || e.key === ']' || e.key === '[') && !readOnly) {
+            e.preventDefault(); cycleGhost(e.code === 'BracketLeft' || e.key === '[' ? -1 : 1); return;
+        }
         if (comp && filtered.length) {
             if (e.key === 'ArrowDown') { e.preventDefault(); setComp({ ...comp, index: (comp.index + 1) % filtered.length }); return; }
             if (e.key === 'ArrowUp') { e.preventDefault(); setComp({ ...comp, index: (comp.index - 1 + filtered.length) % filtered.length }); return; }
-            if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); accept(filtered[Math.min(comp.index, filtered.length - 1)]); return; }
+            if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); void accept(filtered[Math.min(comp.index, filtered.length - 1)]); return; }
         }
-        if (e.key === 'Escape') { setComp(null); setTip(null); if (find.open) setFind({ ...find, open: false }); setGotoOpen(false); return; }
+        // A snippet's placeholders: Tab / Shift+Tab move between them.
+        if (snipRef.current && !(comp && filtered.length) && e.key === 'Tab' && !mod && !e.altKey) {
+            e.preventDefault();
+            const m = snipRef.current;
+            gotoStop(m, e.shiftKey ? Math.max(0, m.cur - 1) : m.cur + 1);
+            return;
+        }
+        // Esc closes one thing at a time: the list, the ghost text, the parameter hint, snippet mode, then the rest.
+        if (e.key === 'Escape') {
+            if (comp) { setComp(null); compAbort.current?.abort(); if (filtered.length) return; }
+            if (ghostView) { dismissGhost(); return; }
+            if (sig) { setSig(null); sigAbort.current?.abort(); return; }
+            if (snipRef.current) { setSnip(null); return; }
+            setTip(null); if (find.open) setFind({ ...find, open: false }); setGotoOpen(false); return;
+        }
+        if (mod && e.shiftKey && (e.key === ' ' || e.code === 'Space')) { e.preventDefault(); requestSig(); return; }
         if (mod && !e.altKey && letter === 's') { e.preventDefault(); props.onSave?.(); return; }
         if (mod && (e.key === ' ' || e.code === 'Space')) { e.preventDefault(); void openCompletion(); return; }
         if (mod && !e.altKey && !e.shiftKey && (letter === 'f' || letter === 'h')) {
@@ -579,7 +842,10 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
             const p = el.selectionStart, next = el.value[p];
             // Type over an auto-inserted closer.
             if ((e.key === ')' || e.key === ']' || e.key === '}' || e.key === '"' || e.key === "'" || e.key === '`') && next === e.key && el.selectionStart === el.selectionEnd) {
-                e.preventDefault(); el.setSelectionRange(p + 1, p + 1); setCaret(p + 1); return;
+                e.preventDefault(); el.setSelectionRange(p + 1, p + 1); setCaret(p + 1);
+                // Typing past the call's ")" ends snippet mode.
+                if (snipRef.current && p + 1 >= snipRef.current.end) setSnip(null);
+                return;
             }
             const close = PAIRS[e.key];
             if (close && el.selectionStart === el.selectionEnd) {
@@ -588,6 +854,11 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                 if (!quote || ((!next || /[\s)\]},;:]/.test(next)) && !/[\w\\]/.test(prev))) {
                     e.preventDefault(); insert(e.key + close, p, p, p + 1); return;
                 }
+            }
+            // A snippet's placeholder is a hint: a bracket or quote typed over it replaces it (a pair, caret inside).
+            const stop = snipRef.current?.stops[snipRef.current.cur];
+            if (close && stop && el.selectionStart === stop.start && el.selectionEnd === stop.end && stop.end > stop.start) {
+                e.preventDefault(); insert(e.key + close, stop.start, stop.end, stop.start + 1); return;
             }
             if (close && el.selectionStart !== el.selectionEnd) {
                 e.preventDefault();
@@ -601,8 +872,7 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
     const onKeyUp = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         setCaret(e.currentTarget.selectionStart);
         if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-        if (e.key === '.' && lang === 'ts' && !e.ctrlKey) void openCompletion();
-        else if (lang === 'feature' && e.key === ' ' && /^\s*(Given|When|Then|And|But|\*) $/.test((lines[posOf(starts, e.currentTarget.selectionStart).line] ?? '').slice(0, posOf(starts, e.currentTarget.selectionStart).col))) void openCompletion();
+        if (lang === 'feature' && e.key === ' ' && /^\s*(Given|When|Then|And|But|\*) $/.test((lines[posOf(starts, e.currentTarget.selectionStart).line] ?? '').slice(0, posOf(starts, e.currentTarget.selectionStart).col))) void openCompletion();
         else if (comp && (e.key === 'Backspace' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.currentTarget.selectionStart < comp.from) setComp(null);
     };
 
@@ -667,6 +937,18 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
         box.style.top = `${top}px`;
         box.style.left = `${Math.max(0, Math.min(x, W - w - 4))}px`;
     });
+    // Parameter hint: above the caret's line (below it on the first lines), at its "(".
+    React.useLayoutEffect(() => {
+        const box = sigRef.current, main = mainRef.current;
+        if (!box || !main || !sig) return;
+        const lineTop = PAD_T + caretPos.line * LH - scroll.top;
+        const h = box.offsetHeight, w = box.offsetWidth, W = main.clientWidth;
+        const top = lineTop - h - 2 >= 0 ? lineTop - h - 2 : lineTop + LH + 2 + (comp ? 0 : 0);
+        const p = posOf(starts, Math.min(sig.start, value.length));
+        const x = PAD_L + xAt(lines[p.line] ?? '', p.col) - scroll.left - 8;
+        box.style.top = `${top}px`;
+        box.style.left = `${Math.max(0, Math.min(x, W - w - 4))}px`;
+    });
     // Hover tooltip: next to the mouse, flipped and clamped so it stays on screen.
     React.useLayoutEffect(() => {
         const box = tipRef.current; if (!box || !tip) return;
@@ -708,11 +990,39 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                         const x0 = xAt(l, p.col);
                         return <div key={'m' + i} className={`ed-match${ta.current && s === ta.current.selectionStart ? ' cur' : ''}`} style={{ top: PAD_T + p.line * LH, left: PAD_L + x0, width: Math.max(cw, xAt(l, ep) - x0), height: LH }} />;
                     })}
-                    {Array.from({ length: last - first }, (_, k) => first + k).map((l) => (
-                        <div key={l} className="ed-line" style={{ top: PAD_T + l * LH, left: PAD_L, height: LH, lineHeight: `${LH}px` }}>
-                            {(tokens[l] ?? []).map((t, i) => <span key={i} className={`tk-${t.t}`}>{t.s}</span>)}
-                        </div>
-                    ))}
+                    {snip && snip.stops.filter((x) => x.index !== 0).map((x, i) => {
+                        const p = posOf(starts, x.start);
+                        const l = lines[p.line] ?? '';
+                        const x0 = xAt(l, p.col), x1 = xAt(l, Math.min(l.length, p.col + (x.end - x.start)));
+                        return <div key={'sn' + i} className={`ed-snip${snip.stops[snip.cur] === x ? ' cur' : ''}`} style={{ top: PAD_T + p.line * LH, left: PAD_L + x0 - 1, width: Math.max(2, x1 - x0 + 2), height: LH }} />;
+                    })}
+                    {Array.from({ length: last - first }, (_, k) => first + k).map((l) => {
+                        const toks = tokens[l] ?? [];
+                        const style = { top: PAD_T + l * LH, left: PAD_L, height: LH, lineHeight: `${LH}px` };
+                        if (!ghostView || l !== caretPos.line) return <div key={l} className="ed-line" style={style}>{toks.map((t, i) => <span key={i} className={`tk-${t.t}`}>{t.s}</span>)}</div>;
+                        // The caret's line with Copilot's suggestion after the caret (the rest of the line after it).
+                        const [before, after] = splitTokens(toks, caretPos.col);
+                        const gl = ghostView.ghost.split('\n');
+                        const rest = after.map((t, i) => <span key={'a' + i} className={`tk-${t.t}`}>{t.s}</span>);
+                        return (
+                            <React.Fragment key={l}>
+                                <div className="ed-line" style={style}>
+                                    {before.map((t, i) => <span key={i} className={`tk-${t.t}`}>{t.s}</span>)}
+                                    <span className="ed-ghost" data-testid="ghost-text">{gl[0]}</span>
+                                    {gl.length === 1 && rest}
+                                </div>
+                                {gl.length > 1 && (
+                                    <div className="ed-ghost-block" style={{ top: PAD_T + (l + 1) * LH, height: (gl.length - 1) * LH }}>
+                                        {gl.slice(1).map((g, i) => (
+                                            <div key={i} className="ed-line" style={{ top: i * LH, left: PAD_L, height: LH, lineHeight: `${LH}px` }}>
+                                                <span className="ed-ghost">{g}</span>{i === gl.length - 2 && rest}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </React.Fragment>
+                        );
+                    })}
                     {diagnostics.filter((d) => d.line - 1 < last && d.endLine - 1 >= first).flatMap((d, i) => {
                         const segs = [];
                         for (let l = Math.max(d.line - 1, first); l <= Math.min(d.endLine - 1, last - 1); l++) {
@@ -727,10 +1037,15 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                 </div>
                 <textarea ref={ta} className="ed-ta" value={value} wrap="off" spellCheck={false} autoCapitalize="off" autoComplete="off" autoCorrect="off" readOnly={readOnly}
                     aria-label="Code editor" aria-multiline="true"
-                    onChange={(e) => { onChange(e.target.value); setCaret(e.target.selectionStart); }}
+                    onChange={(e) => { onEdit(e.target, e.nativeEvent); onChange(e.target.value); setCaret(e.target.selectionStart); }}
                     onScroll={(e) => { const el = e.currentTarget; if (!el.clientHeight) return; savedScroll.current = { top: el.scrollTop, left: el.scrollLeft }; setScroll({ top: el.scrollTop, left: el.scrollLeft, height: el.clientHeight }); setComp(null); setTip(null); }}
                     onKeyDown={onKeyDown} onKeyUp={onKeyUp} onClick={(e) => { setCaret(e.currentTarget.selectionStart); setComp(null); }}
-                    onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+                    onSelect={(e) => {
+                        const el = e.currentTarget, m = snipRef.current;
+                        setCaret(el.selectionStart);
+                        // The caret left the inserted call: snippet mode ends.
+                        if (m && (el.selectionStart < m.start || el.selectionEnd > m.end)) setSnip(null);
+                    }}
                     onMouseMove={onMouseMove} onMouseDown={onMouseDown} onContextMenu={onContextMenu} />
                 {menu.element}
                 {comp && filtered.length > 0 && (
@@ -743,8 +1058,29 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                                 {it.detail && <span className="ed-cd">{it.detail}</span>}
                             </div>
                         ))}
+                        {(() => {
+                            const d = selItem ? comp.details.get(detailKey(selItem)) : null;
+                            return d && (d.detail || d.doc) ? (
+                                <div className="ed-cdetail" aria-live="polite">
+                                    {d.detail && <div className="ed-cdetail-sig">{d.detail}</div>}
+                                    {d.doc && <div className="ed-cdetail-doc">{d.doc}</div>}
+                                </div>
+                            ) : null;
+                        })()}
                     </div>
                 )}
+                {sig && (() => {
+                    const sg = sig.signatures[Math.min(sig.active, sig.signatures.length - 1)];
+                    const pi = sg.params.length ? Math.min(sig.param, sg.params.length - 1) : -1;
+                    const [ps, pe] = pi >= 0 ? sg.params[pi] : [0, 0];
+                    return (
+                        <div className="ed-sig" role="tooltip" ref={sigRef} data-testid="signature-help">
+                            {sig.signatures.length > 1 && <span className="ed-sig-n">{Math.min(sig.active, sig.signatures.length - 1) + 1}/{sig.signatures.length}</span>}
+                            <span className="ed-sig-label">{sg.label.slice(0, ps)}<b>{sg.label.slice(ps, pe)}</b>{sg.label.slice(pe)}</span>
+                            {pi >= 0 && sg.paramDocs[pi] && <div className="ed-sig-doc">{sg.paramDocs[pi]}</div>}
+                        </div>
+                    );
+                })()}
                 {find.open && (
                     <div className="ed-find">
                         <Space direction="vertical" size={4}>
@@ -803,6 +1139,7 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
             <div className="ed-status">
                 Ln {caretPos.line + 1}, Col {caretPos.col + 1} · {lang === 'ts' ? 'TypeScript/JavaScript' : lang === 'feature' ? 'Gherkin' : lang.toUpperCase()} · {props.eol === '\r\n' ? 'CRLF' : 'LF'} · {useTabs ? 'Tabs' : `Spaces: ${step}`}
                 {note && <span className="ed-note" role="status">{note}</span>}
+                {props.statusItems && <span className="ed-status-right">{props.statusItems}</span>}
             </div>
         </div>
     );

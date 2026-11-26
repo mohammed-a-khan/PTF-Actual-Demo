@@ -28,11 +28,24 @@ export interface InstallState {
 
 const VERSION = /^(latest|\d+\.\d+\.\d+(-[\w.]+)?)$/;
 
+/** What a RuntimeInstaller installs (default: the agents' SDK). */
+export interface RuntimePackage {
+    /** npm package name. */
+    pkg: string;
+    /** In messages: "the agents runtime", "the Copilot language server". */
+    label: string;
+    /** Extra npm arguments (e.g. --omit=optional). */
+    extraArgs?: () => string[];
+    /** Platform packages (@github/<name>) checked against this computer after the install. */
+    platformPackages?: RegExp;
+}
+export const SDK_RUNTIME: RuntimePackage = { pkg: SDK_PACKAGE, label: 'the agents runtime', platformPackages: /^copilot-sdk-/ };
+
 export class RuntimeInstaller {
     private st: InstallState = { running: false, log: [] };
     private child: ChildProcess | null = null;
 
-    constructor(private readonly dir: string, private readonly npm: { command: string; prefixArgs: string[] } = npmCommand()) {}
+    constructor(private readonly dir: string, private readonly npm: { command: string; prefixArgs: string[] } = npmCommand(), private readonly what: RuntimePackage = SDK_RUNTIME) {}
 
     /** The folder npm installs into (its node_modules holds the SDK). */
     get folder() { return this.dir; }
@@ -41,21 +54,21 @@ export class RuntimeInstaller {
 
     /** Install (or update to) a version; resolves when npm has started. */
     install(version: string, o: { env?: Record<string, string>; repoRoot?: string; timeoutMs?: number } = {}) {
-        if (this.st.running) throw new Error('The agents runtime is already being installed.');
+        if (this.st.running) throw new Error(`${this.what.label[0].toUpperCase()}${this.what.label.slice(1)} is already being installed.`);
         if (!VERSION.test(version)) throw new Error('Version: latest or x.y.z.');
         fs.mkdirSync(this.dir, { recursive: true });
         const pkg = path.join(this.dir, 'package.json');
-        if (!fs.existsSync(pkg)) fs.writeFileSync(pkg, `${JSON.stringify({ name: 'cs-studio-agents-runtime', private: true, description: 'Installed by CS Test Studio for its agents.' }, null, 2)}\n`);
+        if (!fs.existsSync(pkg)) fs.writeFileSync(pkg, `${JSON.stringify({ name: this.what === SDK_RUNTIME ? 'cs-studio-agents-runtime' : `cs-studio-${this.what.pkg.split('/').pop()}`, private: true, description: this.what === SDK_RUNTIME ? 'Installed by CS Test Studio for its agents.' : `Installed by CS Test Studio (${this.what.label}).` }, null, 2)}\n`);
         // The repository's npm settings (company registry and its sign-in) apply here too.
         const repoNpmrc = o.repoRoot ? path.join(o.repoRoot, '.npmrc') : '';
         if (repoNpmrc && fs.existsSync(repoNpmrc)) fs.copyFileSync(repoNpmrc, path.join(this.dir, '.npmrc'));
         // The lock file of an earlier install would keep packages this computer does not need.
         fs.rmSync(path.join(this.dir, 'package-lock.json'), { force: true });
-        const target = `${SDK_PACKAGE}@${version}`;
+        const target = `${this.what.pkg}@${version}`;
         this.st = { running: true, target, startedAt: Date.now(), log: [`npm install ${target}`] };
         // On Linux, npm cannot tell glibc from musl and would fetch both (~200 MB each): name this computer's.
         const libc = linuxLibc();
-        const args = [...this.npm.prefixArgs, 'install', target, '--save-exact', '--no-audit', '--no-fund', ...(libc ? [`--libc=${libc}`] : []), '--prefix', this.dir];
+        const args = [...this.npm.prefixArgs, 'install', target, '--save-exact', '--no-audit', '--no-fund', ...(libc ? [`--libc=${libc}`] : []), ...(this.what.extraArgs?.() ?? []), '--prefix', this.dir];
         const child = spawn(this.npm.command, args, { cwd: this.dir, env: { ...process.env, ...(o.env ?? {}) } as NodeJS.ProcessEnv, windowsHide: true, shell: false });
         this.child = child;
         const add = (b: Buffer) => { for (const l of b.toString().split(/\r?\n/)) if (l.trim()) this.st.log.push(l.slice(0, 400)); if (this.st.log.length > 400) this.st.log.splice(0, this.st.log.length - 400); };
@@ -70,10 +83,11 @@ export class RuntimeInstaller {
         };
         child.on('error', (e) => done(false, `npm could not start: ${e.message}`));
         child.on('close', (code) => {
-            if (code !== 0) return done(false, npmProblem(this.st.log) ?? `npm stopped with code ${code}.`);
-            const removed = pruneOtherPlatforms(this.dir);
+            if (code !== 0) return done(false, npmProblem(this.st.log, this.what.pkg) ?? `npm stopped with code ${code}.`);
+            const removed = pruneOtherPlatforms(this.dir, undefined, this.what.platformPackages);
             if (removed.length) this.st.log.push(`Removed packages for other computers: ${removed.join(', ')}`);
-            done(installedVersion(this.dir) ? true : false, installedVersion(this.dir) ? undefined : 'npm finished but the SDK is not in the folder.');
+            const v = installedVersion(this.dir, this.what.pkg);
+            done(!!v, v ? undefined : `npm finished but ${this.what.pkg} is not in the folder.`);
         });
     }
 
@@ -87,9 +101,9 @@ export class RuntimeInstaller {
     }
 }
 
-/** The SDK version installed in a runtime folder (null when none). */
-export function installedVersion(dir: string): string | null {
-    try { return (JSON.parse(fs.readFileSync(path.join(dir, 'node_modules', '@github', 'copilot-sdk', 'package.json'), 'utf8')) as { version: string }).version; }
+/** The SDK (or another package's) version installed in a runtime folder (null when none). */
+export function installedVersion(dir: string, pkg = SDK_PACKAGE): string | null {
+    try { return (JSON.parse(fs.readFileSync(path.join(dir, 'node_modules', ...pkg.split('/'), 'package.json'), 'utf8')) as { version: string }).version; }
     catch { return null; }
 }
 
@@ -97,11 +111,11 @@ export function installedVersion(dir: string): string | null {
  * The runtime's platform packages (@github/copilot-sdk-<platform>) declare the system they are for
  * (os, cpu, libc): those for another system are removed (npm keeps ones an earlier install fetched).
  */
-export function pruneOtherPlatforms(dir: string, sys = { os: process.platform as string, cpu: process.arch as string, libc: linuxLibc() as string | null }): string[] {
+export function pruneOtherPlatforms(dir: string, sys = { os: process.platform as string, cpu: process.arch as string, libc: linuxLibc() as string | null }, names_ = /^copilot-sdk-/): string[] {
     const gh = path.join(dir, 'node_modules', '@github');
     const removed: string[] = [];
     let names: string[] = [];
-    try { names = fs.readdirSync(gh).filter((n) => /^copilot-sdk-/.test(n)); } catch { return removed; }
+    try { names = fs.readdirSync(gh).filter((n) => names_.test(n)); } catch { return removed; }
     const fits = (list: unknown, v: string | null) => !Array.isArray(list) || !list.length || v === null || list.includes(v);
     for (const n of names) {
         try {
@@ -132,13 +146,13 @@ export function npmCommand(): { command: string; prefixArgs: string[] } {
 }
 
 /** The reason in npm's output, in words people can act on. */
-export function npmProblem(log: string[]): string | null {
+export function npmProblem(log: string[], pkg = SDK_PACKAGE): string | null {
     const t = log.join('\n');
-    if (/E401|E403|Unable to authenticate|authentication token/i.test(t)) return 'The npm registry refused the request: sign in to your company registry (npm login) or ask for access to @github/copilot-sdk.';
-    if (/E404|404 Not Found/i.test(t)) return 'The npm registry does not have @github/copilot-sdk (or this version): ask for it to be added to the company registry.';
+    if (/E401|E403|Unable to authenticate|authentication token/i.test(t)) return `The npm registry refused the request: sign in to your company registry (npm login) or ask for access to ${pkg}.`;
+    if (/E404|404 Not Found/i.test(t)) return `The npm registry does not have ${pkg} (or this version): ask for it to be added to the company registry.`;
     if (/SELF_SIGNED_CERT|UNABLE_TO_GET_ISSUER_CERT|certificate/i.test(t)) return 'The company certificate is not trusted by npm: set it in Settings → Network (certificates).';
     if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|ECONNRESET|proxy/i.test(t)) return 'npm could not reach the registry: check the proxy in Settings → Network.';
-    if (/ENOSPC/i.test(t)) return 'Not enough disk space (the runtime needs about 250 MB).';
+    if (/ENOSPC/i.test(t)) return `Not enough disk space (${pkg === SDK_PACKAGE ? 'the runtime needs about 250 MB' : 'about 100 MB is needed'}).`;
     if (/EACCES|EPERM/i.test(t)) return 'No permission to write the Studio\'s folder.';
     const err = log.filter((l) => /npm (ERR!|error)/.test(l)).slice(0, 3).join(' ');
     return err ? err.replace(/npm (ERR!|error)\s*/g, '').slice(0, 300) : null;

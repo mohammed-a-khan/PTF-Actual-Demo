@@ -117,6 +117,27 @@ mark.intraline { background: var(--m-mark); color: inherit; padding: 0; border-r
 .ed-tip-doc { margin-top: 6px; font-size: 12px; opacity: .85; white-space: pre-wrap; }
 .ed-status { grid-column: 1 / span 2; border-top: 1px solid var(--panel-border); padding: 2px 10px; font-size: 11px; color: var(--ed-gutter); }
 .ed-note { margin-left: 12px; color: var(--ant-color-warning, #d48806); }
+.ed-status-right { float: right; display: inline-flex; align-items: center; gap: 8px; }
+.ed-copilot { background: none; border: 0; padding: 0 4px; color: inherit; font: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; border-radius: 3px; }
+.ed-copilot:hover, .ed-copilot:focus-visible { background: var(--ed-curline); color: var(--ed-fg); outline: none; }
+.ed-copilot::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ed-gutter); }
+.ed-copilot.ok::after { background: #2da44e; } .ed-copilot.warn::after { background: #d4a72c; } .ed-copilot.err::after { background: #cf222e; } .ed-copilot.busy::after { background: #0969da; animation: ed-pulse 1s infinite alternate; }
+@keyframes ed-pulse { from { opacity: .3; } to { opacity: 1; } }
+/* Copilot's suggestion (ghost text): after the caret; more lines cover the lines below while it shows. */
+.ed-ghost { color: var(--ed-gutter); opacity: .9; }
+.ed-ghost-block { position: absolute; left: 0; width: 20000px; background: var(--ed-bg); z-index: 1; }
+/* A snippet's placeholders (Tab moves between them). */
+.ed-snip { position: absolute; border: 1px solid rgba(147,24,108,.30); border-radius: 2px; }
+.ed-snip.cur { border-color: rgba(147,24,108,.75); background: rgba(147,24,108,.07); }
+/* Parameter hints and the highlighted completion's signature. */
+.ed-sig { position: absolute; z-index: 22; max-width: 640px; background: var(--ed-bg); color: var(--ed-fg); border: 1px solid var(--panel-border); border-radius: 6px; padding: 3px 8px; box-shadow: 0 4px 16px rgba(0,0,0,.15); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; pointer-events: none; }
+.ed-sig b { color: #93186c; }
+:root[data-theme="dark"] .ed-sig b { color: #f778ba; }
+.ed-sig-n { color: var(--ed-gutter); margin-right: 8px; }
+.ed-sig-doc { font-family: var(--font, inherit); opacity: .85; margin-top: 2px; }
+.ed-cdetail { position: sticky; bottom: 0; background: var(--ed-bg); border-top: 1px solid var(--panel-border); padding: 4px 8px; max-height: 96px; overflow: hidden; white-space: pre-wrap; font-size: 11px; }
+.ed-cdetail-sig { color: var(--ed-fg); }
+.ed-cdetail-doc { color: var(--ed-gutter); margin-top: 2px; font-family: var(--font, inherit); }
 /* Right-click menus (ContextMenu.tsx): shortcut hints on the right, compact rows. */
 .ctx-menu .ant-dropdown-menu { min-width: 220px; max-height: calc(100vh - 16px); overflow: auto; }
 .ctx-menu .ant-dropdown-menu-item { padding-block: 3px !important; }

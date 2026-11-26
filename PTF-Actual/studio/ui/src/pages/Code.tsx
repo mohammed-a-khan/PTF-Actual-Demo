@@ -14,6 +14,7 @@ import { useUnsaved } from '../unsaved';
 import { errText, loadRunTarget, saveRunTarget, showRun, unsavedFiles, useStudio } from '../state';
 import { handlesSaveFiles, SAVE_FILES_EVENT, SaveFilesRequest } from '../runSignals';
 import { CodeEditor, CodeEditorHandle } from '../editor/CodeEditor';
+import { copilotProvider, CopilotStatusItem } from '../editor/copilot';
 import { DebugPanel, ExecLocation } from '../components/DebugPanel';
 import { useKept } from '../kept';
 import { codeTarget } from '../codeRoute';
@@ -68,12 +69,19 @@ const TabEditor = React.memo(function TabEditor({ tab, active, diagnostics, reve
 }) {
     const path = tab.path;
     const register = React.useCallback((e: CodeEditorHandle | null) => { if (e) h.current.editors.set(path, e); else h.current.editors.delete(path); }, [path, h]);
+    const lang = langOf(path);
+    // Copilot's ghost text for code files (asks only once Copilot is set up and signed in).
+    const inline = React.useMemo(() => copilotProvider(path), [path]);
+    const statusItems = React.useMemo(() => <CopilotStatusItem />, []);
     return (
-        <CodeEditor ref={register} active={active} value={tab.content} lang={langOf(path)} eol={tab.eol}
+        <CodeEditor ref={register} active={active} value={tab.content} lang={lang} eol={tab.eol}
             onChange={(text) => h.current.setContent(path, text)} onSave={() => h.current.save(path)}
             diagnostics={diagnostics} reveal={reveal} gutterActions={gutterActions}
             breakpoints={breakpoints} execLine={execLine} onToggleBreakpoint={canBreak(path) ? (line) => h.current.toggleBreakpoint(path, line) : undefined}
-            completions={async (text, off) => (await api.completions(path, text, off)).items}
+            completions={async (text, off, signal) => (await api.completions(path, text, off, signal)).items}
+            completionDetails={lang === 'ts' ? async (text, off, it, signal) => { const d = await api.completionDetails(path, text, off, it.name, it.source, it.data, signal); return d.stale ? null : d; } : undefined}
+            signatureHelp={lang === 'ts' ? async (text, off, trigger, signal) => (await api.signatureHelp(path, text, off, trigger, signal)).help : undefined}
+            inline={inline} statusItems={statusItems}
             hover={async (text, off) => { const r = await api.hover(path, text, off); return r.text ? r : null; }}
             definition={(text, off) => h.current.goTo(path, text, off)}
             format={(text) => h.current.format(path, text)}
@@ -212,6 +220,8 @@ export function Code() {
     // Let TypeScript load the project in the background (it runs in its own thread on the server),
     // so the first completion or hover is quick.
     React.useEffect(() => { void api.warmUpLanguage().catch(() => undefined); }, []);
+    // And the project of the TypeScript file being edited (its own tsconfig.json may be another one).
+    React.useEffect(() => { if (active && langOf(active) === 'ts') void api.warmUpLanguage(active).catch(() => undefined); }, [active]);
     React.useEffect(() => { try { localStorage.setItem('cs-studio-tree', JSON.stringify(expanded.slice(-200))); } catch { /* ignore */ } }, [expanded]);
 
     const marks = React.useMemo(() => {
@@ -418,7 +428,7 @@ export function Code() {
         tabsRef.current = rest;
         setTabs((ts) => ts.filter((x) => !gone.has(x.path)));
         setActive((a) => (a && gone.has(a) ? rest[rest.length - 1]?.path ?? null : a));
-        for (const p of paths) void api.closeFile(p).catch(() => undefined);
+        for (const p of paths) { void api.closeFile(p).catch(() => undefined); void api.copilotClose(p).catch(() => undefined); }
     };
 
     const isDirty = (path: string) => { const t = tabsRef.current.find((x) => x.path === path); return !!t && t.content !== t.savedContent; };

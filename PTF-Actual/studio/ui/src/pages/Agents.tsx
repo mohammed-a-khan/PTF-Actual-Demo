@@ -9,6 +9,7 @@ import { Alert, App, Button, Card, Col, Collapse, Empty, Form, Input, Popconfirm
 import { ApiOutlined, BugOutlined, DashboardOutlined, DeleteOutlined, ExperimentOutlined, FileSearchOutlined, LayoutOutlined, LockOutlined, MessageOutlined, RocketOutlined, SettingOutlined } from '@ant-design/icons';
 import { AgentSessionInfo, AgentSettingsDef, AgentStatus, api, PlanContext } from '../api';
 import { AccountSetup, RuntimeSetup } from '../components/AgentSetup';
+import { CopilotSetup } from '../editor/copilot';
 import { ToolServers } from '../components/ToolServers';
 import { errText } from '../state';
 import { ago } from '../format';
@@ -410,6 +411,7 @@ export function Agents({ openPanel }: { openPanel: (sessionId: string) => void }
                                         {status.auth?.isAuthenticated && status.settings.provider === 'copilot' && <Typography.Text type="secondary" style={{ fontSize: 12 }}>Model: GitHub Copilot, {status.settings.model === 'auto' ? 'Auto' : status.settings.model}</Typography.Text>}
                                     </Space>
                                 </Card>}
+                                <Card size="small" title="Copilot in the editor"><CopilotSetup /></Card>
                                 {status?.policy && <Card size="small" title={<Space><LockOutlined />Team policy <Tooltip title="Set by the team in the repository (changed through pull requests); personal settings can be stricter, not looser."><Typography.Text type="secondary" className="mono" style={{ fontSize: 12 }}>{status.policy.file}</Typography.Text></Tooltip></Space>}>
                                     <Space direction="vertical" size={4} style={{ fontSize: 13 }}>
                                         {status.policy.note && <Typography.Text>{status.policy.note}</Typography.Text>}

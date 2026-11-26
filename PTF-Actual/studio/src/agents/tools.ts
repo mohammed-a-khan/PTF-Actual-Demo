@@ -63,7 +63,7 @@ const ELEMENT = {
 };
 
 /** Studio calls that change nothing (previews), allowed without approval. */
-const SAFE_POSTS = new Set(['/api/lang/plan', '/api/recorder/preview', '/api/data/preview', '/api/lang/diagnostics', '/api/lang/completions', '/api/lang/hover', '/api/lang/definition', '/api/lang/references', '/api/lang/format', '/api/lang/steps/plan', '/api/lang/warmup']);
+const SAFE_POSTS = new Set(['/api/lang/plan', '/api/recorder/preview', '/api/data/preview', '/api/lang/diagnostics', '/api/lang/completions', '/api/lang/completion-details', '/api/lang/signature', '/api/lang/hover', '/api/lang/definition', '/api/lang/references', '/api/lang/format', '/api/lang/steps/plan', '/api/lang/warmup']);
 /** Never through agents. */
 const BLOCKED = [/^\/api\/agents\b/, /^\/api\/mcp\b/, /^\/api\/missions\b/, /^\/api\/evals\b/, /^\/api\/agent-builder\b/, /^\/api\/inbox\b/];
 

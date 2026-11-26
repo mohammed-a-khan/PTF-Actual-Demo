@@ -26,11 +26,13 @@ function catalog(text) {
         const qm = /^\+ q\((.*?)\)(?:,|$)\s*(.*)$/.exec(tail);
         if (qm) { query = qm[1]; tail = qm[2]; }
         if (tail.startsWith(',')) tail = tail.slice(1).trim();
-        body = tail;
+        // A screen's AbortSignal (cancel a request when the person typed on) is not part of the call.
+        body = tail.replace(/,\s*signal\s*$/, '');
+        const callArgs = args.replace(/,\s*signal\?: AbortSignal/, '');
         const area = (p.split('/')[2] || '').replace(/[^a-z-]/gi, '');
         // Areas agents may not call (tools.ts BLOCKED): not offered.
         if (['agents', 'mcp', 'missions', 'evals', 'agent-builder', 'inbox'].includes(area)) continue;
-        calls.push({ name, area, method, path: p, args, ...(query ? { query } : {}), ...(body ? { body } : {}), result: result || 'unknown' });
+        calls.push({ name, area, method, path: p, args: callArgs, ...(query ? { query } : {}), ...(body ? { body } : {}), result: result || 'unknown' });
     }
     const types = {};
     const lines = text.split('\n');
