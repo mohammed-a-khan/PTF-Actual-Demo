@@ -5,7 +5,7 @@
  */
 import React from 'react';
 import { Alert, Button, Card, Empty, Segmented, Select, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
-import { CodeOutlined, ReloadOutlined } from '@ant-design/icons';
+import { CodeOutlined, ExportOutlined, ReloadOutlined } from '@ant-design/icons';
 import { api, TeamTrends as Trends, TeamTrendTest } from '../api';
 import { errText } from '../state';
 import { navigate } from '../route';
@@ -25,26 +25,51 @@ export function TeamTrends({ project, localScenario }: { project?: string; local
     const [workflow, setWorkflow] = React.useState<'all' | 'Build' | 'Release'>('all');
     const [kind, setKind] = React.useState<'all' | TeamTrendTest['kind']>('all');
     const [data, setData] = React.useState<Trends | null>(null);
+    // Another Azure DevOps project of the organization (not set: the one the configuration names).
+    const [adoProject, setAdoProject] = React.useState<string | undefined>();
+    const [projects, setProjects] = React.useState<string[] | null>(null);
+    React.useEffect(() => { api.adoProjects(project ? { project } : {}).then((r) => setProjects(r.projects)).catch(() => setProjects([])); }, [project]);
     const [error, setError] = React.useState('');
     const [loading, setLoading] = React.useState(false);
     const load = React.useCallback(async () => {
         setLoading(true); setError('');
-        try { setData(await api.teamTrends({ days, pipeline, branch, ...(workflow !== 'all' ? { workflow } : {}), ...(project ? { project } : {}) })); }
+        try { setData(await api.teamTrends({ days, pipeline, branch, ...(workflow !== 'all' ? { workflow } : {}), ...(project ? { project } : {}), ...(adoProject ? { adoProject } : {}) })); }
         catch (e) { setError(errText(e)); setData(null); } finally { setLoading(false); }
-    }, [days, pipeline, branch, workflow, project]);
+    }, [days, pipeline, branch, workflow, project, adoProject]);
     React.useEffect(() => { void load(); }, [load]);
     const tests = (data?.tests ?? []).filter((t) => kind === 'all' || t.kind === kind);
     const count = (k: TeamTrendTest['kind']) => data?.tests.filter((t) => t.kind === k).length ?? 0;
     const delta = data && data.totals.passRate !== null && data.previous.passRate !== null ? data.totals.passRate - data.previous.passRate : null;
     return (
         <div style={{ padding: '4px 2px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {/* Where these numbers come from: said first, so they are not mistaken for this computer's runs. */}
+            <div className="team-source" data-testid="team-source">
+                <div>
+                    <Typography.Text strong>Test results published to Azure DevOps</Typography.Text>
+                    <Typography.Paragraph type="secondary" style={{ fontSize: 12, margin: '2px 0 0' }}>
+                        Every result recorded in this Azure DevOps project's test runs: by pipelines (the framework with ADO_INTEGRATION_ENABLED), by the Studio's “Publish to Azure DevOps”, or by hand. Read from Azure DevOps Analytics.
+                        The other tabs are the runs on this computer.
+                    </Typography.Paragraph>
+                </div>
+                <Space wrap size={12} align="end">
+                    <div><div className="cs-field-label">Organization</div><Typography.Text code>{data?.source?.org ?? '…'}</Typography.Text></div>
+                    <div><div className="cs-field-label">Project{data?.source?.configured ? <> (configured: {data.source.configured}, in {data.source.from.project}/{data.source.from.env})</> : null}</div>
+                        <Select size="small" style={{ minWidth: 220 }} showSearch loading={projects === null} aria-label="Azure DevOps project"
+                            value={adoProject ?? data?.source?.adoProject} onChange={(v: string) => { setAdoProject(v === data?.source?.configured ? undefined : v); setPipeline(undefined); setBranch(undefined); }}
+                            options={[...new Set([...(projects ?? []), ...(data?.source?.adoProject ? [data.source.adoProject] : [])])].map((p) => ({ value: p, label: p === data?.source?.configured ? `${p} (configured)` : p }))} />
+                    </div>
+                    {data?.source && <Space size={10}>
+                        <Typography.Link href={data.source.runsUrl} target="_blank" rel="noreferrer"><ExportOutlined /> Test runs in Azure DevOps</Typography.Link>
+                        <Typography.Link href={data.source.analyticsUrl} target="_blank" rel="noreferrer"><ExportOutlined /> Test analytics</Typography.Link>
+                    </Space>}
+                </Space>
+            </div>
             <Space wrap>
                 <Segmented size="small" value={days} onChange={(v) => setDays(Number(v))} options={[{ value: 7, label: '7 days' }, { value: 14, label: '14 days' }, { value: 30, label: '30 days' }, { value: 90, label: '90 days' }]} />
                 <Select size="small" allowClear placeholder="All pipelines" style={{ width: 200 }} value={pipeline} onChange={setPipeline} options={(data?.options.pipelines ?? []).map((p) => ({ value: p, label: p }))} aria-label="Pipeline" />
                 <Select size="small" allowClear placeholder="All branches" style={{ width: 180 }} value={branch} onChange={setBranch} options={(data?.options.branches ?? []).map((b) => ({ value: b, label: b }))} aria-label="Branch" />
                 <Segmented size="small" value={workflow} onChange={(v) => setWorkflow(v as typeof workflow)} options={[{ value: 'all', label: 'All' }, { value: 'Build', label: 'Builds' }, { value: 'Release', label: 'Releases' }]} />
                 <Button size="small" icon={<ReloadOutlined />} onClick={() => void load()} aria-label="Refresh team trends" />
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>From Azure DevOps Analytics: every result published by pipelines and other people.</Typography.Text>
             </Space>
             {error && (isAdoNotSetUp(error)
                 ? <AdoNotSetUp what="Team results" error={error} onRetry={() => void load()} compact />
@@ -69,7 +94,7 @@ export function TeamTrends({ project, localScenario }: { project?: string; local
                     <Table size="small" rowKey={(t) => `${t.container}\u0000${t.name}`} dataSource={tests} pagination={{ pageSize: 25, hideOnSinglePage: true }}
                         columns={[
                             { title: '', key: 'k', width: 120, render: (_, t) => <Tooltip title={KIND[t.kind].tip}><Tag color={KIND[t.kind].color}>{KIND[t.kind].label}</Tag></Tooltip> },
-                            { title: 'Test', key: 'n', ellipsis: true, render: (_, t) => <div className="q-name"><span>{t.name}</span><Typography.Text type="secondary" style={{ fontSize: 12 }}>{t.container}</Typography.Text></div> },
+                            { title: 'Test (as named in Azure DevOps)', key: 'n', ellipsis: true, render: (_, t) => <div className="q-name"><span>{t.name}</span><Tooltip title="Where Azure DevOps keeps it: the test's container (for the framework, the feature; for a run published from the Studio, the run's name)"><Typography.Text type="secondary" style={{ fontSize: 12 }}>{t.container}</Typography.Text></Tooltip></div> },
                             { title: 'Ran', dataIndex: 'total', width: 70, align: 'right' },
                             { title: 'Failed', dataIndex: 'failed', width: 70, align: 'right', render: (v: number) => v ? <Typography.Text type="danger">{v}</Typography.Text> : 0 },
                             { title: 'Fail rate', key: 'fr', width: 90, align: 'right', render: (_, t) => pct(t.failRate) },

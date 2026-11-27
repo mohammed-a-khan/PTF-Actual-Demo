@@ -613,6 +613,8 @@ export interface BisectInfo {
 }
 export interface TeamTrendTest { name: string; container: string; total: number; passed: number; failed: number; flaky: number; notExecuted: number; failRate: number; avgSec: number; lastFailed?: string; kind: 'failing' | 'flaky' | 'stable' }
 export interface TeamTrends {
+    /** Where the results were read: the Azure DevOps organization and project, and the configuration that names them. */
+    source?: { org: string; adoProject: string; configured: string; from: { project: string; env: string }; runsUrl: string; analyticsUrl: string };
     from: string; to: string; days: Array<{ date: string; total: number; passed: number; failed: number; notExecuted: number; flaky: number; passRate: number | null; durationSec: number }>;
     totals: { total: number; passed: number; failed: number; flaky: number; notExecuted: number; passRate: number | null }; previous: { passRate: number | null; total: number };
     tests: TeamTrendTest[]; status: 'green' | 'amber' | 'red' | 'none'; summary: string; options: { pipelines: string[]; branches: string[] };
@@ -1129,7 +1131,7 @@ export const api = {
     runs: () => request<RunInfo[]>('GET', '/api/runs'),
     mergeTools: () => request<{ tools: Array<{ name: string; label: string; userDefined?: boolean }>; default?: string; runs: Record<string, { tool: string; startedAt: string; done?: { resolved: boolean; message: string; at: string } }> }>('GET', '/api/git/mergetools'),
     openMergeTool: (file: string, tool: string) => request<{ file: string; tool: string; startedAt: string; done?: { resolved: boolean; message: string; at: string } }>('POST', '/api/git/mergetool', { file, tool }),
-    teamTrends: (o: { days: number; pipeline?: string; branch?: string; workflow?: 'Build' | 'Release'; project?: string }) => request<TeamTrends>('GET', '/api/ado/analytics/tests' + q(o)),
+    teamTrends: (o: { days: number; pipeline?: string; branch?: string; workflow?: 'Build' | 'Release'; project?: string; adoProject?: string }) => request<TeamTrends>('GET', '/api/ado/analytics/tests' + q(o)),
     bisectSuggest: (scenario: string) => request<{ bad: string; good?: string; goodRun?: { id: string; at: string }; warning?: string; commits: Array<{ commit: string; subject: string; author: string; date: string }> }>('GET', '/api/bisect/suggest' + q({ scenario })),
     bisectRange: (good: string, bad?: string) => request<{ good: string; bad: string; commits: number; estimate: number }>('GET', '/api/bisect/range' + q({ good, bad })),
     bisect: () => request<{ bisect: BisectInfo | null }>('GET', '/api/bisect'),

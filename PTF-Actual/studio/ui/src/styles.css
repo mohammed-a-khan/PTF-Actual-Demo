@@ -609,3 +609,4 @@ body.menu-resizing .ant-layout-sider, body.menu-resizing .ant-layout-sider-child
 .scan-bulk { position: sticky; top: 0; z-index: 2; background: var(--surface); padding: 8px 10px; margin-bottom: 8px; border: 1px solid rgba(127,127,127,.2); border-radius: 6px; }
 .scan-file { margin-bottom: 6px; }
 .scan-file-head { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin-bottom: 6px; background: var(--row-sel); border-radius: 4px; }
+.team-source { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; align-items: flex-end; padding: 10px 12px; border: 1px solid rgba(127,127,127,.22); border-radius: 8px; background: var(--row-sel); }

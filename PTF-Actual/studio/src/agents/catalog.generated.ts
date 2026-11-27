@@ -2644,7 +2644,7 @@ export const CALLS: CatalogCall[] = [
   "area": "ado",
   "method": "GET",
   "path": "/api/ado/analytics/tests",
-  "args": "o: { days: number; pipeline?: string; branch?: string; workflow?: 'Build' | 'Release'; project?: string }",
+  "args": "o: { days: number; pipeline?: string; branch?: string; workflow?: 'Build' | 'Release'; project?: string; adoProject?: string }",
   "query": "o",
   "result": "TeamTrends"
  },
@@ -3454,7 +3454,7 @@ export const TYPES: Record<string, string> = {
  "BisectStep": "export interface BisectStep { commit: string; subject: string; outcome: 'pass' | 'fail' | 'skip'; note?: string; run?: string; end?: 'good' | 'bad' }",
  "BisectInfo": "export interface BisectInfo {\n    state: 'running' | 'found' | 'inconclusive' | 'error' | 'stopped'; good: string; bad: string; commits: number; estimate: number; steps: BisectStep[];\n    current?: { commit: string; subject: string }; result?: { commit: string; subject: string; author: string; date: string; files: string[] };\n    candidates?: Array<{ commit: string; subject: string }>; message?: string; startedAt: string; endedAt?: string; feature: string; scenario: string; project: string; env: string;\n}",
  "TeamTrendTest": "export interface TeamTrendTest { name: string; container: string; total: number; passed: number; failed: number; flaky: number; notExecuted: number; failRate: number; avgSec: number; lastFailed?: string; kind: 'failing' | 'flaky' | 'stable' }",
- "TeamTrends": "export interface TeamTrends {\n    from: string; to: string; days: Array<{ date: string; total: number; passed: number; failed: number; notExecuted: number; flaky: number; passRate: number | null; durationSec: number }>;\n    totals: { total: number; passed: number; failed: number; flaky: number; notExecuted: number; passRate: number | null }; previous: { passRate: number | null; total: number };\n    tests: TeamTrendTest[]; status: 'green' | 'amber' | 'red' | 'none'; summary: string; options: { pipelines: string[]; branches: string[] };\n}",
+ "TeamTrends": "export interface TeamTrends {\n    /** Where the results were read: the Azure DevOps organization and project, and the configuration that names them. */\n    source?: { org: string; adoProject: string; configured: string; from: { project: string; env: string }; runsUrl: string; analyticsUrl: string };\n    from: string; to: string; days: Array<{ date: string; total: number; passed: number; failed: number; notExecuted: number; flaky: number; passRate: number | null; durationSec: number }>;\n    totals: { total: number; passed: number; failed: number; flaky: number; notExecuted: number; passRate: number | null }; previous: { passRate: number | null; total: number };\n    tests: TeamTrendTest[]; status: 'green' | 'amber' | 'red' | 'none'; summary: string; options: { pipelines: string[]; branches: string[] };\n}",
  "EvidenceFile": "export interface EvidenceFile { kind: 'screenshot' | 'video' | 'trace' | 'console' | 'har'; file: string; name: string; time?: string; size: number }",
  "PipelineDef": "export interface PipelineDef { id: number; name: string; folder: string }",
  "PipelineRun": "export interface PipelineRun { id: number; number: string; pipeline: { id: number; name: string }; status: string; result?: string; branch: string; reason: string; requestedFor?: string; queued?: string; started?: string; finished?: string; url: string }",

@@ -56,7 +56,7 @@ const PAGE_INFO: Record<Page, { title: string; about: string }> = {
     runs: { title: 'Run tests', about: 'Pick features, tags or scenarios and run them on this computer.' },
     visual: { title: 'Visual review', about: 'Screenshots and accessibility checks from the runs: see what changed and approve it as the new baseline.' },
     healing: { title: 'Healed locators', about: 'Elements the framework found with another locator than the page object\'s: update the page object or dismiss.' },
-    quality: { title: 'Quality', about: 'How each scenario does across runs: new failures, failing, flaky, causes, quarantine and the quality gate.' },
+    quality: { title: 'Quality', about: 'How each scenario does across the runs on this computer (failing, flaky, causes, quarantine, the quality gate), and the results published to Azure DevOps.' },
     'agent-builder': { title: 'Agent builder', about: 'Your team\'s own agents: an assistant to chat with, or a mission that works alone and is checked by the Studio. Kept in the repository.' },
     knowledge: { title: 'Knowledge', about: 'What agents look up before they act: documents, test and application code, work items, the wiki and what earlier runs learned. Every answer names its source.' },
     inbox: { title: 'Inbox', about: 'What agents wait for you on, work ready to review and agents that got worse. Answer here; new items also go to the channels that ask for them.' },

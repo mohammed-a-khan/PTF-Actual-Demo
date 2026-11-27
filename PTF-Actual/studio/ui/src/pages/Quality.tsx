@@ -293,7 +293,8 @@ export function Quality() {
             <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => void load()} aria-label="Refresh" />
         </div>
     );
-    if (noRuns) return <div className="panel">{toolbar}<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 60 }} description="No results yet. Run tests under Run tests (or from the command line): their results appear here." /></div>;
+    // No runs on this computer: the team's results in Azure DevOps can still be seen.
+    if (noRuns && tab !== 'team') return <div className="panel">{toolbar}<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ marginTop: 60 }} description={<>No results on this computer yet. Run tests under Run tests (or from the command line): their results appear here.<br /><Button type="link" onClick={() => goTab('team')}>See the results published to Azure DevOps</Button></>} /></div>;
 
     const overview = (
         <div className="q-body">
@@ -448,13 +449,14 @@ export function Quality() {
 
     return (
         <div className="panel quality" style={{ height: 'calc(100vh - var(--chrome))', display: 'flex', flexDirection: 'column' }}>
-            {toolbar}
+            {/* The runs on this computer: what the first tabs show (the Azure DevOps tab has its own source line). */}
+            {tab !== 'team' && toolbar}
             <Tabs size="small" activeKey={tab} onChange={goTab} className="q-tabs" items={[
                 { key: 'overview', label: 'Overview', children: overview },
                 { key: 'scenarios', label: <>Scenarios <span className="q-count">{data.scenarios.length}</span></>, children: scenarios },
                 { key: 'causes', label: <>Failure causes <span className="q-count">{data.groups.length}</span></>, children: causes },
                 { key: 'quarantine', label: <>Quarantine <span className="q-count">{data.counts.quarantined}</span></>, children: quarantineTab },
-                { key: 'team', label: 'Team (Azure DevOps)', children: tab === 'team' ? <div style={{ padding: 12 }}><TeamTrends project={data.project ?? undefined} localScenario={(n) => { const sc = data.scenarios.find((x) => x.name === n && x.file); return sc ? { file: sc.file!, line: sc.line } : undefined; }} /></div> : null },
+                { key: 'team', label: 'Published to Azure DevOps', children: tab === 'team' ? <div style={{ padding: 12 }}><TeamTrends project={data.project ?? undefined} localScenario={(n) => { const sc = data.scenarios.find((x) => x.name === n && x.file); return sc ? { file: sc.file!, line: sc.line } : undefined; }} /></div> : null },
             ]} />
 
             <TriageModal g={triaging} onClose={() => setTriaging(null)} onSaved={() => { setTriaging(null); void load(); }} />

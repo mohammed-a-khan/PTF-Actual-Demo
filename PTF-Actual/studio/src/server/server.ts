@@ -2071,10 +2071,16 @@ export function createServer(opts: ServerOptions): StudioServer {
         const days = Number(q.days ?? 30);
         if (!Number.isInteger(days) || days < 1 || days > 180) throw new BadRequest('Days must be 1 to 180.');
         const workflow = q.workflow === 'Build' || q.workflow === 'Release' ? q.workflow : undefined;
-        return teamTrends(client, { days, workflow,
+        let configured = '';
+        try { configured = adoSettingsFor(opts.repoRoot, opts.store, projectId, t.project, t.env, process.env, personal()).project; } catch { /* said by the call below */ }
+        const web = `${client.orgUrl.replace(/\/$/, '')}/${encodeURIComponent(client.projectName)}`;
+        // Where the numbers come from, said on the screen: the organization, the project, and the configuration they were read from.
+        const source = { org: client.orgUrl, adoProject: client.projectName, configured, from: { project: t.project, env: t.env }, runsUrl: `${web}/_testManagement/runs`, analyticsUrl: `${web}/_test/analytics` };
+        const r = await teamTrends(client, { days, workflow,
             ...(q.pipeline ? { pipeline: str(q.pipeline, 'pipeline', { max: 300 }) } : {}),
             ...(q.branch ? { branch: str(q.branch, 'branch', { max: 300 }) } : {}),
             ...(q.container ? { container: str(q.container, 'container', { max: 300 }) } : {}) });
+        return { ...r, source };
     });
     // ---- Which commit broke a test: Git bisect in a separate copy, each step a run of that one scenario.
     let bisect: (BisectState & { feature: string; scenario: string; project: string; env: string }) | null = null;
