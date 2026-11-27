@@ -2686,7 +2686,7 @@ export const CALLS: CatalogCall[] = [
   "area": "runs",
   "method": "POST",
   "path": "/api/runs/:id/publish-ado/preview",
-  "args": "id: string, b: { adoProject?: string; plan?: number; suite?: number }",
+  "args": "id: string, b: { adoProject?: string; plan?: number; suites?: number[] }",
   "body": "b",
   "result": "PublishPreviewDef"
  },
@@ -3147,7 +3147,7 @@ export const TYPES: Record<string, string> = {
  "PublishGroupDef": "export interface PublishGroupDef { plan: number; planName?: string; suite: number; suiteName?: string; from: string[]; cases: PublishCaseDef[]; error?: string }",
  "PublishPreviewDef": "export interface PublishPreviewDef { ado: { org: string; project: string; configured: string; from: { project: string; env: string } }; run: { id: string; name: string };\n    scenarios: PublishScenarioDef[]; groups: PublishGroupDef[]; notLinked: string[]; noPlan: string[] }",
  "PublishItemDef": "export interface PublishItemDef { plan: number; suite: number; testCase: number; points: number[]; scenarios: string[] }",
- "PublishDoneDef": "export interface PublishDoneDef { published: Array<{ plan: number; suite: number; runId: number; url: string; published: number; testCases: number }>; tagged: Array<{ file: string; line: number; name: string; tags: string[] }>; notTagged: Array<{ scenario: string; reason: string }> }",
+ "PublishDoneDef": "export interface PublishDoneDef { published: Array<{ plan: number; suites: number[]; runId: number; url: string; published: number; testCases: number }>; tagged: Array<{ file: string; line: number; name: string; tags: string[] }>; notTagged: Array<{ scenario: string; reason: string }> }",
  "MissionInputDef": "export interface MissionInputDef { key: string; label: string; required?: boolean; multiline?: boolean; placeholder?: string; kind?: 'project' | 'env' | 'run' | 'text' | 'number' }",
  "MissionBudgetDef": "export interface MissionBudgetDef { minutes: number; modelCalls: number; attempts: number }",
  "MissionTemplateDef": "export interface MissionTemplateDef { key: string; title: string; about: string; inputs: MissionInputDef[]; oneOf?: string[]; writes: boolean; budget: MissionBudgetDef; team?: Array<{ id: string; name: string }> }",

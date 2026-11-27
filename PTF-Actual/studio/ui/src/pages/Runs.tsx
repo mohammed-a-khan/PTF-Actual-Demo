@@ -455,8 +455,9 @@ export function Runs() {
 
     return (
         <Split id="runs-left" initial={400} min={300} max={720} style={{ height: '100%' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0, flex: 1 }}>
-                <Card size="small" title="New run" className="tests-setup" styles={{ body: { maxHeight: 'calc(100vh - var(--chrome) - 200px)', overflow: 'auto', paddingTop: 0 } }}
+            {/* New run above, recent runs below: the divider between them can be dragged. */}
+            <Split id="runs-left-stack" direction="column" sizeOf="second" initial={240} min={110} max={1400}>
+                <Card size="small" title="New run" className="tests-setup" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', marginBottom: 6 }} styles={{ body: { flex: 1, minHeight: 0, overflow: 'auto', paddingTop: 0 } }}
                     extra={<Space size={6}>
                         {running && <Button size="small" danger icon={<StopOutlined />} onClick={() => { const r = runs.find((x) => x.state === 'running'); if (r) void api.stopRun(r.id); }}>Stop</Button>}
                         <Tooltip title={running ? 'A run is already in progress' : badOpts.length ? `Put the options right first: ${badOpts.join(', ')}` : nothing ? 'Nothing matches this choice' : tooMany ? `Framework ${fw?.version ?? ''} runs one chosen scenario at a time (several need 1.55 or later): choose one, or use a tag` : undefined}>
@@ -546,7 +547,7 @@ export function Runs() {
                         <Button type="text" size="small" aria-label="Dismiss" style={{ padding: 0, height: 'auto', marginLeft: 6 }} onClick={() => setOutputDirs([])}>✕</Button>
                     </div>}
                 </Card>
-                <Card size="small" title={<Space>Recent runs <Button aria-label="Refresh the runs" size="small" type="text" icon={<ReloadOutlined />} onClick={loadRuns} /></Space>} style={{ flex: 1, minHeight: 120, display: 'flex', flexDirection: 'column' }} styles={{ body: { overflow: 'auto', flex: 1, padding: 0 } }}>
+                <Card size="small" title={<Space>Recent runs <Button aria-label="Refresh the runs" size="small" type="text" icon={<ReloadOutlined />} onClick={loadRuns} /></Space>} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', marginTop: 6 }} styles={{ body: { overflow: 'auto', flex: 1, padding: 0 } }}>
                     <List size="small" dataSource={runs} locale={{ emptyText: 'No runs yet.' }} renderItem={(r) => (
                         <List.Item onClick={() => navigate(runsAddr(r.id))} style={{ cursor: 'pointer', paddingInline: 12, background: r.id === sel ? 'rgba(147,24,108,.08)' : undefined }}>
                             <Space direction="vertical" size={0} style={{ width: '100%', minWidth: 0 }}>
@@ -557,7 +558,7 @@ export function Runs() {
                         </List.Item>
                     )} />
                 </Card>
-            </div>
+            </Split>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0, minWidth: 0, flex: 1 }}>
                 {bisect && <BisectPanel value={bisect} onChange={(b) => { setBisect(b); void loadRuns(); }} onOpenRun={(id) => navigate(runsAddr(id))} />}

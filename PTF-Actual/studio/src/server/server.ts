@@ -2236,7 +2236,10 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.post('/api/runs/:id/publish-ado/preview', async (req) => {
         const b = body(req);
         const c = publishContext((req.params as { id: string }).id, b.adoProject);
-        const chosen = b.plan || b.suite ? { plan: posInt(b.plan, 'plan'), suite: posInt(b.suite, 'suite') } : null;
+        // A plan and one or more of its suites chosen here (else the scenarios' tags decide).
+        const chosenSuites = [...new Set([...(Array.isArray(b.suites) ? b.suites : []), ...(b.suite ? [b.suite] : [])].map((x) => posInt(x, 'suite')))].slice(0, 50);
+        const chosen = b.plan || chosenSuites.length ? { plan: posInt(b.plan, 'plan'), suites: chosenSuites } : null;
+        if (chosen && !chosen.suites.length) throw new BadRequest('Choose at least one suite.');
         const planNames = new Map<number, string>();
         try { for (const p of await c.tp.plans(true)) planNames.set(p.id, p.name); } catch (e) { throw new BadRequest((e as Error).message); }
         type Case = { testCase: number; title: string; inSuite: boolean; points: ReturnType<typeof pointView>[]; scenarios: string[] };
@@ -2263,10 +2266,12 @@ export function createServer(opts: ServerOptions): StudioServer {
         };
         if (chosen) {
             if (!planNames.has(chosen.plan)) throw new BadRequest(`Test plan ${chosen.plan} is not in ${c.ado.projectName}.`);
-            const g: Group = { plan: chosen.plan, suite: chosen.suite, from: ['chosen'], cases: [] };
-            // Each test case of the suite, with the run's scenarios tagged with it (whatever plan their tags name).
-            await fill(g, null, (tc) => c.scenarios.filter((s) => s.testCases.includes(tc)).map((s) => s.key));
-            groups.push(g);
+            for (const suite of chosen.suites) {
+                const g: Group = { plan: chosen.plan, suite, from: ['chosen'], cases: [] };
+                // Each test case of the suite, with the run's scenarios tagged with it (whatever plan their tags name).
+                await fill(g, null, (tc) => c.scenarios.filter((s) => s.testCases.includes(tc)).map((s) => s.key));
+                groups.push(g);
+            }
             for (const s of c.scenarios) if (!s.testCases.length) notLinked.push(s.key);
         } else {
             const by = new Map<string, Group & { ids: Set<number> }>();

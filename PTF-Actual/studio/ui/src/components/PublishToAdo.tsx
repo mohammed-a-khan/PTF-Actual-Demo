@@ -46,7 +46,9 @@ export function PublishToAdo({ run, open, onClose }: { run: RunInfo; open: boole
     const [plans, setPlans] = React.useState<TestPlanDef[] | null>(null);
     const [suites, setSuites] = React.useState<Array<{ id: number; path: string }>>([]);
     const [plan, setPlan] = React.useState<number | undefined>(undefined);
-    const [suite, setSuite] = React.useState<number | undefined>(undefined);
+    const [chosenSuites, setChosenSuites] = React.useState<number[]>([]);
+    const [projectsErr, setProjectsErr] = React.useState<string | null>(null);
+    const [projectSearch, setProjectSearch] = React.useState('');
     const [preview, setPreview] = React.useState<PublishPreviewDef | null>(null);
     const [loading, setLoading] = React.useState(false);
     const [picks, setPicks] = React.useState<Record<string, Pick>>({});
@@ -57,26 +59,39 @@ export function PublishToAdo({ run, open, onClose }: { run: RunInfo; open: boole
     const [done, setDone] = React.useState<PublishDoneDef | null>(null);
     const ado = adoProject ? { adoProject } : {};
 
-    React.useEffect(() => { if (open) api.adoProjects(scope).then((r) => setProjects(r.projects)).catch(() => setProjects([])); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+    React.useEffect(() => { if (open) api.adoProjects(scope).then((r) => setProjects(r.projects)).catch((e) => { setProjects([]); setProjectsErr(errText(e)); }); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
     // Plans of the project (for choosing a plan and suite).
     React.useEffect(() => {
         if (!open || mode !== 'suite') return;
         setPlans(null);
         api.testPlans({ ...scope, ...ado, inactive }).then((r) => setPlans(r.plans)).catch((e) => { setPlans([]); setErr(errText(e)); });
     }, [open, mode, adoProject, inactive]); // eslint-disable-line react-hooks/exhaustive-deps
-    React.useEffect(() => { setSuite(undefined); setSuites([]); if (plan) api.testSuites(plan, { ...scope, ...ado }).then((r) => setSuites(suitePaths(r.suites))).catch((e) => setErr(errText(e))); }, [plan, adoProject]); // eslint-disable-line react-hooks/exhaustive-deps
+    // The suites of the chosen plan (a late answer for a plan no longer chosen is dropped).
+    React.useEffect(() => {
+        setSuites([]);
+        if (!plan) return;
+        let live = true;
+        api.testSuites(plan, { ...scope, ...ado }).then((r) => { if (live) setSuites(suitePaths(r.suites)); }).catch((e) => { if (live) setErr(errText(e)); });
+        return () => { live = false; };
+    }, [plan, adoProject]); // eslint-disable-line react-hooks/exhaustive-deps
     // The list: from the tags, or the chosen suite's test cases.
     React.useEffect(() => {
         if (!open || done) return;
-        if (mode === 'suite' && !(plan && suite)) { setPreview((p) => (p ? { ...p, groups: [], notLinked: [], noPlan: [] } : p)); setPicks({}); return; }
+        if (mode === 'suite' && !(plan && chosenSuites.length)) { setLoading(false); setPreview((p) => (p ? { ...p, groups: [], notLinked: [], noPlan: [] } : p)); setPicks({}); return; }
         let live = true;
         setLoading(true); setErr(null);
-        api.publishRunPreview(run.id, { ...ado, ...(mode === 'suite' ? { plan, suite } : {}) })
-            .then((r) => { if (!live) return; setPreview(r); setPicks(defaultPicks(r.groups)); setRunName((n) => n || r.run.name); })
+        api.publishRunPreview(run.id, { ...ado, ...(mode === 'suite' ? { plan, suites: chosenSuites } : {}) })
+            .then((r) => {
+                if (!live) return;
+                setPreview(r);
+                // Test cases already shown keep what was ticked and picked (adding a suite does not reset the others).
+                setPicks((old) => { const d = defaultPicks(r.groups); for (const k of Object.keys(d)) if (old[k]) d[k] = old[k]; return d; });
+                setRunName((n) => n || r.run.name);
+            })
             .catch((e) => { if (live) setErr(errText(e)); })
             .finally(() => { if (live) setLoading(false); });
         return () => { live = false; };
-    }, [open, run.id, mode, plan, suite, adoProject]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [open, run.id, mode, plan, chosenSuites, adoProject]); // eslint-disable-line react-hooks/exhaustive-deps // eslint-disable-line react-hooks/exhaustive-deps
 
     const scen = React.useMemo(() => new Map((preview?.scenarios ?? []).map((s) => [s.key, s])), [preview]);
     const groups = preview?.groups ?? [];
@@ -123,27 +138,32 @@ export function PublishToAdo({ run, open, onClose }: { run: RunInfo; open: boole
                     <div>
                         <div className="cs-field-label">Project {preview && <Typography.Text type="secondary" style={{ fontSize: 12 }}>(config: {preview.ado.from.project} / {preview.ado.from.env}{preview.ado.configured ? ` → ${preview.ado.configured}` : ''})</Typography.Text>}</div>
                         <Select style={{ width: 280 }} showSearch loading={projects === null} disabled={!!done} aria-label="Azure DevOps project"
-                            value={adoProject ?? preview?.ado.project} onChange={(v) => { setAdoProject(v === preview?.ado.configured ? undefined : v); setPlan(undefined); }}
-                            options={(projects ?? []).map((p) => ({ value: p, label: p === preview?.ado.configured ? `${p} (configured)` : p }))} />
+                            value={adoProject ?? preview?.ado.project} searchValue={projectSearch} onSearch={setProjectSearch} filterOption={(input, o) => String(o?.value ?? '').toLowerCase().includes(input.toLowerCase())}
+                            onChange={(v: string) => { setProjectSearch(''); setAdoProject(v === preview?.ado.configured ? undefined : v); setPlan(undefined); setChosenSuites([]); }}
+                            notFoundContent={projectsErr ? 'Type the project name' : undefined}
+                            options={[...new Set([...(projects ?? []), ...(preview?.ado.configured ? [preview.ado.configured] : []), ...(adoProject ? [adoProject] : [])])].sort((a, b) => a.localeCompare(b))
+                                .map((p) => ({ value: p, label: p === preview?.ado.configured ? `${p} (configured)` : p }))
+                                .concat(projectSearch.trim() && !(projects ?? []).some((p) => p.toLowerCase() === projectSearch.trim().toLowerCase()) ? [{ value: projectSearch.trim(), label: `Use "${projectSearch.trim()}"` }] : [])} />
+                        {projectsErr && <div><Typography.Text type="warning" style={{ fontSize: 11 }}>Could not list the organization's projects: type the name. ({projectsErr})</Typography.Text></div>}
                     </div>
                 </Space>
                 {!done && <Segmented value={mode} onChange={(v) => setMode(v as Mode)} options={[{ value: 'tags', label: 'Use tags from feature files' }, { value: 'suite', label: 'Select plan, suite and test cases' }]} />}
                 {!done && mode === 'suite' && (
                     <Space wrap align="end" size={12}>
                         <div><div className="cs-field-label">Test plan {plans && <Typography.Text type="secondary" style={{ fontSize: 12 }}>({plans.length} in {preview?.ado.project ?? 'the project'})</Typography.Text>}</div>
-                            <Select style={{ width: 320 }} showSearch optionFilterProp="label" loading={plans === null} placeholder="Choose a test plan" value={plan} onChange={setPlan} aria-label="Test plan"
+                            <Select style={{ width: 320 }} showSearch optionFilterProp="label" loading={plans === null} placeholder="Choose a test plan" value={plan} onChange={(v: number) => { setChosenSuites([]); setPlan(v); }} aria-label="Test plan"
                                 options={(plans ?? []).map((p) => ({ value: p.id, label: `${p.id} · ${p.name}${p.state && p.state !== 'Active' ? ` (${p.state})` : ''}${p.owner ? ` — ${p.owner}` : ''}` }))} /></div>
-                        <div><div className="cs-field-label">Suite</div>
-                            <Select style={{ width: 360 }} showSearch optionFilterProp="label" disabled={!plan} placeholder="Choose a suite" value={suite} onChange={setSuite} aria-label="Test suite"
+                        <div><div className="cs-field-label">Suites</div>
+                            <Select mode="multiple" style={{ width: 400 }} showSearch optionFilterProp="label" disabled={!plan} placeholder="Choose one or more suites" value={chosenSuites} onChange={(v: number[]) => setChosenSuites(v)} aria-label="Test suite" maxTagCount="responsive" loading={!!plan && !suites.length}
                                 options={suites.map((s) => ({ value: s.id, label: `${s.id} · ${s.path}` }))} /></div>
                         <Checkbox checked={inactive} onChange={(e) => setInactive(e.target.checked)}>Include inactive plans</Checkbox>
                     </Space>)}
                 {err && <Alert type="error" showIcon message={err} />}
-                {done ? <Done d={done} project={preview?.ado.project ?? ''} /> : (loading || !preview) && !err ? <Spin /> : preview && (<>
+                {done ? <Done d={done} project={preview?.ado.project ?? ''} /> : loading || (!preview && !err && mode === 'tags') ? <Spin /> : (<>
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
                         Results of run {run.id} only. {mode === 'tags' ? 'Plan, suite and test case come from each scenario\'s tags (else its feature\'s, else the config), as in the pipeline.' : 'Pick the scenario whose result goes to each test case: one scenario can be picked for several test cases.'}
                     </Typography.Text>
-                    {mode === 'suite' && !(plan && suite) ? <Alert type="info" showIcon message="Choose a test plan and a suite to list its test cases." /> : groups.length === 0 ? (
+                    {mode === 'suite' && !(plan && chosenSuites.length) ? <Alert type="info" showIcon message="Choose a test plan and one or more suites to list their test cases." /> : groups.length === 0 ? (
                         <Alert type="info" showIcon message={mode === 'tags' ? 'None of this run\'s scenarios has a @TestCaseId with a plan and suite.' : 'That suite has no test cases.'}
                             description={mode === 'tags' ? 'Use "Select plan, suite and test cases" to map them.' : undefined} />
                     ) : (
@@ -187,8 +207,8 @@ export function PublishToAdo({ run, open, onClose }: { run: RunInfo; open: boole
                                     })}
                                 </React.Fragment>))}</tbody>
                         </table>)}
-                    <Unmapped title="have no @TestCaseId" keys={preview.notLinked} scen={scen} hint={mode === 'tags' ? 'Use "Select plan, suite and test cases" to map them.' : 'Pick them for a test case above to publish them.'} />
-                    {mode === 'tags' && <Unmapped title="have a @TestCaseId but no plan and suite (tags or config)" keys={preview.noPlan} scen={scen} hint='Use "Select plan, suite and test cases".' />}
+                    <Unmapped title="have no @TestCaseId" keys={preview?.notLinked ?? []} scen={scen} hint={mode === 'tags' ? 'Use "Select plan, suite and test cases" to map them.' : 'Pick them for a test case above to publish them.'} />
+                    {mode === 'tags' && <Unmapped title="have a @TestCaseId but no plan and suite (tags or config)" keys={preview?.noPlan ?? []} scen={scen} hint='Use "Select plan, suite and test cases".' />}
                     <div><div className="cs-field-label">Test run name in Azure DevOps</div><Input value={runName} onChange={(e) => setRunName(e.target.value)} maxLength={250} aria-label="Test run name" /></div>
                 </>)}
             </Space>
