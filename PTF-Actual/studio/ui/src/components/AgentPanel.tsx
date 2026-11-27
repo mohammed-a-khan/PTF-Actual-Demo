@@ -4,7 +4,7 @@
  * framework's QA tools, and asks before changing anything (approval cards).
  */
 import React from 'react';
-import { Alert, App, Button, Empty, Input, Select, Space, Spin, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Empty, Input, Select, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { CheckOutlined, CloseOutlined, DeleteOutlined, DownloadOutlined, HistoryOutlined, PlusOutlined, SendOutlined, SettingOutlined, StopOutlined, ToolOutlined } from '@ant-design/icons';
 import { AgentEventDef, AgentSessionInfo, AgentStatus, AgentUsage, api, TeamAgentDef } from '../api';
 import { AgentChanges } from './AgentChanges';
@@ -183,6 +183,15 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
         try { await api.agentDecide(current, id, d); } catch (e) { message.error(errText(e)); deciding.current.delete(id); setDecidingIds([...deciding.current]); }
     };
 
+    // "Approve everything in this conversation" (as agent modes in editors): kept per conversation, on the server.
+    const [autoApprove, setAutoApprove] = React.useState(false);
+    React.useEffect(() => { setAutoApprove(false); if (current) void api.agentAutoApproveOf(current).then((r) => setAutoApprove(r.autoApprove)).catch(() => undefined); }, [current]);
+    const switchAuto = async (on: boolean) => {
+        if (!current) return;
+        try { const r = await api.agentAutoApprove(current, on); setAutoApprove(r.autoApprove); if (on) message.success(r.approved ? `Approving everything in this conversation (${r.approved} waiting request${r.approved === 1 ? '' : 's'} approved)` : 'Approving everything in this conversation'); }
+        catch (e) { message.error(errText(e)); }
+    };
+
     const head = (
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <Select size="small" style={{ flex: 1, minWidth: 0 }} value={current ?? undefined} placeholder="Conversations" aria-label="Conversation" showSearch optionFilterProp="label"
@@ -192,6 +201,8 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
                 onClick={() => modal.confirm({ title: 'Delete this conversation?', okText: 'Delete', okButtonProps: { danger: true }, onOk: async () => { try { const gone = current!; await api.agentDelete(gone); setCurrent(null); const r = currentRoute(); if (r[0] === 'agents' && r[1] === 'conversations' && r[2] === gone) navigate(['agents', 'conversations'], true); await refresh(); } catch (e) { message.error(errText(e)); } } })} /></Tooltip>
             <Tooltip title="Export the conversation (Markdown: messages, tools, approvals, changed files, usage)"><Button size="small" icon={<DownloadOutlined />} aria-label="Export conversation" disabled={!current} onClick={() => void exportTranscript()} /></Tooltip>
             <Tooltip title="Replay the conversation step by step"><Button size="small" icon={<HistoryOutlined />} aria-label="Replay conversation" disabled={!current} onClick={() => setReplaying(true)} /></Tooltip>
+            <Tooltip title={<span>Approve everything in this conversation: commands, file changes, Studio actions and tools go ahead without asking (as agent mode in VS Code). Still asked: test plans, what your team's agent policy keeps asking about, and anything after the agent may have read injected instructions. Off for new conversations.</span>}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, whiteSpace: 'nowrap' }}><Switch size="small" checked={autoApprove} disabled={!current || current.startsWith('mcp-')} onChange={(v) => void switchAuto(v)} aria-label="Approve everything in this conversation" data-testid="auto-approve" />Approve all</span></Tooltip>
             <Tooltip title="Agents: setup & settings"><Button size="small" icon={<SettingOutlined />} aria-label="Agent settings" onClick={() => navigate(['agents', 'setup'])} /></Tooltip>
         </div>
     );
@@ -235,6 +246,7 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
                                                     {/* For the conversation: a command only this exact command (one that writes files is asked each time), a tool or call only that one. */}
                                                     {it.what !== 'plan' && !it.once && <Tooltip title={it.what === 'shell' ? 'Runs this exact command again without asking, in this conversation only. Other commands still ask.' : it.what === 'write' ? 'File changes in this conversation go ahead without asking.' : 'This same action goes ahead without asking, in this conversation only.'}>
                                                         <Button size="small" disabled={decidingIds.includes(it.id)} onClick={() => void decide(it.id, 'session')}>{it.what === 'shell' ? 'Approve this command for the conversation' : 'Approve for this conversation'}</Button></Tooltip>}
+                                                    {it.what !== 'plan' && !autoApprove && <Tooltip title="Approve this and everything the agent asks next in this conversation (the Approve all switch at the top)"><Button size="small" disabled={decidingIds.includes(it.id)} onClick={() => void switchAuto(true)} data-testid="approve-all">Approve all in this conversation</Button></Tooltip>}
                                                     <Button size="small" danger icon={<CloseOutlined />} disabled={decidingIds.includes(it.id)} onClick={() => void decide(it.id, 'reject')}>{it.what === 'plan' ? 'Change it' : 'Reject'}</Button>
                                                     {it.once && it.what === 'shell' && <Typography.Text type="secondary" style={{ fontSize: 12 }}>This command can change files: it is asked each time.</Typography.Text>}</Space>}
                                         </div>

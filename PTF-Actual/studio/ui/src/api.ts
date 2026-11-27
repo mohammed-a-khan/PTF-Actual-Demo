@@ -944,6 +944,8 @@ export const api = {
     agentTranscript: (id: string) => request<string>('GET', `/api/agents/sessions/${encodeURIComponent(id)}/transcript`),
     agentEvents: (id: string, after: number) => request<{ events: AgentEventDef[]; busy: boolean; known?: boolean; usage?: AgentUsage; changes?: number }>('GET', `/api/agents/sessions/${encodeURIComponent(id)}/events?after=${after}`),
     agentAbort: (id: string) => request<{ ok: boolean }>('POST', `/api/agents/sessions/${encodeURIComponent(id)}/abort`, {}),
+    agentAutoApprove: (id: string, on: boolean) => request<{ autoApprove: boolean; approved: number }>('POST', `/api/agents/sessions/${encodeURIComponent(id)}/auto-approve`, { on }),
+    agentAutoApproveOf: (id: string) => request<{ autoApprove: boolean }>('GET', `/api/agents/sessions/${encodeURIComponent(id)}/auto-approve`),
     agentDecide: (id: string, approvalId: string, decision: 'once' | 'session' | 'reject') => request<{ ok: boolean }>('POST', `/api/agents/sessions/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}`, { decision }),
     browserFrame: (after: number) => request<BrowserFrame>('GET', `/api/agents/browser/frame?after=${after}`),
     browserOpen: (url: string) => request<{ url: string; title: string }>('POST', '/api/agents/browser/open', { url }),

@@ -6558,6 +6558,11 @@ export function createServer(opts: ServerOptions): StudioServer {
         return reply.type('text/markdown; charset=utf-8').header('Content-Disposition', `attachment; filename="agent-${id}.md"`).send(md);
     });
     app.post('/api/agents/sessions/:id/abort', async (req) => { await agents.abort(str((req.params as { id: string }).id, 'id', { max: 80 })); return { ok: true }; });
+    app.post('/api/agents/sessions/:id/auto-approve', async (req) => {
+        const id = str((req.params as { id: string }).id, 'id', { max: 80 });
+        try { return agents.setAutoApprove(id, body(req).on === true); } catch (e) { throw agentErr(e); }
+    });
+    app.get('/api/agents/sessions/:id/auto-approve', async (req) => ({ autoApprove: agents.autoApproveOf(str((req.params as { id: string }).id, 'id', { max: 80 })) }));
     app.post('/api/agents/sessions/:id/approvals/:aid', async (req) => {
         const p = req.params as { id: string; aid: string };
         const d = String(body(req).decision);

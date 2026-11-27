@@ -189,6 +189,9 @@ interface SessionState {
     pending: Map<string, Pending>;
     /** Approved for the rest of the session (approval kinds / tool names). */
     allowed: Set<string>;
+    /** "Approve everything in this conversation" (as editors' agent modes): every request goes ahead, except
+     *  what the team policy keeps asking about, test plans (reviewed each time), and anything after possible prompt injection. */
+    autoApprove?: boolean;
     /** Files the agent changed (repository paths): for review and discarding. */
     changes: Set<string>;
     usage: Usage;
@@ -682,13 +685,36 @@ export class AgentHost {
         const key = approvalKey(kind, title, detail);
         // After possible prompt injection nothing goes through on an earlier "for this conversation".
         const tainted = /\(after possible prompt injection\)$/.test(title);
-        if (key && !tainted && s.allowed.has(key)) { const id = randomBytes(6).toString('hex'); this.push(s, { type: 'approval-done', id, decision: 'auto' }); return Promise.resolve('once'); }
+        if ((key && !tainted && s.allowed.has(key)) || (!tainted && this.autoApproves(s, kind))) { const id = randomBytes(6).toString('hex'); this.push(s, { type: 'approval-done', id, decision: 'auto' }); return Promise.resolve('once'); }
         const id = randomBytes(6).toString('hex');
         this.push(s, { type: 'approval', id, title, detail: detail.slice(0, 6000), kind, ...(key ? {} : { once: true }) });
         // A test plan is approved each time it is submitted (never for the whole conversation); a command only for
         // that exact command, and one that writes files never.
         return new Promise((resolve) => s.pending.set(id, { resolve: (d) => { if (d === 'session' && key) s.allowed.add(key); resolve(d === 'session' && !key ? 'once' : d); }, title, detail, kind }));
     }
+
+    /** Whether "approve everything" lets this kind of request through (never a plan, nor what the team policy keeps asking about). */
+    private autoApproves(s: SessionState, kind: string): boolean {
+        if (!s.autoApprove || kind === 'plan') return false;
+        const policyKey: Record<string, string> = { shell: 'shell', write: 'files', studio: 'studio', mcp: 'mcp', url: 'urls', fetch: 'urls' };
+        const forced = (this.policy()?.approvals as Record<string, string> | undefined)?.[policyKey[kind] ?? kind];
+        return forced !== 'ask' && forced !== 'deny';
+    }
+
+    /** Switch "approve everything in this conversation" on or off; on, what is waiting now goes ahead too (as it would have). */
+    setAutoApprove(sessionId: string, on: boolean): { autoApprove: boolean; approved: number } {
+        const s = this.sessions.get(sessionId);
+        if (!s) throw new Error('No such conversation.');
+        s.autoApprove = on;
+        this.d.log('agent.approval', `${on ? 'Approve everything switched on' : 'Approve everything switched off'} for an agent conversation (${s.title})`, { agentSession: s.id });
+        let approved = 0;
+        if (on) for (const [id, p] of [...s.pending]) {
+            if (/\(after possible prompt injection\)$/.test(p.title) || !this.autoApproves(s, p.kind)) continue;
+            s.pending.delete(id); this.push(s, { type: 'approval-done', id, decision: 'auto' }); p.resolve('once'); approved++;
+        }
+        return { autoApprove: on, approved };
+    }
+    autoApproveOf(sessionId: string): boolean { return !!this.sessions.get(sessionId)?.autoApprove; }
 
     decide(sessionId: string, approvalId: string, decision: 'once' | 'session' | 'reject') {
         const s = this.sessions.get(sessionId);
