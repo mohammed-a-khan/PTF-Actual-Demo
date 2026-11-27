@@ -4,10 +4,11 @@
  * with a recorded reason when the team policy allows it.
  */
 import React from 'react';
-import { Alert, App, Button, Card, Collapse, Divider, Form, Input, Modal, Result, Select, Space, Tag, Typography, Tooltip } from 'antd';
+import { Alert, App, Button, Card, Checkbox, Collapse, Divider, Form, Input, Modal, Result, Select, Space, Tag, Typography, Tooltip } from 'antd';
 import { CheckCircleTwoTone, KeyOutlined, LockOutlined, WarningTwoTone } from '@ant-design/icons';
 import { api, Finding, GateResult } from '../api';
 import { errText, useStudio } from '../state';
+import { BulkNotSecretModal, BulkStoreModal } from './BulkSecretFixes';
 
 type Blocked = Extract<GateResult, { status: 'blocked' }>;
 
@@ -24,7 +25,7 @@ export interface ScanGateProps {
     onDone: (sha?: string) => void;
 }
 
-function FindingCard({ f, mode, onFixed }: { f: Finding; mode: 'commit' | 'push'; onFixed: () => Promise<void> }) {
+function FindingCard({ f, mode, onFixed, selected, onSelect }: { f: Finding; mode: 'commit' | 'push'; onFixed: () => Promise<void>; selected?: boolean; onSelect?: (on: boolean) => void }) {
     const { message } = App.useApp();
     const { env } = useStudio();
     const [busy, setBusy] = React.useState<string | null>(null);
@@ -48,7 +49,7 @@ function FindingCard({ f, mode, onFixed }: { f: Finding; mode: 'commit' | 'push'
 
     return (
         <Card size="small" style={{ marginBottom: 10 }}
-            title={<Space><WarningTwoTone twoToneColor={f.confidence === 'high' ? '#cf1322' : '#d48806'} />{f.type}
+            title={<Space>{onSelect && <Checkbox checked={selected} onChange={(e) => onSelect(e.target.checked)} aria-label={`Select ${f.file}:${f.line}`} />}<WarningTwoTone twoToneColor={f.confidence === 'high' ? '#cf1322' : '#d48806'} />{f.type}
                 <Tag color={f.confidence === 'high' ? 'red' : 'gold'}>{f.confidence === 'high' ? 'Very likely' : 'Possibly'} a secret</Tag></Space>}
             extra={<Typography.Text className="mono">{fileLevel ? f.file : `${f.file}:${f.line}`}</Typography.Text>}>
             <Typography.Paragraph style={{ marginBottom: 8 }}>{f.reason}</Typography.Paragraph>
@@ -91,7 +92,7 @@ function FindingCard({ f, mode, onFixed }: { f: Finding; mode: 'commit' | 'push'
 }
 
 export function ScanGate({ mode, blocked, message: commitMessage, amend, signoff, proceed: proceedFn, onClose, onDone }: ScanGateProps) {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const { refresh, status } = useStudio();
     // The branch the commit was meant for (as when the review opened): a commit that would land elsewhere is refused.
     const branchAtOpen = React.useRef(status?.branch ?? null);
@@ -100,10 +101,18 @@ export function ScanGate({ mode, blocked, message: commitMessage, amend, signoff
     const [busy, setBusy] = React.useState(false);
     const [error, setError] = React.useState<string | null>(null);
     React.useEffect(() => setState(blocked), [blocked]);
+    // Findings chosen for a fix done to all of them at once (commit only).
+    const keyOf = (f: Finding) => `${f.id}|${f.fingerprint}|${f.file}|${f.line}`;
+    const [picked, setPicked] = React.useState<Set<string>>(new Set());
+    const [kind, setKind] = React.useState<string>('');
+    const [bulk, setBulk] = React.useState<'store' | 'allow' | null>(null);
+    const [bulkBusy, setBulkBusy] = React.useState(false);
 
     const rescan = async () => {
         const r = await api.scanStaged();
         setState((s) => ({ ...s, findings: r.findings, digest: r.digest }));
+        // What was chosen and is still there stays chosen.
+        setPicked((p) => new Set(r.findings.map(keyOf).filter((k) => p.has(k))));
         await refresh();
     };
 
@@ -124,6 +133,28 @@ export function ScanGate({ mode, blocked, message: commitMessage, amend, signoff
     };
 
     const clear = state.findings.length === 0;
+    const kinds = [...state.findings.reduce((m, f) => m.set(f.type, (m.get(f.type) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]);
+    const shown = kind ? state.findings.filter((f) => f.type === kind) : state.findings;
+    const byFile = [...shown.reduce((m, f) => m.set(f.file, [...(m.get(f.file) ?? []), f]), new Map<string, Finding[]>())];
+    const chosen = state.findings.filter((f) => picked.has(keyOf(f)));
+    const lineFindings = chosen.filter((f) => f.line > 0);
+    const toggle = (list: Finding[], on: boolean) => setPicked((p) => { const n = new Set(p); for (const f of list) { if (on) n.add(keyOf(f)); else n.delete(keyOf(f)); } return n; });
+    const allOn = (list: Finding[]) => list.length > 0 && list.every((f) => picked.has(keyOf(f)));
+    const someOn = (list: Finding[]) => list.some((f) => picked.has(keyOf(f)));
+    const bulkSimple = (action: 'remove' | 'unstage') => {
+        const list = action === 'remove' ? lineFindings : chosen;
+        const files = [...new Set(list.map((f) => f.file))];
+        modal.confirm({
+            title: action === 'remove' ? `Blank ${list.length} value${list.length === 1 ? '' : 's'}?` : `Leave ${files.length} file${files.length === 1 ? '' : 's'} out of this commit?`,
+            content: action === 'remove' ? `The values are removed from ${files.length} file${files.length === 1 ? '' : 's'} (and staged). Tests that need them will fail until they are set another way.` : <ul style={{ margin: 0 }}>{files.slice(0, 12).map((x) => <li key={x}><Typography.Text code>{x}</Typography.Text></li>)}{files.length > 12 && <li>and {files.length - 12} more</li>}</ul>,
+            okText: action === 'remove' ? 'Blank them' : 'Leave them out',
+            onOk: async () => {
+                setBulkBusy(true);
+                try { await api.fixMany({ action, items: list.map((f) => ({ finding: f })) }); message.success(action === 'remove' ? `${list.length} value(s) blanked` : `${files.length} file(s) left out of this commit`); await rescan(); }
+                catch (e) { message.error(errText(e)); } finally { setBulkBusy(false); }
+            },
+        });
+    };
     const verb = mode === 'commit' ? 'Commit' : 'Push';
     return (
         <Modal open width={760} onCancel={onClose} footer={null} destroyOnClose
@@ -137,11 +168,38 @@ export function ScanGate({ mode, blocked, message: commitMessage, amend, signoff
                     <Alert type="warning" showIcon style={{ marginBottom: 12 }}
                         message={`${state.findings.length} possible secret${state.findings.length === 1 ? '' : 's'} ${mode === 'commit' ? 'in your staged changes' : 'in commits you are about to push'}`}
                         description={mode === 'commit'
-                            ? 'Once committed and pushed, a secret stays in the repository history. Fix each one below — the fixes update your staged files.'
+                            ? 'Once committed and pushed, a secret stays in the repository history. Fix them below, one by one or several at once (tick them: a whole file, every one of a kind, or all) — the fixes update your staged files.'
                             : 'These are in commits already made on this computer (possibly outside the Studio). Fix them in a new commit, or push anyway with a reason.'} />
+                    {mode === 'commit' && state.findings.length > 1 && <div className="scan-bulk">
+                        <Space wrap size={8}>
+                            <Checkbox checked={allOn(shown)} indeterminate={!allOn(shown) && someOn(shown)} onChange={(e) => toggle(shown, e.target.checked)} data-testid="scan-select-all">
+                                Select all{kind ? ' of this kind' : ''} ({shown.length})</Checkbox>
+                            {kinds.length > 1 && <Select size="small" style={{ minWidth: 240 }} value={kind} onChange={setKind} aria-label="Kind of finding"
+                                options={[{ value: '', label: `Every kind (${state.findings.length})` }, ...kinds.map(([k, n]) => ({ value: k, label: `${k} (${n})` }))]} />}
+                        </Space>
+                        {chosen.length > 0 && <Space wrap size={6} style={{ marginTop: 8 }} data-testid="scan-bulk-bar">
+                            <Typography.Text strong>{chosen.length} selected:</Typography.Text>
+                            <Button size="small" type="primary" icon={<LockOutlined />} disabled={!lineFindings.length || bulkBusy} onClick={() => setBulk('store')}>Move to secret store{lineFindings.length < chosen.length ? ` (${lineFindings.length})` : ''}</Button>
+                            <Button size="small" disabled={!lineFindings.length || bulkBusy} onClick={() => bulkSimple('remove')}>Remove values</Button>
+                            <Button size="small" disabled={bulkBusy} onClick={() => bulkSimple('unstage')}>Leave {new Set(chosen.map((f) => f.file)).size} file(s) out of commit</Button>
+                            <Button size="small" disabled={!lineFindings.length || bulkBusy} onClick={() => setBulk('allow')}>Not secrets…</Button>
+                            <Button size="small" type="link" onClick={() => setPicked(new Set())}>Clear</Button>
+                        </Space>}
+                    </div>}
                     <div style={{ maxHeight: '48vh', overflow: 'auto', paddingRight: 4 }}>
-                        {state.findings.map((f) => <FindingCard key={f.id + f.fingerprint} f={f} mode={mode} onFixed={rescan} />)}
+                        {mode === 'commit' && state.findings.length > 1 ? byFile.map(([file, list]) => (
+                            <div key={file} className="scan-file">
+                                <div className="scan-file-head">
+                                    <Checkbox checked={allOn(list)} indeterminate={!allOn(list) && someOn(list)} onChange={(e) => toggle(list, e.target.checked)} aria-label={`Select every finding in ${file}`} />
+                                    <Typography.Text className="mono" style={{ fontSize: 12 }}>{file}</Typography.Text>
+                                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>{list.length} finding{list.length === 1 ? '' : 's'}</Typography.Text>
+                                </div>
+                                {list.map((f) => <FindingCard key={f.id + f.fingerprint} f={f} mode={mode} onFixed={rescan} selected={picked.has(keyOf(f))} onSelect={(on) => toggle([f], on)} />)}
+                            </div>
+                        )) : state.findings.map((f) => <FindingCard key={f.id + f.fingerprint} f={f} mode={mode} onFixed={rescan} />)}
                     </div>
+                    {bulk === 'store' && <BulkStoreModal findings={lineFindings} onClose={() => setBulk(null)} onDone={async () => { setBulk(null); await rescan(); }} />}
+                    {bulk === 'allow' && <BulkNotSecretModal findings={lineFindings} onClose={() => setBulk(null)} onDone={async () => { setBulk(null); await rescan(); }} />}
                     <Divider style={{ margin: '12px 0' }} />
                     {state.overrideAllowed ? (
                         <Collapse ghost items={[{

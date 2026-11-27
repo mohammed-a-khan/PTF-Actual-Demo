@@ -144,3 +144,54 @@ test('fix: remove value, ignore file, allowlist', async () => {
     const files = (await runGit(['show', '--name-only', '--format=', 'HEAD'], { cwd: dir })).stdout.trim().split('\n').sort();
     assert.deepEqual(files, ['.cs-studio/secret-allowlist.json', '.gitignore', 'a.ts', 'b.ts']);
 });
+
+test('fixes for many findings at once: names and environments worked out, equal values share a secret, files edited once, then the commit goes through', async () => {
+    const { planStore, moveManyToStore, removeMany, allowlistMany, unstageMany, envOfFile, secretName } = await import('../src/scanner/fixes');
+    assert.equal(envOfFile('config/shop/environments/qa.env'), 'qa');
+    assert.equal(envOfFile('config/shop/common/common.env'), undefined);
+    assert.equal(secretName('db-password'), 'DB_PASSWORD');
+    assert.equal(secretName('2fa key'), '_2FA_KEY');
+    const { dir, git } = await repo('fix-many');
+    const { store } = newStore('fix-many-store');
+    fs.mkdirSync(path.join(dir, 'config/shop/environments'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'config/shop/common'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'config/shop/environments/qa.env'), 'DB_PASSWORD=Q4!zr7Lm-x\nAPI_TOKEN=Zk9!pQ2wR7$vL4m\n');
+    fs.writeFileSync(path.join(dir, 'config/shop/environments/uat.env'), 'DB_PASSWORD=U4!zr7Lm-y\n');
+    fs.writeFileSync(path.join(dir, 'config/shop/common/common.env'), 'SMTP_PASSWORD=Q4!zr7Lm-x\nADMIN_PASSWORD=Tr0ub4dor&3\nSERVICE_PASSWORD=Hj5$gT9!nQ2w\n');
+    await git.stage(['config/shop/environments/qa.env', 'config/shop/environments/uat.env', 'config/shop/common/common.env']);
+    const r = await git.commit('config');
+    assert.equal(r.status, 'blocked');
+    if (r.status !== 'blocked') return;
+    const at = (file: string, key: string) => r.findings.find((f) => f.file === file && f.suggestedName === key)!;
+    const qaDb = at('config/shop/environments/qa.env', 'DB_PASSWORD'), uatDb = at('config/shop/environments/uat.env', 'DB_PASSWORD');
+    const smtp = at('config/shop/common/common.env', 'SMTP_PASSWORD'), token = at('config/shop/environments/qa.env', 'API_TOKEN');
+    const admin = at('config/shop/common/common.env', 'ADMIN_PASSWORD'), service = at('config/shop/common/common.env', 'SERVICE_PASSWORD');
+    assert.ok(qaDb && uatDb && smtp && token && admin && service, JSON.stringify(r.findings.map((f) => [f.file, f.suggestedName])));
+    store.set({ name: 'SMTP_PASSWORD', project: 'p' }, 'another-value');
+    const plan = await planStore(git, store, [qaDb, uatDb, smtp, token], 'p');
+    assert.deepEqual(plan.map((x) => [x.name, x.env ?? '', x.exists]), [['DB_PASSWORD', 'qa', 'none'], ['DB_PASSWORD', 'uat', 'none'], ['SMTP_PASSWORD', '', 'different'], ['API_TOKEN', 'qa', 'none']],
+        'each environment file gets its environment; a name in the store with another value is said');
+    assert.equal(plan[0].group, plan[2].group, 'qa DB_PASSWORD and SMTP_PASSWORD have the same value');
+    // One name for two different values in the same place: refused, nothing changed.
+    await assert.rejects(moveManyToStore(git, store, [{ ref: qaDb, name: 'SHARED', env: 'qa' }, { ref: token, name: 'SHARED', env: 'qa' }], { project: 'p' }), /One name for different values/);
+    assert.match(fs.readFileSync(path.join(dir, 'config/shop/environments/qa.env'), 'utf8'), /Q4!zr7Lm-x/);
+    // The stored SMTP_PASSWORD has another value: refused unless replacing is chosen.
+    await assert.rejects(moveManyToStore(git, store, plan.map((x) => ({ ref: x.ref, name: x.name, env: x.env })), { project: 'p' }), /Already in the secret store with another value: SMTP_PASSWORD/);
+    const done = await moveManyToStore(git, store, plan.map((x) => ({ ref: x.ref, name: x.name, env: x.env })), { project: 'p', overwrite: true });
+    assert.deepEqual([done.moved, done.secrets, done.files.sort()], [4, 4, ['config/shop/common/common.env', 'config/shop/environments/qa.env', 'config/shop/environments/uat.env']]);
+    assert.equal(fs.readFileSync(path.join(dir, 'config/shop/environments/qa.env'), 'utf8'), 'DB_PASSWORD={env:DB_PASSWORD}\nAPI_TOKEN={env:API_TOKEN}\n', 'two findings in one file: both done');
+    assert.equal(store.resolve('DB_PASSWORD', { project: 'p', env: 'uat' }), 'U4!zr7Lm-y');
+    assert.equal(store.resolve('DB_PASSWORD', { project: 'p', env: 'qa' }), 'Q4!zr7Lm-x');
+    assert.equal(store.resolve('SMTP_PASSWORD', { project: 'p' }), 'Q4!zr7Lm-x');
+    // The other two: one blanked, one marked not a secret; then nothing is left.
+    await removeMany(git, [admin]);
+    await allowlistMany(git, [service], 'a fake used by the local mock', 'T');
+    assert.equal(fs.readFileSync(path.join(dir, 'config/shop/common/common.env'), 'utf8'), 'SMTP_PASSWORD={env:SMTP_PASSWORD}\nADMIN_PASSWORD=\nSERVICE_PASSWORD=Hj5$gT9!nQ2w\n');
+    assert.equal((await git.commit('config')).status, 'ok');
+    // Leaving files out: each named file unstaged once.
+    fs.writeFileSync(path.join(dir, 'config/shop/environments/qa.env'), 'DB_PASSWORD=N3w!pa55-word\n');
+    await git.stage(['config/shop/environments/qa.env']);
+    await unstageMany(git, ['config/shop/environments/qa.env', 'config/shop/environments/qa.env']);
+    const st = await runGit(['diff', '--cached', '--name-only'], { cwd: dir });
+    assert.equal(st.stdout.trim(), '');
+});

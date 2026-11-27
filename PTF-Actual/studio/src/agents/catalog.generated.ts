@@ -610,6 +610,15 @@ export const CALLS: CatalogCall[] = [
   "result": "Record<string, unknown>"
  },
  {
+  "name": "storePlan",
+  "area": "scan",
+  "method": "POST",
+  "path": "/api/scan/store-plan",
+  "args": "findings: Finding[]",
+  "body": "{ findings: findings.map((f) => ({ fingerprint: f.fingerprint, file: f.file, line: f.line })) }",
+  "result": "{ items: Array<{ fingerprint: string; file: string; line: number; name: string; env?: string; group: string; exists: 'none' | 'same' | 'different'; decrypted: boolean }> }"
+ },
+ {
   "name": "secrets",
   "area": "secrets",
   "method": "GET",
@@ -3397,7 +3406,7 @@ export const TYPES: Record<string, string> = {
  "LoadGeneratorDef": "export interface LoadGeneratorDef { name: string; url: string; zone?: string; token: string }",
  "LoadGeneratorHealth": "export interface LoadGeneratorHealth { name: string; zone?: string; url: string; state: string; users?: number; requests?: number; errors?: number; cpu?: number; memory?: number; error?: string; lastSeen?: string }",
  "LoadRunDetailDef": "export interface LoadRunDetailDef extends LoadRunInfoDef { live?: LoadSnapshot; result?: LoadResult; definition: LoadScenarioDef; generators?: LoadGeneratorHealth[] }",
- "RunRequest": "export interface RunRequest { project: string; env: string; features?: string[]; tags?: string; scenario?: string; scenarios?: string[]; headless?: boolean; browser?: string; workers?: number;\n    retries?: number; device?: string; viewport?: { width: number; height: number }; variables?: Record<string, string>;\n    /** Send results to Azure DevOps for this run; not set: as the project is configured. */\n    ado?: boolean;\n    /** A debug run: pause before each step and/or on a failure, browser shown, one scenario at a time. */\n    debug?: { steps?: boolean; pauseOnFailure?: boolean; slowMo?: number; exceptions?: boolean; /** Set by the server: the saved breakpoints the run started with. */ breakpoints?: Breakpoint[] } }",
+ "RunRequest": "export interface RunRequest { rerunOf?: string; project: string; env: string; features?: string[]; tags?: string; scenario?: string; scenarios?: string[]; headless?: boolean; browser?: string; workers?: number;\n    retries?: number; device?: string; viewport?: { width: number; height: number }; variables?: Record<string, string>;\n    /** Send results to Azure DevOps for this run; not set: as the project is configured. */\n    ado?: boolean;\n    /** A debug run: pause before each step and/or on a failure, browser shown, one scenario at a time. */\n    debug?: { steps?: boolean; pauseOnFailure?: boolean; slowMo?: number; exceptions?: boolean; /** Set by the server: the saved breakpoints the run started with. */ breakpoints?: Breakpoint[] } }",
  "DebugPause": "export interface DebugPause { kind: 'before-step' | 'after-failure'; step: string; scenario?: string; error?: string; file?: string; line?: number; reason?: 'breakpoint' | 'step' }",
  "CodeFrame": "export interface CodeFrame { index: number; name: string; file?: string; line?: number; external: boolean; /** A caller across an await (no variables: shown where it is). */ async?: boolean }",
  "CodePause": "export interface CodePause { seq: number; reason: string; frames: CodeFrame[]; exception?: string }",

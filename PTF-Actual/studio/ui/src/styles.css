@@ -601,3 +601,8 @@ body.menu-resizing .ant-layout-sider, body.menu-resizing .ant-layout-sider-child
 .ed-tip.ed-tip-live { pointer-events: auto; max-height: min(60vh, 520px); overflow: auto; max-width: min(720px, 90vw); }
 .ed-tip-value { padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid var(--panel-border); }
 .ed-tip-value .dbg-value-tree .ant-tree-title { white-space: nowrap; }
+
+/* Commit review: findings chosen for a fix done to all of them */
+.scan-bulk { position: sticky; top: 0; z-index: 2; background: var(--surface); padding: 8px 10px; margin-bottom: 8px; border: 1px solid rgba(127,127,127,.2); border-radius: 6px; }
+.scan-file { margin-bottom: 6px; }
+.scan-file-head { display: flex; align-items: center; gap: 8px; padding: 4px 6px; margin-bottom: 6px; background: var(--row-sel); border-radius: 4px; }

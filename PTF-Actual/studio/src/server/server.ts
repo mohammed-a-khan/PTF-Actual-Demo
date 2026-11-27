@@ -24,7 +24,7 @@ import { DiffOptions, GitService, INDEX_LOCK_MESSAGE, Override, STALE_HUNK_MESSA
 import { GitError } from '../git/run';
 import { UserError } from '../core/errors';
 import { SecretStore } from '../secrets/store';
-import { allowlistFinding, FindingRef, ignoreFile, moveToStore, removeValue, unstageFile } from '../scanner/fixes';
+import { allowlistFinding, allowlistMany, FindingRef, ignoreFile, moveManyToStore, moveToStore, planStore, removeMany, removeValue, unstageFile, unstageMany } from '../scanner/fixes';
 import { secretsAsEnv } from '../secrets/store';
 import { DEFAULT_SETTINGS, SettingsStore } from '../core/settings';
 import { ROTATE_DAYS, secretUsage } from '../secrets/usage';
@@ -846,6 +846,48 @@ export function createServer(opts: ServerOptions): StudioServer {
                 return { ok: true };
             default: throw new BadRequest(`Unknown fix action "${action}".`);
         }
+    });
+
+    // ---- Fixes for many findings at once (selected in the review): one scan, each file edited and staged once.
+    /** ENCRYPTED: values made with the framework's built-in key, read with the project's own framework (null: kept as written). */
+    const frameworkDecrypt = (v: string): string | null => {
+        try {
+            const pkg = frameworkPackage(opts.repoRoot);
+            if (!pkg) return null;
+            const mod = require(path.join(pkg.dir, 'dist', 'utils', 'CSEncryptionUtil.js')) as { CSEncryptionUtil?: { getInstance(): { decrypt(v: string): string } } }; // eslint-disable-line @typescript-eslint/no-var-requires
+            const d = mod.CSEncryptionUtil?.getInstance().decrypt(v);
+            return typeof d === 'string' && d ? d : null;
+        } catch { return null; }
+    };
+    const refsOf = (v: unknown, max = 2000): FindingRef[] => {
+        const list = Array.isArray(v) ? v.slice(0, max) : [];
+        if (!list.length) throw new BadRequest('Choose at least one finding.');
+        return list.map(findingRef);
+    };
+    app.post('/api/scan/store-plan', async (req) => {
+        const b = body(req);
+        const plan = await planStore(git, opts.store, refsOf(b.findings), projectId, frameworkDecrypt);
+        return { items: plan.map((x) => ({ ...x.ref, name: x.name, env: x.env, group: x.group, exists: x.exists, decrypted: x.decrypted })) };
+    });
+    app.post('/api/scan/fix-many', async (req) => {
+        const b = body(req);
+        const action = str(b.action, 'action', { max: 32 });
+        const items = Array.isArray(b.items) ? (b.items as Array<Record<string, unknown>>).slice(0, 2000) : [];
+        if (!items.length) throw new BadRequest('Choose at least one finding.');
+        const refs = items.map((x) => findingRef(x.finding));
+        let result: Record<string, unknown> = { ok: true };
+        switch (action) {
+            case 'move-to-store':
+                result = await moveManyToStore(git, opts.store, items.map((x, i) => ({ ref: refs[i], name: str(x.name, 'name', { max: 64 }), env: str(x.env, 'env', { optional: true, max: 32 }) || undefined })),
+                    { project: projectId, overwrite: b.overwrite === true, decode: frameworkDecrypt });
+                break;
+            case 'remove': result = await removeMany(git, refs); break;
+            case 'not-a-secret': await allowlistMany(git, refs, str(b.reason, 'reason', { max: 500 }), opts.userName ?? 'unknown'); break;
+            case 'unstage': await unstageMany(git, refs.map((r) => r.file)); break;
+            default: throw new BadRequest(`Unknown fix action "${action}".`);
+        }
+        log('secret-scan.fix', `Applied fix "${action}" to ${refs.length} finding(s)`, { action, count: refs.length, files: [...new Set(refs.map((r) => r.file))].slice(0, 20).join(', ') });
+        return result;
     });
 
     // ---- Secrets (write-only values)

@@ -795,6 +795,9 @@ export const api = {
         request<RepoStatus & { resolved?: { deleted: boolean; message?: string } }>('POST', '/api/git/conflict/resolve', typeof choice === 'string' ? { file, choice } : { file, content: choice.content }),
     scanStaged: () => request<{ findings: Finding[]; digest: string }>('GET', '/api/scan/staged'),
     fix: (body: Record<string, unknown>) => request<Record<string, unknown>>('POST', '/api/scan/fix', body),
+    storePlan: (findings: Finding[]) => request<{ items: Array<{ fingerprint: string; file: string; line: number; name: string; env?: string; group: string; exists: 'none' | 'same' | 'different'; decrypted: boolean }> }>('POST', '/api/scan/store-plan', { findings: findings.map((f) => ({ fingerprint: f.fingerprint, file: f.file, line: f.line })) }),
+    fixMany: (b: { action: 'move-to-store' | 'remove' | 'not-a-secret' | 'unstage'; items: Array<{ finding: Finding; name?: string; env?: string }>; reason?: string; overwrite?: boolean }) =>
+        request<{ moved?: number; secrets?: number; files?: string[] }>('POST', '/api/scan/fix-many', { ...b, items: b.items.map((x) => ({ ...x, finding: { fingerprint: x.finding.fingerprint, file: x.finding.file, line: x.finding.line } })) }),
     secrets: () => request<SecretMeta[]>('GET', '/api/secrets'),
     setSecret: (name: string, value: string, env?: string, scope?: 'all-projects') => request<SecretMeta>('PUT', '/api/secrets', { name, value, env, scope }),
     deleteSecret: (name: string, env?: string, scope?: 'all-projects') => request<{ removed: boolean }>('DELETE', '/api/secrets' + q({ name, env, scope })),
