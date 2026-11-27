@@ -10,6 +10,7 @@ import { runGit } from '../git/run';
 import { UserError } from '../core/errors';
 import { safeRepoPath, writeFileInRepo } from '../core/safePath';
 import { nameProblem } from './newName';
+import { globFilter, inScope, isExcluded, matcher, matchesIn, normalizeRel, TextQuery } from './textSearch';
 
 export const MAX_EDIT_BYTES = 5 * 1024 * 1024;
 
@@ -121,6 +122,63 @@ export class Workspace {
         return { recoveryDir };
     }
 
+    /** The files a search looks at: tracked and new files (not ignored ones, unless asked), in the scope. */
+    private async searchCandidates(o: TextSearchOptions): Promise<string[]> {
+        if (o.file) {
+            const rel = normalizeRel(o.file);
+            this.abs(rel);
+            return fs.existsSync(path.join(this.root, rel)) ? [rel] : [];
+        }
+        const folder = o.folder ? normalizeRel(o.folder) : '';
+        if (folder) this.abs(folder);
+        const spec = folder ? ['--', folder] : [];
+        const listed = await runGit(['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--deduplicate', ...spec], { cwd: this.root, maxOutputBytes: 64 * 1024 * 1024 });
+        let files = listed.stdout.split('\0').filter(Boolean);
+        if (o.includeIgnored) {
+            const ign = await runGit(['ls-files', '-z', '--others', '--ignored', '--exclude-standard', ...spec], { cwd: this.root, allowFailure: true, maxOutputBytes: 64 * 1024 * 1024 });
+            files = [...new Set([...files, ...ign.stdout.split('\0').filter(Boolean)])];
+        }
+        const only = globFilter(o.glob);
+        return files.filter((f) => (o.includeIgnored || !isExcluded(f)) && inScope(f, { folder }) && only(f)).sort((a, b) => a.localeCompare(b));
+    }
+
+    /**
+     * Search file contents with the same matcher Replace uses (textSearch.ts): per file, every match is
+     * counted; the first `limit` are listed. Binary files and files over 2 MB are skipped.
+     */
+    async textSearch(o: TextSearchOptions): Promise<TextSearchResult> {
+        const empty: TextSearchResult = { hits: [], files: [], total: 0, limited: false, truncated: false, scanned: 0 };
+        if (!o.q) return empty;
+        const re = matcher(o);
+        const all = await this.searchCandidates(o);
+        const truncated = all.length > MAX_SEARCH_FILES;
+        const limit = o.limit ?? 2000;
+        const out = { ...empty, truncated };
+        let n = 0;
+        for (const rel of all.slice(0, MAX_SEARCH_FILES)) {
+            // Other requests are answered while a large project is searched.
+            if (++n % 200 === 0) await new Promise((r) => setImmediate(r));
+            let buf: Buffer;
+            try {
+                const a = path.join(this.root, rel);
+                const st = fs.statSync(a);
+                if (!st.isFile() || st.size > MAX_SEARCH_BYTES) continue;
+                buf = fs.readFileSync(a);
+            } catch { continue; }
+            out.scanned++;
+            if (buf.subarray(0, 8000).includes(0)) continue;
+            const found = matchesIn(buf.toString('utf8'), re);
+            if (!found.length) continue;
+            out.files.push({ path: rel, count: found.length });
+            out.total += found.length;
+            for (const m of found) {
+                if (out.hits.length >= limit) { out.limited = true; break; }
+                out.hits.push({ path: rel, line: m.line, column: m.column, length: m.length, text: m.text });
+            }
+        }
+        return out;
+    }
+
     /** Search file contents (git grep: fast, respects .gitignore, includes new files). */
     async search(query: string, opts: { regex?: boolean; caseSensitive?: boolean; wholeWord?: boolean; glob?: string; limit?: number } = {}): Promise<SearchHit[]> {
         if (!query) return [];
@@ -143,7 +201,30 @@ export class Workspace {
     }
 }
 
-export interface SearchHit { path: string; line: number; column: number; text: string }
+export interface SearchHit { path: string; line: number; column: number; text: string; length?: number }
+export interface TextSearchOptions extends TextQuery {
+    /** "Only in": comma-separated globs (see textSearch.ts globFilter). */
+    glob?: string;
+    /** Scope: a folder (repository-relative), or one file. Neither: the whole project. */
+    folder?: string; file?: string;
+    /** Also files Git ignores and the build / dependency / report folders (EXCLUDED_DIRS). */
+    includeIgnored?: boolean;
+    /** Results listed (the counts per file are always complete for the files read). */
+    limit?: number;
+}
+export interface TextSearchResult {
+    hits: SearchHit[];
+    /** Every file with matches and how many (for Replace all, also beyond the results listed). */
+    files: Array<{ path: string; count: number }>;
+    total: number;
+    /** More matches than listed in `hits`. */
+    limited: boolean;
+    /** Not every candidate file was read (too many files): narrow the scope. */
+    truncated: boolean;
+    scanned: number;
+}
+const MAX_SEARCH_FILES = 40_000;
+const MAX_SEARCH_BYTES = 2 * 1024 * 1024;
 
 export class ConflictError extends UserError {
     readonly conflict = true;

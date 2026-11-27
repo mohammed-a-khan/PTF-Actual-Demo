@@ -8,7 +8,8 @@ import {
 } from '@ant-design/icons';
 import { api, GateResult, hasToken, setProtectedRunConfirm } from './api';
 import { errText, StudioProvider, useStudio } from './state';
-import { canSaveLost, discardLost, lostOnLeave, saveLost } from './unsaved';
+import { canSaveLost, discardLost, installUnsavedGuard, lostOnLeave, saveLost } from './unsaved';
+import { installReloadGuard, RELOAD_HINT } from './reloadKeys';
 import { cameFrom, goBack, navigate, questionClosed, routeOfHash, setPopGuard, useBackForward, useRoute } from './route';
 import { remoteSynced, tagNews } from './datagit-common';
 import { SourceControl } from './pages/SourceControl';
@@ -349,6 +350,12 @@ function OperationBanner() {
 
 function Shell({ dark, onToggleTheme }: { dark: boolean; onToggleTheme: () => void }) {
     const { message: shellMessage, modal: shellModal } = App.useApp();
+    // F5 / Ctrl+R never reload the Studio (F5 is Continue while debugging); unsaved work asks before the page goes.
+    React.useEffect(() => {
+        installUnsavedGuard();
+        return installReloadGuard((k) => shellMessage.info({ key: 'cs-reload-hint', duration: 3,
+            content: k === 'f5' ? RELOAD_HINT : `${k === 'ctrl-r' ? 'Ctrl+R' : 'Ctrl+F5'} does not reload the Studio; use the browser's reload button if you need to.` }));
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
     // "Leave without saving?": Save (when the screen can save), Discard, or Stay.
     const askLeave = (lose: string[], leave: () => void) => {
         const canSave = canSaveLost();

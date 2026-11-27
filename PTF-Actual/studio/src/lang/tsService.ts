@@ -27,6 +27,45 @@ function safe<T>(f: () => T, fallback: T): T {
 
 const isInside = (root: string, p: string) => { const r = path.relative(root, p); return !!r && !r.startsWith('..') && !path.isAbsolute(r); };
 
+type PathImpl = Pick<typeof path, 'resolve' | 'relative' | 'isAbsolute' | 'sep'>;
+/**
+ * The key a file is known by, whatever spelling TypeScript or the editor uses for it: TypeScript
+ * writes "C:/repo/a.ts", the Studio "C:\\repo\\a.ts" (one backslash each), and on Windows (and macOS) the
+ * drive letter or a folder may differ in case ("c:\\Repo"). One key for all, so the editor's unsaved text is the one
+ * TypeScript checks (a miss on Windows means the file on disk, with CRLF line ends, against the editor's
+ * offsets, and go to definition lands beside the word).
+ */
+export function fileKey(p: string, caseSensitive: boolean, impl: PathImpl = path): string {
+    const k = impl.resolve(p);
+    return caseSensitive ? k : k.toLowerCase();
+}
+/**
+ * A file TypeScript names (forward slashes, any case of the drive letter) as a repository path
+ * ("test/pages/Login.ts"), or a path starting with "../" for files outside the repository.
+ * `links`: folders inside the repository that are links elsewhere (npm link, pnpm), real path → path in the
+ * repository, so a definition in a linked package opens under node_modules/ instead of outside the project.
+ */
+export function repoPathOf(root: string, fileName: string, caseSensitive: boolean, impl: PathImpl = path, links: Array<[string, string]> = []): string {
+    let abs = impl.resolve(fileName);
+    const inside = (r: string, p: string) => { const x = impl.relative(r, p); return !!x && !x.startsWith('..') && !impl.isAbsolute(x); };
+    const same = (a: string, b: string) => (caseSensitive ? a === b : a.toLowerCase() === b.toLowerCase());
+    if (!inside(root, abs)) {
+        for (const [real, link] of links) {
+            const r = impl.resolve(real);
+            if (same(r, abs) || inside(r, abs)) { abs = impl.resolve(link, impl.relative(r, abs)); break; }
+        }
+    }
+    let rel = impl.relative(root, abs);
+    // Another drive (Windows): relative() gives the absolute path; still a path outside the project.
+    if (impl.isAbsolute(rel)) return '../' + rel.split(impl.sep).join('/').split('\\').join('/');
+    // path.relative compares case-insensitively only on Windows; elsewhere (macOS) a case-only difference in the root is fixed here.
+    if (!caseSensitive && rel.startsWith('..')) {
+        const r = impl.resolve(root);
+        if (abs.toLowerCase().startsWith(r.toLowerCase() + impl.sep)) rel = abs.slice(r.length + 1);
+    }
+    return rel.split(impl.sep).join('/').split('\\').join('/');
+}
+
 export interface TsDiagnostic { line: number; column: number; endLine: number; endColumn: number; message: string; severity: 'error' | 'warning' | 'info'; code: number }
 export interface TsCompletion {
     name: string; kind: string; sortText: string; insertText?: string;
@@ -126,7 +165,14 @@ export class TsService {
     readonly ts: TsModule;
     readonly tsSource: 'project' | 'studio';
     private readonly service: TS.LanguageService;
-    private readonly overlays = new Map<string, { text: string; version: number; snap: TS.IScriptSnapshot }>();
+    /** The editor's texts, by fileKey (name: the spelling the Studio uses, given to TypeScript). */
+    private readonly overlays = new Map<string, { name: string; text: string; version: number; snap: TS.IScriptSnapshot }>();
+    private readonly caseSensitive: boolean;
+    private readonly key = (f: string) => fileKey(f, this.caseSensitive);
+    /** Package folders under node_modules that are links (real path → path in the repository), found on first use. */
+    private linkMap: Array<[string, string]> | null = null;
+    private resolutionCache: TS.ModuleResolutionCache | null = null;
+    private fallbackCache: TS.ModuleResolutionCache | null = null;
     /** Files on disk: their version (mtime), checked at most every DISK_CHECK_MS, and their text per version. */
     private readonly stats = new Map<string, { at: number; version: string }>();
     private readonly snaps = new Map<string, { version: string; snap: TS.IScriptSnapshot }>();
@@ -150,6 +196,7 @@ export class TsService {
         const { ts, source } = loadTypeScript(root);
         this.ts = ts;
         this.tsSource = source;
+        this.caseSensitive = ts.sys.useCaseSensitiveFileNames;
         this.configPath = configPath === undefined ? (fs.existsSync(path.join(root, 'tsconfig.json')) ? path.join(root, 'tsconfig.json') : null) : configPath;
         if (this.configPath && isInside(root, this.configPath)) {
             const errors: TS.Diagnostic[] = [];
@@ -169,18 +216,55 @@ export class TsService {
             this.options = { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, experimentalDecorators: true, emitDecoratorMetadata: true, esModuleInterop: true, allowJs: true, skipLibCheck: true, strict: false };
             this.fileNames = [];
         }
-        this.fileSet = new Set(this.fileNames.map((f) => path.resolve(f)));
+        this.fileSet = new Set(this.fileNames.map((f) => this.key(f)));
+        const legacyResolution = (() => {
+            // As TypeScript picks it: set, or from "module" (commonjs and older: node10; node16/nodenext: their own).
+            const o = this.options;
+            const kind = o.moduleResolution ?? (o.module === ts.ModuleKind.Node16 ? ts.ModuleResolutionKind.Node16 : o.module === ts.ModuleKind.NodeNext ? ts.ModuleResolutionKind.NodeNext
+                : o.module === ts.ModuleKind.Preserve ? ts.ModuleResolutionKind.Bundler
+                : (o.module === undefined || o.module === ts.ModuleKind.CommonJS || o.module === ts.ModuleKind.None) ? ts.ModuleResolutionKind.Node10 : ts.ModuleResolutionKind.Classic);
+            return kind === ts.ModuleResolutionKind.Node10 || kind === ts.ModuleResolutionKind.Classic;
+        })();
+        const moduleHost: TS.ModuleResolutionHost = {
+            fileExists: (f) => this.overlays.has(this.key(f)) || ts.sys.fileExists(f),
+            readFile: (f) => this.overlays.get(this.key(f))?.text ?? ts.sys.readFile(f),
+            directoryExists: ts.sys.directoryExists, getDirectories: ts.sys.getDirectories,
+            useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames, getCurrentDirectory: () => root,
+        };
+        const canon = (f: string) => (this.caseSensitive ? f : f.toLowerCase());
+        /**
+         * Imports resolved as configured; one that is not found with the old "node" resolution (moduleResolution
+         * node / node10, or none set with module commonjs) is looked up again honouring the package's "exports",
+         * as Node.js does at run time. The framework's entry points ("@mdakhan.mak/cs-playwright-test-framework/bdd")
+         * exist only there: without this every framework class is `any` and go to definition finds nothing.
+         */
+        const resolveOne = (name: string, containingFile: string, redirected: TS.ResolvedProjectReference | undefined, options: TS.CompilerOptions, mode: TS.ResolutionMode): TS.ResolvedModuleWithFailedLookupLocations => {
+            this.resolutionCache ??= ts.createModuleResolutionCache(root, canon, this.options);
+            const r = ts.resolveModuleName(name, containingFile, options, moduleHost, this.resolutionCache, redirected, mode);
+            if (r.resolvedModule || !legacyResolution || name.startsWith('.') || path.isAbsolute(name)) return r;
+            const alt: TS.CompilerOptions = { ...options, module: ts.ModuleKind.Node16, moduleResolution: ts.ModuleResolutionKind.Node16 };
+            this.fallbackCache ??= ts.createModuleResolutionCache(root, canon, alt);
+            const r2 = ts.resolveModuleName(name, containingFile, alt, moduleHost, this.fallbackCache, redirected, ts.ModuleKind.CommonJS);
+            return r2.resolvedModule ? r2 : r;
+        };
         const host: TS.LanguageServiceHost = {
             getScriptFileNames: () => {
-                if (!this.names || this.namesFor !== this.overlays.size) { this.names = [...new Set([...this.fileNames, ...this.overlays.keys()])]; this.namesFor = this.overlays.size; }
+                if (!this.names || this.namesFor !== this.overlays.size) {
+                    // Each file once, in the spelling of the project's own list when it has the file.
+                    const keys = new Set(this.fileNames.map((f) => this.key(f)));
+                    this.names = [...this.fileNames, ...[...this.overlays.entries()].filter(([k]) => !keys.has(k)).map(([, o]) => o.name)];
+                    this.namesFor = this.overlays.size;
+                }
                 return this.names;
             },
             getScriptVersion: (f) => {
-                const o = this.overlays.get(path.resolve(f));
+                const o = this.overlays.get(this.key(f));
                 return o ? `o${o.version}` : this.diskVersion(f);
             },
+            resolveModuleNameLiterals: (lits, containingFile, redirected, options, containingSourceFile) =>
+                lits.map((lit) => resolveOne(lit.text, containingFile, redirected, options, ts.getModeForUsageLocation(containingSourceFile, lit, options))),
             getScriptSnapshot: (f) => {
-                const k = path.resolve(f);
+                const k = this.key(f);
                 const o = this.overlays.get(k);
                 if (o) return o.snap;
                 // A file on disk is read once per version (not again each time the program is checked).
@@ -196,8 +280,8 @@ export class TsService {
             getCurrentDirectory: () => root,
             getCompilationSettings: () => this.options,
             getDefaultLibFileName: (o) => ts.getDefaultLibFilePath(o),
-            fileExists: (f) => this.overlays.has(path.resolve(f)) || ts.sys.fileExists(f),
-            readFile: (f) => this.overlays.get(path.resolve(f))?.text ?? ts.sys.readFile(f),
+            fileExists: (f) => this.overlays.has(this.key(f)) || ts.sys.fileExists(f),
+            readFile: (f) => this.overlays.get(this.key(f))?.text ?? ts.sys.readFile(f),
             readDirectory: ts.sys.readDirectory,
             directoryExists: ts.sys.directoryExists,
             getDirectories: ts.sys.getDirectories,
@@ -210,7 +294,7 @@ export class TsService {
 
     /** The version of a file on disk (its mtime), looked up again only after a while: files rarely change under the editor. */
     private diskVersion(f: string): string {
-        const k = path.resolve(f);
+        const k = this.key(f);
         const now = Date.now();
         const c = this.stats.get(k);
         if (c && now - c.at < TsService.DISK_CHECK_MS) return c.version;
@@ -224,22 +308,59 @@ export class TsService {
     setCancellationToken(t: TS.HostCancellationToken) { this.cancel = t; }
 
     /** Is this file part of the project as configured (before any file was opened)? */
-    includes(abs: string): boolean { return this.fileSet.has(path.resolve(abs)); }
+    includes(abs: string): boolean { return this.fileSet.has(this.key(abs)); }
 
     static supports(file: string): boolean { return /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/i.test(file); }
 
     /** Use the editor's current (possibly unsaved) text for this file. */
     update(abs: string, text: string | undefined): void {
-        const k = path.resolve(abs);
+        const k = this.key(abs);
         // Saved or closed: the file on disk counts again (looked at now, not after DISK_CHECK_MS).
         this.stats.delete(k);
-        if (text === undefined) { this.overlays.delete(k); return; }
+        if (text === undefined) {
+            // A saved file may be a new one an import was waiting for: imports are looked up again.
+            this.overlays.delete(k); this.resolutionCache = null; this.fallbackCache = null; return;
+        }
         const o = this.overlays.get(k);
         if (o && o.text === text) return;
-        this.overlays.set(k, { text, version: (o?.version ?? 0) + 1, snap: editSnapshot(this.ts, text, o?.snap) });
+        if (!o) { this.resolutionCache = null; this.fallbackCache = null; }
+        this.overlays.set(k, { name: o?.name ?? path.resolve(abs), text, version: (o?.version ?? 0) + 1, snap: editSnapshot(this.ts, text, o?.snap) });
     }
 
-    private text(abs: string): string { return this.overlays.get(path.resolve(abs))?.text ?? fs.readFileSync(abs, 'utf8'); }
+    private text(abs: string): string { return this.overlays.get(this.key(abs))?.text ?? fs.readFileSync(abs, 'utf8'); }
+
+    /**
+     * The position in the text TypeScript has for a file that matches `offset` in the editor's text: the
+     * same unless the program holds another text (the file on disk, with "\r\n" line ends), then by line and column.
+     */
+    private at(abs: string, offset: number): number {
+        const o = this.overlays.get(this.key(abs));
+        const sf = this.service.getProgram()?.getSourceFile(abs);
+        if (!o || !sf || sf.text === o.text) return offset;
+        const before = o.text.slice(0, offset).split('\n');
+        const line = before.length - 1, col = before[before.length - 1].replace(/\r$/, '').length;
+        try { return sf.getPositionOfLineAndCharacter(line, col); } catch { return offset; }
+    }
+
+    /** Package folders in node_modules that are links to somewhere else (npm link / pnpm / a shared folder). */
+    private links(): Array<[string, string]> {
+        if (this.linkMap) return this.linkMap;
+        const out: Array<[string, string]> = [];
+        const nm = path.join(this.root, 'node_modules');
+        const look = (dir: string, depth: number) => {
+            let entries: fs.Dirent[] = [];
+            try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+            for (const e of entries) {
+                const p = path.join(dir, e.name);
+                if (e.isSymbolicLink()) { try { out.push([fs.realpathSync(p), p]); } catch { /* broken link */ } }
+                else if (depth === 0 && e.isDirectory() && e.name.startsWith('@')) look(p, 1);
+            }
+        };
+        try { if (fs.lstatSync(nm).isSymbolicLink()) out.push([fs.realpathSync(nm), nm]); else look(nm, 0); } catch { /* no node_modules */ }
+        // The longest real path first (a package inside a linked folder).
+        this.linkMap = out.sort((a, b) => b[0].length - a[0].length);
+        return this.linkMap;
+    }
 
     private lc(abs: string, pos: number): { line: number; column: number } {
         const sf = this.service.getProgram()?.getSourceFile(abs);
@@ -261,7 +382,7 @@ export class TsService {
             const key = `${d.code}|${message}`;
             if (seen.has(key)) return [];
             seen.add(key);
-            const inCfg = d.start !== undefined && d.file && this.configPath && path.resolve(d.file.fileName) === path.resolve(this.configPath);
+            const inCfg = d.start !== undefined && d.file && this.configPath && this.key(d.file.fileName) === this.key(this.configPath);
             const s = inCfg ? pos(d.start!) : { line: 1, column: 1 };
             const e = inCfg ? pos(d.start! + (d.length ?? 1)) : { line: 1, column: 2 };
             const severity: TsDiagnostic['severity'] = d.category === ts.DiagnosticCategory.Error ? 'error' : d.category === ts.DiagnosticCategory.Warning ? 'warning' : 'info';
@@ -321,7 +442,7 @@ export class TsService {
         if (!d) return null;
         const out: TsCompletionDetails = { detail: this.ts.displayPartsToString(d.displayParts), doc: this.ts.displayPartsToString(d.documentation) };
         if (CALLABLE.has(d.kind)) out.snippet = callSnippet(name, d.displayParts);
-        const edits = (d.codeActions ?? []).flatMap((a) => a.changes).filter((c) => path.resolve(c.fileName) === path.resolve(abs)).flatMap((c) => c.textChanges);
+        const edits = (d.codeActions ?? []).flatMap((a) => a.changes).filter((c) => this.key(c.fileName) === this.key(abs)).flatMap((c) => c.textChanges);
         if (edits.length) out.edits = edits.map((e) => ({ start: e.span.start, length: e.span.length, newText: e.newText }));
         return out;
     }
@@ -347,23 +468,43 @@ export class TsService {
     }
 
     quickInfo(abs: string, offset: number): { text: string; doc: string } | null {
-        const q = safe(() => this.service.getQuickInfoAtPosition(abs, offset), undefined);
+        const q = safe(() => this.service.getQuickInfoAtPosition(abs, this.at(abs, offset)), undefined);
         if (!q) return null;
         return { text: this.ts.displayPartsToString(q.displayParts), doc: this.ts.displayPartsToString(q.documentation) };
     }
 
     definition(abs: string, offset: number): TsLocation[] {
-        const defs = safe(() => this.service.getDefinitionAtPosition(abs, offset), undefined) ?? [];
+        const pos = this.at(abs, offset);
+        const defs = safe(() => this.service.getDefinitionAtPosition(abs, pos), undefined) ?? [];
         return defs.map((d) => this.location(d.fileName, d.textSpan));
     }
 
-    references(abs: string, offset: number): TsLocation[] {
-        const refs = safe(() => this.service.getReferencesAtPosition(abs, offset), undefined) ?? [];
-        return refs.slice(0, 500).map((r) => {
-            const loc = this.location(r.fileName, r.textSpan);
-            try { loc.text = this.text(r.fileName).split(/\r?\n/)[loc.line - 1]?.trim().slice(0, 200); } catch { /* unreadable */ }
-            return loc;
-        });
+    /**
+     * Every use of the symbol at the offset across the project (TypeScript's find all references): page
+     * element properties, methods, classes, functions, variables. `definition`: the declaration itself.
+     */
+    references(abs: string, offset: number): Array<TsLocation & { definition?: boolean; write?: boolean }> {
+        const pos = this.at(abs, offset);
+        const groups = safe(() => this.service.findReferences(abs, pos), undefined) ?? [];
+        const seen = new Set<string>();
+        const out: Array<TsLocation & { definition?: boolean; write?: boolean }> = [];
+        const lines = new Map<string, string[]>();
+        for (const g of groups) for (const r of g.references) {
+            const id = `${this.key(r.fileName)}:${r.textSpan.start}`;
+            if (seen.has(id) || out.length >= 1000) continue;
+            seen.add(id);
+            const loc: TsLocation & { definition?: boolean; write?: boolean } = this.location(r.fileName, r.textSpan);
+            // The declaration (TypeScript 5 no longer marks it on the reference itself).
+            if (r.isDefinition || (this.key(g.definition.fileName) === this.key(r.fileName) && g.definition.textSpan.start === r.textSpan.start)) loc.definition = true;
+            if (r.isWriteAccess) loc.write = true;
+            try {
+                let ls = lines.get(r.fileName);
+                if (!ls) { ls = this.text(r.fileName).split(/\r?\n/); lines.set(r.fileName, ls); }
+                loc.text = ls[loc.line - 1]?.trim().slice(0, 200);
+            } catch { /* unreadable */ }
+            out.push(loc);
+        }
+        return out.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line || a.column - b.column);
     }
 
     /** Format the whole file with TypeScript's formatter (4-space indent, like the framework). */
@@ -383,7 +524,7 @@ export class TsService {
     private location(fileName: string, span: TS.TextSpan): TsLocation {
         const s = this.lc(fileName, span.start);
         const e = this.lc(fileName, span.start + span.length);
-        return { path: path.relative(this.root, fileName).split(path.sep).join('/'), ...s, endLine: e.line, endColumn: e.column };
+        return { path: repoPathOf(this.root, fileName, this.caseSensitive, path, this.links()), ...s, endLine: e.line, endColumn: e.column };
     }
 }
 

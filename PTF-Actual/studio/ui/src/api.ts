@@ -72,6 +72,15 @@ export class ApiError extends Error {
     constructor(message: string, public status: number, public code?: string) { super(message); }
 }
 
+/**
+ * The page is going away (reload, closed tab): the language service forgets the editor texts it was sent for these
+ * files, so a later go to definition reads them from disk instead of edits that were never saved.
+ */
+export function closeFilesOnUnload(paths: string[]): void {
+    for (const path of paths.slice(0, 50)) {
+        try { void fetch('/api/lang/close', { method: 'POST', keepalive: true, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ path }) }).catch(() => undefined); } catch { /* the page is closing */ }
+    }
+}
 async function request<T>(method: string, url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const res = await fetch(url, {
         method, signal,
@@ -237,7 +246,7 @@ export interface Backup { ref: string; sha: string; date: string; subject: strin
 type OpResult = { status: 'ok' | 'conflicts' | 'rejected'; message?: string; conflicts?: string[] };
 const dq = (o?: DiffOpts) => ({ ws: o?.ws && o.ws !== 'none' ? o.ws : undefined, eol: o?.eol ? true : undefined });
 
-export interface FileData { path: string; content?: string; hash: string; size: number; eol?: string; binary: boolean }
+export interface FileData { path: string; content?: string; hash: string; size: number; eol?: string; binary: boolean; readOnly?: boolean }
 export interface Diag { line: number; column: number; endLine: number; endColumn: number; message: string; severity: string; source: string; fix?: 'create-step' }
 export interface StepPlan {
     step: string; pattern: string; params: Array<{ name: string; type: string }>; preview: string;
@@ -246,8 +255,10 @@ export interface StepPlan {
 export interface StepUsage { path: string; line: number; column: number; text: string; keyword: string }
 export interface StepUsages { step: { pattern: string; file: string; line: number; builtIn?: boolean }; usages: StepUsage[] }
 export interface StepRename { step: { pattern: string; file: string; line: number }; pattern?: string; changes: Array<{ path: string; line: number; before: string; after: string }>; files: string[]; skipped: StepUsage[] }
-export interface Loc { path: string; line: number; column: number; endLine: number; endColumn: number; text?: string }
-export interface SearchHit { path: string; line: number; column: number; text: string }
+export interface Loc { path: string; line: number; column: number; endLine: number; endColumn: number; text?: string; definition?: boolean; write?: boolean }
+export interface SearchHit { path: string; line: number; column: number; text: string; length?: number }
+export interface TextSearchResult { hits: SearchHit[]; files: Array<{ path: string; count: number }>; total: number; limited: boolean; truncated: boolean; scanned: number }
+export interface TextSearchQuery { regex?: boolean; case?: boolean; word?: boolean; glob?: string; folder?: string; file?: string; ignored?: boolean }
 export interface CompletionItem { name: string; kind: string; sortText?: string; insertText?: string; detail?: string; isSnippet?: boolean; replace?: { start: number; length: number }; hasAction?: boolean; source?: string; data?: unknown; kindModifiers?: string }
 export interface CompletionDetailsDef { detail?: string; doc?: string; snippet?: string; edits?: Array<{ start: number; length: number; newText: string }>; stale?: boolean }
 export interface SignatureHelpDef { signatures: Array<{ label: string; params: Array<[number, number]>; doc: string; paramDocs: string[] }>; active: number; param: number; start: number }
@@ -513,9 +524,9 @@ export interface RunRequest { project: string; env: string; features?: string[];
     /** Send results to Azure DevOps for this run; not set: as the project is configured. */
     ado?: boolean;
     /** A debug run: pause before each step and/or on a failure, browser shown, one scenario at a time. */
-    debug?: { steps?: boolean; pauseOnFailure?: boolean; slowMo?: number; exceptions?: boolean } }
+    debug?: { steps?: boolean; pauseOnFailure?: boolean; slowMo?: number; exceptions?: boolean; /** Set by the server: the saved breakpoints the run started with. */ breakpoints?: Breakpoint[] } }
 export interface DebugPause { kind: 'before-step' | 'after-failure'; step: string; scenario?: string; error?: string; file?: string; line?: number; reason?: 'breakpoint' | 'step' }
-export interface CodeFrame { index: number; name: string; file?: string; line?: number; external: boolean }
+export interface CodeFrame { index: number; name: string; file?: string; line?: number; external: boolean; /** A caller across an await (no variables: shown where it is). */ async?: boolean }
 export interface CodePause { seq: number; reason: string; frames: CodeFrame[]; exception?: string }
 /** A debug run's state as it changes: where it is paused (a feature step, a code line with its top frame's variables), or running. */
 export interface DebugState { paused: DebugPause | null; codePaused: CodePause | null; scopes?: DebugScope[] }
@@ -1047,12 +1058,14 @@ export const api = {
     warmUpLanguage: (path?: string) => request<{ ok: boolean }>('POST', '/api/lang/warmup', path ? { path } : {}),
     files: () => request<string[]>('GET', '/api/files'),
     readFile: (path: string) => request<FileData>('GET', '/api/file' + q({ path })),
+    readLibraryFile: (path: string) => request<FileData>('GET', '/api/file/library' + q({ path })),
     saveFile: (path: string, content: string, expectedHash: string | null) => request<{ hash: string }>('PUT', '/api/file', { path, content, expectedHash }),
     newFolder: (path: string) => request<{ ok: boolean }>('POST', '/api/file/folder', { path }),
     renamePath: (from: string, to: string) => request<{ ok: boolean }>('POST', '/api/file/rename', { from, to }),
     copyPath: (from: string, to: string) => request<{ ok: boolean }>('POST', '/api/file/copy', { from, to }),
     deletePath: (path: string) => request<{ recoveryDir: string }>('DELETE', '/api/file' + q({ path })),
     search: (query: string, o: { regex?: boolean; case?: boolean; word?: boolean; glob?: string }) => request<SearchHit[]>('GET', '/api/search' + q({ q: query, regex: o.regex, case: o.case, word: o.word, glob: o.glob })),
+    textSearch: (query: string, o: TextSearchQuery) => request<TextSearchResult>('GET', '/api/search/text' + q({ q: query, regex: o.regex, case: o.case, word: o.word, glob: o.glob, folder: o.folder, file: o.file, ignored: o.ignored })),
     diagnostics: (path: string, content: string) => request<{ diagnostics: Diag[] }>('POST', '/api/lang/diagnostics', { path, content }),
     completions: (path: string, content: string, offset: number, signal?: AbortSignal) => request<{ items: CompletionItem[]; stale?: boolean }>('POST', '/api/lang/completions', { path, content, offset }, signal),
     completionDetails: (path: string, content: string, offset: number, name: string, source?: string, data?: unknown, signal?: AbortSignal) => request<CompletionDetailsDef>('POST', '/api/lang/completion-details', { path, content, offset, name, source, data }, signal),

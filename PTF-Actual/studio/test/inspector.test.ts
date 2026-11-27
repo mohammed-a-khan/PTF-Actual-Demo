@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { spawn } from 'child_process';
 import * as ts from 'typescript';
-import { decodeMappings, generatedFor, InspectorSession, inspectorUrl, originalFor, readInlineMap } from '../src/debug/inspector';
+import { decodeMappings, generatedFor, InspectorSession, inspectorUrl, originalFor, projectFile, readInlineMap, sameFile } from '../src/debug/inspector';
 
 const SRC = `import { helper } from './helper';
 
@@ -178,4 +178,85 @@ test('stepping past the end of a step asks the framework to pause before the nex
     await exited;
     try { child.kill(); } catch { /* ended */ }
     fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('script addresses as the project\'s files: Windows file URLs (drive letters, escapes, letter case), backslash paths, network drives', () => {
+    const W = 'win32';
+    const root = 'C:\\Users\\John Smith\\repo';
+    // What Node reports for CommonJS / ts-node scripts on Windows
+    assert.equal(projectFile('file:///C:/Users/John%20Smith/repo/test/weblab/steps/shop.steps.ts', root, W), 'test/weblab/steps/shop.steps.ts');
+    assert.equal(projectFile('file:///c:/users/john%20smith/REPO/test/Shop.steps.ts', root, W), 'test/Shop.steps.ts', 'letter case of the folder does not matter');
+    assert.equal(projectFile('C:\\Users\\John Smith\\repo\\test\\a.ts', root, W), 'test/a.ts', 'a plain path');
+    assert.equal(projectFile('c:\\users\\john smith\\repo\\test\\a.ts', 'C:/Users/John Smith/repo', W), 'test/a.ts', 'the root with / too');
+    assert.equal(projectFile('\\\\?\\C:\\Users\\John Smith\\repo\\a.ts', root, W), 'a.ts', 'a long path');
+    assert.equal(projectFile('file://fileserver/share/repo/steps/a.ts', '\\\\fileserver\\share\\repo', W), 'steps/a.ts', 'a network drive');
+    assert.equal(projectFile('file:///C:/Users/John%20Smith/repo/Node_Modules/fw/a.js', root, W), null, 'node_modules (any case) is not the project\'s');
+    assert.equal(projectFile('file:///D:/repo/a.ts', root, W), null, 'another drive');
+    assert.equal(projectFile('C:\\Users\\John Smith\\repo2\\a.ts', root, W), null, 'a folder next to it');
+    assert.equal(projectFile('node:internal/modules/cjs/loader', root, W), null);
+    assert.equal(projectFile('evalmachine.<anonymous>', root, W), null);
+    assert.equal(projectFile('/C:/x.ts', root, W), null);
+    // Linux / macOS: escapes decoded, letter case matters
+    assert.equal(projectFile('file:///home/me/my%20repo/test/a.ts', '/home/me/my repo', 'linux'), 'test/a.ts');
+    assert.equal(projectFile('/home/me/repo/test/a.ts', '/home/me/repo', 'darwin'), 'test/a.ts');
+    assert.equal(projectFile('/home/me/Repo/test/a.ts', '/home/me/repo', 'linux'), null);
+    assert.equal(projectFile('file:///home/me/repo/node_modules/x/a.js', '/home/me/repo', 'linux'), null);
+    // Breakpoints (saved with /) and scripts are the same file on Windows whatever the letter case or separator
+    assert.equal(sameFile('test/weblab/steps/Shop.Steps.ts', 'Test\\Weblab\\steps\\shop.steps.ts', W), true);
+    assert.equal(sameFile('test/a.ts', 'test/A.ts', 'linux'), false);
+    assert.equal(sameFile('./test/a.ts', 'test/a.ts', 'linux'), true);
+});
+
+test('a project in a folder with a space: breakpoint hit; `this` and async callers shown; Stop while paused lets the run end', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'insp space-'));
+    fs.mkdirSync(path.join(root, 'steps'));
+    fs.writeFileSync(path.join(root, 'steps', 'page.js'), [
+        'class CartPage {',                          // 1
+        '    constructor() { this.items = 2; }',     // 2
+        '    async total(price) {',                  // 3
+        '        await null;',                       // 4
+        '        const sum = this.items * price;',   // 5
+        '        return sum;',                       // 6
+        '    }',                                     // 7
+        '}',                                         // 8
+        'async function step() {',                   // 9
+        '    const r = await new CartPage().total(3);', // 10
+        '    console.log("sum " + r);',              // 11
+        '}',                                         // 12
+        'setTimeout(() => { step(); setInterval(() => undefined, 1000); }, 300);', // 13
+        "process.on('SIGTERM', () => { console.log('cleaned up'); process.exit(0); });", // 14
+    ].join('\n'));
+    const child = spawn(process.execPath, ['--inspect-brk=127.0.0.1:0', path.join(root, 'steps', 'page.js')], { cwd: root });
+    let out = '';
+    child.stdout.on('data', (d) => { out += d; });
+    const url = await new Promise<string>((res) => child.stderr.on('data', (d) => { const u = inspectorUrl(String(d).split('\n')[0]); if (u) res(u); }));
+    const s = new InspectorSession(url, root);
+    // A failed check must not leave the process waiting in the debugger (the test run would never end).
+    const guard = setTimeout(() => { s.close(); child.kill('SIGKILL'); }, 20000);
+    try {
+    const p = new Promise<any>((res) => s.once('paused', res));
+    await s.start([{ file: 'steps/page.js', line: 6 }]);
+    const paused = await p;
+    assert.deepEqual([paused.frames[0].name, paused.frames[0].file, paused.frames[0].line], ['total', 'steps/page.js', 6]);
+    const caller = paused.frames.find((f: any) => f.async && f.name === 'step');
+    assert.ok(caller, 'the async caller is in the call stack');
+    assert.deepEqual([caller.file, caller.line, caller.external], ['steps/page.js', 10, false]);
+    const local = (await s.scopes(0)).find((sc) => sc.name === 'Local')!.variables;
+    assert.equal(local[0].name, 'this');
+    assert.match(local[0].value, /^CartPage \{items: 2\}/);
+    assert.equal((await s.properties(local[0].objectId!)).find((v) => v.name === 'items')!.value, '2', 'this expands');
+    assert.equal(local.find((v) => v.name === 'sum')!.value, '6');
+    assert.equal((await s.evaluate('this.items + price', 0)).value, '5', 'evaluated in the paused frame');
+    // Stop while paused: the debugger lets it go, so its SIGTERM handler runs
+    await s.release();
+    child.kill('SIGTERM');
+    await new Promise<void>((res) => { child.once('exit', () => res()); setTimeout(res, 5000); });
+    assert.match(out, /sum 6/);
+    assert.match(out, /cleaned up/);
+    } finally {
+        clearTimeout(guard);
+        s.close();
+        try { child.kill('SIGKILL'); } catch { /* ended */ }
+        fs.rmSync(root, { recursive: true, force: true });
+    }
 });

@@ -2382,6 +2382,15 @@ export const CALLS: CatalogCall[] = [
   "result": "FileData"
  },
  {
+  "name": "readLibraryFile",
+  "area": "file",
+  "method": "GET",
+  "path": "/api/file/library",
+  "args": "path: string",
+  "query": "{ path }",
+  "result": "FileData"
+ },
+ {
   "name": "saveFile",
   "area": "file",
   "method": "PUT",
@@ -2434,6 +2443,15 @@ export const CALLS: CatalogCall[] = [
   "args": "query: string, o: { regex?: boolean; case?: boolean; word?: boolean; glob?: string }",
   "query": "{ q: query, regex: o.regex, case: o.case, word: o.word, glob: o.glob }",
   "result": "SearchHit[]"
+ },
+ {
+  "name": "textSearch",
+  "area": "search",
+  "method": "GET",
+  "path": "/api/search/text",
+  "args": "query: string, o: TextSearchQuery",
+  "query": "{ q: query, regex: o.regex, case: o.case, word: o.word, glob: o.glob, folder: o.folder, file: o.file, ignored: o.ignored }",
+  "result": "TextSearchResult"
  },
  {
   "name": "diagnostics",
@@ -3192,14 +3210,16 @@ export const TYPES: Record<string, string> = {
  "TagInfo": "export interface TagInfo { name: string; sha: string; date: string; message: string; annotated: boolean; /** On the remote: yes, no, or a different tag of that name; missing when the remote could not be asked. */ onRemote?: 'yes' | 'no' | 'different' }",
  "Hunk": "export interface Hunk { id: string; header: string; lines: string[]; added: number; removed: number; newStart: number }",
  "Backup": "export interface Backup { ref: string; sha: string; date: string; subject: string }",
- "FileData": "export interface FileData { path: string; content?: string; hash: string; size: number; eol?: string; binary: boolean }",
+ "FileData": "export interface FileData { path: string; content?: string; hash: string; size: number; eol?: string; binary: boolean; readOnly?: boolean }",
  "Diag": "export interface Diag { line: number; column: number; endLine: number; endColumn: number; message: string; severity: string; source: string; fix?: 'create-step' }",
  "StepPlan": "export interface StepPlan {\n    step: string; pattern: string; params: Array<{ name: string; type: string }>; preview: string;\n    targets: Array<{ file: string; exists: boolean; recommended: boolean }>;\n}",
  "StepUsage": "export interface StepUsage { path: string; line: number; column: number; text: string; keyword: string }",
  "StepUsages": "export interface StepUsages { step: { pattern: string; file: string; line: number; builtIn?: boolean }; usages: StepUsage[] }",
  "StepRename": "export interface StepRename { step: { pattern: string; file: string; line: number }; pattern?: string; changes: Array<{ path: string; line: number; before: string; after: string }>; files: string[]; skipped: StepUsage[] }",
- "Loc": "export interface Loc { path: string; line: number; column: number; endLine: number; endColumn: number; text?: string }",
- "SearchHit": "export interface SearchHit { path: string; line: number; column: number; text: string }",
+ "Loc": "export interface Loc { path: string; line: number; column: number; endLine: number; endColumn: number; text?: string; definition?: boolean; write?: boolean }",
+ "SearchHit": "export interface SearchHit { path: string; line: number; column: number; text: string; length?: number }",
+ "TextSearchResult": "export interface TextSearchResult { hits: SearchHit[]; files: Array<{ path: string; count: number }>; total: number; limited: boolean; truncated: boolean; scanned: number }",
+ "TextSearchQuery": "export interface TextSearchQuery { regex?: boolean; case?: boolean; word?: boolean; glob?: string; folder?: string; file?: string; ignored?: boolean }",
  "CompletionItem": "export interface CompletionItem { name: string; kind: string; sortText?: string; insertText?: string; detail?: string; isSnippet?: boolean; replace?: { start: number; length: number }; hasAction?: boolean; source?: string; data?: unknown; kindModifiers?: string }",
  "CompletionDetailsDef": "export interface CompletionDetailsDef { detail?: string; doc?: string; snippet?: string; edits?: Array<{ start: number; length: number; newText: string }>; stale?: boolean }",
  "SignatureHelpDef": "export interface SignatureHelpDef { signatures: Array<{ label: string; params: Array<[number, number]>; doc: string; paramDocs: string[] }>; active: number; param: number; start: number }",
@@ -3370,9 +3390,9 @@ export const TYPES: Record<string, string> = {
  "LoadGeneratorDef": "export interface LoadGeneratorDef { name: string; url: string; zone?: string; token: string }",
  "LoadGeneratorHealth": "export interface LoadGeneratorHealth { name: string; zone?: string; url: string; state: string; users?: number; requests?: number; errors?: number; cpu?: number; memory?: number; error?: string; lastSeen?: string }",
  "LoadRunDetailDef": "export interface LoadRunDetailDef extends LoadRunInfoDef { live?: LoadSnapshot; result?: LoadResult; definition: LoadScenarioDef; generators?: LoadGeneratorHealth[] }",
- "RunRequest": "export interface RunRequest { project: string; env: string; features?: string[]; tags?: string; scenario?: string; scenarios?: string[]; headless?: boolean; browser?: string; workers?: number;\n    retries?: number; device?: string; viewport?: { width: number; height: number }; variables?: Record<string, string>;\n    /** Send results to Azure DevOps for this run; not set: as the project is configured. */\n    ado?: boolean;\n    /** A debug run: pause before each step and/or on a failure, browser shown, one scenario at a time. */\n    debug?: { steps?: boolean; pauseOnFailure?: boolean; slowMo?: number; exceptions?: boolean } }",
+ "RunRequest": "export interface RunRequest { project: string; env: string; features?: string[]; tags?: string; scenario?: string; scenarios?: string[]; headless?: boolean; browser?: string; workers?: number;\n    retries?: number; device?: string; viewport?: { width: number; height: number }; variables?: Record<string, string>;\n    /** Send results to Azure DevOps for this run; not set: as the project is configured. */\n    ado?: boolean;\n    /** A debug run: pause before each step and/or on a failure, browser shown, one scenario at a time. */\n    debug?: { steps?: boolean; pauseOnFailure?: boolean; slowMo?: number; exceptions?: boolean; /** Set by the server: the saved breakpoints the run started with. */ breakpoints?: Breakpoint[] } }",
  "DebugPause": "export interface DebugPause { kind: 'before-step' | 'after-failure'; step: string; scenario?: string; error?: string; file?: string; line?: number; reason?: 'breakpoint' | 'step' }",
- "CodeFrame": "export interface CodeFrame { index: number; name: string; file?: string; line?: number; external: boolean }",
+ "CodeFrame": "export interface CodeFrame { index: number; name: string; file?: string; line?: number; external: boolean; /** A caller across an await (no variables: shown where it is). */ async?: boolean }",
  "CodePause": "export interface CodePause { seq: number; reason: string; frames: CodeFrame[]; exception?: string }",
  "DebugState": "export interface DebugState { paused: DebugPause | null; codePaused: CodePause | null; scopes?: DebugScope[] }",
  "DebugVariable": "export interface DebugVariable { name: string; value: string; type: string; objectId?: string }",

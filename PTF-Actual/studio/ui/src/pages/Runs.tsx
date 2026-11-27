@@ -5,8 +5,8 @@
  */
 import React from 'react';
 import { Alert, App, Button, Card, Checkbox, Col, Empty, Form, Input, InputNumber, List, Modal, Popconfirm, Row, Select, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
-import { SearchOutlined, BugOutlined, StepForwardOutlined, WarningOutlined, CaretRightOutlined, CommentOutlined, FileTextOutlined, LoadingOutlined, LockOutlined, DeleteOutlined, CloudUploadOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons';
-import { api, BisectInfo, followRun, LogLine, RunCatalog, RunConfigDef, RunEvidence, RunInfo, RunRequest, ScenarioResult } from '../api';
+import { SearchOutlined, BugOutlined, StepForwardOutlined, VerticalAlignBottomOutlined, VerticalAlignTopOutlined, WarningOutlined, CaretRightOutlined, CommentOutlined, FileTextOutlined, LoadingOutlined, LockOutlined, DeleteOutlined, CloudUploadOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons';
+import { api, BisectInfo, Breakpoint, followRun, LogLine, RunCatalog, RunConfigDef, RunEvidence, RunInfo, RunRequest, ScenarioResult } from '../api';
 import { errText, loadRunTarget, openInEditor, saveRunTarget, unsavedFiles, useStudio } from '../state';
 import { RunEvidenceList } from '../components/Evidence';
 import { fmtDur, RunTree } from '../components/RunTree';
@@ -23,6 +23,8 @@ import { currentRoute, navigate, useRoute } from '../route';
 import { TAB_MARK } from '../apiperf-ui';
 import { onRunsChanged, runsChanged, saveEditorFiles } from '../runSignals';
 import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
+import { debugPlan, targetForProject } from '../runChoice';
+import { commandFor, DebugAction, registerDebugKeys } from '../debugKeys';
 import { StrictWholeNumber } from '../components/StrictWholeNumber';
 import '../styles-tests.css';
 
@@ -360,7 +362,7 @@ export function Runs() {
         if (!debugging) return;
         let live = true;
         const tick = async () => {
-            try { const r = await api.run(debugging, Number.MAX_SAFE_INTEGER); if (live) setRuns((rs) => rs.map((x) => (x.id === r.id ? { ...x, paused: r.paused ?? null } : x))); } catch { /* next tick */ }
+            try { const r = await api.run(debugging, Number.MAX_SAFE_INTEGER); if (live) setRuns((rs) => rs.map((x) => (x.id === r.id ? { ...x, paused: r.paused ?? null, codePaused: r.codePaused ?? null } : x))); } catch { /* next tick */ }
         };
         void tick();
         const t = setInterval(tick, 800);
@@ -368,10 +370,42 @@ export function Runs() {
     }, [debugging]);
     const [debugOpen, setDebugOpen] = React.useState(false);
     const [debugOpts, setDebugOpts] = React.useState({ steps: true, pauseOnFailure: true, slowMo: 0 });
-    const debugCmd = async (id: string, cmd: 'next' | 'continue' | 'stop') => {
-        setRuns((rs) => rs.map((x) => (x.id === id ? { ...x, paused: null } : x)));
+    const debugCmd = async (id: string, cmd: Parameters<typeof api.debugRun>[1]) => {
+        setRuns((rs) => rs.map((x) => (x.id === id ? { ...x, paused: null, codePaused: null } : x)));
         try { await api.debugRun(id, cmd); } catch (e) { message.error(errText(e)); }
     };
+    // The breakpoints (set in the Code screen): read when the Debug dialog opens.
+    const [allBps, setAllBps] = React.useState<Breakpoint[]>([]);
+    const [bpsShown, setBpsShown] = React.useState(false);
+    const openDebug = () => { setBpsShown(false); api.breakpoints().then((r) => setAllBps(r.breakpoints)).catch(() => setAllBps([])); setDebugOpen(true); };
+    const plan = debugPlan(allBps, [...new Set(selectedScenarios(pick, scope.features).map((x) => x.f.path))], debugOpts);
+    /** Continue / step over / into / out where the debug run is paused (in the code, or at a feature step). */
+    const debugAct = (r: RunInfo, a: DebugAction): boolean => {
+        if (a === 'stop') { void api.stopRun(r.id); return true; }
+        const cmd = r.codePaused ? commandFor(a, 'code') : r.paused ? commandFor(a, 'step', r.paused.kind) : null;
+        if (!cmd) return false;
+        void debugCmd(r.id, cmd);
+        return true;
+    };
+    // Debugger keys (F5, F10, F11, Shift+F11, Shift+F5) on this screen while the debug run shown is paused.
+    const keyRun = React.useRef<RunInfo | null>(null);
+    keyRun.current = onPage && current?.state === 'running' && current.request.debug ? current : null;
+    React.useEffect(() => registerDebugKeys((a) => {
+        const r = keyRun.current;
+        if (!r || !(/^#\/?runs(\/|$)/.test(window.location.hash))) return false;
+        if (a === 'stop') return debugAct(r, a);
+        return r.codePaused || r.paused ? debugAct(r, a) : false;
+    }), []); // eslint-disable-line react-hooks/exhaustive-deps
+    // The first time the run shown pauses in the code: the Code screen opens there (its Debug tab), as editors do.
+    const openedCode = React.useRef(new Set<string>());
+    React.useEffect(() => {
+        const c = current?.state === 'running' ? current.codePaused : null;
+        if (!c || !onPage || openedCode.current.has(current!.id)) return;
+        const top = c.frames.find((f) => !f.external);
+        if (!top?.file) return;
+        openedCode.current.add(current!.id);
+        navigate(['code', top.file, top.line ?? 1]);
+    }, [current?.codePaused?.seq]); // eslint-disable-line react-hooks/exhaustive-deps
     const progress = React.useMemo(() => current?.state === 'running' ? progressOf(log) : null, [log, current?.state]);
     // A run that ended without results (the framework stopped before running scenarios): say why.
     const firstError = React.useMemo(() => {
@@ -429,8 +463,8 @@ export function Runs() {
                             <Button type="primary" icon={<CaretRightOutlined />} loading={starting} disabled={running || !target.project || nothing || tooMany || fw?.installed === false || badOpts.length > 0}
                                 onClick={() => start(request())}>{starting ? 'Starting…' : 'Run'}</Button>
                         </Tooltip>
-                        <Tooltip title="Run in a visible browser and pause before each step or when a step fails">
-                            <Button icon={<BugOutlined />} disabled={running || !target.project || nothing || fw?.installed === false} onClick={() => setDebugOpen(true)}>Debug</Button>
+                        <Tooltip title="Run in a visible browser: pause at breakpoints, before each step or when a step fails">
+                            <Button icon={<BugOutlined />} disabled={running || !target.project || nothing || fw?.installed === false} onClick={openDebug}>Debug</Button>
                         </Tooltip>
                     </Space>}>
                     {fw && !fw.installed && <Alert type="warning" showIcon style={{ margin: '8px 0' }} message={fw.message} />}
@@ -440,7 +474,12 @@ export function Runs() {
                         <Tabs size="small" activeKey={setupTab} onChange={(k) => setSetupTab(k as SetupTab, true)} className="tests-tabs" items={[
                             { key: 'what', label: 'What to run', children: <>
                                 <Row gutter={12}>
-                                    <Col span={12}><Form.Item label="Project" style={{ marginBottom: 8 }} htmlFor="cs-runs-project"><Select id="cs-runs-project" value={target.project} onChange={(v) => setTarget({ ...target, project: v })} options={projects.map((p) => ({ value: p, label: p }))} /></Form.Item></Col>
+                                    <Col span={12}><Form.Item label="Project" style={{ marginBottom: 8 }} htmlFor="cs-runs-project"><Select id="cs-runs-project" value={target.project} onChange={(v) => {
+                                        // Another project: its own environments; the features, tags and scenarios chosen were the old one's.
+                                        const r = targetForProject(target, v, disc?.environments[v] ?? []);
+                                        setTarget(r.target);
+                                        if (r.changed) setPick(EMPTY_PICK);
+                                    }} options={projects.map((p) => ({ value: p, label: p }))} /></Form.Item></Col>
                                     <Col span={12}><Form.Item label="Environment" style={{ marginBottom: 8 }} htmlFor="cs-runs-environment"><Select id="cs-runs-environment" value={target.env} onChange={(v) => setTarget({ ...target, env: v })} options={(envs.length ? envs : ['dev']).map((e) => ({ value: e, label: e }))} /></Form.Item></Col>
                                 </Row>
                                 {catalog ? <RunPicker catalog={catalog} project={target.project} value={pick} onChange={setPick} /> : <Spin size="small" style={{ margin: 8 }} />}
@@ -580,7 +619,13 @@ export function Runs() {
                                     description={current.codePaused.exception ? <Typography.Text code style={{ fontSize: 12 }}>{current.codePaused.exception}</Typography.Text> : 'Variables, call stack and stepping are in the Code screen\'s Debug tab.'}
                                     action={<Space direction="vertical" size={4}>
                                         {top?.file && <Button size="small" type="primary" onClick={() => navigate(['code', top.file!, top.line ?? 1])}>Open in Code</Button>}
-                                        <Button size="small" icon={<CaretRightOutlined />} onClick={() => void api.debugRun(current.id, 'resume')}>Continue</Button>
+                                        <Space size={2} wrap>
+                                            <Tooltip title="Continue (F5)"><Button size="small" icon={<CaretRightOutlined />} onClick={() => debugAct(current, 'continue')} aria-label="Continue" /></Tooltip>
+                                            <Tooltip title="Step over (F10)"><Button size="small" icon={<StepForwardOutlined />} onClick={() => debugAct(current, 'over')} aria-label="Step over" /></Tooltip>
+                                            <Tooltip title="Step into (F11)"><Button size="small" icon={<VerticalAlignBottomOutlined />} onClick={() => debugAct(current, 'into')} aria-label="Step into" /></Tooltip>
+                                            <Tooltip title="Step out (Shift+F11)"><Button size="small" icon={<VerticalAlignTopOutlined />} onClick={() => debugAct(current, 'out')} aria-label="Step out" /></Tooltip>
+                                            <Tooltip title="Stop (Shift+F5)"><Button size="small" danger icon={<StopOutlined />} onClick={() => debugAct(current, 'stop')} aria-label="Stop" /></Tooltip>
+                                        </Space>
                                     </Space>} />;
                             })()}
                             {current.state === 'running' && current.request.debug && !current.codePaused && (current.paused
@@ -592,11 +637,14 @@ export function Runs() {
                                         <div style={{ fontSize: 12, marginTop: 4 }}>{current.paused.kind === 'after-failure' ? 'A browser the test uses is still open on the failed page: look at it (its developer tools too), then go on.' : 'A browser the test uses shows the page as it is before this step.'}</div>
                                     </>}
                                     action={<Space direction="vertical" size={4}>
-                                        <Button size="small" type="primary" icon={<StepForwardOutlined />} onClick={() => void debugCmd(current.id, 'next')}>{current.paused.kind === 'after-failure' ? 'Go on' : 'Run this step'}</Button>
-                                        {(current.paused.kind === 'before-step' || current.request.debug.steps) && <Button size="small" icon={<CaretRightOutlined />} onClick={() => void debugCmd(current.id, 'continue')}>Continue</Button>}
-                                        <Button size="small" danger icon={<StopOutlined />} onClick={() => void debugCmd(current.id, 'stop')}>Stop</Button>
+                                        <Tooltip title={current.paused.kind === 'after-failure' ? 'Go on (F10)' : 'Run this step and pause before the next (F10)'}><Button size="small" type="primary" icon={<StepForwardOutlined />} onClick={() => void debugCmd(current.id, 'next')}>{current.paused.kind === 'after-failure' ? 'Go on' : 'Run this step'}</Button></Tooltip>
+                                        {current.paused.kind === 'before-step' && <Tooltip title="Run this step and pause on the first line of its code (F11)"><Button size="small" icon={<VerticalAlignBottomOutlined />} onClick={() => void debugCmd(current.id, 'into')}>Step into</Button></Tooltip>}
+                                        {(current.paused.kind === 'before-step' || current.request.debug.steps) && <Tooltip title="Run on to the next breakpoint (F5)"><Button size="small" icon={<CaretRightOutlined />} onClick={() => void debugCmd(current.id, 'continue')}>Continue</Button></Tooltip>}
+                                        <Tooltip title="Stop the run (Shift+F5)"><Button size="small" danger icon={<StopOutlined />} onClick={() => void debugCmd(current.id, 'stop')}>Stop</Button></Tooltip>
                                     </Space>} />
-                                : <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}><BugOutlined /> Debug run: {current.request.debug.steps ? 'pauses before each step' : ''}{current.request.debug.steps && current.request.debug.pauseOnFailure ? ' and ' : ''}{current.request.debug.pauseOnFailure ? 'pauses when a step fails' : ''}.</Typography.Text>)}
+                                : <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}><BugOutlined /> Debug run: {[
+                                    current.request.debug.breakpoints?.length ? `pauses at ${current.request.debug.breakpoints.length} breakpoint${current.request.debug.breakpoints.length === 1 ? '' : 's'}` : '',
+                                    current.request.debug.steps ? 'pauses before each step' : '', current.request.debug.pauseOnFailure ? 'pauses when a step fails' : ''].filter(Boolean).join(', ') || 'running'}.</Typography.Text>)}
                             {progress && <Typography.Text style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
                                 {progress.started === 0 ? 'Starting the framework (configuration, step definitions, browser)…'
                                     : <>Scenario {progress.started}: <b>{progress.current}</b></>}
@@ -622,14 +670,32 @@ export function Runs() {
                         {resultsCard}
                     </>
                 )}
-                <Modal open={debugOpen} title="Debug run" okText="Start debugging" onCancel={() => setDebugOpen(false)}
-                    okButtonProps={{ disabled: !debugOpts.steps && !debugOpts.pauseOnFailure, icon: <BugOutlined /> }}
-                    onOk={() => { setDebugOpen(false); void start({ ...request(), debug: { steps: debugOpts.steps, pauseOnFailure: debugOpts.pauseOnFailure, ...(debugOpts.slowMo ? { slowMo: debugOpts.slowMo } : {}) } }); }}>
-                    <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>The chosen scenarios run one at a time in a visible browser on this computer. When the run pauses, the page here shows where, with buttons to go on.</Typography.Paragraph>
+                <Modal open={debugOpen} title="Debug run" onCancel={() => setDebugOpen(false)}
+                    footer={<Space>
+                        <Button onClick={() => setDebugOpen(false)}>Cancel</Button>
+                        <Tooltip title={plan.startable ? undefined : plan.reason}>
+                            {/* A disabled button gets no mouse events: the tooltip is on what holds it. */}
+                            <span style={{ display: 'inline-block' }}><Button type="primary" icon={<BugOutlined />} disabled={!plan.startable}
+                                onClick={() => { setDebugOpen(false); void start({ ...request(), debug: { steps: debugOpts.steps, pauseOnFailure: debugOpts.pauseOnFailure, ...(debugOpts.slowMo ? { slowMo: debugOpts.slowMo } : {}) } }); }}>Start debugging</Button></span>
+                        </Tooltip>
+                    </Space>}>
+                    <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>The chosen scenarios run one at a time in a visible browser on this computer. When the run pauses, the page here shows where, with buttons to go on; a pause in the code opens the Code screen at that line (its Debug tab: step over / into / out, variables, call stack).</Typography.Paragraph>
+                    <div className="dbg-plan" style={{ marginBottom: 10 }}>
+                        {plan.breakpoints.length
+                            ? <Typography.Text><BugOutlined style={{ color: 'var(--cs-danger, #d4380d)' }} /> <b>{plan.breakpoints.length} breakpoint{plan.breakpoints.length === 1 ? '' : 's'}</b> in {plan.files} file{plan.files === 1 ? '' : 's'} will pause the run.{' '}
+                                <a onClick={() => setBpsShown((x) => !x)}>{bpsShown ? 'Hide them' : 'Show them'}</a></Typography.Text>
+                            : <Typography.Text type="secondary">No breakpoints{allBps.length ? ' in what runs' : ''}: click a line number in the Code screen (a feature file: before that step; TypeScript / JavaScript: that line).</Typography.Text>}
+                        {bpsShown && plan.breakpoints.length > 0 && <div style={{ marginTop: 4, maxHeight: 160, overflow: 'auto' }}>
+                            {plan.breakpoints.map((b) => <div key={`${b.file}:${b.line}`} style={{ fontSize: 12 }}>
+                                <a className="mono" onClick={() => { setDebugOpen(false); navigate(['code', b.file, b.line]); }}>{b.file}:{b.line}</a>
+                            </div>)}
+                        </div>}
+                    </div>
                     <Space direction="vertical">
                         <Checkbox checked={debugOpts.steps} onChange={(e) => setDebugOpts({ ...debugOpts, steps: e.target.checked })}>Pause before each step</Checkbox>
                         <Checkbox checked={debugOpts.pauseOnFailure} onChange={(e) => setDebugOpts({ ...debugOpts, pauseOnFailure: e.target.checked })}>Pause when a step fails (the browser stays on the failed page)</Checkbox>
                         <Space><span>Slow motion</span><InputNumber size="small" min={0} max={5000} step={100} value={debugOpts.slowMo} onChange={(v) => setDebugOpts({ ...debugOpts, slowMo: v ?? 0 })} addonAfter="ms per action" style={{ width: 170 }} aria-label="Slow motion" /></Space>
+                        {!plan.startable && <Typography.Text type="warning" style={{ fontSize: 12 }}>{plan.reason}</Typography.Text>}
                     </Space>
                 </Modal>
             </div>

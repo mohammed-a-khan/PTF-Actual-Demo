@@ -153,7 +153,7 @@ export class TsClient {
     signatureHelp(abs: string, offset: number, trigger?: string) { return this.call<TsSignatureHelp | null>('signatureHelp', abs, offset, trigger); }
     quickInfo(abs: string, offset: number) { return this.call<{ text: string; doc: string } | null>('quickInfo', abs, offset); }
     definition(abs: string, offset: number) { return this.call<TsLocation[]>('definition', abs, offset); }
-    references(abs: string, offset: number) { return this.call<TsLocation[]>('references', abs, offset); }
+    references(abs: string, offset: number) { return this.call<Array<TsLocation & { definition?: boolean; write?: boolean }>>('references', abs, offset); }
     format(abs: string) { return this.call<string>('format', abs); }
     projectDiagnostics(configAbs: string) { return this.call<TsDiagnostic[]>('projectDiagnostics', configAbs); }
     /** Build the program of the project a file belongs to (the repository's root project without one). */

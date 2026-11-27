@@ -9,6 +9,7 @@ import type { DataNode } from 'antd/es/tree';
 import { BugOutlined, CaretRightOutlined, DeleteOutlined, PauseOutlined, StepForwardOutlined, StopOutlined, VerticalAlignBottomOutlined, VerticalAlignTopOutlined, ArrowRightOutlined } from '@ant-design/icons';
 import { api, Breakpoint, DebugScope, DebugState, DebugVariable, followDebug, RunInfo } from '../api';
 import { errText } from '../state';
+import { commandFor, DebugAction, registerDebugKeys } from '../debugKeys';
 
 /** Where the run is paused in a file of the repository (for the editor). */
 export interface ExecLocation { file: string; line: number; key: string }
@@ -34,11 +35,25 @@ const findNode = (list: Node[], key: string): Node | undefined => {
 const HOLD_MS = 350;
 /** Presses made while a step runs are kept (each press is one step, as in editors), up to this many. */
 const MAX_QUEUED = 10;
-type Action = 'over' | 'into' | 'out' | 'continue';
-/** The command an action is at a code pause or a feature step pause. */
-const commandFor = (a: Action, at: 'code' | 'step', stepKind?: string): Parameters<typeof api.debugRun>[1] | null =>
-    at === 'code' ? ({ over: 'stepOver', into: 'stepInto', out: 'stepOut', continue: 'resume' } as const)[a]
-        : a === 'over' ? 'next' : a === 'continue' ? 'continue' : a === 'into' && stepKind === 'before-step' ? 'into' : null;
+type Action = Exclude<DebugAction, 'stop'>;
+
+/** Watched expressions: kept for this browser (as editors keep them from one debug session to the next). */
+const WATCH_KEY = 'cs-studio-debug-watch';
+const loadWatches = (): string[] => { try { const j = JSON.parse(localStorage.getItem(WATCH_KEY) ?? '[]'); return Array.isArray(j) ? j.filter((x) => typeof x === 'string').slice(0, 30) : []; } catch { return []; } };
+const saveWatches = (w: string[]) => { try { localStorage.setItem(WATCH_KEY, JSON.stringify(w)); } catch { /* not kept */ } };
+
+/** A value (evaluated, watched) that expands when it is an object. */
+function ValueTree({ runId, v, label, prefix }: { runId: string; v: DebugVariable; label?: React.ReactNode; prefix: string }) {
+    const root = React.useMemo<Node>(() => ({ ...varNode({ ...v, name: '' }, prefix, new Map()), title: <span className="dbg-var">{label ?? <span className="dbg-name">{v.name}</span>} = <span className={`dbg-val t-${v.type}`}>{v.value}</span></span> }), [v, prefix, label]);
+    const [tree, setTree] = React.useState<Node[]>([root]);
+    React.useEffect(() => setTree([root]), [root]);
+    const load = async (node: Node) => {
+        if (!node.objectId || node.children) return;
+        const r = await api.debugProperties(runId, node.objectId).catch(() => null);
+        if (r) setTree((t) => withChildren(t, node.key as string, r.variables.map((x) => varNode(x, `${node.path}/${x.name}`, new Map()))));
+    };
+    return <Tree<Node> treeData={tree} loadData={load} blockNode selectable={false} className="dbg-value-tree" />;
+}
 
 export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints, onLocation, onStart, canStart }: {
     breakpoints: Breakpoint[];
@@ -56,6 +71,10 @@ export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints
     const [expanded, setExpanded] = React.useState<React.Key[]>([]);
     const [expr, setExpr] = React.useState('');
     const [evals, setEvals] = React.useState<Array<{ expr: string; v: DebugVariable }>>([]);
+    const [watches, setWatchesRaw] = React.useState<string[]>(loadWatches);
+    const setWatches = (w: string[]) => { setWatchesRaw(w); saveWatches(w); };
+    const [watchVals, setWatchVals] = React.useState<Record<string, DebugVariable>>({});
+    const [watchExpr, setWatchExpr] = React.useState('');
     /** A command was sent and the run has not paused again yet: further presses wait (none get lost or doubled). */
     const [pending, setPending] = React.useState(false);
     const pendingRef = React.useRef(false);
@@ -150,6 +169,15 @@ export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints
         return () => { live = false; };
     }, [run?.id, code?.seq, frame]); // eslint-disable-line react-hooks/exhaustive-deps
 
+    // The watched expressions, in the selected frame, at each pause.
+    React.useEffect(() => {
+        if (!run || !code || !watches.length) { setWatchVals({}); return; }
+        let live = true;
+        void Promise.all(watches.map((w) => api.debugEvaluate(run.id, w, frame).then((v) => [w, v] as const).catch((e) => [w, { name: w, value: errText(e), type: 'error' }] as const)))
+            .then((r) => { if (live) setWatchVals(Object.fromEntries(r)); });
+        return () => { live = false; };
+    }, [run?.id, code?.seq, frame, watches.join('\n')]); // eslint-disable-line react-hooks/exhaustive-deps
+
     const send = async (cmd: Parameters<typeof api.debugRun>[1]) => {
         if (!run || pendingRef.current) return;
         const stays = cmd === 'pause';
@@ -171,18 +199,17 @@ export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints
         if (!run || !expr.trim()) return;
         try { const v = await api.debugEvaluate(run.id, expr.trim(), frame); setEvals((x) => [...x.slice(-30), { expr: expr.trim(), v }]); } catch (e) { setEvals((x) => [...x, { expr, v: { name: expr, value: errText(e), type: 'error' } }]); }
     };
-    // Keys as in editors: F5 continue, F10 step over, F11 step into, Shift+F11 step out. A key held down or
-    // pressed again before the next pause is not sent (it would reach a run that is not paused yet).
-    React.useEffect(() => {
-        const h = (e: KeyboardEvent) => {
-            if (!run || !['F5', 'F10', 'F11'].includes(e.key)) return;
-            if (!code && !step && !pendingRef.current) return;
-            e.preventDefault();
-            act(e.key === 'F5' ? 'continue' : e.key === 'F10' ? 'over' : e.shiftKey ? 'out' : 'into');
-        };
-        window.addEventListener('keydown', h);
-        return () => window.removeEventListener('keydown', h);
-    }); // eslint-disable-line react-hooks/exhaustive-deps
+    // Keys as in editors (F5 continue, F10 step over, F11 step into, Shift+F11 step out, Shift+F5 stop), wherever the
+    // focus is, while this screen is shown and the run is paused (or a step runs: a press then waits its turn).
+    const keys = React.useRef<(a: DebugAction) => boolean>(() => false);
+    keys.current = (a) => {
+        if (!run || !/^#\/?code(\/|$)/.test(window.location.hash)) return false;
+        if (a === 'stop') { void api.stopRun(run.id); return true; }
+        if (!code && !step && !pendingRef.current) return false;
+        act(a);
+        return true;
+    };
+    React.useEffect(() => registerDebugKeys((a) => keys.current(a)), []);
 
     const loadChildren = async (node: Node) => {
         if (!run || !node.objectId || node.children) return;
@@ -229,11 +256,11 @@ export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints
                     <Tooltip title="Step into (F11)"><Button size="small" icon={<VerticalAlignBottomOutlined />} onClick={() => act('into')} aria-label="Step into" /></Tooltip>
                     <Tooltip title="Step out (Shift+F11)"><Button size="small" icon={<VerticalAlignTopOutlined />} onClick={() => act('out')} aria-label="Step out" /></Tooltip>
                 </Space> : step ? <Space size={4}>
-                    <Tooltip title={step.kind === 'after-failure' ? 'Go on' : 'Run this step and pause before the next (F10)'}><Button size="small" icon={<StepForwardOutlined />} onClick={() => act('over')}>{step.kind === 'after-failure' ? 'Go on' : 'Next step'}</Button></Tooltip>
+                    <Tooltip title={step.kind === 'after-failure' ? 'Go on' : 'Run this step and pause before the next (F10)'}><Button size="small" icon={<StepForwardOutlined />} onClick={() => act('over')}>{step.kind === 'after-failure' ? 'Go on' : 'Run this step'}</Button></Tooltip>
                     {step.kind === 'before-step' && <Tooltip title="Run this step and pause on the first line of its code (F11)"><Button size="small" icon={<VerticalAlignBottomOutlined />} onClick={() => act('into')}>Step into</Button></Tooltip>}
                     <Tooltip title="Run to the next breakpoint (F5)"><Button size="small" icon={<CaretRightOutlined />} onClick={() => act('continue')}>Continue</Button></Tooltip>
                 </Space> : <Tooltip title="Pause the code where it is"><Button size="small" icon={<PauseOutlined />} onClick={() => void send('pause')} aria-label="Pause" /></Tooltip>}
-                <Tooltip title="Stop the run"><Button size="small" danger icon={<StopOutlined />} onClick={() => void api.stopRun(run.id)} aria-label="Stop" /></Tooltip>
+                <Tooltip title="Stop the run (Shift+F5)"><Button size="small" danger icon={<StopOutlined />} onClick={() => void api.stopRun(run.id)} aria-label="Stop" /></Tooltip>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }} ellipsis>{run.request.project} / {run.request.env}</Typography.Text>
             </div>
             {step && !code && <div className="dbg-section">
@@ -246,8 +273,11 @@ export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints
                     <div className="dbg-head">Call stack</div>
                     {code.exception && <Typography.Text type="danger" style={{ display: 'block', fontSize: 12 }}>{code.exception}</Typography.Text>}
                     {code.frames.slice(0, 40).map((f) => (
-                        <div key={f.index} className={`dbg-frame${f.index === frame ? ' sel' : ''}${f.external ? ' ext' : ''}`} onClick={() => setFrame(f.index)}>
+                        <div key={f.index} className={`dbg-frame${f.index === frame ? ' sel' : ''}${f.external ? ' ext' : ''}${f.async ? ' async' : ''}`}
+                            title={f.async ? 'A caller across an await: its variables are not kept (shown where it is)' : undefined}
+                            onClick={() => (f.async ? (!f.external && f.file && f.line && onLocation({ file: f.file, line: f.line, key: `af:${code.seq}:${f.index}:${Date.now()}` })) : setFrame(f.index))}>
                             {f.index === frame && <ArrowRightOutlined style={{ fontSize: 10 }} />}
+                            {f.async && <Typography.Text type="secondary" style={{ fontSize: 10 }}>async</Typography.Text>}
                             <span className="mono">{f.name}</span>
                             <Typography.Text type="secondary" className="mono" style={{ fontSize: 11 }} ellipsis>{f.file ? `${f.file}:${f.line}` : ''}</Typography.Text>
                         </div>
@@ -260,8 +290,18 @@ export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints
                 </div>
             </div>}
             {code && <div className="dbg-section">
+                <div className="dbg-head">Watch</div>
+                {watches.map((w) => <div key={w} className="dbg-row dbg-watch">
+                    <div style={{ flex: 1, minWidth: 0 }}>{watchVals[w] ? <ValueTree runId={run.id} v={watchVals[w]} label={<span className="dbg-name">{w}</span>} prefix={`watch/${w}/${code.seq}/${frame}`} />
+                        : <span className="dbg-var"><span className="dbg-name">{w}</span> = …</span>}</div>
+                    <Button size="small" type="text" icon={<DeleteOutlined />} onClick={() => setWatches(watches.filter((x) => x !== w))} aria-label={`Stop watching ${w}`} />
+                </div>)}
+                <Input size="small" className="mono" placeholder="Add an expression to watch at every pause (Enter)" value={watchExpr} onChange={(e) => setWatchExpr(e.target.value)} aria-label="Watch expression"
+                    onPressEnter={() => { const w = watchExpr.trim(); if (w && !watches.includes(w)) setWatches([...watches, w].slice(-30)); setWatchExpr(''); }} />
+            </div>}
+            {code && <div className="dbg-section">
                 <div className="dbg-head">Evaluate</div>
-                {evals.map((e, i) => <div key={i} className="dbg-eval"><span className="mono">{e.expr}</span> = <span className={`dbg-val t-${e.v.type} mono`}>{e.v.value}</span></div>)}
+                {evals.map((e, i) => <div key={i} className="dbg-eval"><ValueTree runId={run.id} v={e.v} label={<span className="mono">{e.expr}</span>} prefix={`eval/${i}`} /></div>)}
                 <Input size="small" className="mono" placeholder="An expression in the selected frame, e.g. this.lines.length (Enter)" value={expr} onChange={(e) => setExpr(e.target.value)} onPressEnter={() => void evaluate()} aria-label="Expression" />
             </div>}
             {bps}

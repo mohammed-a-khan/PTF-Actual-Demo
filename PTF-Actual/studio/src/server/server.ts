@@ -131,7 +131,8 @@ import { changeKind, ChangeKind, CoverageStore, prImpact, prStatusOf, recentFail
 import { resultsComment } from '../run/prComment';
 import { AUTO_DOWNLOAD_BYTES, fetchArtifact, findReports, Pipelines, reportCandidates } from '../ado/pipelines';
 import { getIdentity, setIdentity } from '../git/identity';
-import { ConflictError, Workspace } from '../workspace/files';
+import { ConflictError, TextSearchOptions, Workspace } from '../workspace/files';
+import { matcher } from '../workspace/textSearch';
 import { checkVersion, contentVersion, StaleSaveError } from '../core/version';
 import { TsService } from '../lang/tsService';
 import { StaleCall, TsClient } from '../lang/tsClient';
@@ -1500,6 +1501,25 @@ export function createServer(opts: ServerOptions): StudioServer {
 
     app.get('/api/files', async () => ws.list());
     app.get('/api/file', async (req) => ws.read(filePath((req.query as Record<string, string>).path)));
+    /**
+     * A library file that go to definition or find usages led to (a framework class's .d.ts under node_modules),
+     * to show read-only. Only files the language service named, so a package installed as a link (npm link,
+     * pnpm) can be shown although it is outside the project; nothing else outside the project can be read here.
+     */
+    const libFiles = new Set<string>();
+    const noteLibFiles = <T extends { path: string }>(locs: T[]): T[] => {
+        for (const l of locs) if (/(^|\/)node_modules\//.test(l.path) && /\.(d\.)?[cm]?[jt]sx?$/.test(l.path) && !l.path.startsWith('..')) { libFiles.add(l.path); if (libFiles.size > 2000) libFiles.delete(libFiles.values().next().value as string); }
+        return locs;
+    };
+    app.get('/api/file/library', async (req) => {
+        const rel = str((req.query as Record<string, string>).path, 'path', { max: 4096 });
+        if (!libFiles.has(rel)) throw new BadRequest(`${rel} can only be opened from go to definition or find usages.`);
+        const a = path.resolve(opts.repoRoot, rel);
+        const st = fs.statSync(a);
+        if (!st.isFile() || st.size > 5 * 1024 * 1024) throw new BadRequest(`${rel} cannot be shown (not a file, or larger than 5 MB).`);
+        const content = fs.readFileSync(a, 'utf8');
+        return { path: rel, content, hash: '', size: st.size, eol: content.includes('\r\n') ? '\r\n' : '\n', binary: false, readOnly: true };
+    });
     app.put('/api/file', async (req) => {
         const b = body(req);
         const p = filePath(b.path);
@@ -1532,11 +1552,22 @@ export function createServer(opts: ServerOptions): StudioServer {
         stepCache = null;
         return r;
     });
-    app.get('/api/search', async (req) => {
-        const q = req.query as Record<string, string>;
-        if (q.regex === 'true') { try { new RegExp(String(q.q ?? '')); } catch (e) { throw new BadRequest(`Not a valid regular expression: ${(e as Error).message.replace(/^Invalid regular expression: \/.*\/[a-z]*: /, '')}. Turn off .* to search for the text as written.`); } }
-        return ws.search(str(q.q, 'searchText', { max: 500 }), { regex: q.regex === 'true', caseSensitive: q.case === 'true', wholeWord: q.word === 'true', glob: q.glob || undefined });
-    });
+    /** The search's options from the address (?q=&regex=&case=&word=&glob=&folder=&file=&ignored=). */
+    const searchOptions = (q: Record<string, string>): TextSearchOptions => {
+        const o: TextSearchOptions = {
+            q: str(q.q, 'searchText', { max: 500 }), regex: q.regex === 'true', caseSensitive: q.case === 'true', wholeWord: q.word === 'true',
+            glob: q.glob ? str(q.glob, 'glob', { max: 500 }) : undefined,
+            folder: q.folder ? str(q.folder, 'folder', { max: 4096 }) : undefined,
+            file: q.file ? str(q.file, 'file', { max: 4096 }) : undefined,
+            includeIgnored: q.ignored === 'true',
+        };
+        try { matcher(o); } catch (e) { throw new BadRequest((e as Error).message); }
+        return o;
+    };
+    // The results only (other screens, e.g. Run tests looking for a scenario).
+    app.get('/api/search', async (req) => (await ws.textSearch(searchOptions(req.query as Record<string, string>))).hits);
+    // Search in the Code screen: the results, and every file with matches and how many (for Replace all).
+    app.get('/api/search/text', async (req) => ws.textSearch(searchOptions(req.query as Record<string, string>)));
 
     app.post('/api/lang/diagnostics', async (req) => {
         const b = body(req);
@@ -1615,7 +1646,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     app.post('/api/lang/definition', async (req) => {
         const b = body(req);
         const p = filePath(b.path); const text = content(b.content); const offset = offsetOf(b.offset);
-        if (TsService.supports(p)) { const s = await ts(ws.abs(p), text); return { locations: await s.definition(ws.abs(p), offset) }; }
+        if (TsService.supports(p)) { const s = await ts(ws.abs(p), text); return { locations: noteLibFiles(await s.definition(ws.abs(p), offset)) }; }
         if (p.endsWith('.feature')) {
             const d = definitionFor(text, lineAt(text, offset), stepDefs(p));
             return { locations: d ? [{ path: d.file, line: d.line, column: 1, endLine: d.line, endColumn: 1 }] : [] };
@@ -1627,7 +1658,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         const p = filePath(b.path); const text = content(b.content); const offset = offsetOf(b.offset);
         if (!TsService.supports(p)) return { locations: [] };
         const s = await ts(ws.abs(p), text);
-        return { locations: await s.references(ws.abs(p), offset) };
+        return { locations: noteLibFiles(await s.references(ws.abs(p), offset)) };
     });
     app.post('/api/lang/format', async (req) => {
         const b = body(req);
@@ -1646,7 +1677,11 @@ export function createServer(opts: ServerOptions): StudioServer {
             if (!d) throw new BadRequest('No step definition runs the step here.');
             return d;
         }
-        const here = extractStepDefs(text, p, false).filter((d) => d.line <= line && line - d.line <= 4).sort((x, y) => y.line - x.line)[0];
+        // On the decorator or the method's own line(s), not inside the method's body: there the caret is on code
+        // (this.loginPage.enterUsername), whose usages come from TypeScript.
+        const lines = text.split(/\r?\n/);
+        const opensBody = (from: number, to: number) => lines.slice(from - 1, to - 1).some((l) => l.replace(/(['"`])(?:\\.|(?!\1).)*\1/g, '').replace(/\/\/.*$/, '').includes('{'));
+        const here = extractStepDefs(text, p, false).filter((d) => d.line <= line && line - d.line <= 4 && !opensBody(d.line, line)).sort((x, y) => y.line - x.line)[0];
         if (!here) throw new BadRequest('Put the caret on a step definition (its @CSBDDStepDef line or method).');
         const d = stepDefs(p).find((x) => x.file === p && x.pattern === here.pattern);
         if (!d) throw new BadRequest(`"${here.pattern}" is not loaded by any project (its folder is not in STEP_DEFINITIONS_PATH).`);

@@ -571,3 +571,16 @@ body.menu-resizing .ant-layout-sider, body.menu-resizing .ant-layout-sider-child
 .ant-tree .ant-tree-node-selected .tree-M, .ant-tree .ant-tree-node-selected .tree-A, .ant-tree .ant-tree-node-selected .tree-U,
 .ant-tree .ant-tree-node-selected .tree-D, .ant-tree .ant-tree-node-selected .tree-\! { color: inherit; }
 .ant-tree .ant-tree-node-selected .tree-mark { opacity: 1; font-weight: 600; }
+/* Debug panel: watched / evaluated values that expand */
+.dbg-value-tree, .dbg-value-tree .ant-tree-list { background: transparent; }
+.dbg-value-tree .ant-tree-treenode { padding-bottom: 0; }
+.dbg-watch { align-items: flex-start; }
+.dbg-frame.async .mono { font-style: italic; }
+
+/* Code screen: Search and Usages results, grouped by file */
+.cs-result-group { margin-top: 4px; }
+.cs-result-file { display: flex; align-items: center; padding: 2px 4px; font-weight: 600; font-size: 12px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.cs-result-row { padding-left: 14px; }
+.cs-result-row mark.cs-match { background: rgba(234, 179, 8, .35); color: inherit; padding: 0; border-radius: 2px; }
+.cs-result-row mark.cs-match-old { background: rgba(220, 38, 38, .22); text-decoration: line-through; }
+.cs-result-row mark.cs-match-new { background: rgba(22, 163, 74, .25); color: inherit; padding: 0; border-radius: 2px; }

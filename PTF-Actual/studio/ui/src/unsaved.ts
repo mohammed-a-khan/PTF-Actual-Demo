@@ -9,6 +9,8 @@ let installed = false;
 /** The address the screens show (the step Back/Forward makes is already in window.location while the app asks). */
 let shownHash = typeof window !== 'undefined' ? window.location.hash : '';
 const routeOf = (hash: string): string[] => hash.replace(/^#\/?/, '').split('/').filter((x) => x !== '' && !/^token=/.test(x)).map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
+/** Leaving or reloading the page asks first while anything is unsaved (the browser's own "Leave site?"). */
+export function installUnsavedGuard() { install(); }
 function install() {
     if (installed || typeof window === 'undefined') return;
     installed = true;

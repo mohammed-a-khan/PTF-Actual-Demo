@@ -82,12 +82,51 @@ export function originalFor(map: ScriptMap | null, genLine: number, genCol: numb
     return best ? best.line + 1 : genLine + 1;
 }
 
+// ---- Files: the script addresses V8 reports, as the project's files (relative, with /)
+
+/**
+ * The file of the project a script address is (relative to the project's folder, with /), or null when it is not
+ * one of the project's own (outside the folder, in node_modules, Node's own). Addresses come in several forms:
+ * file:///home/me/repo/a.ts, file:///C:/Users/John%20Smith/repo/a.ts (Windows; letters escaped), C:\repo\a.ts
+ * (what CommonJS scripts are on Windows with some Node versions), \\?\C:\… and file://server/share/… (network
+ * drives). On Windows letter case does not matter (C:\Repo is c:\repo).
+ */
+export function projectFile(url: string, root: string, platform: NodeJS.Platform = process.platform): string | null {
+    const win = platform === 'win32';
+    const P = win ? path.win32 : path.posix;
+    let p = url;
+    if (/^file:\/\//i.test(p)) {
+        let u: URL;
+        try { u = new URL(p); } catch { return null; }
+        let pathname: string;
+        try { pathname = decodeURIComponent(u.pathname); } catch { return null; }
+        if (win) {
+            // file:///C:/x → C:\x; file://server/share/x → \\server\share\x
+            p = u.host ? `\\\\${u.host}${pathname.replace(/\//g, '\\')}` : pathname.replace(/^\/([A-Za-z]:)/, '$1').replace(/\//g, '\\');
+        } else p = pathname;
+    } else if (win) p = p.replace(/^\\\\\?\\(?!UNC\\)/, '');
+    if (!P.isAbsolute(p) || (win && !/^([A-Za-z]:[\\/]|\\\\[^\\])/.test(p))) return null;
+    // path.win32.relative compares without letter case already.
+    const rel = P.relative(win ? root.replace(/\//g, '\\') : root, p);
+    if (!rel || rel === '..' || rel.startsWith(`..${P.sep}`) || P.isAbsolute(rel)) return null;
+    const parts = rel.split(P.sep);
+    if (parts.some((x) => (win ? x.toLowerCase() : x) === 'node_modules')) return null;
+    return parts.join('/');
+}
+
+/** Two of the project's files (relative, / or \\) are the same one: on Windows without regard to letter case. */
+export function sameFile(a: string, b: string, platform: NodeJS.Platform = process.platform): boolean {
+    const n = (x: string) => { const y = x.replace(/\\/g, '/').replace(/^\.\//, ''); return platform === 'win32' ? y.toLowerCase() : y; };
+    return n(a) === n(b);
+}
+
 // ---- The session
 
 /** Steps taken by themselves through code outside the project before the run is let go on. */
 const MAX_AUTO_STEPS = 20000;
 
-export interface CodeFrame { index: number; name: string; file?: string; line?: number; external: boolean }
+/** async: a caller across an await (from the async stack trace; no variables, only where it is). */
+export interface CodeFrame { index: number; name: string; file?: string; line?: number; external: boolean; async?: boolean }
 /** seq: numbers the pauses of a session (a new one on every stop, even on the same line). */
 export interface CodePause { seq: number; reason: string; frames: CodeFrame[]; exception?: string }
 export interface Variable { name: string; value: string; type: string; objectId?: string }
@@ -132,7 +171,7 @@ export class InspectorSession extends EventEmitter {
     /** The one-off breakpoint on the step definition's function (breakInto). */
     private intoBreakpoint: string | null = null;
     private pauseSeq = 0;
-    private callFrames: Array<{ callFrameId: string; scopeChain: Array<{ type: string; object: RemoteObject }> }> = [];
+    private callFrames: Array<{ callFrameId: string; this?: RemoteObject; scopeChain: Array<{ type: string; object: RemoteObject }> }> = [];
     paused: CodePause | null = null;
     private ready: Promise<void>;
 
@@ -163,19 +202,28 @@ export class InspectorSession extends EventEmitter {
         await this.send('Debugger.enable');
         await this.send('Debugger.setBlackboxPatterns', { patterns: ['/node_modules/', '^node:', '^internal/'] }).catch(() => undefined);
         await this.send('Debugger.setPauseOnExceptions', { state: opts.pauseOnExceptions ?? 'none' });
+        // The callers of async functions (a step definition awaits a page object, which awaits a helper…).
+        await this.send('Debugger.setAsyncCallStackDepth', { maxDepth: 16 }).catch(() => undefined);
         await this.send('Runtime.runIfWaitingForDebugger');
     }
 
     close(): void { try { this.ws.close(); } catch { /* closed */ } }
 
-    private relFile(url: string): string | null {
-        let p = url;
-        if (p.startsWith('file://')) { try { p = new URL(p).pathname; if (process.platform === 'win32') p = p.replace(/^\/([A-Za-z]:)/, '$1'); } catch { return null; } }
-        if (!path.isAbsolute(p)) return null;
-        const rel = path.relative(this.root, p);
-        if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || rel.split(path.sep).includes('node_modules')) return null;
-        return rel.split(path.sep).join('/');
+    /** Let the run go (breakpoints off, resumed) and disconnect: a run stopped while paused in the debugger can
+     *  then end by itself (its signal handlers run), instead of being killed. At most `ms` long. */
+    async release(ms = 1500): Promise<void> {
+        const go = (async () => {
+            await this.send('Debugger.setBreakpointsActive', { active: false }).catch(() => undefined);
+            await this.send('Debugger.setPauseOnExceptions', { state: 'none' }).catch(() => undefined);
+            if (this.paused) await this.send('Debugger.resume').catch(() => undefined);
+        })();
+        await Promise.race([go, new Promise((r) => setTimeout(r, ms).unref?.())]);
+        this.close();
     }
+
+    private relFile(url: string): string | null { return projectFile(url, this.root); }
+    /** The same file (on Windows letter case does not matter: Test\Steps\a.ts is test/steps/a.ts). */
+    private same(a: string, b: string): boolean { return sameFile(a, b); }
 
     private onMessage(raw: string): void {
         let msg: { id?: number; result?: unknown; error?: { message: string }; method?: string; params?: any };
@@ -192,7 +240,7 @@ export class InspectorSession extends EventEmitter {
             const file = this.relFile(msg.params.url);
             if (!file || !/\.(ts|js|mjs|cjs)$/.test(file)) return;
             this.scripts.set(msg.params.scriptId, { file, map: readInlineMap(msg.params.sourceMapURL) });
-            for (const key of this.wanted.keys()) if (key.startsWith(`${file}:`)) void this.place(key, msg.params.scriptId);
+            for (const key of this.wanted.keys()) if (this.same(key.slice(0, key.lastIndexOf(':')), file)) void this.place(key, msg.params.scriptId);
         } else if (msg.method === 'Debugger.paused') {
             if (msg.params.reason === 'Break on start') { void this.send('Debugger.resume').catch(() => undefined); return; }
             const frames: any[] = msg.params.callFrames;
@@ -211,15 +259,28 @@ export class InspectorSession extends EventEmitter {
             }
             this.autoSteps = null; this.stepIn = false;
             this.callFrames = msg.params.callFrames;
+            const where = (scriptId: string, lineNumber: number, columnNumber: number, url?: string) => {
+                const s = this.scripts.get(scriptId);
+                if (s) return { file: s.file, line: originalFor(s.map, lineNumber, columnNumber), external: false };
+                const short = String(this.urls.get(scriptId) ?? url ?? '').replace(/^file:\/\//, '').replace(/^.*\/node_modules\//, '').split(/[\\/]/).slice(-3).join('/');
+                return { ...(short ? { file: short } : {}), line: lineNumber + 1, external: true };
+            };
+            const shown: CodeFrame[] = msg.params.callFrames.map((f: any, index: number) => ({ index, name: f.functionName || '(anonymous)', ...where(f.location.scriptId, f.location.lineNumber, f.location.columnNumber ?? 0, f.url) }));
+            // Then the async callers (the framework's own are left out after the project's last one).
+            const later: CodeFrame[] = [];
+            for (let t = msg.params.asyncStackTrace, n = 0; t && n < 8; t = t.parent, n++) {
+                for (const f of t.callFrames ?? []) later.push({ index: shown.length + later.length, name: f.functionName || '(anonymous)', ...where(f.scriptId, f.lineNumber, f.columnNumber ?? 0, f.url), async: true });
+                if (later.length > 60) break;
+            }
+            // Node's own code (timers, async hooks) is left out of the async callers.
+            const asyncShown = later.filter((f) => !f.external || !/^node:/.test(f.file ?? '')).map((f, i) => ({ ...f, index: shown.length + i }));
+            later.splice(0, later.length, ...asyncShown);
+            const lastOwn = later.map((f) => !f.external).lastIndexOf(true);
+            shown.push(...later.slice(0, lastOwn + 1 || Math.min(later.length, 3)));
             this.paused = {
                 seq: ++this.pauseSeq,
                 reason: exception ? 'exception' : hit ? 'breakpoint' : 'step',
-                frames: msg.params.callFrames.map((f: any, index: number) => {
-                    const s = this.scripts.get(f.location.scriptId);
-                    const url = this.urls.get(f.location.scriptId) ?? f.url ?? '';
-                    const short = String(url).replace(/^file:\/\//, '').replace(/^.*\/node_modules\//, '').split(/[\\/]/).slice(-3).join('/');
-                    return { index, name: f.functionName || '(anonymous)', ...(s ? { file: s.file, line: originalFor(s.map, f.location.lineNumber, f.location.columnNumber ?? 0) } : { ...(short ? { file: short } : {}), line: f.location.lineNumber + 1 }), external: !s };
-                }),
+                frames: shown,
                 ...(msg.params.data && (msg.params.reason === 'exception' || msg.params.reason === 'promiseRejection') ? { exception: preview(msg.params.data) } : {}),
             };
             this.emit('paused', this.paused);
@@ -284,7 +345,7 @@ export class InspectorSession extends EventEmitter {
             if (this.wanted.has(key)) continue;
             this.wanted.set(key, []);
             const file = key.slice(0, key.lastIndexOf(':'));
-            for (const [id, s] of this.scripts) if (s.file === file) await this.place(key, id);
+            for (const [id, s] of this.scripts) if (this.same(s.file, file)) await this.place(key, id);
         }
     }
 
@@ -304,6 +365,17 @@ export class InspectorSession extends EventEmitter {
         for (const sc of f.scopeChain) {
             if (sc.type === 'global' || !sc.object.objectId) continue;
             const vars = await this.properties(sc.object.objectId);
+            // The object the code runs on (a step definition class, a page object), first in the local scope.
+            if (sc.type === 'local' && f.this && f.this.type === 'object' && f.this.subtype !== 'null' && !vars.some((v) => v.name === 'this')) {
+                const t = variable('this', f.this);
+                // A frame's `this` comes without a preview: its first properties, as editors show it.
+                if (f.this.objectId && !f.this.preview) {
+                    const props = await this.properties(f.this.objectId).catch(() => [] as Variable[]);
+                    const one = (v: Variable) => (v.type === 'function' ? 'ƒ' : v.value.length > 40 ? `${v.value.slice(0, 40)}…` : v.value);
+                    t.value = `${f.this.className ?? 'Object'} {${props.slice(0, 5).map((v) => `${v.name}: ${one(v)}`).join(', ')}${props.length > 5 ? ', …' : ''}}`.slice(0, 300);
+                }
+                vars.unshift(t);
+            }
             out.push({ name: sc.type === 'local' ? 'Local' : sc.type === 'closure' ? 'Closure' : sc.type === 'block' ? 'Block' : sc.type === 'catch' ? 'Catch' : sc.type === 'module' ? 'Module' : sc.type, variables: vars });
         }
         return out;

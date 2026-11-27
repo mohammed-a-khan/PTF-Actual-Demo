@@ -1107,9 +1107,10 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                             </Space>
                             {find.replace && (
                                 <Space size={4}>
-                                    <Input size="small" placeholder="Replace" value={find.r} style={{ width: 220 }} onChange={(e) => setFind({ ...find, r: e.target.value })} />
-                                    <Button size="small" onClick={replaceOne} disabled={readOnly}>Replace</Button>
-                                    <Button size="small" onClick={replaceAll} disabled={readOnly || !matches.length}>All</Button>
+                                    <Input size="small" placeholder={find.re ? 'Replace ($1, $2… for groups)' : 'Replace'} aria-label="Replace with" value={find.r} style={{ width: 220 }} onChange={(e) => setFind({ ...find, r: e.target.value })}
+                                        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); if (e.ctrlKey || e.metaKey) replaceAll(); else replaceOne(); } if (e.key === 'Escape') { e.preventDefault(); setFind({ ...find, open: false }); ta.current?.focus(); } }} />
+                                    <Tooltip title="Replace this match (Enter)"><Button size="small" onClick={replaceOne} disabled={readOnly}>Replace</Button></Tooltip>
+                                    <Tooltip title={`Replace all ${matches.length} matches in this file, as one change Ctrl+Z undoes (Ctrl+Enter)`}><Button size="small" onClick={replaceAll} disabled={readOnly || !matches.length}>Replace all</Button></Tooltip>
                                 </Space>
                             )}
                             <Space size={8}>

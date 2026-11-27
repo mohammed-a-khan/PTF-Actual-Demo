@@ -566,6 +566,13 @@ export class TestRunner extends EventEmitter {
         const run = this.get(id);
         if (!child || !run || run.state !== 'running') return;
         (run as RunInfo & { stopping?: boolean }).stopping = true;
+        // A debug run paused in the debugger runs no code (its exit handlers neither): let it go first.
+        const session = this.sessions.get(id);
+        if (session) { this.sessions.delete(id); void session.release().finally(() => this.kill(child)); return; }
+        this.kill(child);
+    }
+
+    private kill(child: ChildProcess): void {
         if (process.platform === 'win32') spawnSync(systemTool('taskkill.exe'), ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true });
         else { try { process.kill(-child.pid!, 'SIGTERM'); } catch { child.kill('SIGTERM'); } setTimeout(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already gone */ } }, 5000).unref(); }
     }

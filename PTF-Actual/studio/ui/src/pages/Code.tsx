@@ -5,11 +5,13 @@
 import React from 'react';
 import { Split } from '../components/Split';
 import { currentRoute, navigate, useRoute } from '../route';
-import { Alert, App, Badge, Button, Empty, Input, List, Modal, Radio, Space, Tabs, Tag, Tooltip, Tree, Typography } from 'antd';
+import { Alert, App, Badge, Button, Checkbox, Empty, Input, List, Modal, Radio, Space, Tabs, Tag, Tooltip, Tree, Typography } from 'antd';
 import { BlameView } from '../components/BlameView';
 import type { DataNode } from 'antd/es/tree';
-import { BugOutlined, FileAddOutlined, UserOutlined, FileOutlined, FolderAddOutlined, FolderOutlined, LoadingOutlined, ReloadOutlined, SaveOutlined, SearchOutlined, UndoOutlined } from '@ant-design/icons';
-import { api, Breakpoint, Diag, SearchHit, StepPlan, StepRename } from '../api';
+import { BugOutlined, CloseOutlined, LockOutlined, FileAddOutlined, UserOutlined, FileOutlined, FolderAddOutlined, FolderOutlined, LoadingOutlined, ReloadOutlined, SaveOutlined, SearchOutlined, UndoOutlined } from '@ant-design/icons';
+import { api, Breakpoint, closeFilesOnUnload, Diag, SearchHit, StepPlan, StepRename, TextSearchResult } from '../api';
+import { countText, groupByFile, NEW_SEARCH, previewLine, queryOf, SearchState, withOpenTabs } from '../codeSearch';
+import { EXCLUDED_DIRS, replaceIn } from '../../../src/workspace/textSearch';
 import { useUnsaved } from '../unsaved';
 import { errText, loadRunTarget, saveRunTarget, showRun, unsavedFiles, useStudio } from '../state';
 import { handlesSaveFiles, SAVE_FILES_EVENT, SaveFilesRequest } from '../runSignals';
@@ -22,11 +24,13 @@ import { splitTab, TAB_MARK, withTab } from '../apiperf-ui';
 import { langOf } from '../editor/highlight';
 import { newPathProblem } from '../../../src/workspace/newName';
 import { useContextMenu } from '../components/ContextMenu';
-import { areaOf, duplicateName, featuresIn, folderGlob, fullPath, gitStateOf, MenuEntry, scenarioAt, scenarioRef, tabMenu, TabClose, tabsToClose, treeMenu } from '../contextMenus';
+import { areaOf, duplicateName, featuresIn, fullPath, gitStateOf, MenuEntry, scenarioAt, scenarioRef, tabMenu, TabClose, tabsToClose, treeMenu } from '../contextMenus';
 import { confirmDiscard, copyText, openChanges, showHistory } from '../gitActions';
 
 /** `content` / `savedContent` always use "\n"; `eol` is the file's own line ending, restored on save. */
-interface OpenFile { path: string; content: string; savedContent: string; hash: string | null; binary: boolean; eol: '\n' | '\r\n' }
+interface OpenFile { path: string; content: string; savedContent: string; hash: string | null; binary: boolean; eol: '\n' | '\r\n'; readOnly?: boolean }
+/** A library file (a framework class's .d.ts): shown read-only, from go to definition or usages. */
+const isLibrary = (path: string) => path.split('/').includes('node_modules');
 
 /** A file as read from disk, ready for the editor (which works with "\n" only). */
 function fromDisk(content: string | undefined): { content: string; eol: '\n' | '\r\n' } {
@@ -74,7 +78,7 @@ const TabEditor = React.memo(function TabEditor({ tab, active, diagnostics, reve
     const inline = React.useMemo(() => copilotProvider(path), [path]);
     const statusItems = React.useMemo(() => <CopilotStatusItem />, []);
     return (
-        <CodeEditor ref={register} active={active} value={tab.content} lang={lang} eol={tab.eol}
+        <CodeEditor ref={register} active={active} value={tab.content} lang={lang} eol={tab.eol} readOnly={tab.readOnly}
             onChange={(text) => h.current.setContent(path, text)} onSave={() => h.current.save(path)}
             diagnostics={diagnostics} reveal={reveal} gutterActions={gutterActions}
             breakpoints={breakpoints} execLine={execLine} onToggleBreakpoint={canBreak(path) ? (line) => h.current.toggleBreakpoint(path, line) : undefined}
@@ -116,6 +120,93 @@ function buildTree(files: string[], filter: string, marks: Map<string, string>):
             return { key: `dir:${key}`, title: <span data-tree-key={`dir:${key}`}>{name}</span>, children: toNodes(v as Record<string, unknown>, key) };
         });
     return toNodes(root, '');
+}
+
+/** The Search tab: search (and replace) in the project, a folder, or the open file. */
+function SearchPanel({ search, setSearch, found, searching, replacing, activeFile, folderOfActive, onSearch, onClear, onOpen, onReplaceOne, onReplaceAll }: {
+    search: SearchState; setSearch: (s: SearchState) => void;
+    found: { r: TextSearchResult; for: SearchState; file: string | null } | null; searching: boolean; replacing: boolean;
+    activeFile: string | null; folderOfActive: string;
+    onSearch: (s: SearchState) => void; onClear: () => void; onOpen: (h: SearchHit) => void;
+    onReplaceOne: (h: SearchHit) => void; onReplaceAll: (onlyFile?: string) => void;
+}) {
+    /** Change options; with results shown, search again with them. */
+    const change = (patch: Partial<SearchState>, again = true) => {
+        const next = { ...search, ...patch };
+        setSearch(next);
+        if (again && found && next.q) onSearch(next);
+    };
+    const esc = (e: React.KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); onClear(); } };
+    const r = found?.r;
+    const stale = !!found && found.for.q !== search.q;
+    const shown: SearchState = found ? { ...found.for, replace: search.replace, showReplace: search.showReplace } : search;
+    const canReplace = search.showReplace && !!r && r.total > 0 && !stale && !replacing;
+    const groups = r ? groupByFile(r.hits) : [];
+    const countOf = new Map((r?.files ?? []).map((f) => [f.path, f.count]));
+    const scopeText = search.scope === 'file' ? (activeFile ? activeFile.split('/').pop() : 'no file open') : search.scope === 'folder' ? (search.folder || folderOfActive || 'the project') + '/' : 'the whole project';
+    return (
+        <div onKeyDown={esc} className="cs-search">
+            <Space direction="vertical" style={{ width: '100%' }} size={4}>
+                <Space wrap size={6}>
+                    <Tooltip title={search.showReplace ? 'Hide replace' : 'Replace (Ctrl+Shift+H)'}>
+                        <Button size="small" type={search.showReplace ? 'primary' : 'default'} aria-label="Toggle replace" aria-pressed={search.showReplace} onClick={() => setSearch({ ...search, showReplace: !search.showReplace })}>⇄</Button>
+                    </Tooltip>
+                    <Input id="cs-global-search" size="small" placeholder="Search (Ctrl+Shift+F) — Esc clears" style={{ width: 300 }} value={search.q} aria-label="Search text"
+                        onChange={(e) => setSearch({ ...search, q: e.target.value })} onPressEnter={() => onSearch(search)} />
+                    <Tooltip title="Match case"><Button size="small" aria-pressed={search.case} type={search.case ? 'primary' : 'default'} onClick={() => change({ case: !search.case })}>Aa</Button></Tooltip>
+                    <Tooltip title="Whole word"><Button size="small" aria-pressed={search.word} type={search.word ? 'primary' : 'default'} onClick={() => change({ word: !search.word })}>Word</Button></Tooltip>
+                    <Tooltip title="Regular expression (JavaScript)"><Button size="small" aria-pressed={search.regex} type={search.regex ? 'primary' : 'default'} onClick={() => change({ regex: !search.regex })}>.*</Button></Tooltip>
+                    <Button size="small" type="primary" loading={searching} onClick={() => onSearch(search)}>Search</Button>
+                    <Tooltip title="Clear the search and its results (Esc)"><Button size="small" type="text" aria-label="Clear search" icon={<CloseOutlined />} disabled={!search.q && !found} onClick={onClear} /></Tooltip>
+                    {r && !searching && <Typography.Text type="secondary" role="status">{r.total ? countText(r.total, r.files.length) : 'No matches'}{r.limited ? ` (first ${r.hits.length} shown)` : ''} in {found?.for.scope === 'file' ? found.file : found?.for.scope === 'folder' ? `${found.for.folder}/` : 'the project'}{stale ? ' — press Enter to search for the new text' : ''}</Typography.Text>}
+                </Space>
+                {search.showReplace && (
+                    <Space wrap size={6}>
+                        <span style={{ display: 'inline-block', width: 30 }} />
+                        <Input id="cs-global-replace" size="small" placeholder={search.regex ? 'Replace with ($1, $2… for groups)' : 'Replace with'} style={{ width: 300 }} value={search.replace} aria-label="Replace with"
+                            onChange={(e) => setSearch({ ...search, replace: e.target.value })} onPressEnter={() => canReplace && onReplaceAll()} />
+                        <Button size="small" danger disabled={!canReplace} loading={replacing} onClick={() => onReplaceAll()}>
+                            Replace all{r && r.total > 0 && !stale ? ` (${countText(r.total, r.files.length)})` : ''}
+                        </Button>
+                        {!found && <Typography.Text type="secondary" style={{ fontSize: 12 }}>Search first: the results show what each replacement makes.</Typography.Text>}
+                    </Space>
+                )}
+                <Space wrap size={8}>
+                    <Radio.Group size="small" value={search.scope} optionType="button" aria-label="Search in"
+                        onChange={(e) => change({ scope: e.target.value, ...(e.target.value === 'folder' && !search.folder ? { folder: folderOfActive } : {}) })}
+                        options={[{ value: 'project', label: 'Whole project' }, { value: 'folder', label: 'Folder' }, { value: 'file', label: 'This file', disabled: !activeFile }]} />
+                    {search.scope === 'folder' && <Input size="small" className="mono" aria-label="Folder" placeholder="test/orders" style={{ width: 200 }} value={search.folder}
+                        onChange={(e) => setSearch({ ...search, folder: e.target.value.replace(/\\/g, '/') })} onPressEnter={() => onSearch(search)} />}
+                    {search.scope !== 'file' && <Input size="small" placeholder="Only in (e.g. *.feature, *.ts)" style={{ width: 190 }} value={search.glob} aria-label="Only in files"
+                        onChange={(e) => setSearch({ ...search, glob: e.target.value })} onPressEnter={() => onSearch(search)} />}
+                    {search.scope !== 'file' && <Tooltip title={`Also search files Git ignores and the folders left out by default: ${EXCLUDED_DIRS.filter((d) => d !== '.git').join(', ')}`}>
+                        <Checkbox checked={search.ignored} onChange={(e) => change({ ignored: e.target.checked })}>Include ignored files</Checkbox>
+                    </Tooltip>}
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>Searching {scopeText}</Typography.Text>
+                </Space>
+                {r?.truncated && <Alert type="warning" showIcon message="Too many files to read them all: choose a folder to search everywhere in it." />}
+                {groups.map((g) => (
+                    <div key={g.path} className="cs-result-group">
+                        <div className="cs-result-file" title={g.path}>
+                            <FileOutlined style={{ marginRight: 6 }} /><span className="mono">{g.path}</span>
+                            <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>{countOf.get(g.path) ?? g.items.length}</Typography.Text>
+                            {canReplace && <Button size="small" type="link" style={{ marginLeft: 8, padding: 0, height: 'auto' }} onClick={(e) => { e.stopPropagation(); onReplaceAll(g.path); }}>Replace in file</Button>}
+                        </div>
+                        {g.items.map((h, i) => {
+                            const p = previewLine(h, shown);
+                            return (
+                                <div key={i} className="file-row cs-result-row" onClick={() => onOpen(h)}>
+                                    <Typography.Text className="mono" type="secondary" style={{ flex: 'none', minWidth: 44, textAlign: 'right' }}>{h.line}</Typography.Text>
+                                    <span className="name mono">{p.before.trimStart()}<mark className={p.replaced !== undefined ? 'cs-match cs-match-old' : 'cs-match'}>{p.match}</mark>{p.replaced !== undefined && <mark className="cs-match-new">{p.replaced}</mark>}{p.after}</span>
+                                    {canReplace && <Button size="small" type="link" style={{ flex: 'none', padding: '0 4px', height: 'auto' }} onClick={(e) => { e.stopPropagation(); onReplaceOne(h); }}>Replace</Button>}
+                                </div>
+                            );
+                        })}
+                    </div>
+                ))}
+            </Space>
+        </div>
+    );
 }
 
 export function Code() {
@@ -183,8 +274,13 @@ export function Code() {
             return next;
         });
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
-    const [search, setSearch] = React.useState({ q: '', regex: false, case: false, word: false, glob: '' });
-    const [hits, setHits] = React.useState<SearchHit[] | null>(null);
+    const [search, setSearch] = React.useState<SearchState>(NEW_SEARCH);
+    const searchRef = React.useRef(search);
+    searchRef.current = search;
+    /** The last search's results (with open tabs' unsaved text searched here), and the search they are for. */
+    const [found, setFound] = React.useState<{ r: TextSearchResult; for: SearchState; file: string | null } | null>(null);
+    const [searching, setSearching] = React.useState(false);
+    const [replacing, setReplacing] = React.useState(false);
     const [quick, setQuick] = React.useState<{ open: boolean; q: string; index: number }>({ open: false, q: '', index: 0 });
     const [dialog, setDialog] = React.useState<{ kind: 'file' | 'folder' | 'rename'; path: string; base?: string; error?: string } | null>(null);
     const diagTimer = React.useRef<number>();
@@ -202,7 +298,6 @@ export function Code() {
     const tabMenuRef = React.useRef<(path: string, x: number, y: number) => void>(null!);
     // The tree node the keyboard is on (or last clicked): F2, Delete and the menu key act on it.
     const treeNode = React.useRef<string | null>(null);
-    const [treeActive, setTreeActive] = React.useState<string | null>(null);
     /** The tree's own focus target (rc-tree keeps the keyboard on a hidden input). */
     const focusTree = () => (treeBox.current?.querySelector('.ant-tree input') as HTMLElement | null)?.focus({ preventScroll: true });
     const treeRef = React.useRef<{ scrollTo: (o: { key: React.Key; align?: 'top' | 'bottom' | 'auto' }) => void } | null>(null);
@@ -215,6 +310,12 @@ export function Code() {
     const [tsState, setTsState] = React.useState<'idle' | 'starting' | 'ready'>('idle');
     const quickInput = React.useRef<import('antd').InputRef>(null);
 
+    // A reload or a closed browser tab: the editor texts sent to TypeScript are dropped (else they would outlive the page).
+    React.useEffect(() => {
+        const bye = () => closeFilesOnUnload(tabsRef.current.filter((t) => !t.readOnly && !t.binary && langOf(t.path) === 'ts').map((t) => t.path));
+        window.addEventListener('pagehide', bye);
+        return () => window.removeEventListener('pagehide', bye);
+    }, []);
     const loadFiles = React.useCallback(() => { api.files().then(setFiles).catch((e) => message.error(errText(e))); }, [message]);
     React.useEffect(loadFiles, [loadFiles, status?.head]);
     // Let TypeScript load the project in the background (it runs in its own thread on the server),
@@ -250,9 +351,10 @@ export function Code() {
         const existing = tabs.find((t) => t.path === path);
         if (!existing) {
             try {
-                const f = await api.readFile(path);
+                const lib = isLibrary(path);
+                const f = lib ? await api.readLibraryFile(path) : await api.readFile(path);
                 const d = fromDisk(f.content);
-                setTabs((ts) => ts.some((t) => t.path === path) ? ts : [...ts, { path, content: d.content, savedContent: d.content, hash: f.hash, binary: f.binary, eol: d.eol }]);
+                setTabs((ts) => ts.some((t) => t.path === path) ? ts : [...ts, { path, content: d.content, savedContent: d.content, hash: f.hash, binary: f.binary, eol: d.eol, ...(lib || f.readOnly ? { readOnly: true } : {}) }]);
             } catch (e) {
                 message.error(`${path}: ${errText(e)}`);
                 // An address to a file that is not there (an old link): the address shows the open file, not the missing one.
@@ -313,7 +415,7 @@ export function Code() {
 
     // Diagnostics for the active file, shortly after the user stops typing.
     React.useEffect(() => {
-        if (!cur || cur.binary) return;
+        if (!cur || cur.binary || cur.readOnly) return;
         window.clearTimeout(diagTimer.current);
         const path = cur.path, content = cur.content, isTs = langOf(path) === 'ts';
         diagTimer.current = window.setTimeout(() => {
@@ -328,7 +430,7 @@ export function Code() {
         const onFocus = async (tree: boolean | Event = true) => {
             if (tree !== false) loadFiles();
             for (const t of tabs) {
-                if (t.binary || t.content !== t.savedContent) continue;
+                if (t.binary || t.readOnly || t.content !== t.savedContent) continue;
                 try {
                     const f = await api.readFile(t.path);
                     if (f.hash !== t.hash) { const d = fromDisk(f.content); setTabs((ts) => ts.map((x) => x.path === t.path && x.content === x.savedContent ? { ...x, content: d.content, savedContent: d.content, hash: f.hash, eol: d.eol } : x)); }
@@ -364,6 +466,7 @@ export function Code() {
     };
     const save = async (path: string, force = false): Promise<boolean> => {
         const t = tabsRef.current.find((x) => x.path === path); if (!t) return false;
+        if (t.readOnly) { message.info(`${path.split('/').pop()} is a library file: it is shown read-only.`); return false; }
         try {
             let expected = t.hash;
             if (force) expected = (await api.readFile(path).catch(() => null))?.hash ?? null;
@@ -468,6 +571,7 @@ export function Code() {
             const loc = r.locations[0];
             if (!loc) { message.info('No definition found here.'); return; }
             if (loc.path.startsWith('..')) { message.info(`Defined outside this project: ${loc.path}`); return; }
+            if (isLibrary(loc.path)) message.info({ key: 'cs-library', content: `${loc.path.split('/').pop()} is a library file: opened read-only.`, duration: 2.5 });
             // Back returns to the line that was clicked (Ctrl+click does not move the caret).
             goFile(loc.path, loc.line, loc.column, text.slice(0, offset).split('\n').length);
         } catch (e) { message.error(errText(e)); }
@@ -518,21 +622,32 @@ export function Code() {
     };
 
     // ---- Usages (Shift+F12) and step rename (F2)
-    const [usages, setUsages] = React.useState<{ title: string; items: Array<{ path: string; line: number; column: number; text: string }> } | null>(null);
+    const [usages, setUsages] = React.useState<{ title: string; kind: 'step' | 'symbol'; items: Array<{ path: string; line: number; column: number; text: string; definition?: boolean; write?: boolean }> } | null>(null);
+    const [usagesBusy, setUsagesBusy] = React.useState(false);
+    /**
+     * Shift+F12 / Find usages: a step (on a feature step, or on a step definition's decorator or method line) shows
+     * the feature steps that run it; anything else in TypeScript / JavaScript shows every reference to the symbol at
+     * the caret across the project (page element properties, methods, classes, functions, variables).
+     */
     const findUsages = async (path: string, text: string, offset: number) => {
+        const isCode = langOf(path) === 'ts';
+        const word = (/[\w$]+$/.exec(text.slice(0, offset))?.[0] ?? '') + (/^[\w$]*/.exec(text.slice(offset))?.[0] ?? '');
+        setUsagesBusy(true);
         try {
             const r = await api.stepUsages(path, text, offset);
-            setUsages({ title: `"${r.step.pattern}"`, items: r.usages.map((u) => ({ path: u.path, line: u.line, column: u.column, text: `${u.keyword} ${u.text}` })) });
+            setUsages({ title: `"${r.step.pattern}"`, kind: 'step', items: r.usages.map((u) => ({ path: u.path, line: u.line, column: u.column, text: `${u.keyword} ${u.text}` })) });
         } catch (e) {
             // Not a step: the language service's references (TypeScript).
-            if (path.endsWith('.feature')) { message.info(errText(e)); return; }
+            if (!isCode) { message.info(errText(e)); return; }
+            if (!word) { message.info('Put the caret on a name (a method, property, class, function or variable) to find its usages.'); return; }
             try {
+                setTsState((s) => (s === 'idle' ? 'starting' : s));
                 const r = await api.references(path, text, offset);
-                const word = /[\w$]+$/.exec(text.slice(0, offset))?.[0] ?? '';
-                const rest = /^[\w$]*/.exec(text.slice(offset))?.[0] ?? '';
-                setUsages({ title: word + rest || 'references', items: r.locations.filter((l) => !l.path.startsWith('..')).map((l) => ({ path: l.path, line: l.line, column: l.column, text: l.text ?? '' })) });
+                setTsState('ready');
+                if (!r.locations.length) { message.info(`No usages of "${word}" found (TypeScript knows no symbol here).`); return; }
+                setUsages({ title: word, kind: 'symbol', items: r.locations.filter((l) => !l.path.startsWith('..')).map((l) => ({ path: l.path, line: l.line, column: l.column, text: l.text ?? '', definition: l.definition, write: l.write })) });
             } catch (e2) { message.info(errText(e2)); return; }
-        }
+        } finally { setUsagesBusy(false); }
         setBottom('usages');
     };
     const [blame, setBlame] = React.useState<{ file: string; line?: number } | null>(null);
@@ -570,11 +685,99 @@ export function Code() {
         } catch (e) { setRenaming((x) => (x ? { ...x, busy: false, error: errText(e) } : x)); }
     };
 
-    const runSearch = async (o: typeof search = search) => {
+    /** The file "This file" searches: the open tab (not a library file). */
+    const searchFile = () => { const a = activeRef.current; return a && !isLibrary(a) ? a : null; };
+    const searchSeq = React.useRef(0);
+    const runSearch = async (o: SearchState = searchRef.current) => {
         // An empty query or one that fails clears the results (old results under a new query mislead).
-        if (!o.q.trim()) { setHits(null); return; }
+        if (!o.q) { setFound(null); return; }
         setBottom('search');
-        try { setHits(await api.search(o.q, o)); } catch (e) { setHits(null); message.error(errText(e)); }
+        const file = o.scope === 'file' ? searchFile() : null;
+        if (o.scope === 'file' && !file) { setFound(null); message.info('Open a file to search in it.'); return; }
+        const seq = ++searchSeq.current;
+        setSearching(true);
+        try {
+            const r = await api.textSearch(o.q, { regex: o.regex, case: o.case, word: o.word, glob: o.scope === 'file' ? undefined : o.glob || undefined,
+                folder: o.scope === 'folder' ? o.folder || undefined : undefined, file: file ?? undefined, ignored: o.ignored });
+            if (seq !== searchSeq.current) return;
+            const open = tabsRef.current.filter((t) => !t.binary && !t.readOnly).map((t) => ({ path: t.path, content: t.content, dirty: t.content !== t.savedContent }));
+            setFound({ r: withOpenTabs(r, o, open, file), for: o, file });
+        } catch (e) { if (seq === searchSeq.current) { setFound(null); message.error(errText(e)); } }
+        finally { if (seq === searchSeq.current) setSearching(false); }
+    };
+    /** × / Esc: the query and its results go (the options stay). */
+    const clearSearch = () => { searchSeq.current++; setSearching(false); setFound(null); setSearch((x) => ({ ...x, q: '', replace: '' })); window.setTimeout(() => document.getElementById('cs-global-search')?.focus(), 0); };
+
+    /**
+     * Replace in files, through the editor's own save: a file open with unsaved edits is changed in its tab only
+     * (one undoable edit, left unsaved); the file shown is changed in its editor (undoable) and saved; other files are
+     * read, changed and saved with "changed on disk" protection (open ones show the new text). `only`: one match.
+     */
+    const replaceInFiles = async (o: SearchState, targets: Array<{ path: string; only?: { line: number; column: number } }>) => {
+        const q = queryOf(o);
+        let matches = 0, files = 0;
+        const unsavedOpen: string[] = [], failed: string[] = [];
+        setReplacing(true);
+        // The file shown last: its change is the one Ctrl+Z there undoes first (the browser keeps one undo list for the page).
+        const shownNow = activeRef.current;
+        const ordered = [...targets.filter((t) => t.path !== shownNow), ...targets.filter((t) => t.path === shownNow)];
+        try {
+            for (const t of ordered) {
+                const tab = tabsRef.current.find((x) => x.path === t.path);
+                try {
+                    if (tab) {
+                        if (tab.readOnly || tab.binary) continue;
+                        const r = replaceIn(tab.content, q, o.replace, t.only);
+                        if (!r.count) continue;
+                        const wasDirty = tab.content !== tab.savedContent;
+                        // In the editor as one undoable edit: the file shown, and files with unsaved edits (they stay unsaved).
+                        // Other open files are saved like files that are not open.
+                        const ed = editors.current.get(t.path);
+                        if (ed && (wasDirty || t.path === shownNow)) ed.applyEdit(r.text); else setContent(t.path, r.text);
+                        matches += r.count; files++;
+                        if (wasDirty) { unsavedOpen.push(t.path); continue; }
+                        const saved = await api.saveFile(t.path, toDisk({ content: r.text, eol: tab.eol }), tab.hash);
+                        setTabs((ts) => ts.map((x) => (x.path === t.path ? { ...x, content: r.text, savedContent: r.text, hash: saved.hash } : x)));
+                    } else {
+                        const f = await api.readFile(t.path);
+                        if (f.binary) continue;
+                        const d = fromDisk(f.content);
+                        const r = replaceIn(d.content, q, o.replace, t.only);
+                        if (!r.count) continue;
+                        await api.saveFile(t.path, toDisk({ content: r.text, eol: d.eol }), f.hash);
+                        matches += r.count; files++;
+                    }
+                } catch (e) { failed.push(`${t.path}: ${errText(e)}`); }
+            }
+        } finally { setReplacing(false); }
+        // The tabs' new text is in place before the search runs again (it searches open tabs' unsaved text).
+        await new Promise((r) => window.setTimeout(r, 0));
+        if (matches) {
+            message.success(`Replaced ${countText(matches, files)}${unsavedOpen.length ? `. ${unsavedOpen.length === 1 ? unsavedOpen[0].split('/').pop() + ' had' : `${unsavedOpen.length} open files had`} unsaved changes: changed in the editor, not saved yet` : ''}.`, unsavedOpen.length ? 6 : 3);
+        } else if (!failed.length) message.info('Nothing to replace: the text changed since the search.');
+        if (failed.length) modal.error({ title: `Not replaced in ${failed.length} file${failed.length === 1 ? '' : 's'}`, content: <div style={{ whiteSpace: 'pre-wrap' }}>{failed.join('\n')}</div> });
+        loadFiles(); void refresh();
+        void runSearch(o);
+    };
+    /** Replace all: asks first, with how many replacements in how many files. */
+    const confirmReplaceAll = (onlyFile?: string) => {
+        if (!found) return;
+        const o = found.for.q === search.q ? { ...found.for, replace: search.replace, showReplace: true } : null;
+        if (!o) { message.info('Search again first: the results are for another query.'); return; }
+        const list = onlyFile ? found.r.files.filter((f) => f.path === onlyFile) : found.r.files;
+        const n = list.reduce((a, f) => a + f.count, 0);
+        if (!n) return;
+        const unsaved = list.filter((f) => isDirty(f.path)).map((f) => f.path);
+        modal.confirm({
+            title: `Replace ${countText(n, list.length)}?`,
+            okText: 'Replace all', width: 520,
+            content: <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                <span><span className="mono">{o.q}</span> → <span className="mono">{o.replace === '' ? '(nothing)' : o.replace}</span>{o.regex && <Typography.Text type="secondary"> (regular expression: $1, $2… are its groups)</Typography.Text>}</span>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>Files are saved at once; the file shown in the editor changes there too (Ctrl+Z undoes it){unsaved.length ? `. ${unsaved.length === 1 ? 'One open file has' : `${unsaved.length} open files have`} unsaved changes: changed in the editor only, not saved` : ''}.</Typography.Text>
+                {found.r.truncated && <Alert type="warning" showIcon message="The search did not read every file (too many): narrow it to a folder to replace everywhere." />}
+            </Space>,
+            onOk: () => replaceInFiles(o, list.map((f) => ({ path: f.path }))),
+        });
     };
 
     // Global shortcuts: Ctrl+P quick open, Ctrl+Shift+F search.
@@ -583,7 +786,11 @@ export function Code() {
             const mod = e.ctrlKey || e.metaKey;
             const letter = /^[a-z]$/i.test(e.key) ? e.key.toLowerCase() : (/^Key([A-Z])$/.exec(e.code)?.[1].toLowerCase() ?? '');
             if (mod && !e.shiftKey && letter === 'p') { e.preventDefault(); setQuick({ open: true, q: '', index: 0 }); }
-            if (mod && e.shiftKey && letter === 'f') { e.preventDefault(); setBottom('search'); setTimeout(() => document.getElementById('cs-global-search')?.focus(), 0); }
+            if (mod && e.shiftKey && (letter === 'f' || letter === 'h')) {
+                e.preventDefault(); setBottom('search');
+                if (letter === 'h') setSearch((x) => ({ ...x, showReplace: true }));
+                setTimeout(() => document.getElementById(letter === 'h' && searchRef.current.q ? 'cs-global-replace' : 'cs-global-search')?.focus(), 0);
+            }
         };
         window.addEventListener('keydown', h);
         return () => window.removeEventListener('keydown', h);
@@ -612,14 +819,13 @@ export function Code() {
         const dirs = path.split('/').slice(0, -1).map((_, i, a) => `dir:${a.slice(0, i + 1).join('/')}`);
         setExpanded((ex) => [...new Set([...ex, ...dirs])]);
         setRevealed(path);
-        setTreeActive(path);
         treeNode.current = path;
         window.setTimeout(() => treeRef.current?.scrollTo({ key: path, align: 'auto' }), 60);
     };
 
-    /** Search in all files, only in a folder (the search's "Only in" filter). */
+    /** Search in a folder only (the search's scope: "Folder"); the project's top folder is the whole project. */
     const findInFolder = (dir: string) => {
-        const next = { ...search, glob: folderGlob(dir) };
+        const next: SearchState = { ...searchRef.current, scope: dir ? 'folder' : 'project', folder: dir };
         setSearch(next);
         setBottom('search', true);
         if (next.q.trim()) void runSearch(next);
@@ -640,7 +846,7 @@ export function Code() {
         const changed = status?.files ?? [];
         const fstat = path && !isDir ? changed.find((f) => f.path === path) : undefined;
         const inside = path && isDir ? changed.filter((f) => f.path.startsWith(path + '/')).map((f) => f.path) : [];
-        if (key !== null) { treeNode.current = key; setTreeActive(key); }
+        if (key !== null) treeNode.current = key;
         ctx.show({
             x, y, label: path ? `Actions for ${path}` : 'File tree actions',
             entries: treeMenu({ path, isDir, featuresInside: isDir && path !== null ? featuresIn(files, path).length : undefined, git: path ? gitStateOf(changed, path, isDir) : null }),
@@ -857,16 +1063,26 @@ export function Code() {
                         <Tree.DirectoryTree ref={treeRef as never} treeData={tree} height={treeHeight} virtual selectedKeys={revealed ? [revealed] : active ? [active] : []} expandedKeys={filterOpen ?? expanded}
                             onExpand={(k) => setExpanded(k)} expandAction="click" aria-label="Files"
                             onSelect={(keys) => { const k = String(keys[0] ?? ''); setRevealed(null); if (k && !k.startsWith('dir:')) goFileRef.current(k); }}
-                            activeKey={treeActive}
-                            onClick={(_, n) => { treeNode.current = String(n.key); setTreeActive(String(n.key)); if (!n.isLeaf) focusTree(); }}
-                            onActiveChange={(k) => { if (k !== null && k !== undefined) { treeNode.current = String(k); setTreeActive(String(k)); } }}
+                            onClick={(_, n) => { treeNode.current = String(n.key); if (!n.isLeaf) focusTree(); }}
+                            onActiveChange={(k) => { if (k !== null && k !== undefined) treeNode.current = String(k); }}
                             onRightClick={({ event, node }) => { event.preventDefault(); treeMenuRef.current(String(node.key), event.clientX, event.clientY); }}
                             onKeyDown={(e) => treeKeyRef.current(e)}
                             icon={(p: { isLeaf?: boolean }) => p.isLeaf ? <FileOutlined /> : <FolderOutlined />} />
                     )}
                 </div>
             </div>
-    ), [filterText, files.length, tree, active, expanded, loadFiles, filterOpen, treeHeight, revealed, treeActive]);
+    ), [filterText, files.length, tree, active, expanded, loadFiles, filterOpen, treeHeight, revealed]);
+    // The open file is shown in the tree when it changes (another tab, a jump to a definition, a search result),
+    // never again on its own: scrolling the tree, or anything else re-drawing the screen, leaves the tree where it is.
+    // (The tree's "active" row is not handed back to it: the tree scrolls to that row whenever it differs from its
+    // own, e.g. after the tree lost focus, which pulled the tree back to the open file on every update.)
+    const filesRef = React.useRef(files);
+    filesRef.current = files;
+    React.useEffect(() => {
+        if (!active || !filesRef.current.includes(active)) return;
+        const t = window.setTimeout(() => treeRef.current?.scrollTo({ key: active, align: 'auto' }), 60);
+        return () => window.clearTimeout(t);
+    }, [active]);
 
     const curDiags = cur ? diags[cur.path] ?? NO_DIAGS : NO_DIAGS;
     const bpLines = (path: string) => breakpoints.filter((b) => b.file === path).map((b) => b.line);
@@ -919,7 +1135,7 @@ export function Code() {
                                     // Same file name open twice: show the folder too.
                                     const twin = tabs.some((o) => o !== t && o.path.split('/').pop() === name);
                                     const dir = t.path.split('/').slice(-2, -1)[0];
-                                    return { key: t.path, label: <Tooltip title={t.path}><span>{name}{twin && dir && <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>{t.path.split('/').slice(-3, -1).join('/')}</Typography.Text>}{dirty(t) && <Badge status="processing" style={{ marginLeft: 6 }} />}</span></Tooltip>, closable: true };
+                                    return { key: t.path, label: <Tooltip title={t.readOnly ? `${t.path} (library file, read-only)` : t.path}><span>{t.readOnly && <LockOutlined aria-label="read-only" style={{ marginRight: 4, fontSize: 11 }} />}{name}{twin && dir && <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>{t.path.split('/').slice(-3, -1).join('/')}</Typography.Text>}{dirty(t) && <Badge status="processing" style={{ marginLeft: 6 }} />}</span></Tooltip>, closable: true };
                                 })} />
                             </div>
                             <div style={{ flex: 1, minHeight: 0 }}>
@@ -949,13 +1165,19 @@ export function Code() {
                     </div>
                     <div style={{ flex: 1, overflow: 'auto', padding: '0 8px 8px', display: bottom === 'debug' ? 'none' : 'block' }}>
                         {bottom === 'usages' ? (
-                            !usages ? <Typography.Text type="secondary">Shift+F12 on a step (in a feature or a step file) shows where it is used.</Typography.Text> : (
-                                <Space direction="vertical" style={{ width: '100%' }} size={2}>
-                                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>{usages.items.length} usage{usages.items.length === 1 ? '' : 's'} of <span className="mono">{usages.title}</span> in {new Set(usages.items.map((u) => u.path)).size} file{new Set(usages.items.map((u) => u.path)).size === 1 ? '' : 's'}</Typography.Text>
-                                    {usages.items.map((u, i) => (
-                                        <div key={i} className="file-row" onClick={() => goFile(u.path, u.line, u.column)}>
-                                            <Typography.Text className="mono" type="secondary" style={{ flex: 'none' }}>{u.path}:{u.line}</Typography.Text>
-                                            <span className="name mono">{u.text.trim()}</span>
+                            !usages ? <Typography.Text type="secondary">{usagesBusy ? <><LoadingOutlined style={{ marginRight: 6 }} />Finding usages…</> : <>Put the caret on a name and press <Typography.Text keyboard>Shift</Typography.Text>+<Typography.Text keyboard>F12</Typography.Text> (or right-click, Find usages): for a step (in a feature or a step file) the feature steps that use it; for anything in TypeScript (a page element such as <span className="mono">usernameField</span>, a method, class, function or variable) every place in the project that uses it.</>}</Typography.Text> : (
+                                <Space direction="vertical" style={{ width: '100%' }} size={2} className="cs-usages">
+                                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>{usagesBusy && <LoadingOutlined style={{ marginRight: 6 }} />}{usages.items.length} usage{usages.items.length === 1 ? '' : 's'} of <span className="mono">{usages.title}</span> in {new Set(usages.items.map((u) => u.path)).size} file{new Set(usages.items.map((u) => u.path)).size === 1 ? '' : 's'}{usages.kind === 'step' ? ' (feature steps that run it)' : ''}</Typography.Text>
+                                    {groupByFile(usages.items).map((g) => (
+                                        <div key={g.path} className="cs-result-group">
+                                            <div className="cs-result-file" title={g.path}><FileOutlined style={{ marginRight: 6 }} /><span className="mono">{g.path}</span><Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>{g.items.length}</Typography.Text>{isLibrary(g.path) && <Tag style={{ marginLeft: 8 }}>library</Tag>}</div>
+                                            {g.items.map((u, i) => (
+                                                <div key={i} className="file-row cs-result-row" onClick={() => goFile(u.path, u.line, u.column)}>
+                                                    <Typography.Text className="mono" type="secondary" style={{ flex: 'none', minWidth: 44, textAlign: 'right' }}>{u.line}</Typography.Text>
+                                                    <span className="name mono">{u.text.trim()}</span>
+                                                    {u.definition && <Tag color="blue" style={{ marginLeft: 6 }}>definition</Tag>}
+                                                    {u.write && !u.definition && <Tag style={{ marginLeft: 6 }}>written</Tag>}
+                                                </div>))}
                                         </div>))}
                                 </Space>)
                         ) : bottom === 'problems' ? (
@@ -973,23 +1195,11 @@ export function Code() {
                                 )} />
                             )
                         ) : (
-                            <Space direction="vertical" style={{ width: '100%' }} size={4}>
-                                <Space wrap size={6}>
-                                    <Input id="cs-global-search" size="small" placeholder="Search in all files (Ctrl+Shift+F)" style={{ width: 300 }} value={search.q} onChange={(e) => setSearch({ ...search, q: e.target.value })} onPressEnter={() => void runSearch()} />
-                                    <Input size="small" placeholder="Only in (e.g. *.feature)" style={{ width: 170 }} value={search.glob} onChange={(e) => setSearch({ ...search, glob: e.target.value })} onPressEnter={() => void runSearch()} />
-                                    <Button size="small" type={search.case ? 'primary' : 'default'} onClick={() => setSearch({ ...search, case: !search.case })}>Aa</Button>
-                                    <Button size="small" type={search.word ? 'primary' : 'default'} onClick={() => setSearch({ ...search, word: !search.word })}>Word</Button>
-                                    <Button size="small" type={search.regex ? 'primary' : 'default'} onClick={() => setSearch({ ...search, regex: !search.regex })}>.*</Button>
-                                    <Button size="small" type="primary" onClick={() => void runSearch()}>Search</Button>
-                                    {hits && (() => { const n = new Set(hits.map((h) => h.path)).size; return <Typography.Text type="secondary">{hits.length ? `${hits.length} result${hits.length === 1 ? '' : 's'} in ${n} file${n === 1 ? '' : 's'}` : 'No matches'}</Typography.Text>; })()}
-                                </Space>
-                                {hits?.map((h, i) => (
-                                    <div key={i} className="file-row" onClick={() => goFile(h.path, h.line, h.column)}>
-                                        <Typography.Text className="mono" type="secondary" style={{ flex: 'none' }}>{h.path}:{h.line}</Typography.Text>
-                                        <span className="name mono">{h.text.trim()}</span>
-                                    </div>
-                                ))}
-                            </Space>
+                            <SearchPanel search={search} setSearch={setSearch} found={found} searching={searching} replacing={replacing}
+                                activeFile={cur && !cur.readOnly ? cur.path : null} folderOfActive={cur ? cur.path.split('/').slice(0, -1).join('/') : ''}
+                                onSearch={(o) => void runSearch(o)} onClear={clearSearch} onOpen={(h) => goFile(h.path, h.line, h.column)}
+                                onReplaceOne={(h) => found && void replaceInFiles({ ...found.for, replace: search.replace, showReplace: true }, [{ path: h.path, only: { line: h.line, column: h.column } }])}
+                                onReplaceAll={confirmReplaceAll} />
                         )}
                     </div>
                 </div>
