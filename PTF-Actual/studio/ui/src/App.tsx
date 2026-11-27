@@ -7,7 +7,7 @@ import {
     VideoCameraOutlined, RobotOutlined, CloudServerOutlined, CodeOutlined, MenuFoldOutlined, MenuUnfoldOutlined, PullRequestOutlined, ExperimentOutlined, SafetyCertificateOutlined, CheckSquareOutlined, AimOutlined, BuildOutlined, ReadOutlined, BellOutlined, MedicineBoxOutlined, EyeOutlined, HistoryOutlined, LockOutlined, MergeCellsOutlined, MoonOutlined, PlusOutlined, ProfileOutlined, DeploymentUnitOutlined, SettingOutlined, SunOutlined,
     InboxOutlined,
 } from '@ant-design/icons';
-import { api, GateResult, hasToken, setProtectedRunConfirm } from './api';
+import { api, GateResult, hasToken, LogEntry, setProtectedRunConfirm } from './api';
 import { errText, StudioProvider, useStudio } from './state';
 import { canSaveLost, discardLost, installUnsavedGuard, lostOnLeave, saveLost } from './unsaved';
 import { installReloadGuard, RELOAD_HINT } from './reloadKeys';
@@ -222,6 +222,12 @@ function SyncButtons() {
     const { status, refresh } = useStudio();
     const [busy, setBusy] = React.useState<string | null>(null);
     const [gate, setGate] = React.useState<Extract<GateResult, { status: 'blocked' }> | null>(null);
+    // The commits Pull would bring (and Push would send), to look at before pulling.
+    const [commits, setCommits] = React.useState<{ kind: 'incoming' | 'outgoing'; upstream: string | null; list: LogEntry[] } | null>(null);
+    const showCommits = async (kind: 'incoming' | 'outgoing') => {
+        try { const r = await api.incoming(); setCommits({ kind, upstream: r.upstream, list: kind === 'incoming' ? r.incoming : r.outgoing }); }
+        catch (e) { message.error(errText(e)); }
+    };
     // After Fetch, Pull or Push the lists showing the remote's state (Tags) read it again.
     const run = async (k: string, fn: () => Promise<void>) => { setBusy(k); try { await fn(); } catch (e) { modal.error({ title: 'Something went wrong', content: errText(e) }); } finally { setBusy(null); await refresh(); remoteSynced(); } };
 
@@ -269,11 +275,26 @@ function SyncButtons() {
     const pullOff = remotes === 0 ? NO_REMOTE : !status?.branch ? 'Pull needs a branch (this is a detached commit): switch to a branch first.' : status.upstreamGone ? `${status.upstream ?? 'The remote branch'} was deleted on the remote: nothing to pull.` : !status.upstream ? `${status.branch} is not on the remote yet (Publish branch first), so there is nothing to pull.` : null;
     return (
         <Space>
+            <Modal open={!!commits} onCancel={() => setCommits(null)} footer={commits?.kind === 'incoming' ? <Space><Button onClick={() => setCommits(null)}>Close</Button><Button type="primary" icon={<ArrowDownOutlined />} onClick={() => { setCommits(null); pull(); }}>Pull them</Button></Space> : <Button onClick={() => setCommits(null)}>Close</Button>}
+                width={720} title={commits ? (commits.kind === 'incoming' ? `${commits.list.length} commit${commits.list.length === 1 ? '' : 's'} on ${commits.upstream ?? 'the remote'} not here yet` : `${commits.list.length} commit${commits.list.length === 1 ? '' : 's'} to push to ${commits.upstream ?? 'the remote'}`) : ''}>
+                <Typography.Paragraph type="secondary" style={{ fontSize: 12 }}>{commits?.kind === 'incoming' ? 'Pull brings them into your branch. Click one to see its files and changes.' : 'Push sends them. Click one to see its files and changes.'}</Typography.Paragraph>
+                <div style={{ maxHeight: '55vh', overflow: 'auto' }} data-testid="incoming-list">
+                    {commits?.list.map((c) => (
+                        <div key={c.sha} className="file-row" onClick={() => { setCommits(null); navigate(['git', 'history', c.sha]); }} style={{ alignItems: 'flex-start' }}>
+                            <Typography.Text code>{c.sha.slice(0, 8)}</Typography.Text>
+                            <div style={{ flex: 1, minWidth: 0 }}><div>{c.subject}</div><Typography.Text type="secondary" style={{ fontSize: 12 }}>{c.authorName} · {new Date(c.date).toLocaleString()}</Typography.Text></div>
+                        </div>))}
+                </div>
+            </Modal>
             <Tooltip title={remotes === 0 ? NO_REMOTE : 'Check the remote for new commits (changes nothing here)'}><Button icon={<CloudSyncOutlined />} loading={busy === 'fetch'} onClick={fetchNow}>Fetch</Button></Tooltip>
             <Tooltip title={pullOff ?? (status?.behind ? `${status.behind} new commit(s) on the remote` : 'Get the latest commits from the remote')}>
-                <Badge count={status?.behind ?? 0} size="small"><Button icon={<ArrowDownOutlined />} loading={busy === 'pull'} disabled={!status?.upstream || !!status?.upstreamGone} onClick={pull}
-                    // A disabled button gets no hover: the badge around it shows why it is off.
-                    style={!status?.upstream || status?.upstreamGone ? { pointerEvents: 'none' } : undefined}>Pull</Button></Badge>
+                <Badge count={status?.behind ?? 0} size="small">
+                    {status?.behind ? <Dropdown.Button icon={<DownOutlined />} loading={busy === 'pull'} onClick={pull} data-testid="pull-button"
+                        menu={{ items: [{ key: 'in', label: `See the ${status.behind} incoming commit${status.behind === 1 ? '' : 's'}…` }], onClick: () => void showCommits('incoming') }}>
+                        <ArrowDownOutlined /> Pull</Dropdown.Button>
+                    : <Button icon={<ArrowDownOutlined />} loading={busy === 'pull'} disabled={!status?.upstream || !!status?.upstreamGone} onClick={pull}
+                        // A disabled button gets no hover: the badge around it shows why it is off.
+                        style={!status?.upstream || status?.upstreamGone ? { pointerEvents: 'none' } : undefined}>Pull</Button>}</Badge>
             </Tooltip>
             <Tooltip title={remotes === 0 ? 'This repository has no remote to push to. Add one in Source control › Branches & tags › Remotes.' : noUpstream ? 'First push: publishes this branch to the remote' : status?.ahead ? `${status.ahead} commit(s) to send${status.behind ? ` (the remote also has ${status.behind} new: Pull first)` : ''}` : status?.behind ? `Nothing to push: the remote has ${status.behind} new commit${status.behind === 1 ? '' : 's'}. Pull first.` : 'Nothing to push'}>
                 <Badge count={status?.ahead ?? 0} size="small" color="#93186C">

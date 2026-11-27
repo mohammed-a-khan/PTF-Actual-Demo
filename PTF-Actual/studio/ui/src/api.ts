@@ -593,7 +593,10 @@ export interface DiffLine { kind: 'same' | 'add' | 'del'; text: string }
 export interface AriaSnapshotInfo { dir: string; name: string; key: string; status: 'changed' | 'same'; baseline: string; actual: string | null; actualSha?: string; diff?: DiffLine[]; at?: string }
 export interface A11yViolation { id: string; impact: string; description: string; element?: string; help?: string; helpUrl?: string }
 export interface A11yCheck { url: string; scenario?: string; feature?: string; at: string; run: string; passed: boolean; violations: A11yViolation[]; passes?: number }
-export interface HealGroup { key: string; element: string; pageClass?: string; property?: string; original: string; healed: string; variants: Array<{ healed: string; count: number }>; strategy: string; confidence: number; count: number; runs: number; firstSeen: string; lastSeen: string; scenarios: Array<{ name: string; feature: string; project?: string; env?: string }>; status: HealStatus; decidedAt?: string; events: HealEvent[] }
+export interface HealGroup { key: string; element: string; pageClass?: string; property?: string; original: string; healed: string; variants: Array<{ healed: string; count: number }>; strategy: string; confidence: number; count: number; runs: number; firstSeen: string; lastSeen: string; scenarios: Array<{ name: string; feature: string; project?: string; env?: string }>; status: HealStatus; decidedAt?: string;
+    /** The page object change made here: where, before and after, and whether it is committed yet. */
+    change?: { file: string; line?: number; before?: string; after?: string; at: string; healed: string; uncommitted?: boolean; commit?: { sha: string; subject: string; date: string } };
+    events: HealEvent[] }
 export interface HealPreview { file: string; baseHash: string; line: number; before: string; after: string; option: { key: string; value: string } }
 export interface TestPlanDef { id: number; name: string; state: string; rootSuite: number; iteration?: string; areaPath?: string; owner?: string; web: string }
 export interface TestSuiteDef { id: number; name: string; type: string; parent: number | null; requirementId?: number; query?: string }
@@ -754,6 +757,7 @@ export const api = {
     trustFolder: () => request<{ ok: boolean }>('POST', '/api/git/trust-folder'),
     fetch: () => request<FetchResult>('POST', '/api/git/fetch'),
     createBranch: (name: string, from?: string) => request<RepoStatus>('POST', '/api/git/branch', { name, from }),
+    incoming: () => request<{ upstream: string | null; incoming: LogEntry[]; outgoing: LogEntry[] }>('GET', '/api/git/incoming'),
     switchBranch: (name: string, o: { stash?: boolean } = {}) => request<RepoStatus & { autoStash?: StashEntry | null; stashed?: boolean }>('POST', '/api/git/switch', { name, ...(o.stash ? { stash: true } : {}) }),
     merge: (branch: string, opts?: { noFastForward?: boolean; squash?: boolean; noCommit?: boolean }) => request<MergeResult>('POST', '/api/git/merge', { branch, ...opts }),
     history: (h: HistoryQuery) => request<{ commits: LogCommit[]; graph: GraphRow[]; more: boolean }>('GET', '/api/git/history' + q({ ...h })),

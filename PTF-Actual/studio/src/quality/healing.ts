@@ -31,9 +31,13 @@ export interface HealGroup {
     count: number; runs: number; firstSeen: string; lastSeen: string;
     scenarios: Array<{ name: string; feature: string; project?: string; env?: string }>;
     status: HealStatus; decidedAt?: string;
+    /** The page object change made from the Studio ("Update page object"): where, and the line before and after. */
+    change?: { file: string; line?: number; before?: string; after?: string; at: string; healed: string };
     events: HealEvent[];
 }
-export interface HealDecision { healed: string; action: 'applied' | 'dismissed'; at: string; file?: string }
+export interface HealDecision { healed: string; action: 'applied' | 'dismissed'; at: string; file?: string;
+    /** The page object line changed, and the decorator before and after (kept to show where and what changed). */
+    line?: number; before?: string; after?: string }
 
 const keyOf = (e: Pick<HealEvent, 'pageClass' | 'property' | 'element' | 'original'>) => (e.pageClass && e.property ? `${e.pageClass}.${e.property}` : `${e.element}\u0000${e.original}`);
 
@@ -100,7 +104,9 @@ export function groupHeals(events: HealEvent[], decisions: Record<string, HealDe
             healed: suggestion, variants, strategy: evs.filter((e) => e.healed === suggestion).pop()!.strategy,
             confidence: Math.max(...evs.filter((e) => e.healed === suggestion).map((e) => e.confidence)),
             count: evs.length, runs: new Set(evs.map((e) => e.run)).size, firstSeen: evs[0].at, lastSeen: last.at,
-            scenarios: [...scen.values()], status, ...(d ? { decidedAt: d.at } : {}), events: evs.slice(-50),
+            scenarios: [...scen.values()], status, ...(d ? { decidedAt: d.at } : {}),
+            ...(d && d.action === 'applied' && d.file ? { change: { file: d.file, at: d.at, healed: d.healed, ...(d.line ? { line: d.line } : {}), ...(d.before !== undefined ? { before: d.before } : {}), ...(d.after !== undefined ? { after: d.after } : {}) } } : {}),
+            events: evs.slice(-50),
         });
     }
     const order: Record<HealStatus, number> = { review: 0, applied: 1, confirmed: 2, dismissed: 3 };

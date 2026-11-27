@@ -250,6 +250,14 @@ export const CALLS: CatalogCall[] = [
   "result": "RepoStatus"
  },
  {
+  "name": "incoming",
+  "area": "git",
+  "method": "GET",
+  "path": "/api/git/incoming",
+  "args": "",
+  "result": "{ upstream: string | null; incoming: LogEntry[]; outgoing: LogEntry[] }"
+ },
+ {
   "name": "switchBranch",
   "area": "git",
   "method": "POST",
@@ -3441,7 +3449,7 @@ export const TYPES: Record<string, string> = {
  "AriaSnapshotInfo": "export interface AriaSnapshotInfo { dir: string; name: string; key: string; status: 'changed' | 'same'; baseline: string; actual: string | null; actualSha?: string; diff?: DiffLine[]; at?: string }",
  "A11yViolation": "export interface A11yViolation { id: string; impact: string; description: string; element?: string; help?: string; helpUrl?: string }",
  "A11yCheck": "export interface A11yCheck { url: string; scenario?: string; feature?: string; at: string; run: string; passed: boolean; violations: A11yViolation[]; passes?: number }",
- "HealGroup": "export interface HealGroup { key: string; element: string; pageClass?: string; property?: string; original: string; healed: string; variants: Array<{ healed: string; count: number }>; strategy: string; confidence: number; count: number; runs: number; firstSeen: string; lastSeen: string; scenarios: Array<{ name: string; feature: string; project?: string; env?: string }>; status: HealStatus; decidedAt?: string; events: HealEvent[] }",
+ "HealGroup": "export interface HealGroup { key: string; element: string; pageClass?: string; property?: string; original: string; healed: string; variants: Array<{ healed: string; count: number }>; strategy: string; confidence: number; count: number; runs: number; firstSeen: string; lastSeen: string; scenarios: Array<{ name: string; feature: string; project?: string; env?: string }>; status: HealStatus; decidedAt?: string;\n    /** The page object change made here: where, before and after, and whether it is committed yet. */\n    change?: { file: string; line?: number; before?: string; after?: string; at: string; healed: string; uncommitted?: boolean; commit?: { sha: string; subject: string; date: string } };\n    events: HealEvent[] }",
  "HealPreview": "export interface HealPreview { file: string; baseHash: string; line: number; before: string; after: string; option: { key: string; value: string } }",
  "TestPlanDef": "export interface TestPlanDef { id: number; name: string; state: string; rootSuite: number; iteration?: string; areaPath?: string; owner?: string; web: string }",
  "TestSuiteDef": "export interface TestSuiteDef { id: number; name: string; type: string; parent: number | null; requirementId?: number; query?: string }",

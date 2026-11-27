@@ -143,6 +143,14 @@ export class GitService {
         return parseLog(r.stdout);
     }
 
+    /** Commits on the remote branch not here yet (what Pull brings), and the ones here not on it (what Push sends). */
+    async incoming(limit = 200): Promise<{ upstream: string | null; incoming: LogEntry[]; outgoing: LogEntry[] }> {
+        const up = await this.git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], { allowFailure: true });
+        if (up.code !== 0) return { upstream: null, incoming: [], outgoing: [] };
+        const list = async (range: string) => parseLog((await this.git(['log', `--format=${LOG_FORMAT}`, '-n', String(limit), range], { env: LITERAL })).stdout);
+        return { upstream: up.stdout.trim(), incoming: await list('HEAD..@{u}'), outgoing: await list('@{u}..HEAD') };
+    }
+
     /** Unified diff of one file: staged (index vs HEAD) or unstaged (worktree vs index). */
     async diff(file: string, staged: boolean, opts: DiffOptions = {}): Promise<string> {
         if (!staged) {

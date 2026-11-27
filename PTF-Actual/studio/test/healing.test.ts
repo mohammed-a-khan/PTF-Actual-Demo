@@ -90,6 +90,10 @@ test('groupHeals: per element, suggestion, review / applied / confirmed / dismis
     const applied = { 'OrdersPage.findButton': { healed: '#find-btn', action: 'applied' as const, at: '2026-11-04T00:00:00.000Z' } };
     assert.equal(groupHeals(events, applied, [], info)[0].status, 'applied');
     assert.equal(groupHeals(events, applied, [{ at: '2026-11-05T00:00:00.000Z', scenarios: new Set(['Find an order']) }], info)[0].status, 'confirmed');
+    // Where it was changed: kept with the update (file, line, the line before and after)
+    const withWhere = { 'OrdersPage.findButton': { ...applied['OrdersPage.findButton'], file: 'test/shop/pages/OrdersPage.ts', line: 7, before: "@CSGetElement({ css: '#find' })", after: "@CSGetElement({ css: '#find-btn' })" } };
+    assert.deepEqual(groupHeals(events, withWhere, [], info)[0].change, { file: 'test/shop/pages/OrdersPage.ts', at: '2026-11-04T00:00:00.000Z', healed: '#find-btn', line: 7, before: "@CSGetElement({ css: '#find' })", after: "@CSGetElement({ css: '#find-btn' })" });
+    assert.equal(groupHeals(events, applied, [], info)[0].change, undefined, 'no file recorded: nothing to show');
     // It healed again after the change: up for review
     assert.equal(groupHeals([...events, ev({ run: 'r6', at: '2026-11-06T00:00:00.000Z' })], applied, [], info)[0].status, 'review');
     // Dismissed, until it heals to another locator later

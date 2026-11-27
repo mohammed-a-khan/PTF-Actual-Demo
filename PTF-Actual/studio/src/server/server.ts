@@ -536,6 +536,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     // ---- Git
     app.get('/api/git/status', async () => git.status());
     app.get('/api/git/branches', async () => git.branches());
+    app.get('/api/git/incoming', async () => git.incoming());
     app.get('/api/git/log', async (req) => {
         const q = req.query as Record<string, string>;
         const limit = Math.min(Math.max(Number(q.limit) || 50, 1), 1000);
@@ -2618,6 +2619,28 @@ export function createServer(opts: ServerOptions): StudioServer {
     };
     app.get('/api/healing', async (req) => {
         const r = healGroups(req.query as Record<string, string>);
+        // Updated page objects: the line (found again for updates made before it was kept) and whether the change
+        // is still to commit, or in which commit it went.
+        const pending = new Set((await git.status().catch(() => ({ files: [] as Array<{ path: string }> }))).files.map((f) => f.path));
+        for (const g of r.groups) {
+            const ch = g.change;
+            if (!ch) continue;
+            if (!ch.line) {
+                try {
+                    const lines = fs.readFileSync(safePath(opts.repoRoot, ch.file), 'utf8').split(/\r?\n/);
+                    const v = healedOption(ch.healed).value;
+                    const i = lines.findIndex((l) => l.includes(v) || l.includes(ch.healed));
+                    if (i >= 0) ch.line = i + 1;
+                } catch { /* the file is gone */ }
+            }
+            let commit: { sha: string; subject: string; date: string } | undefined;
+            if (!pending.has(ch.file)) {
+                const lg = await runGit(['log', '-1', `--since=${ch.at}`, '--format=%H%x00%s%x00%aI', '--', ch.file], { cwd: opts.repoRoot, allowFailure: true });
+                const [sha, subject, date] = lg.stdout.trim().split('\0');
+                if (sha) commit = { sha, subject, date };
+            }
+            Object.assign(ch, { uncommitted: pending.has(ch.file), ...(commit ? { commit } : {}) });
+        }
         const secrets = opts.store.exists ? opts.store.knownSecrets().map((k) => k.value) : [];
         const mask = (t: string) => maskSecrets(t, secrets);
         return { ...r, project: r.project ?? null, groups: r.groups.map((g) => ({ ...g, events: g.events.map((e) => ({ ...e, step: mask(e.step) })) })) };
@@ -2634,7 +2657,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         if (typeof b.baseHash === 'string' && b.baseHash !== c.baseHash) throw new BadRequest(`${c.file} changed since the preview: look at the change again.`);
         ws.write(c.file, c.edit.text, c.baseHash);
         const d = readDecisions();
-        d[key] = { healed, action: 'applied', at: new Date().toISOString(), file: c.file };
+        d[key] = { healed, action: 'applied', at: new Date().toISOString(), file: c.file, line: c.edit.line, before: c.edit.before, after: c.edit.after };
         writeDecisions(d);
         log('healing.apply', `Updated ${c.group.pageClass}.${c.group.property} in ${c.file}: ${c.edit.option.key} ${c.edit.option.value}`, { file: c.file });
         return { ok: true, file: c.file, line: c.edit.line };

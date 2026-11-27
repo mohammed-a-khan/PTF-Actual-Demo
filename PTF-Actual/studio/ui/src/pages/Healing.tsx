@@ -5,7 +5,7 @@
  */
 import React from 'react';
 import { Alert, App, Button, Card, Drawer, Empty, Radio, Segmented, Select, Space, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
-import { CheckOutlined, CodeOutlined, EyeInvisibleOutlined, PlayCircleOutlined, ReloadOutlined, UndoOutlined } from '@ant-design/icons';
+import { BranchesOutlined, CheckOutlined, CodeOutlined, EyeInvisibleOutlined, PlayCircleOutlined, ReloadOutlined, UndoOutlined } from '@ant-design/icons';
 import { api, HealGroup, HealPreview, HealStatus } from '../api';
 import { errText, loadRunTarget, useStudio } from '../state';
 import { navigate, useRoute } from '../route';
@@ -150,7 +150,8 @@ export function Healing() {
 
             <Drawer open={!!current} onClose={() => setOpen(null)} width={720} title={<Typography.Text ellipsis={{ tooltip: current?.element }}>{current?.element}</Typography.Text>} destroyOnClose
                 extra={current && <Space>
-                    {preview && !('error' in preview) && <Button size="small" icon={<CodeOutlined />} onClick={() => navigate(['code', preview.file, preview.line])}>Open</Button>}
+                    {current.change ? <Button size="small" icon={<CodeOutlined />} onClick={() => navigate(['code', current.change!.file, current.change!.line ?? 1])}>Open</Button>
+                        : preview && !('error' in preview) && <Button size="small" icon={<CodeOutlined />} onClick={() => navigate(['code', preview.file, preview.line])}>Open</Button>}
                     {current.status === 'dismissed'
                         ? <Button size="small" icon={<UndoOutlined />} onClick={() => void dismiss(current, true)}>Back to review</Button>
                         : current.status === 'review' && <Button size="small" icon={<EyeInvisibleOutlined />} onClick={() => void dismiss(current)}>Dismiss</Button>}
@@ -163,7 +164,9 @@ export function Healing() {
                     </Space>
                     <div className="h-facts">
                         <div><span>Page object</span><b className="mono">{current.pageClass && current.property ? `${current.pageClass}.${current.property}` : '–'}</b></div>
-                        <div><span>Its locator</span><b className="mono h-broken">{current.original}</b></div>
+                        {current.change
+                            ? <div><span>Locator: was → now</span><b className="mono"><span className="h-broken" style={{ textDecoration: 'line-through' }}>{current.original}</span> → <span className="h-found">{current.change.healed}</span></b></div>
+                            : <div><span>Its locator</span><b className="mono h-broken">{current.original}</b></div>}
                         <div><span>Found by</span><b>{HOW[current.strategy] ?? current.strategy} · {current.confidence}% confidence</b></div>
                         <div><span>Seen</span><b>{current.count}× in {current.runs} run{current.runs === 1 ? '' : 's'}, last {ago(current.lastSeen)}</b></div>
                     </div>
@@ -177,7 +180,23 @@ export function Healing() {
                         </Radio.Group>
                     </Card>}
 
-                    {current.status !== 'confirmed' && <Card size="small" title="Change to the page object" style={{ marginBottom: 12 }}
+                    {current.change && (current.status === 'applied' || current.status === 'confirmed') && <Card size="small" title="What was changed" style={{ marginBottom: 12 }} data-testid="heal-change">
+                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                            <Typography.Text>Updated on {new Date(current.change.at).toLocaleString()} in{' '}
+                                <Typography.Link className="mono" onClick={() => navigate(['code', current.change!.file, current.change!.line ?? 1])}>{current.change.file}{current.change.line ? `:${current.change.line}` : ''}</Typography.Link>
+                                {' '}(<span className="mono">{current.pageClass}.{current.property}</span>).</Typography.Text>
+                            {current.change.before !== undefined && current.change.after !== undefined
+                                ? <Change before={current.change.before} after={current.change.after} />
+                                : <Typography.Text type="secondary" style={{ fontSize: 12 }}>The locator is now <span className="mono">{current.change.healed}</span> (the line before the change was not kept for updates made before this version).</Typography.Text>}
+                            {current.change.uncommitted
+                                ? <Alert type="warning" showIcon message="Not committed yet" description={<>The change is in your working copy only. Review and commit it in Source control.{' '}
+                                    <Button size="small" icon={<BranchesOutlined />} onClick={() => navigate(['git', 'changes', 'changes', current.change!.file])}>See it in Source control</Button></>} />
+                                : current.change.commit
+                                    ? <Alert type="success" showIcon message={<>Committed in <Typography.Link code onClick={() => navigate(['git', 'history', current.change!.commit!.sha])}>{current.change.commit.sha.slice(0, 8)}</Typography.Link> · {current.change.commit.subject}</>} />
+                                    : <Typography.Text type="secondary" style={{ fontSize: 12 }}>No uncommitted change to this file, and no commit to it since the update.</Typography.Text>}
+                        </Space>
+                    </Card>}
+                    {current.status !== 'confirmed' && !(current.status === 'applied' && current.change) && <Card size="small" title="Change to the page object" style={{ marginBottom: 12 }}
                         extra={preview && !('error' in preview) && current.status !== 'applied' && <Button type="primary" size="small" icon={<CheckOutlined />} loading={busy} onClick={() => void apply()}>Update page object</Button>}>
                         {!preview ? <Typography.Text type="secondary">Working out the change…</Typography.Text>
                             : 'error' in preview ? <Alert type="warning" showIcon message={preview.error} />
