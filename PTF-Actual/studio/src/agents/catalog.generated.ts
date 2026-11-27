@@ -254,9 +254,9 @@ export const CALLS: CatalogCall[] = [
   "area": "git",
   "method": "POST",
   "path": "/api/git/switch",
-  "args": "name: string",
-  "body": "{ name }",
-  "result": "RepoStatus"
+  "args": "name: string, o: { stash?: boolean } = {}",
+  "body": "{ name, ...(o.stash ? { stash: true } : {}) }",
+  "result": "RepoStatus & { autoStash?: StashEntry | null; stashed?: boolean }"
  },
  {
   "name": "merge",

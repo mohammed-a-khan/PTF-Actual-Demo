@@ -57,9 +57,12 @@ body { font-family: -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
 mark.intraline { background: var(--m-mark); color: inherit; padding: 0; border-radius: 2px; }
 
 /* side-by-side diff */
+/* Nothing is cut off with "…": side by side, a long line wraps (both versions stay in view, as on GitHub);
+   inline, lines stay whole and the diff scrolls sideways. */
 .diff table.split { table-layout: fixed; }
 .diff table.split td.ln { width: 48px; }
-.diff table.split td.half { width: calc(50% - 48px); overflow: hidden; text-overflow: ellipsis; }
+.diff table.split td.half { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all; }
+.diff table:not(.split) { width: max-content; min-width: 100%; }
 .diff table.split td.half.del, .diff table.split td.ln.del { background: var(--del-bg); color: var(--del-fg); }
 .diff table.split td.half.add, .diff table.split td.ln.add { background: var(--add-bg); color: var(--add-fg); }
 .diff table.split td.half.empty { background-image: repeating-linear-gradient(135deg, transparent 0 6px, rgba(127,127,127,.12) 6px 7px); }

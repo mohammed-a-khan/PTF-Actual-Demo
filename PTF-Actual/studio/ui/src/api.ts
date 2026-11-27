@@ -752,7 +752,7 @@ export const api = {
     trustFolder: () => request<{ ok: boolean }>('POST', '/api/git/trust-folder'),
     fetch: () => request<FetchResult>('POST', '/api/git/fetch'),
     createBranch: (name: string, from?: string) => request<RepoStatus>('POST', '/api/git/branch', { name, from }),
-    switchBranch: (name: string) => request<RepoStatus>('POST', '/api/git/switch', { name }),
+    switchBranch: (name: string, o: { stash?: boolean } = {}) => request<RepoStatus & { autoStash?: StashEntry | null; stashed?: boolean }>('POST', '/api/git/switch', { name, ...(o.stash ? { stash: true } : {}) }),
     merge: (branch: string, opts?: { noFastForward?: boolean; squash?: boolean; noCommit?: boolean }) => request<MergeResult>('POST', '/api/git/merge', { branch, ...opts }),
     history: (h: HistoryQuery) => request<{ commits: LogCommit[]; graph: GraphRow[]; more: boolean }>('GET', '/api/git/history' + q({ ...h })),
     commitDetails: (rev: string) => request<CommitDetails>('GET', '/api/git/commit' + q({ rev })),

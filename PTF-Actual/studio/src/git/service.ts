@@ -701,15 +701,48 @@ export class GitService {
         return !!remote && rest.slice(remote.length + 1) === name;
     }
 
-    async switchBranch(name: string): Promise<void> {
+    /**
+     * Switch branches. Uncommitted changes belong to the working folder, not to a branch, so Git takes them along;
+     * `stash` keeps them on the branch being left instead (a stash named for it, offered back on return). When
+     * Git refuses to take them along, the files in the way are named.
+     */
+    async switchBranch(name: string, o: { stash?: boolean } = {}): Promise<{ autoStash: StashEntry | null; stashed: boolean }> {
         await this.assertIdle('switch branches');
         assertRev(name);
+        const from = (await this.status()).branch;
+        let stashed = false;
+        if (o.stash && (await this.status()).files.length) {
+            await this.git(['stash', 'push', '--include-untracked', '-m', `${AUTO_STASH}${from ?? 'detached'}`]);
+            stashed = true;
+        }
+        try { await this.switchOnly(name); }
+        catch (e) {
+            // Not switched: the changes come back where they were.
+            if (stashed) await this.git(['stash', 'pop', '--index'], { allowFailure: true });
+            throw e;
+        }
+        return { autoStash: await this.autoStashFor(name), stashed };
+    }
+
+    /** The changes stashed when this branch was left by a switch, if still kept. */
+    async autoStashFor(branch: string): Promise<StashEntry | null> {
+        return (await this.stashList()).find((s) => s.message === `${AUTO_STASH}${branch}`) ?? null;
+    }
+
+    private async switchOnly(name: string): Promise<void> {
         // A commit (not a branch): switch to it detached ("git switch <sha>" refuses: "a branch is expected").
         const isBranch = (await this.git(['show-ref', '--verify', '-q', `refs/heads/${name}`], { allowFailure: true })).code === 0;
         const isCommit = !isBranch && /^[0-9a-f]{4,40}$/i.test(name) && (await this.git(['rev-parse', '--verify', '-q', '--end-of-options', `${name}^{commit}`], { allowFailure: true })).code === 0;
         const args = isCommit ? ['switch', '--detach', name] : ['switch', name];
         const r = await this.git(args, { allowFailure: true });
-        if (r.code !== 0) throw new GitError(explainGitFailure(r.stderr), args, r.code, r.stderr);
+        if (r.code !== 0) {
+            // Which files are in the way (Git lists them, indented, after the reason).
+            const files = /would be overwritten by checkout|would be removed by checkout/.test(r.stderr) ? r.stderr.split(/\r?\n/).filter((l) => /^\t/.test(l)).map((l) => l.trim()) : [];
+            const msg = files.length
+                ? `Your uncommitted changes go with you when you switch branches, but ${name} has other versions of ${files.length === 1 ? 'this file' : `these ${files.length} files`}: ${files.slice(0, 8).join(', ')}${files.length > 8 ? `, and ${files.length - 8} more` : ''}. Stash the changes on this branch and switch, or commit or discard them first.`
+                : explainGitFailure(r.stderr);
+            throw new GitError(msg, args, r.code, r.stderr);
+        }
     }
 
     async deleteBranch(name: string, force = false): Promise<{ status: 'ok' | 'not-merged'; message?: string }> {
@@ -1486,6 +1519,9 @@ export class GitService {
 function oneLine(s: string): string {
     return s.replace(/\s+/g, ' ').trim();
 }
+
+/** The message of a stash made by switching branches with "stash them on this branch" (then the branch name). */
+export const AUTO_STASH = 'cs-studio: left on ';
 
 /** Turn common git failures into plain language; keep git's own text for the rest. */
 export function explainGitFailure(stderr: string): string {

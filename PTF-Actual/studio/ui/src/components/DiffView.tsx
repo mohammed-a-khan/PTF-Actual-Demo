@@ -88,6 +88,8 @@ export function DiffView({ diff, loading, mode = 'unified', hunkAction, lineActi
         return (
             <div className="diff" role="table" aria-label="File changes, side by side">
                 <table className="split">
+                    {/* The widths: a hunk header (one cell over all four) first must not split the table in quarters. */}
+                    <colgroup><col style={{ width: 56 }} /><col /><col style={{ width: 56 }} /><col /></colgroup>
                     <tbody>
                         {pairs.map((p, i) => p.kind !== 'pair'
                             ? (p.kind === 'hunk' ? hunkRow(p.text, p.hunk, 4, i) : <tr key={i} className="meta"><td colSpan={4}>{p.text}</td></tr>)

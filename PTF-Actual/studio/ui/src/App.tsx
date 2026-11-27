@@ -1,4 +1,5 @@
 import React from 'react';
+import { useSwitchBranch } from './branchSwitch';
 import { Alert, App, Badge, Button, Divider, Drawer, Dropdown, Form, Input, Layout, Menu, Modal, Result, Select, Space, Tooltip, Typography } from 'antd';
 import {
     ArrowLeftOutlined, LeftOutlined, RightOutlined,
@@ -161,10 +162,8 @@ function BranchMenu() {
     // The name Git gets: spaces become -, characters Git refuses are dropped (shown before it is created).
     const finalName = name.trim().replace(/\s+/g, '-').replace(/[~^:?*[\\\x00-\x1f\x7f]+/g, '').replace(/\.{2,}/g, '.').replace(/\/{2,}/g, '/').replace(/@\{/g, '@').replace(/^[-./]+/, '').replace(/(\.lock|[./])+$/, '');
 
-    const switchTo = async (b: string) => {
-        try { await api.switchBranch(b); message.success(`Switched to ${b}`); await refresh(); }
-        catch (e) { modal.error({ title: `Could not switch to ${b}`, content: errText(e) }); }
-    };
+    const switchBranch = useSwitchBranch();
+    const switchTo = async (b: string) => { await switchBranch(b); };
 
     // The server takes branch names up to 255 characters; a longer one is refused here, with a message.
     const BRANCH_MAX = 255;

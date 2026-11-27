@@ -1,5 +1,6 @@
 /** Branches & tags (TortoiseGit "Browse references"). */
 import React from 'react';
+import { useSwitchBranch } from '../branchSwitch';
 import { App, Button, Dropdown, Empty, Form, Input, Modal, Segmented, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { MenuProps } from 'antd';
 import { BranchesOutlined, CloudUploadOutlined, DeleteOutlined, MoreOutlined, PlusOutlined, SearchOutlined, TagOutlined } from '@ant-design/icons';
@@ -84,6 +85,7 @@ export function Branches() {
     React.useEffect(() => { if (here && !wasHere.current) loadTags(); wasHere.current = here; }, [here, loadTags]);
 
     /** true when it worked (a dialog stays open on a problem, with the typed values). */
+    const switchBranch = useSwitchBranch();
     const run = async (label: string, fn: () => Promise<unknown>): Promise<boolean> => {
         try { await fn(); message.success(label); await refresh(); loadTags(); return true; } catch (e) { modal.error({ title: 'That did not work', content: errText(e) }); return false; }
     };
@@ -158,7 +160,7 @@ export function Branches() {
             { key: 'delete', label: 'Delete…', danger: true, disabled: b.current },
         ],
         onClick: ({ key }) => {
-            if (key === 'switch') void run(`Switched to ${b.name}`, () => api.switchBranch(b.name));
+            if (key === 'switch') void switchBranch(b.name).then(() => loadTags());
             if (key === 'merge') setMerge(b.name);
             if (key === 'rebase') modal.confirm({
                 title: `Rebase ${status?.branch} onto ${b.name}?`,
@@ -219,7 +221,7 @@ export function Branches() {
                     { title: 'Last commit', dataIndex: 'sha', width: 120, render: (s: string) => <Typography.Text code>{s.slice(0, 7)}</Typography.Text> },
                     { title: '', width: 220, render: (_: unknown, b) => (
                         <Space>
-                            {!b.current && <Button size="small" onClick={() => run(`Switched to ${b.name}`, () => api.switchBranch(b.name))}>Switch</Button>}
+                            {!b.current && <Button size="small" onClick={() => void switchBranch(b.name).then(() => loadTags())}>Switch</Button>}
                             {!b.current && <Button size="small" onClick={() => setMerge(b.name)}>Merge…</Button>}
                             <Dropdown menu={localMenu(b)} trigger={['click']}><Button size="small" icon={<MoreOutlined />} aria-label={`More actions for ${b.name}`} /></Dropdown>
                         </Space>) },
@@ -237,7 +239,7 @@ export function Branches() {
                         const exists = local.some((l) => l.name === localName);
                         return (
                             <Space>
-                                {!exists && <Tooltip title={`Creates ${localName} on this computer, tracking ${b.name}`}><Button size="small" onClick={() => run(`Checked out ${localName}`, () => api.switchBranch(localName))}>Check out</Button></Tooltip>}
+                                {!exists && <Tooltip title={`Creates ${localName} on this computer, tracking ${b.name}`}><Button size="small" onClick={() => void switchBranch(localName).then(() => loadTags())}>Check out</Button></Tooltip>}
                                 {status?.branch && <Button size="small" onClick={() => compare(status.branch!, b.name)}>Compare</Button>}
                                 <Button size="small" danger type="text" icon={<DeleteOutlined />} onClick={() => modal.confirm({
                                     title: `Delete ${b.name} on the remote?`, content: 'This removes the branch for everyone. Commits that are on other branches are kept.',

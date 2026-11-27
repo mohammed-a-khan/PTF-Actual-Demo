@@ -636,7 +636,11 @@ export function createServer(opts: ServerOptions): StudioServer {
         await git.createBranch(str(b.name, 'name', { max: 255 }), { from: str(b.from, 'from', { optional: true, max: 255 }) || undefined, switchTo: b.switchTo !== false });
         return git.status();
     });
-    app.post('/api/git/switch', async (req) => { await git.switchBranch(str(body(req).name, 'name', { max: 255 })); return git.status(); });
+    app.post('/api/git/switch', async (req) => {
+        const b = body(req);
+        const r = await git.switchBranch(str(b.name, 'name', { max: 255 }), { stash: b.stash === true });
+        return { ...(await git.status()), autoStash: r.autoStash, stashed: r.stashed };
+    });
     app.post('/api/git/merge', async (req) => {
         const b = body(req);
         return git.merge(str(b.branch, 'branch', { max: 255 }), { noFastForward: b.noFastForward === true, squash: b.squash === true, noCommit: b.noCommit === true });
