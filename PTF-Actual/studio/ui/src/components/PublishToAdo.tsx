@@ -9,7 +9,7 @@
  */
 import React from 'react';
 import { Alert, App, Button, Checkbox, Input, Modal, Segmented, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd';
-import { CloudUploadOutlined } from '@ant-design/icons';
+import { CloudUploadOutlined, PaperClipOutlined } from '@ant-design/icons';
 import { api, PublishDoneDef, PublishGroupDef, PublishItemDef, PublishOutcome, PublishPreviewDef, PublishScenarioDef, RunInfo, TestPlanDef, TestSuiteDef } from '../api';
 import { errText } from '../state';
 
@@ -20,6 +20,8 @@ const caseKey = (g: { plan: number; suite: number }, tc: number) => `${g.plan}/$
 const RANK: Record<PublishOutcome, number> = { Failed: 3, Blocked: 2, NotExecuted: 1, Passed: 0 };
 const worst = (list: PublishOutcome[]) => (list.length ? list.reduce((a, b) => (RANK[a] >= RANK[b] ? a : b)) : null);
 const outcomeTag = (o: PublishOutcome | null) => (o ? <Tag color={o === 'Passed' ? 'green' : o === 'Failed' ? 'red' : 'default'}>{o === 'NotExecuted' ? 'Not run' : o}</Tag> : null);
+const KIND_LABEL: Record<string, string> = { screenshot: 'screenshot', video: 'video', console: 'console log', trace: 'trace', har: 'HAR file' };
+const kindsText = (u: PublishPreviewDef['upload']) => (['screenshot', 'video', 'console', 'trace', 'har'] as const).filter((k) => u[k]).map((k) => `${KIND_LABEL[k]}s`).join(', ') || 'nothing';
 const fromText: Record<string, string> = { scenario: 'scenario tags', feature: 'feature tags', config: 'config ADO_TEST_PLAN_ID / ADO_TEST_SUITE_ID', chosen: 'chosen here' };
 
 /** Suites with their path ("Root › Login › Smoke"). */
@@ -53,6 +55,8 @@ export function PublishToAdo({ run, open, onClose }: { run: RunInfo; open: boole
     const [loading, setLoading] = React.useState(false);
     const [picks, setPicks] = React.useState<Record<string, Pick>>({});
     const [writeTags, setWriteTags] = React.useState(false);
+    const [attachEvidence, setAttachEvidence] = React.useState(true);
+    const [attachResults, setAttachResults] = React.useState(true);
     const [runName, setRunName] = React.useState('');
     const [err, setErr] = React.useState<string | null>(null);
     const [busy, setBusy] = React.useState(false);
@@ -113,10 +117,16 @@ export function PublishToAdo({ run, open, onClose }: { run: RunInfo; open: boole
         }));
         if (!ok) return;
         setBusy(true); setErr(null);
-        try { setDone(await api.publishRun(run.id, { ...ado, items, writeTags, runName })); }
+        try { setDone(await api.publishRun(run.id, { ...ado, items, writeTags, runName, attachEvidence: attachEvidence && !!preview?.upload.attachments, attachResults: attachResults && !!preview?.resultsZip })); }
         catch (e) { setErr(errText(e)); } finally { setBusy(false); }
     };
 
+    // Evidence files that go with the ticked test cases (each scenario's files once).
+    const evidenceTotal = React.useMemo(() => {
+        const keys = new Set(ticked.flatMap((x) => picks[x.k].scenarios));
+        return [...keys].reduce((n, k) => n + Object.values(preview?.evidence[k] ?? {}).reduce((a, b) => a + b, 0), 0);
+    }, [ticked, picks, preview]);
+    const evidenceOf = (keys: string[]) => { const m: Record<string, number> = {}; for (const k of keys) for (const [kind, n] of Object.entries(preview?.evidence[k] ?? {})) m[kind] = (m[kind] ?? 0) + n; return m; };
     const scenarioLabel = (s: PublishScenarioDef) => `${s.name}${s.iterations.length > 1 ? ` (${s.iterations.length} iterations)` : ''}`;
     const scenarioOptions = (preview?.scenarios ?? []).map((s) => ({ value: s.key, label: scenarioLabel(s), title: `${s.feature}: ${s.name} — ${s.outcome}${s.file ? ` (${s.file}:${s.line})` : ''}` }));
 
@@ -124,7 +134,13 @@ export function PublishToAdo({ run, open, onClose }: { run: RunInfo; open: boole
         <Modal open={open} onCancel={onClose} width={980} title={<Space><CloudUploadOutlined />Publish run {run.id} results to Azure DevOps</Space>} destroyOnClose
             footer={done ? <Button onClick={onClose}>Close</Button> : (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-                    <Checkbox checked={writeTags} onChange={(e) => setWriteTags(e.target.checked)} data-testid="write-tags">Also add the @TestCaseId tags to the scenarios (feature files)</Checkbox>
+                    <Space direction="vertical" size={0} style={{ textAlign: 'left', alignItems: 'flex-start' }}>
+                        <Checkbox checked={attachEvidence && !!preview?.upload.attachments} disabled={!preview?.upload.attachments} onChange={(e) => setAttachEvidence(e.target.checked)} data-testid="attach-evidence">
+                            <Tooltip title={preview ? `As the framework does (ADO_UPLOAD_*): ${kindsText(preview.upload)}; files up to ${preview.upload.maxMb} MB (ADO_ATTACHMENT_MAX_MB).${preview.upload.attachments ? '' : ' Off in the config (ADO_UPLOAD_ATTACHMENTS=false).'}` : undefined}>
+                                Attach the evidence to the results ({evidenceTotal} file{evidenceTotal === 1 ? '' : 's'})</Tooltip></Checkbox>
+                        <Checkbox checked={attachResults && !!preview?.resultsZip} disabled={!preview?.resultsZip} onChange={(e) => setAttachResults(e.target.checked)} data-testid="attach-results">Attach the zipped results to the test run</Checkbox>
+                        <Checkbox checked={writeTags} onChange={(e) => setWriteTags(e.target.checked)} data-testid="write-tags">Also add the @TestCaseId tags to the scenarios (feature files)</Checkbox>
+                    </Space>
                     <span style={{ flex: 1 }} />
                     <Typography.Text type="secondary">{ticked.length} test case{ticked.length === 1 ? '' : 's'} · {pointCount} test point{pointCount === 1 ? '' : 's'}</Typography.Text>
                     <Button onClick={onClose}>Cancel</Button>
@@ -195,7 +211,7 @@ export function PublishToAdo({ run, open, onClose }: { run: RunInfo; open: boole
                                                             status={p.points.length && !p.scenarios.length ? 'error' : undefined}
                                                             onChange={(v: string[]) => setPick(k, { scenarios: v, points: v.length && !p.scenarios.length && usable ? c.points.map((x) => x.id) : v.length ? p.points : [] })} />
                                                     ) : p.scenarios.map((s) => { const x = scen.get(s); return <div key={s}>{x ? scenarioLabel(x) : s}{x?.file && <Typography.Text type="secondary" style={{ fontSize: 11 }}> · {x.file}:{x.line}</Typography.Text>}</div>; })}</td>
-                                                    <td>{outcomeTag(outcome)}</td>
+                                                    <td>{outcomeTag(outcome)}{(() => { const m = evidenceOf(p.scenarios); const n = Object.values(m).reduce((a, b) => a + b, 0); return n && attachEvidence ? <Tooltip title={Object.entries(m).map(([k, c]) => `${c} ${KIND_LABEL[k] ?? k}${c === 1 ? '' : 's'}`).join(', ')}><Tag icon={<PaperClipOutlined />} style={{ marginInlineStart: 4 }}>{n}</Tag></Tooltip> : null; })()}</td>
                                                 </tr>
                                                 {c.points.map((pt) => (
                                                     <tr key={pt.id} className="cs-publish-point">
@@ -230,7 +246,9 @@ function Done({ d, project }: { d: PublishDoneDef; project: string }) {
     return (
         <Space direction="vertical" style={{ width: '100%' }}>
             <Alert type="success" showIcon message={`Published to ${project}`} description={<div>{d.published.map((p) => (
-                <div key={p.runId}>Test run <b>{p.runId}</b> — plan {p.plan} › suite{p.suites.length === 1 ? '' : 's'} {p.suites.join(', ')}: {p.published} test point result{p.published === 1 ? '' : 's'} for {p.testCases} test case{p.testCases === 1 ? '' : 's'}. <a href={p.url} target="_blank" rel="noreferrer">Open in Azure DevOps</a></div>))}</div>} />
+                <div key={p.runId}>Test run <b>{p.runId}</b> — plan {p.plan} › suite{p.suites.length === 1 ? '' : 's'} {p.suites.join(', ')}: {p.published} test point result{p.published === 1 ? '' : 's'} for {p.testCases} test case{p.testCases === 1 ? '' : 's'}{p.attached ? `, ${p.attached} attachment${p.attached === 1 ? '' : 's'}` : ''}{p.resultsAttached ? ', zipped results on the run' : ''}. <a href={p.url} target="_blank" rel="noreferrer">Open in Azure DevOps</a></div>))}</div>} />
+            {d.published.some((p) => p.attachFailed.length) && <Alert type="warning" showIcon message="Some files were not attached (the results were published)" description={<ul style={{ margin: 0 }}>{d.published.flatMap((p) => p.attachFailed.map((f) => <li key={`${p.runId}:${f}`}>Test run {p.runId}: {f}</li>))}</ul>} />}
+            {d.zipNote && <Alert type="info" showIcon message={d.zipNote} />}
             {d.tagged.length > 0 && <Alert type="info" showIcon message={`Tags written to ${d.tagged.length} scenario${d.tagged.length === 1 ? '' : 's'}`} description={<ul style={{ margin: 0 }}>{d.tagged.map((t) => <li key={`${t.file}:${t.line}`}>{t.file}:{t.line} {t.name} — {t.tags.join(' ')}</li>)}</ul>} />}
             {d.notTagged.length > 0 && <Alert type="warning" showIcon message={`Tags not changed for ${d.notTagged.length} scenario${d.notTagged.length === 1 ? '' : 's'} (the results were published)`} description={<ul style={{ margin: 0 }}>{d.notTagged.map((t) => <li key={t.scenario}>{t.scenario} — {t.reason}</li>)}</ul>} />}
         </Space>

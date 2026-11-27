@@ -48,7 +48,8 @@ export interface CodeEditorProps {
     inline?: InlineProvider | null;
     /** Extra items at the end of the status bar (e.g. Copilot's status). */
     statusItems?: React.ReactNode;
-    hover?: (text: string, offset: number) => Promise<{ text?: string; doc?: string } | null>;
+    /** Hover info; `node` (e.g. a paused run's value, which can be expanded) makes the tooltip one the mouse can enter. */
+    hover?: (text: string, offset: number) => Promise<{ text?: string; doc?: string; node?: React.ReactNode } | null>;
     definition?: (text: string, offset: number) => void;
     /** Format request; apply the result with the handle's applyEdit so it can be undone. */
     format?: (text: string) => void;
@@ -207,7 +208,10 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
     /** The text and caret after the last edit (a caret move without an edit dismisses the ghost text). */
     const lastText = React.useRef(value);
     const lastEditCaret = React.useRef(-1);
-    const [tip, setTip] = React.useState<{ x: number; y: number; text: string; doc?: string } | null>(null);
+    const [tip, setTip] = React.useState<{ x: number; y: number; text: string; doc?: string; node?: React.ReactNode } | null>(null);
+    /** The mouse is in a tooltip that can be entered (a value to expand): it stays until the mouse leaves it. */
+    const overTip = React.useRef(false);
+    const tipClose = React.useRef<number>();
     const [find, setFind] = React.useState<{ open: boolean; replace: boolean; q: string; r: string; cs: boolean; re: boolean; word: boolean; idx: number }>({ open: false, replace: false, q: '', r: '', cs: false, re: false, word: false, idx: 0 });
     // Opening Find (Ctrl+F/H) moves the focus into its box in the same render, so keys typed right
     // after the shortcut go into the box, never into the code (a timer left a window for that).
@@ -891,13 +895,16 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
         if (menu.open || (!props.hover && !diagnostics.length)) return;
         const off = offsetAtMouse(e);
         const x = e.clientX, y = e.clientY;
-        if (off < 0) { setTip(null); return; }
+        // On the way to a tooltip with a value to expand, it is not closed at once.
+        if (off < 0) { if (tip?.node) { window.clearTimeout(tipClose.current); tipClose.current = window.setTimeout(() => { if (!overTip.current) setTip(null); }, 500); } else setTip(null); return; }
         hoverTimer.current = window.setTimeout(async () => {
+            if (overTip.current) return;
             const p = posOf(starts, off);
             const diag = diagnostics.find((d) => d.line - 1 <= p.line && p.line <= d.endLine - 1 && (d.line - 1 < p.line || p.col >= d.column - 1) && (d.endLine - 1 > p.line || p.col <= d.endColumn - 1));
             const info = props.hover ? await props.hover(value, off).catch(() => null) : null;
             const text = [diag ? `${diag.source ? diag.source + ': ' : ''}${diag.message}` : '', info?.text ?? ''].filter(Boolean).join('\n\n');
-            if (text) setTip({ x, y, text, doc: info?.doc });
+            if (overTip.current) return;
+            if (text || info?.node) setTip({ x, y, text, doc: info?.doc, node: info?.node });
         }, 450);
     };
     const onMouseDown = (e: React.MouseEvent<HTMLTextAreaElement>) => {
@@ -1143,8 +1150,11 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                     </div>
                 )}
                 {tip && (
-                    <div className="ed-tip" ref={tipRef}>
-                        <pre>{tip.text}</pre>
+                    <div className={`ed-tip${tip.node ? ' ed-tip-live' : ''}`} ref={tipRef} data-testid="editor-tip"
+                        onMouseEnter={() => { overTip.current = true; window.clearTimeout(tipClose.current); }}
+                        onMouseLeave={() => { overTip.current = false; setTip(null); }}>
+                        {tip.node && <div className="ed-tip-value">{tip.node}</div>}
+                        {tip.text && <pre>{tip.text}</pre>}
                         {tip.doc && <div className="ed-tip-doc">{tip.doc}</div>}
                     </div>
                 )}

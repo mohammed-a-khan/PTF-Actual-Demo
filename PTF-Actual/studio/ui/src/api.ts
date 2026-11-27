@@ -118,9 +118,10 @@ export interface PublishScenarioDef { key: string; name: string; feature: string
 export interface PublishCaseDef { testCase: number; title: string; inSuite: boolean; points: Array<{ id: number; configuration: string; tester?: string }>; scenarios: string[] }
 export interface PublishGroupDef { plan: number; planName?: string; suite: number; suiteName?: string; from: string[]; cases: PublishCaseDef[]; error?: string }
 export interface PublishPreviewDef { ado: { org: string; project: string; configured: string; from: { project: string; env: string } }; run: { id: string; name: string };
-    scenarios: PublishScenarioDef[]; groups: PublishGroupDef[]; notLinked: string[]; noPlan: string[] }
+    scenarios: PublishScenarioDef[]; groups: PublishGroupDef[]; notLinked: string[]; noPlan: string[];
+    upload: { attachments: boolean; screenshot: boolean; video: boolean; console: boolean; har: boolean; trace: boolean; maxMb: number }; evidence: Record<string, Record<string, number>>; resultsZip: boolean }
 export interface PublishItemDef { plan: number; suite: number; testCase: number; points: number[]; scenarios: string[] }
-export interface PublishDoneDef { published: Array<{ plan: number; suites: number[]; runId: number; url: string; published: number; testCases: number }>; tagged: Array<{ file: string; line: number; name: string; tags: string[] }>; notTagged: Array<{ scenario: string; reason: string }> }
+export interface PublishDoneDef { zipNote?: string; published: Array<{ plan: number; suites: number[]; runId: number; url: string; published: number; testCases: number; attached: number; attachFailed: string[]; resultsAttached: boolean }>; tagged: Array<{ file: string; line: number; name: string; tags: string[] }>; notTagged: Array<{ scenario: string; reason: string }> }
 export interface MissionInputDef { key: string; label: string; required?: boolean; multiline?: boolean; placeholder?: string; kind?: 'project' | 'env' | 'run' | 'text' | 'number' }
 export interface MissionBudgetDef { minutes: number; modelCalls: number; attempts: number }
 export interface MissionTemplateDef { key: string; title: string; about: string; inputs: MissionInputDef[]; oneOf?: string[]; writes: boolean; budget: MissionBudgetDef; team?: Array<{ id: string; name: string }> }
@@ -1134,7 +1135,7 @@ export const api = {
     runCatalog: () => request<RunCatalog>('GET', '/api/runs/catalog'),
     startRun: (r: RunRequest) => confirmedRun<RunInfo>('POST', '/api/runs', r),
     publishRunPreview: (id: string, b: { adoProject?: string; plan?: number; suites?: number[] }) => request<PublishPreviewDef>('POST', `/api/runs/${encodeURIComponent(id)}/publish-ado/preview`, b),
-    publishRun: (id: string, b: { adoProject?: string; items: PublishItemDef[]; writeTags: boolean; runName?: string }) => request<PublishDoneDef>('POST', `/api/runs/${encodeURIComponent(id)}/publish-ado`, { ...b, confirm: true }),
+    publishRun: (id: string, b: { adoProject?: string; items: PublishItemDef[]; writeTags: boolean; runName?: string; attachEvidence: boolean; attachResults: boolean }) => request<PublishDoneDef>('POST', `/api/runs/${encodeURIComponent(id)}/publish-ado`, { ...b, confirm: true }),
     doctor: (t: { project?: string; env?: string }) => request<DoctorDef>('GET', '/api/doctor' + q({ project: t.project, env: t.env })),
     notifications: () => request<NotifyDef>('GET', '/api/notifications'),
     saveNotifications: (channels: NotifyChannelDef[], webhooks: Record<string, string>) => request<NotifyDef>('PUT', '/api/notifications', { channels, webhooks }),
@@ -1168,7 +1169,7 @@ export const api = {
     debugRun: (id: string, command: 'next' | 'into' | 'continue' | 'stop' | 'resume' | 'stepOver' | 'stepInto' | 'stepOut' | 'pause') => request<{ ok: true }>('POST', `/api/runs/${encodeURIComponent(id)}/debug`, { command }),
     debugScopes: (id: string, frame: number) => request<{ scopes: DebugScope[] }>('GET', `/api/runs/${encodeURIComponent(id)}/debug/scopes` + q({ frame })),
     debugProperties: (id: string, objectId: string) => request<{ variables: DebugVariable[] }>('GET', `/api/runs/${encodeURIComponent(id)}/debug/properties` + q({ objectId })),
-    debugEvaluate: (id: string, expression: string, frame: number) => request<DebugVariable>('POST', `/api/runs/${encodeURIComponent(id)}/debug/evaluate`, { expression, frame }),
+    debugEvaluate: (id: string, expression: string, frame: number, hover = false) => request<DebugVariable>('POST', `/api/runs/${encodeURIComponent(id)}/debug/evaluate`, { expression, frame, ...(hover ? { hover: true } : {}) }),
     breakpoints: () => request<{ breakpoints: Breakpoint[] }>('GET', '/api/breakpoints'),
     setBreakpoints: (breakpoints: Breakpoint[]) => request<{ breakpoints: Breakpoint[] }>('PUT', '/api/breakpoints', { breakpoints }),
     quality: (window: number, project?: string) => request<QualityReport>('GET', '/api/quality' + q({ window, project })),

@@ -55,7 +55,7 @@ test('publishTo: a run on exactly the ticked points, each point its own result, 
         { testCase: 101, pointIds: [1], outcome: 'Passed', durationMs: 1000, comment: 'Scenario: a', scenario: 'Login: a' },
         { testCase: 102, pointIds: [4], outcome: 'Failed', durationMs: 500, error: 'expected X', comment: 'Scenario: b', scenario: 'Login: b' },
     ], 'by T');
-    assert.deepEqual(r, { runId: 55, url: 'https://dev.azure.com/org/Proj/_TestManagement/Runs?runId=55', published: 2 });
+    assert.deepEqual(r, { runId: 55, url: 'https://dev.azure.com/org/Proj/_TestManagement/Runs?runId=55', published: 2, results: [{ testCase: 101, resultId: 100000 }, { testCase: 102, resultId: 100001 }] });
     const create = calls.find((c) => c.p === 'test/runs')!.b as Record<string, unknown>;
     assert.deepEqual(create.pointIds, [1, 4], 'only the ticked points (point 2, the Edge one, was left out)');
     const results = calls.find((c) => c.p === 'test/runs/55/results' && c.m === 'PATCH')!.b as Array<Record<string, unknown>>;
@@ -108,4 +108,52 @@ test('one feature, scenarios in different suites of one plan, and in different p
         ['Other suite, same plan', 10, 2, [200, 201], 'feature', 'scenario'],
         ['Other plan and suite', 20, 3, [300], 'scenario', 'scenario'],
     ]);
+});
+
+test('evidence: what the ADO_UPLOAD_* settings allow, under the size limit, matched to the scenario (iterations too)', () => {
+    const { evidenceFor, uploadSettings, attachmentTypeOf } = require('../src/ado/testPlans') as typeof import('../src/ado/testPlans');
+    const up = uploadSettings((k) => ({ ADO_UPLOAD_TRACES: 'true', ADO_ATTACHMENT_MAX_MB: '1' } as Record<string, string>)[k] ?? '');
+    assert.deepEqual(up, { attachments: true, screenshot: true, video: true, console: true, har: false, trace: true, maxMb: 1 });
+    const scen = runScenarios([
+        { name: 'Visit each module_Iteration-1', feature: 'Nav', status: 'passed', duration: 1 },
+        { name: 'Visit each module_Iteration-2', feature: 'Nav', status: 'failed', duration: 1 },
+        { name: 'Valid login', feature: 'Login', status: 'passed', duration: 1 },
+    ], targets);
+    const f = (kind: string, name: string, size = 10) => ({ kind, file: `shots/${name}`, name, size });
+    const ev = evidenceFor(scen, [
+        { name: 'Visit each module_Iteration-1', feature: 'Nav', files: [f('screenshot', 'a.png'), f('har', 'x.har')] },
+        { name: 'Visit each module_Iteration-2', feature: 'Nav', files: [f('screenshot', 'b.png'), f('video', 'big.webm', 5 * 1024 * 1024), f('trace', 't.zip')] },
+        { name: 'Valid login', feature: 'Login', location: { file: 'f/login.feature', line: 3 }, files: [f('console', 'log.txt'), f('trace', 'shared.zip')], matchedByTime: true, failedStep: { screenshot: f('screenshot', 'fail.png') }, steps: [{ screenshot: f('screenshot', 'fail.png') }, { screenshot: f('screenshot', 'step2.png') }] },
+        { name: 'Other', feature: 'Login', files: [f('trace', 'shared.zip')], matchedByTime: true },
+    ], up);
+    assert.deepEqual(ev.get('f/nav.feature:5')!.map((x) => x.name), ['a.png', 'b.png', 't.zip'], 'HAR is off by default; the 5 MB video is over the 1 MB limit');
+    assert.deepEqual(ev.get('f/login.feature:3')!.map((x) => x.name), ['log.txt', 'fail.png', 'step2.png'], 'a trace matched by time to two scenarios is not attached to either');
+    assert.equal(evidenceFor(scen, [{ name: 'Valid login', feature: 'Login', files: [f('console', 'log.txt')] }], { ...up, attachments: false }).size, 0, 'ADO_UPLOAD_ATTACHMENTS=false: nothing');
+    // Failure screenshots listed for the whole run: to the one scenario that failed on that step.
+    const run = [f('screenshot', 'step-failure-When-I-click-on--Leave--menu-item-2026-11-27T13-03-04-776Z.png'), f('screenshot', 'step-failure-Then-it-fails-2026-11-27T13-03-05-000Z.png')];
+    const byStep = evidenceFor(scen, [
+        { name: 'Visit each module_Iteration-2', feature: 'Nav', files: [], steps: [{ text: 'When I click on "Leave" menu item', status: 'failed' }] },
+        { name: 'Valid login', feature: 'Login', files: [], steps: [{ text: 'Then it fails', status: 'failed' }] },
+        { name: 'Visit each module_Iteration-1', feature: 'Nav', files: [], steps: [{ text: 'Then it fails', status: 'failed' }] },
+    ], up, run);
+    assert.deepEqual(byStep.get('f/nav.feature:5')!.map((x) => x.name), ['step-failure-When-I-click-on--Leave--menu-item-2026-11-27T13-03-04-776Z.png']);
+    assert.deepEqual(byStep.get('f/login.feature:3')!.map((x) => x.name), [], 'two scenarios failed on "Then it fails": its screenshot goes to neither');
+    assert.deepEqual(['screenshot', 'video', 'console', 'trace', 'har'].map(attachmentTypeOf), ['GeneralAttachment', 'GeneralAttachment', 'ConsoleLog', 'GeneralAttachment', 'GeneralAttachment']);
+});
+
+test('publishTo: attachments go on before the run is completed', async () => {
+    const calls: string[] = [];
+    const fake = {
+        orgUrl: 'https://dev.azure.com/org', projectName: 'Proj',
+        async get(p: string) { calls.push(`GET ${p}`); return { value: [{ id: 9, testCase: { id: '101' }, testPoint: { id: '1' } }] }; },
+        async post(p: string) { calls.push(`POST ${p}`); return { id: 55 }; },
+        async patch(p: string, b: unknown) { calls.push(`PATCH ${p} ${JSON.stringify(b).slice(0, 25)}`); return {}; },
+    };
+    const tp = new TestPlans(fake as unknown as AdoClient);
+    await tp.publishTo(7, 'n', [{ testCase: 101, pointIds: [1], outcome: 'Failed', durationMs: 1, comment: 'c', scenario: 's' }], undefined, async (runId, results) => {
+        assert.deepEqual(results, [{ testCase: 101, resultId: 9 }]);
+        await tp.attachToResult(runId, 9, 'a.png', Buffer.from('x'), 'GeneralAttachment');
+        await tp.attachToRun(runId, 'results.zip', Buffer.from('z'));
+    });
+    assert.deepEqual(calls.slice(-3), ['POST test/Runs/55/Results/9/attachments?api-version=7.1-preview.1', 'POST test/Runs/55/attachments?api-version=7.1-preview.1', 'PATCH test/runs/55 {"state":"Completed"}']);
 });

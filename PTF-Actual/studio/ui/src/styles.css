@@ -591,3 +591,13 @@ body.menu-resizing .ant-layout-sider, body.menu-resizing .ant-layout-sider-child
 .cs-publish-table td { padding: 5px 8px; border-bottom: 1px solid rgba(127,127,127,.14); vertical-align: top; }
 .cs-publish-group td { background: var(--row-sel); padding-top: 7px; padding-bottom: 7px; }
 .cs-publish-point td { font-size: 12px; color: var(--muted); }
+
+/* Debug: long values and paths scroll sideways instead of being cut off */
+.dbg-scroll { overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; }
+.dbg-scroll .ant-tree { min-width: max-content; }
+.dbg-scroll .ant-tree-node-content-wrapper, .dbg-scroll .ant-tree-title, .dbg-scroll .dbg-var { white-space: nowrap; }
+.dbg-scroll .dbg-frame { width: max-content; min-width: 100%; }
+/* Editor hover with a paused run's value: the mouse can go into it to expand objects */
+.ed-tip.ed-tip-live { pointer-events: auto; max-height: min(60vh, 520px); overflow: auto; max-width: min(720px, 90vw); }
+.ed-tip-value { padding-bottom: 4px; margin-bottom: 4px; border-bottom: 1px solid var(--panel-border); }
+.ed-tip-value .dbg-value-tree .ant-tree-title { white-space: nowrap; }

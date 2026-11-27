@@ -10,6 +10,7 @@ import { BugOutlined, CaretRightOutlined, DeleteOutlined, PauseOutlined, StepFor
 import { api, Breakpoint, DebugScope, DebugState, DebugVariable, followDebug, RunInfo } from '../api';
 import { errText } from '../state';
 import { commandFor, DebugAction, registerDebugKeys } from '../debugKeys';
+import { setDebugHoverContext } from '../debugHover';
 
 /** Where the run is paused in a file of the repository (for the editor). */
 export interface ExecLocation { file: string; line: number; key: string }
@@ -19,7 +20,7 @@ type Node = DataNode & { objectId?: string; path: string; value?: string };
  *  so what was expanded stays expanded; a value that changed since the last pause is marked. */
 const varNode = (v: DebugVariable, path: string, before: Map<string, string>): Node => ({
     key: path, path, value: v.value, objectId: v.objectId, isLeaf: !v.objectId,
-    title: <span className="dbg-var"><span className="dbg-name">{v.name}</span>: <span className={`dbg-val t-${v.type}${before.has(path) && before.get(path) !== v.value ? ' chg' : ''}`}>{v.value}</span></span>,
+    title: <span className="dbg-var"><span className="dbg-name">{v.name}</span>: <span className={`dbg-val t-${v.type}${before.has(path) && before.get(path) !== v.value ? ' chg' : ''}`} title={v.value}>{v.value}</span></span>,
 });
 const scopeTree = (scopes: DebugScope[], before: Map<string, string>): Node[] =>
     scopes.map((sc) => ({ key: sc.name, path: sc.name, title: <b>{sc.name}</b>, children: sc.variables.map((v) => varNode(v, `${sc.name}/${v.name}`, before)) }));
@@ -43,7 +44,7 @@ const loadWatches = (): string[] => { try { const j = JSON.parse(localStorage.ge
 const saveWatches = (w: string[]) => { try { localStorage.setItem(WATCH_KEY, JSON.stringify(w)); } catch { /* not kept */ } };
 
 /** A value (evaluated, watched) that expands when it is an object. */
-function ValueTree({ runId, v, label, prefix }: { runId: string; v: DebugVariable; label?: React.ReactNode; prefix: string }) {
+export function ValueTree({ runId, v, label, prefix }: { runId: string; v: DebugVariable; label?: React.ReactNode; prefix: string }) {
     const root = React.useMemo<Node>(() => ({ ...varNode({ ...v, name: '' }, prefix, new Map()), title: <span className="dbg-var">{label ?? <span className="dbg-name">{v.name}</span>} = <span className={`dbg-val t-${v.type}`}>{v.value}</span></span> }), [v, prefix, label]);
     const [tree, setTree] = React.useState<Node[]>([root]);
     React.useEffect(() => setTree([root]), [root]);
@@ -131,6 +132,8 @@ export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints
     React.useEffect(() => {
         const f = code?.frames[frame];
         const loc = code && f && !f.external && f.file && f.line ? { file: f.file, line: f.line } : !code && step?.file && step.line ? { file: step.file, line: step.line } : null;
+        // The editor's hover shows values of this frame, in its file (as browser dev tools do).
+        setDebugHoverContext(code && run && f && !f.external && f.file && !f.async ? { runId: run.id, frame, file: f.file } : null);
         const key = loc ? `${run?.id}:${loc.file}:${loc.line}:${code ? `${code.seq}:${frame}` : step?.step}` : '';
         if (key === lastKey.current) return;
         lastKey.current = key;
@@ -272,20 +275,20 @@ export function DebugPanel({ breakpoints, onRemoveBreakpoint, onClearBreakpoints
                 <div className="dbg-section">
                     <div className="dbg-head">Call stack</div>
                     {code.exception && <Typography.Text type="danger" style={{ display: 'block', fontSize: 12 }}>{code.exception}</Typography.Text>}
-                    {code.frames.slice(0, 40).map((f) => (
+                    <div className="dbg-scroll">{code.frames.slice(0, 40).map((f) => (
                         <div key={f.index} className={`dbg-frame${f.index === frame ? ' sel' : ''}${f.external ? ' ext' : ''}${f.async ? ' async' : ''}`}
                             title={f.async ? 'A caller across an await: its variables are not kept (shown where it is)' : undefined}
                             onClick={() => (f.async ? (!f.external && f.file && f.line && onLocation({ file: f.file, line: f.line, key: `af:${code.seq}:${f.index}:${Date.now()}` })) : setFrame(f.index))}>
                             {f.index === frame && <ArrowRightOutlined style={{ fontSize: 10 }} />}
                             {f.async && <Typography.Text type="secondary" style={{ fontSize: 10 }}>async</Typography.Text>}
                             <span className="mono">{f.name}</span>
-                            <Typography.Text type="secondary" className="mono" style={{ fontSize: 11 }} ellipsis>{f.file ? `${f.file}:${f.line}` : ''}</Typography.Text>
+                            <Typography.Text type="secondary" className="mono" style={{ fontSize: 11, whiteSpace: 'nowrap' }} title={f.file ? `${f.file}:${f.line}` : undefined}>{f.file ? `${f.file}:${f.line}` : ''}</Typography.Text>
                         </div>
-                    ))}
+                    ))}</div>
                 </div>
                 <div className="dbg-section">
                     <div className="dbg-head">Variables</div>
-                    {tree.length ? <Tree<Node> treeData={tree} loadData={loadChildren} blockNode selectable={false} expandedKeys={expanded} onExpand={(k) => setExpanded(k)} />
+                    {tree.length ? <div className="dbg-scroll"><Tree<Node> treeData={tree} loadData={loadChildren} blockNode selectable={false} expandedKeys={expanded} onExpand={(k) => setExpanded(k)} /></div>
                         : <Typography.Text type="secondary" style={{ fontSize: 12 }}>Loading…</Typography.Text>}
                 </div>
             </div>}

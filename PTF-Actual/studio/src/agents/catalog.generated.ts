@@ -2695,7 +2695,7 @@ export const CALLS: CatalogCall[] = [
   "area": "runs",
   "method": "POST",
   "path": "/api/runs/:id/publish-ado",
-  "args": "id: string, b: { adoProject?: string; items: PublishItemDef[]; writeTags: boolean; runName?: string }",
+  "args": "id: string, b: { adoProject?: string; items: PublishItemDef[]; writeTags: boolean; runName?: string; attachEvidence: boolean; attachResults: boolean }",
   "body": "{ ...b, confirm: true }",
   "result": "PublishDoneDef"
  },
@@ -2887,8 +2887,8 @@ export const CALLS: CatalogCall[] = [
   "area": "runs",
   "method": "POST",
   "path": "/api/runs/:id/debug/evaluate",
-  "args": "id: string, expression: string, frame: number",
-  "body": "{ expression, frame }",
+  "args": "id: string, expression: string, frame: number, hover = false",
+  "body": "{ expression, frame, ...(hover ? { hover: true } : {}) }",
   "result": "DebugVariable"
  },
  {
@@ -3145,9 +3145,9 @@ export const TYPES: Record<string, string> = {
  "PublishScenarioDef": "export interface PublishScenarioDef { key: string; name: string; feature: string; file?: string; line?: number; outcome: PublishOutcome; durationMs: number; error?: string;\n    iterations: Array<{ n: number; outcome: PublishOutcome; durationMs: number; error?: string }>; testCases: number[]; plan?: number; suite?: number; planFrom?: string; suiteFrom?: string }",
  "PublishCaseDef": "export interface PublishCaseDef { testCase: number; title: string; inSuite: boolean; points: Array<{ id: number; configuration: string; tester?: string }>; scenarios: string[] }",
  "PublishGroupDef": "export interface PublishGroupDef { plan: number; planName?: string; suite: number; suiteName?: string; from: string[]; cases: PublishCaseDef[]; error?: string }",
- "PublishPreviewDef": "export interface PublishPreviewDef { ado: { org: string; project: string; configured: string; from: { project: string; env: string } }; run: { id: string; name: string };\n    scenarios: PublishScenarioDef[]; groups: PublishGroupDef[]; notLinked: string[]; noPlan: string[] }",
+ "PublishPreviewDef": "export interface PublishPreviewDef { ado: { org: string; project: string; configured: string; from: { project: string; env: string } }; run: { id: string; name: string };\n    scenarios: PublishScenarioDef[]; groups: PublishGroupDef[]; notLinked: string[]; noPlan: string[];\n    upload: { attachments: boolean; screenshot: boolean; video: boolean; console: boolean; har: boolean; trace: boolean; maxMb: number }; evidence: Record<string, Record<string, number>>; resultsZip: boolean }",
  "PublishItemDef": "export interface PublishItemDef { plan: number; suite: number; testCase: number; points: number[]; scenarios: string[] }",
- "PublishDoneDef": "export interface PublishDoneDef { published: Array<{ plan: number; suites: number[]; runId: number; url: string; published: number; testCases: number }>; tagged: Array<{ file: string; line: number; name: string; tags: string[] }>; notTagged: Array<{ scenario: string; reason: string }> }",
+ "PublishDoneDef": "export interface PublishDoneDef { zipNote?: string; published: Array<{ plan: number; suites: number[]; runId: number; url: string; published: number; testCases: number; attached: number; attachFailed: string[]; resultsAttached: boolean }>; tagged: Array<{ file: string; line: number; name: string; tags: string[] }>; notTagged: Array<{ scenario: string; reason: string }> }",
  "MissionInputDef": "export interface MissionInputDef { key: string; label: string; required?: boolean; multiline?: boolean; placeholder?: string; kind?: 'project' | 'env' | 'run' | 'text' | 'number' }",
  "MissionBudgetDef": "export interface MissionBudgetDef { minutes: number; modelCalls: number; attempts: number }",
  "MissionTemplateDef": "export interface MissionTemplateDef { key: string; title: string; about: string; inputs: MissionInputDef[]; oneOf?: string[]; writes: boolean; budget: MissionBudgetDef; team?: Array<{ id: string; name: string }> }",

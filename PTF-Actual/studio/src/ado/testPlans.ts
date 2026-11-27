@@ -129,7 +129,7 @@ export class TestPlans {
      * duration, error and comment (the scenario, and each data iteration as the framework writes them), then the
      * run completed. Every point must belong to the plan and to its entry's test case (checked by the caller).
      */
-    async publishTo(plan: number, name: string, entries: PublishEntry[], comment?: string): Promise<{ runId: number; url: string; published: number }> {
+    async publishTo(plan: number, name: string, entries: PublishEntry[], comment?: string, beforeComplete?: (runId: number, results: Array<{ testCase: number; resultId: number }>) => Promise<void>): Promise<{ runId: number; url: string; published: number; results: Array<{ testCase: number; resultId: number }> }> {
         const TM = 'Test Management (Read & write)';
         const byPoint = new Map<number, PublishEntry>();
         for (const e of entries) for (const p of e.pointIds) byPoint.set(p, e);
@@ -138,15 +138,29 @@ export class TestPlans {
             name: name.slice(0, 250), plan: { id: String(plan) }, pointIds: [...byPoint.keys()], automated: true, state: 'InProgress', ...(comment ? { comment: comment.slice(0, 1000) } : {}),
         }, 'project', TM);
         const created = await this.ado.get<{ value: Array<{ id: number; testPoint?: { id: string }; testCase?: { id: string } }> }>(`test/runs/${run.id}/results?$top=1000`, 'project', TM);
+        const results: Array<{ testCase: number; resultId: number }> = [];
         const updates = (created.value ?? []).map((res) => {
             const e = byPoint.get(Number(res.testPoint?.id)) ?? entries.find((x) => x.testCase === Number(res.testCase?.id));
             if (!e) return null;
+            results.push({ testCase: e.testCase, resultId: res.id });
             return { id: res.id, state: 'Completed', outcome: e.outcome, durationInMs: Math.round(e.durationMs), automatedTestName: e.scenario.slice(0, 250),
                 ...(e.error ? { errorMessage: e.error.slice(0, 4000) } : {}), comment: e.comment.slice(0, 1000) };
         }).filter(Boolean);
         if (updates.length) await this.ado.patch(`test/runs/${run.id}/results`, updates, 'project', TM);
+        // Attachments go on before the run is completed (as the framework does); a failure there does not keep it open.
+        if (beforeComplete) await beforeComplete(run.id, results).catch(() => undefined);
         await this.ado.patch(`test/runs/${run.id}`, { state: 'Completed' }, 'project', TM);
-        return { runId: run.id, url: run.webAccessUrl ?? `${this.webBase}/_testManagement/runs?_a=resultQuery&runId=${run.id}`, published: updates.length };
+        return { runId: run.id, url: run.webAccessUrl ?? `${this.webBase}/_testManagement/runs?_a=resultQuery&runId=${run.id}`, published: updates.length, results };
+    }
+
+    /** Attach a file to a test result (a scenario's evidence), as the framework does. */
+    async attachToResult(runId: number, resultId: number, fileName: string, content: Buffer, attachmentType: AttachmentType): Promise<void> {
+        await this.ado.post(`test/Runs/${runId}/Results/${resultId}/attachments?api-version=7.1-preview.1`, { stream: content.toString('base64'), fileName, comment: 'Test evidence', attachmentType }, 'project', 'Test Management (Read & write)');
+    }
+
+    /** Attach a file to a test run (the zipped results), as the framework does. */
+    async attachToRun(runId: number, fileName: string, content: Buffer): Promise<void> {
+        await this.ado.post(`test/Runs/${runId}/attachments?api-version=7.1-preview.1`, { stream: content.toString('base64'), fileName, comment: 'Test results', attachmentType: 'GeneralAttachment' }, 'project', 'Test Management (Read & write)');
     }
 
     /** Add test cases to a static suite (a test point per configuration of the suite). */
@@ -167,6 +181,55 @@ function automationOps(name?: string, storage?: string): Array<{ op: 'add'; path
         { op: 'add', path: '/fields/Microsoft.VSTS.TCM.AutomatedTestType', value: 'CS Playwright BDD' },
         { op: 'add', path: '/fields/Microsoft.VSTS.TCM.AutomatedTestId', value: nameGuid(`${storage}\u0000${name}`) },
     ];
+}
+
+/** Azure DevOps' test attachment types: there is no "Screenshot" or "Video" (refused: "Invalid AttachmentType"). */
+export type AttachmentType = 'ConsoleLog' | 'GeneralAttachment';
+/** Which evidence goes with the results (the framework's ADO_UPLOAD_* settings and their defaults). */
+export interface UploadSettings { attachments: boolean; screenshot: boolean; video: boolean; console: boolean; har: boolean; trace: boolean; maxMb: number }
+export function uploadSettings(val: (key: string) => string): UploadSettings {
+    const on = (k: string, d: boolean) => { const v = val(k).trim().toLowerCase(); return v ? /^(true|yes|1|on)$/.test(v) : d; };
+    const mb = parseFloat(val('ADO_ATTACHMENT_MAX_MB'));
+    return { attachments: on('ADO_UPLOAD_ATTACHMENTS', true), screenshot: on('ADO_UPLOAD_SCREENSHOTS', true), video: on('ADO_UPLOAD_VIDEOS', true), console: on('ADO_UPLOAD_LOGS', true),
+        har: on('ADO_UPLOAD_HAR', false), trace: on('ADO_UPLOAD_TRACES', false), maxMb: mb > 0 ? mb : 50 };
+}
+/** The attachment type of an evidence file (screenshot, video, console log, trace, HAR). */
+export const attachmentTypeOf = (kind: string): AttachmentType => (kind === 'console' ? 'ConsoleLog' : 'GeneralAttachment');
+
+/**
+ * The run's evidence files of each scenario to publish (by its key), as the framework attaches them: what the
+ * settings allow, each file no larger than the limit. Iterations of a data-driven scenario all count.
+ */
+type EvFile = { kind: string; file: string; name: string; size: number };
+export function evidenceFor(scenarios: RunScenario[], evidence: Array<{ name: string; feature: string; location?: { file: string; line: number }; files: EvFile[]; matchedByTime?: boolean; failedStep?: { screenshot?: EvFile }; steps?: Array<{ text?: string; status?: string; screenshot?: EvFile }> }>, up: UploadSettings, runFiles: EvFile[] = []): Map<string, Array<{ kind: string; file: string; name: string; size: number }>> {
+    const out = new Map<string, Array<{ kind: string; file: string; name: string; size: number }>>();
+    if (!up.attachments) return out;
+    const norm = (x: string) => x.trim().toLowerCase();
+    const allowed = (k: string) => (up as unknown as Record<string, boolean>)[k] === true;
+    // Failure screenshots listed only for the whole run ("step-failure-<step>-<time>.png"): to the one scenario
+    // that failed on that step; when several did, to none (it cannot be told whose it is).
+    const failureShots = new Map<(typeof evidence)[number], EvFile[]>();
+    const slug = (t: string) => t.replace(/[^A-Za-z0-9]/g, '-');
+    for (const f of runFiles) {
+        const m = /^step-failure-(.+)-\d{4}-\d{2}-\d{2}T[\d-]+Z\.\w+$/.exec(f.name);
+        if (!m) continue;
+        const who = evidence.filter((ev) => (ev.steps ?? []).some((st) => st.status === 'failed' && st.text && slug(st.text) === m[1]));
+        if (who.length === 1) failureShots.set(who[0], [...(failureShots.get(who[0]) ?? []), f]);
+    }
+    const shared = new Map<string, number>();
+    for (const ev of evidence) for (const f of ev.files) shared.set(f.file, (shared.get(f.file) ?? 0) + 1);
+    for (const ev of evidence) {
+        const s = scenarios.find((x) => x.file && ev.location && x.file === ev.location.file && x.line === ev.location.line)
+            ?? scenarios.filter((x) => norm(x.feature) === norm(ev.feature) && norm(ev.name).startsWith(norm(x.name))).sort((a, b) => b.name.length - a.name.length)[0];
+        if (!s) continue;
+        const list = out.get(s.key) ?? [];
+        // Its files, its failure screenshot and its steps' screenshots. A file matched by time that another
+        // scenario (in parallel) also got is left out: it may not be this scenario's.
+        const own = [...ev.files.filter((f) => !ev.matchedByTime || shared.get(f.file) === 1), ...(ev.failedStep?.screenshot ? [ev.failedStep.screenshot] : []), ...(ev.steps ?? []).flatMap((st) => (st.screenshot ? [st.screenshot] : [])), ...(failureShots.get(ev) ?? [])];
+        for (const f of own) if (allowed(f.kind) && f.size <= up.maxMb * 1024 * 1024 && !list.some((x) => x.file === f.file)) list.push(f);
+        out.set(s.key, list);
+    }
+    return out;
 }
 
 /** One test case's result as sent to its chosen test points. */

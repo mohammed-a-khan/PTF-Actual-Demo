@@ -387,12 +387,16 @@ export class InspectorSession extends EventEmitter {
         return r.result.filter((p) => p.value).slice(0, 300).map((p) => variable(p.name, p.value!));
     }
 
-    /** Evaluate an expression in a frame (or globally when not paused). */
-    async evaluate(expression: string, frame = 0): Promise<Variable> {
+    /**
+     * Evaluate an expression in a frame (or globally when not paused). `noSideEffects` (the editor's hover, as in
+     * browser dev tools): an expression that would change anything (a call, a getter that writes) is refused.
+     */
+    async evaluate(expression: string, frame = 0, o: { noSideEffects?: boolean } = {}): Promise<Variable> {
         const f = this.callFrames[frame];
+        const safe = o.noSideEffects ? { throwOnSideEffect: true } : {};
         const r = f
-            ? await this.send<{ result: RemoteObject; exceptionDetails?: { exception?: RemoteObject; text: string } }>('Debugger.evaluateOnCallFrame', { callFrameId: f.callFrameId, expression, generatePreview: true, timeout: 5000 })
-            : await this.send<{ result: RemoteObject; exceptionDetails?: { exception?: RemoteObject; text: string } }>('Runtime.evaluate', { expression, generatePreview: true, timeout: 5000 });
+            ? await this.send<{ result: RemoteObject; exceptionDetails?: { exception?: RemoteObject; text: string } }>('Debugger.evaluateOnCallFrame', { callFrameId: f.callFrameId, expression, generatePreview: true, timeout: 5000, ...safe })
+            : await this.send<{ result: RemoteObject; exceptionDetails?: { exception?: RemoteObject; text: string } }>('Runtime.evaluate', { expression, generatePreview: true, timeout: 5000, ...safe });
         if (r.exceptionDetails) return { name: expression, value: preview(r.exceptionDetails.exception ?? { type: 'string', value: r.exceptionDetails.text }), type: 'error' };
         return variable(expression, r.result);
     }

@@ -17,7 +17,8 @@ import { errText, loadRunTarget, saveRunTarget, showRun, unsavedFiles, useStudio
 import { handlesSaveFiles, SAVE_FILES_EVENT, SaveFilesRequest } from '../runSignals';
 import { CodeEditor, CodeEditorHandle } from '../editor/CodeEditor';
 import { copilotProvider, CopilotStatusItem } from '../editor/copilot';
-import { DebugPanel, ExecLocation } from '../components/DebugPanel';
+import { DebugPanel, ExecLocation, ValueTree } from '../components/DebugPanel';
+import { debugHoverContext, hoverExpression, sameFile } from '../debugHover';
 import { useKept } from '../kept';
 import { codeTarget } from '../codeRoute';
 import { splitTab, TAB_MARK, withTab } from '../apiperf-ui';
@@ -86,7 +87,17 @@ const TabEditor = React.memo(function TabEditor({ tab, active, diagnostics, reve
             completionDetails={lang === 'ts' ? async (text, off, it, signal) => { const d = await api.completionDetails(path, text, off, it.name, it.source, it.data, signal); return d.stale ? null : d; } : undefined}
             signatureHelp={lang === 'ts' ? async (text, off, trigger, signal) => (await api.signatureHelp(path, text, off, trigger, signal)).help : undefined}
             inline={inline} statusItems={statusItems}
-            hover={async (text, off) => { const r = await api.hover(path, text, off); return r.text ? r : null; }}
+            hover={async (text, off) => {
+                // While a debug run is paused in this file: the value under the mouse too, as in browser dev tools.
+                const ctx = debugHoverContext();
+                const expr = ctx && sameFile(ctx.file, path) ? hoverExpression(text, off) : null;
+                const [r, v] = await Promise.all([
+                    api.hover(path, text, off).catch(() => ({ text: '' } as { text?: string; doc?: string })),
+                    expr && ctx ? api.debugEvaluate(ctx.runId, expr, ctx.frame, true).catch(() => null) : Promise.resolve(null),
+                ]);
+                const value = v && v.type !== 'error' && ctx && expr ? <ValueTree runId={ctx.runId} v={v} label={<span className="dbg-name">{expr}</span>} prefix={`hover/${ctx.frame}/${expr}`} /> : undefined;
+                return r.text || value ? { ...r, node: value } : null;
+            }}
             definition={(text, off) => h.current.goTo(path, text, off)}
             format={(text) => h.current.format(path, text)}
             usages={(text, off) => h.current.usages(path, text, off)}

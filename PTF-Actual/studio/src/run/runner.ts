@@ -389,7 +389,7 @@ export class TestRunner extends EventEmitter {
     async debugCode(id: string, command: 'resume' | 'stepOver' | 'stepInto' | 'stepOut' | 'pause'): Promise<void> { await this.session(id).command(command); }
     debugScopes(id: string, frame: number) { return this.session(id).scopes(frame); }
     debugProperties(id: string, objectId: string) { return this.session(id).properties(objectId); }
-    debugEvaluate(id: string, expression: string, frame: number) { return this.session(id).evaluate(expression, frame); }
+    debugEvaluate(id: string, expression: string, frame: number, o: { noSideEffects?: boolean } = {}) { return this.session(id).evaluate(expression, frame, o); }
     /** Change a debug run's breakpoints while it runs (code ones in the debugger, feature ones in the framework). */
     async setBreakpoints(id: string, list: Array<{ file: string; line: number }>): Promise<void> {
         const child = this.procs.get(id);

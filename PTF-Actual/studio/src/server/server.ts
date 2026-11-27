@@ -117,7 +117,7 @@ import { classify, dangerous } from '../db/safety';
 import { dbFeature, DbFeatureInput, featureSlug as dbFeatureSlug } from '../db/feature';
 import { CheckOptions, CheckSource, checkFeature as pdfCheckFeature, checkSteps, compareModule, compareModuleDir, inspectPdf, listPdfs, pdfFeatureSlug, pdfPathIn } from '../pdfcheck/pdfcheck';
 import { Cell, cellText } from '../db/cells';
-import { xlsx } from '../core/xlsx';
+import { xlsx, zip } from '../core/xlsx';
 import { importHar } from '../api/har';
 import { wsAsResponse, wsExchange, wsUrl } from '../api/ws';
 import { automatedScenarios, testCaseIdsAt, branchNameFor, scenarioFromTestCase, WorkItems } from '../ado/workItems';
@@ -138,7 +138,7 @@ import { TsService } from '../lang/tsService';
 import { StaleCall, TsClient } from '../lang/tsClient';
 import { CopilotInline } from '../lang/copilot';
 import { projectFeatureFolder, readCatalog } from '../run/catalog';
-import { entryFor, publishTargets, runScenarios, tagsForMapping, scenarioTestSteps, tagsToPublishTo, testCaseTag, TestPlans, TestPoint } from '../ado/testPlans';
+import { attachmentTypeOf, entryFor, evidenceFor, publishTargets, runScenarios, tagsForMapping, uploadSettings, scenarioTestSteps, tagsToPublishTo, testCaseTag, TestPlans, TestPoint } from '../ado/testPlans';
 import { filesDeclaring, groupHeals, HealDecision, HealEvent, healedOption, healsInReport, proposeEdit } from '../quality/healing';
 import { accessibilityChecks, approveAria, approveVisual, ariaSnapshots, configuredDirs, insideRepo, ReviewDecision, StaleReview, visualSnapshots } from '../quality/visual';
 import { bugReproHtml, bugsForTagsQuery, readTriage, signatureTag, TriageVerdict, VERDICTS, writeTriage } from '../quality/triage';
@@ -1267,7 +1267,7 @@ export function createServer(opts: ServerOptions): StudioServer {
             const js = pkg ? fs.readFileSync(path.join(pkg.dir, 'dist', 'ado', 'CSADOPublisher.js'), 'utf8') : '';
             combines = js.includes('combinedResult'); chooses = js.includes('ADO_TEST_CONFIGURATION');
         } catch { /* not installed */ }
-        return { project, env, enabled: /^(true|yes|1)$/i.test(val('ADO_INTEGRATION_ENABLED')), ...config, configuration: val('ADO_TEST_CONFIGURATION'), combines, chooses, targets: publishTargets(readCatalog(opts.repoRoot), config) };
+        return { project, env, enabled: /^(true|yes|1)$/i.test(val('ADO_INTEGRATION_ENABLED')), ...config, configuration: val('ADO_TEST_CONFIGURATION'), combines, chooses, targets: publishTargets(readCatalog(opts.repoRoot), config), upload: uploadSettings(val) };
     };
     const posInt = (v: unknown, name: string) => { const n = Number(v); if (!Number.isInteger(n) || n <= 0) throw new BadRequest(`Invalid ${name}.`); return n; };
     app.get('/api/ado/testplans', async (req) => {
@@ -2156,7 +2156,7 @@ export function createServer(opts: ServerOptions): StudioServer {
     });
     app.post('/api/runs/:id/debug/evaluate', async (req) => {
         const b = body(req);
-        const v = await runner.debugEvaluate((req.params as { id: string }).id, str(b.expression, 'expression', { max: 2000 }), frameParam(b.frame));
+        const v = await runner.debugEvaluate((req.params as { id: string }).id, str(b.expression, 'expression', { max: 2000 }), frameParam(b.frame), { noSideEffects: b.hover === true });
         return { ...v, value: debugMask(v.value) };
     });
     /**
@@ -2223,7 +2223,12 @@ export function createServer(opts: ServerOptions): StudioServer {
         // The run's own feature files first, then its project's folder (a feature copied elsewhere has the same names).
         const runFiles = new Set((r.request.features ?? []).map((f) => f.replace(/\\/g, '/')));
         const prefer = (file: string) => (runFiles.has(file) || [...runFiles].some((f) => f.endsWith('/') && file.startsWith(f)) ? 2 : file.startsWith(`test/${project}/`) ? 1 : 0);
-        return { r, tp, ado, project, env, pub, configured, scenarios: runScenarios(r.summary.scenarios, pub.targets, prefer) };
+        const scenarios = runScenarios(r.summary.scenarios, pub.targets, prefer);
+        // The run's evidence (screenshots, videos, logs…) of each scenario, attached as the framework does.
+        let ev: ReturnType<typeof readEvidence> | null = null;
+        try { ev = r.summary.reportDir ? readEvidence(runner.base(r), r.summary.reportDir, { features: indexFeatures(runner.base(r)), ran: r.request.features }) : null; } catch { ev = null; }
+        const evidence = ev ? evidenceFor(scenarios, ev.scenarios, pub.upload, ev.run) : new Map<string, Array<{ kind: string; file: string; name: string; size: number }>>();
+        return { r, tp, ado, project, env, pub, configured, scenarios, ev, evidence };
     };
     /** Suites of a plan by id, each with its path ("Root › Login › Smoke"). */
     const suitePaths = async (tp: TestPlans, plan: number) => {
@@ -2295,6 +2300,10 @@ export function createServer(opts: ServerOptions): StudioServer {
             ado: { org: c.ado.orgUrl, project: c.ado.projectName, configured: c.configured, from: { project: c.project, env: c.env } },
             run: { id: c.r.id, name: `${c.project} ${c.env} – Studio run ${c.r.id}${c.r.commit ? ` @ ${c.r.commit.slice(0, 8)}${c.r.dirty ? '+changes' : ''}` : ''}` },
             scenarios: c.scenarios, groups, notLinked, noPlan,
+            upload: c.pub.upload,
+            // What each scenario would attach: kind → count.
+            evidence: Object.fromEntries([...c.evidence].map(([k, files]) => [k, files.reduce<Record<string, number>>((m, f) => ({ ...m, [f.kind]: (m[f.kind] ?? 0) + 1 }), {})])),
+            resultsZip: !!c.ev,
         };
     });
     app.post('/api/runs/:id/publish-ado', async (req) => {
@@ -2328,12 +2337,59 @@ export function createServer(opts: ServerOptions): StudioServer {
         // One test run per test plan, as the framework does: suites of the same plan share it.
         const byPlan = new Map<number, typeof items>();
         for (const it of items) byPlan.set(it.plan, [...(byPlan.get(it.plan) ?? []), it]);
-        const published: Array<{ plan: number; suites: number[]; runId: number; url: string; published: number; testCases: number }> = [];
+        const attach = b.attachEvidence !== false && c.pub.upload.attachments;
+        const attachZip = b.attachResults !== false;
+        // The zipped results folder for each test run (as the framework attaches it): an existing zip, else made here.
+        let resultsZip: { name: string; data: Buffer } | null = null;
+        let zipNote: string | undefined;
+        if (attachZip && c.ev) {
+            const root = path.join(runner.base(c.r), c.ev.resultsRoot);
+            const max = c.pub.upload.maxMb * 1024 * 1024;
+            try {
+                if (fs.existsSync(`${root}.zip`) && fs.statSync(`${root}.zip`).size <= max) resultsZip = { name: path.basename(`${root}.zip`), data: fs.readFileSync(`${root}.zip`) };
+                else {
+                    const entries: Array<{ name: string; data: Buffer }> = [];
+                    let total = 0;
+                    const walk = (dir: string) => { for (const d of fs.readdirSync(dir, { withFileTypes: true })) { const f = path.join(dir, d.name); if (d.isDirectory()) walk(f); else if (d.isFile()) { total += fs.statSync(f).size; if (total > max) throw new Error('too big'); entries.push({ name: path.relative(root, f).split(path.sep).join('/'), data: fs.readFileSync(f) }); } } };
+                    walk(root);
+                    resultsZip = { name: `${path.basename(root)}.zip`, data: zip(entries) };
+                }
+            } catch (e) { zipNote = (e as Error).message === 'too big' ? `The results are larger than ADO_ATTACHMENT_MAX_MB (${c.pub.upload.maxMb} MB): not attached to the test run.` : `The results could not be zipped: ${(e as Error).message}`; }
+        }
+        const published: Array<{ plan: number; suites: number[]; runId: number; url: string; published: number; testCases: number; attached: number; attachFailed: string[]; resultsAttached: boolean }> = [];
         for (const [plan, list] of byPlan) {
             const suites = [...new Set(list.map((it) => it.suite))];
             const entries = list.map((it) => entryFor(it.testCase, it.points, it.keys.map((k) => byKey.get(k)!)));
-            try { published.push({ plan, suites, testCases: new Set(list.map((it) => it.testCase)).size, ...(await c.tp.publishTo(plan, name, entries, `Published from CS Test Studio by ${opts.userName}${c.r.dirty ? ' (the working copy had changes not committed)' : ''}.`)) }); }
+            // Evidence: each result gets the files of the scenario(s) that gave its outcome; the test run gets the
+            // zipped results. A failed upload is reported; the results stay published.
+            let attached = 0, resultsAttached = false;
+            const attachFailed: string[] = [];
+            const attachAll = async (runId: number, results: Array<{ testCase: number; resultId: number }>) => {
+                if (attach && c.ev) {
+                    const root = path.join(runner.base(c.r), c.ev.resultsRoot);
+                    for (const it of list) {
+                        const files = [...new Map(it.keys.flatMap((k) => c.evidence.get(k) ?? []).map((f) => [f.file, f])).values()];
+                        const ids = results.filter((x) => x.testCase === it.testCase).map((x) => x.resultId);
+                        for (const f of files) {
+                            let data: Buffer;
+                            try { data = fs.readFileSync(path.join(root, f.file)); } catch { attachFailed.push(`${f.name} (not found)`); continue; }
+                            for (const id of ids) {
+                                try { await c.tp.attachToResult(runId, id, f.name, data, attachmentTypeOf(f.kind)); attached++; }
+                                catch (e) { attachFailed.push(`${f.name}: ${(e as Error).message.slice(0, 160)}`); }
+                            }
+                        }
+                    }
+                }
+                if (resultsZip) {
+                    try { await c.tp.attachToRun(runId, resultsZip.name, resultsZip.data); resultsAttached = true; }
+                    catch (e) { attachFailed.push(`${resultsZip.name}: ${(e as Error).message.slice(0, 160)}`); }
+                }
+            };
+            let done: Awaited<ReturnType<TestPlans['publishTo']>>;
+            try { done = await c.tp.publishTo(plan, name, entries, `Published from CS Test Studio by ${opts.userName}${c.r.dirty ? ' (the working copy had changes not committed)' : ''}.`, attachAll); }
             catch (e) { throw new BadRequest(`Plan ${plan}: ${(e as Error).message}${published.length ? ` (already published: ${published.map((x) => `test run ${x.runId}`).join(', ')})` : ''}`); }
+            const { results: _r, ...rest } = done; void _r;
+            published.push({ plan, suites, testCases: new Set(list.map((it) => it.testCase)).size, ...rest, attached, attachFailed: [...new Set(attachFailed)], resultsAttached });
         }
         log('ado.publish', `Published run ${c.r.id} to Azure DevOps ${c.ado.projectName}: ${published.map((x) => `run ${x.runId} (plan ${x.plan}, suite ${x.suites.join(', ')}, ${x.published} results)`).join('; ')}`, { id: c.r.id });
         // Optionally the mapping goes back into the feature files: each scenario gets the test cases it was
@@ -2369,7 +2425,7 @@ export function createServer(opts: ServerOptions): StudioServer {
             }
             if (tagged.length) log('ado.publish.tags', `Tagged ${tagged.length} scenario(s) with their Azure DevOps test cases`, { files: [...new Set(tagged.map((t) => t.file))].join(', ') });
         }
-        return { published, tagged, notTagged };
+        return { published, tagged, notTagged, ...(zipNote ? { zipNote } : {}) };
     });
 
     // ---- Quality: results across runs, classification, failure groups, quarantine, gate
