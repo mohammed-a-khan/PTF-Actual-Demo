@@ -2281,7 +2281,8 @@ export const CALLS: CatalogCall[] = [
   "area": "ado",
   "method": "GET",
   "path": "/api/ado/projects",
-  "args": "",
+  "args": "s: AdoScope = {}",
+  "query": "{ ...s }",
   "result": "{ projects: string[]; configured: string }"
  },
  {
@@ -2684,8 +2685,8 @@ export const CALLS: CatalogCall[] = [
   "name": "publishRunPreview",
   "area": "runs",
   "method": "POST",
-  "path": "/api/runs/:id/publish-ado",
-  "args": "id: string, b: { plan?: number; suite?: number }",
+  "path": "/api/runs/:id/publish-ado/preview",
+  "args": "id: string, b: { adoProject?: string; plan?: number; suite?: number }",
   "body": "b",
   "result": "PublishPreviewDef"
  },
@@ -2694,9 +2695,9 @@ export const CALLS: CatalogCall[] = [
   "area": "runs",
   "method": "POST",
   "path": "/api/runs/:id/publish-ado",
-  "args": "id: string, b: { plan?: number; suite?: number }",
-  "body": "{ ...b, publish: true }",
-  "result": "PublishPreviewDef"
+  "args": "id: string, b: { adoProject?: string; items: PublishItemDef[]; writeTags: boolean; runName?: string }",
+  "body": "{ ...b, confirm: true }",
+  "result": "PublishDoneDef"
  },
  {
   "name": "doctor",
@@ -3089,7 +3090,7 @@ export const CALLS: CatalogCall[] = [
   "area": "ado",
   "method": "GET",
   "path": "/api/ado/testplans",
-  "args": "s: AdoScope",
+  "args": "s: AdoScope & { inactive?: boolean }",
   "query": "{ ...s }",
   "result": "{ project: string; env: string; adoProject: string; plans: TestPlanDef[] }"
  },
@@ -3140,7 +3141,13 @@ export const CALLS: CatalogCall[] = [
  }
 ];
 export const TYPES: Record<string, string> = {
- "PublishPreviewDef": "export interface PublishPreviewDef { groups: Array<{ plan: number; suite: number; testCases: number; results: Array<{ testCase: number; outcome: string; scenario: string }> }>; notLinked: string[]; noPlan: string[];\n    published?: Array<{ plan: number; suite: number; runId: number; url: string; published: number; missing: number[] }> }",
+ "PublishOutcome": "export type PublishOutcome = 'Passed' | 'Failed' | 'NotExecuted' | 'Blocked';",
+ "PublishScenarioDef": "export interface PublishScenarioDef { key: string; name: string; feature: string; file?: string; line?: number; outcome: PublishOutcome; durationMs: number; error?: string;\n    iterations: Array<{ n: number; outcome: PublishOutcome; durationMs: number; error?: string }>; testCases: number[]; plan?: number; suite?: number; planFrom?: string; suiteFrom?: string }",
+ "PublishCaseDef": "export interface PublishCaseDef { testCase: number; title: string; inSuite: boolean; points: Array<{ id: number; configuration: string; tester?: string }>; scenarios: string[] }",
+ "PublishGroupDef": "export interface PublishGroupDef { plan: number; planName?: string; suite: number; suiteName?: string; from: string[]; cases: PublishCaseDef[]; error?: string }",
+ "PublishPreviewDef": "export interface PublishPreviewDef { ado: { org: string; project: string; configured: string; from: { project: string; env: string } }; run: { id: string; name: string };\n    scenarios: PublishScenarioDef[]; groups: PublishGroupDef[]; notLinked: string[]; noPlan: string[] }",
+ "PublishItemDef": "export interface PublishItemDef { plan: number; suite: number; testCase: number; points: number[]; scenarios: string[] }",
+ "PublishDoneDef": "export interface PublishDoneDef { published: Array<{ plan: number; suite: number; runId: number; url: string; published: number; testCases: number }>; tagged: Array<{ file: string; line: number; name: string; tags: string[] }>; notTagged: Array<{ scenario: string; reason: string }> }",
  "MissionInputDef": "export interface MissionInputDef { key: string; label: string; required?: boolean; multiline?: boolean; placeholder?: string; kind?: 'project' | 'env' | 'run' | 'text' | 'number' }",
  "MissionBudgetDef": "export interface MissionBudgetDef { minutes: number; modelCalls: number; attempts: number }",
  "MissionTemplateDef": "export interface MissionTemplateDef { key: string; title: string; about: string; inputs: MissionInputDef[]; oneOf?: string[]; writes: boolean; budget: MissionBudgetDef; team?: Array<{ id: string; name: string }> }",

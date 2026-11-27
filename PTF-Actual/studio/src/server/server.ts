@@ -138,7 +138,7 @@ import { TsService } from '../lang/tsService';
 import { StaleCall, TsClient } from '../lang/tsClient';
 import { CopilotInline } from '../lang/copilot';
 import { projectFeatureFolder, readCatalog } from '../run/catalog';
-import { publishTargets, resultsToPublish, scenarioTestSteps, tagsToPublishTo, TestPlans } from '../ado/testPlans';
+import { entryFor, publishTargets, runScenarios, tagsForMapping, scenarioTestSteps, tagsToPublishTo, testCaseTag, TestPlans, TestPoint } from '../ado/testPlans';
 import { filesDeclaring, groupHeals, HealDecision, HealEvent, healedOption, healsInReport, proposeEdit } from '../quality/healing';
 import { accessibilityChecks, approveAria, approveVisual, ariaSnapshots, configuredDirs, insideRepo, ReviewDecision, StaleReview, visualSnapshots } from '../quality/visual';
 import { bugReproHtml, bugsForTagsQuery, readTriage, signatureTag, TriageVerdict, VERDICTS, writeTriage } from '../quality/triage';
@@ -2207,29 +2207,164 @@ export function createServer(opts: ServerOptions): StudioServer {
         return { ...r, reportKey: runner.reportKey(id), reportIndex: reportIndexOf(r), log: runner.log(id, Number((req.query as Record<string, string>).from) || 0) };
     });
 
-    // ---- A finished run's results published to Azure DevOps Test Plans (a test run on the test points of the
-    // scenarios' @TestCaseId), like the framework does in the pipeline: preview first, then publish.
-    app.post('/api/runs/:id/publish-ado', async (req) => {
-        const id = (req.params as { id: string }).id;
+    // ---- A finished run's results published to Azure DevOps Test Plans. Only this run's results are sent.
+    // Two ways to choose where: the scenarios' tags (@TestCaseId and @TestPlanId / @TestSuiteId, else the
+    // feature's, else ADO_TEST_PLAN_ID / ADO_TEST_SUITE_ID, as the framework does), or a plan and suite chosen
+    // here with the run's scenario(s) picked for each of its test cases. Either way the person ticks the test
+    // cases and test points; one scenario can give the result of several test cases.
+    const publishContext = (id: string, adoProject: unknown) => {
         const r = runner.get(id);
         if (!r) throw new BadRequest('Unknown run.');
         if (r.state === 'running' || !r.summary) throw new BadRequest('The run has no results yet.');
+        const { tp, ado, project, env } = testPlansFor({ project: r.request.project, env: r.request.env, ...(typeof adoProject === 'string' && adoProject ? { adoProject } : {}) });
+        const pub = adoPublishing(project, env);
+        let configured = '';
+        try { configured = adoSettingsFor(opts.repoRoot, opts.store, projectId, project, env, process.env, personal()).project; } catch { /* shown by the call that fails */ }
+        // The run's own feature files first, then its project's folder (a feature copied elsewhere has the same names).
+        const runFiles = new Set((r.request.features ?? []).map((f) => f.replace(/\\/g, '/')));
+        const prefer = (file: string) => (runFiles.has(file) || [...runFiles].some((f) => f.endsWith('/') && file.startsWith(f)) ? 2 : file.startsWith(`test/${project}/`) ? 1 : 0);
+        return { r, tp, ado, project, env, pub, configured, scenarios: runScenarios(r.summary.scenarios, pub.targets, prefer) };
+    };
+    /** Suites of a plan by id, each with its path ("Root › Login › Smoke"). */
+    const suitePaths = async (tp: TestPlans, plan: number) => {
+        const list = await tp.suites(plan);
+        const by = new Map(list.map((x) => [x.id, x]));
+        const pathOf = (sid: number): string => { const x = by.get(sid); if (!x) return String(sid); const up = x.parent && by.has(x.parent) ? pathOf(x.parent) : ''; return up ? `${up} › ${x.name}` : x.name; };
+        return new Map(list.map((x) => [x.id, pathOf(x.id)]));
+    };
+    const pointView = (p: TestPoint) => ({ id: p.id, configuration: p.configuration, ...(p.tester ? { tester: p.tester } : {}) });
+    app.post('/api/runs/:id/publish-ado/preview', async (req) => {
         const b = body(req);
-        const chosen = { ...(b.plan ? { plan: posInt(b.plan, 'plan') } : {}), ...(b.suite ? { suite: posInt(b.suite, 'suite') } : {}) };
-        const pub = adoPublishing(r.request.project, r.request.env);
-        const plan = resultsToPublish(r.summary.scenarios, pub.targets, chosen);
-        const preview = { groups: plan.groups.map((g) => ({ plan: g.plan, suite: g.suite, testCases: [...new Set(g.results.map((x) => x.testCase))].length, results: g.results.map((x) => ({ testCase: x.testCase, outcome: x.outcome, scenario: x.scenario })) })), notLinked: plan.notLinked, noPlan: plan.noPlan };
-        if (b.publish !== true) return preview;
-        if (!plan.groups.length) throw new BadRequest(plan.notLinked.length ? 'None of the run\'s scenarios has a @TestCaseId tag.' : 'Choose the test plan and suite to publish to.');
-        const { tp } = testPlansFor({ project: r.request.project, env: r.request.env, ...(typeof b.adoProject === 'string' ? { adoProject: b.adoProject } : {}) });
-        const name = `${r.request.project} ${r.request.env} – Studio run ${r.id}${r.commit ? ` @ ${r.commit.slice(0, 8)}${r.dirty ? '+changes' : ''}` : ''}`;
-        const published: Array<{ plan: number; suite: number; runId: number; url: string; published: number; missing: number[] }> = [];
-        for (const g of plan.groups) {
-            try { published.push({ plan: g.plan, suite: g.suite, ...(await tp.publishRun(g.plan, g.suite, name, g.results, `Published from CS Test Studio by ${opts.userName}${r.dirty ? ' (the working copy had changes not committed)' : ''}.`)) }); }
-            catch (e) { throw new BadRequest(`Plan ${g.plan} / suite ${g.suite}: ${(e as Error).message}`); }
+        const c = publishContext((req.params as { id: string }).id, b.adoProject);
+        const chosen = b.plan || b.suite ? { plan: posInt(b.plan, 'plan'), suite: posInt(b.suite, 'suite') } : null;
+        const planNames = new Map<number, string>();
+        try { for (const p of await c.tp.plans(true)) planNames.set(p.id, p.name); } catch (e) { throw new BadRequest((e as Error).message); }
+        type Case = { testCase: number; title: string; inSuite: boolean; points: ReturnType<typeof pointView>[]; scenarios: string[] };
+        type Group = { plan: number; planName?: string; suite: number; suiteName?: string; from: string[]; cases: Case[]; error?: string };
+        const groups: Group[] = [];
+        const notLinked: string[] = [], noPlan: string[] = [];
+        const suiteNames = new Map<number, Map<number, string>>();
+        const nameOfSuite = async (plan: number, suite: number) => {
+            if (!suiteNames.has(plan)) { try { suiteNames.set(plan, await suitePaths(c.tp, plan)); } catch { suiteNames.set(plan, new Map()); } }
+            return suiteNames.get(plan)!.get(suite);
+        };
+        const fill = async (g: Group, ids: number[] | null, scenariosOf: (tc: number) => string[]) => {
+            let points: TestPoint[] = [];
+            // Every point (Azure DevOps marks a point inactive once it has a result: it can still take a new one, as in the framework).
+            try { points = await c.tp.points(g.plan, g.suite); }
+            catch (e) { g.error = (e as Error).message; }
+            const inSuite = new Map<number, TestPoint[]>();
+            for (const p of points) inSuite.set(p.testCase, [...(inSuite.get(p.testCase) ?? []), p]);
+            const list = ids ?? [...inSuite.keys()];
+            const missing = list.filter((tc) => !inSuite.has(tc));
+            const titles = missing.length ? await c.tp.testCases(missing).catch(() => new Map<number, { title?: string }>()) : new Map<number, { title?: string }>();
+            g.cases = list.map((tc) => ({ testCase: tc, title: inSuite.get(tc)?.[0]?.title || titles.get(tc)?.title || '', inSuite: inSuite.has(tc), points: (inSuite.get(tc) ?? []).map(pointView), scenarios: scenariosOf(tc) }));
+            g.planName = planNames.get(g.plan); g.suiteName = await nameOfSuite(g.plan, g.suite);
+        };
+        if (chosen) {
+            if (!planNames.has(chosen.plan)) throw new BadRequest(`Test plan ${chosen.plan} is not in ${c.ado.projectName}.`);
+            const g: Group = { plan: chosen.plan, suite: chosen.suite, from: ['chosen'], cases: [] };
+            // Each test case of the suite, with the run's scenarios tagged with it (whatever plan their tags name).
+            await fill(g, null, (tc) => c.scenarios.filter((s) => s.testCases.includes(tc)).map((s) => s.key));
+            groups.push(g);
+            for (const s of c.scenarios) if (!s.testCases.length) notLinked.push(s.key);
+        } else {
+            const by = new Map<string, Group & { ids: Set<number> }>();
+            for (const s of c.scenarios) {
+                if (!s.testCases.length) { notLinked.push(s.key); continue; }
+                if (!s.plan || !s.suite) { noPlan.push(s.key); continue; }
+                const k = `${s.plan}/${s.suite}`;
+                if (!by.has(k)) by.set(k, { plan: s.plan, suite: s.suite, from: [], cases: [], ids: new Set() });
+                const g = by.get(k)!;
+                const from = s.planFrom === s.suiteFrom ? `${s.planFrom}` : `${s.planFrom}/${s.suiteFrom}`;
+                if (!g.from.includes(from)) g.from.push(from);
+                for (const tc of s.testCases) g.ids.add(tc);
+            }
+            for (const g of by.values()) {
+                await fill(g, [...g.ids], (tc) => c.scenarios.filter((s) => s.plan === g.plan && s.suite === g.suite && s.testCases.includes(tc)).map((s) => s.key));
+                const { ids, ...rest } = g; void ids;
+                groups.push(rest);
+            }
         }
-        log('ado.publish', `Published run ${r.id} to Azure DevOps: ${published.map((x) => `run ${x.runId} (plan ${x.plan}, suite ${x.suite}, ${x.published} results)`).join('; ')}`, { id: r.id });
-        return { ...preview, published };
+        return {
+            ado: { org: c.ado.orgUrl, project: c.ado.projectName, configured: c.configured, from: { project: c.project, env: c.env } },
+            run: { id: c.r.id, name: `${c.project} ${c.env} – Studio run ${c.r.id}${c.r.commit ? ` @ ${c.r.commit.slice(0, 8)}${c.r.dirty ? '+changes' : ''}` : ''}` },
+            scenarios: c.scenarios, groups, notLinked, noPlan,
+        };
+    });
+    app.post('/api/runs/:id/publish-ado', async (req) => {
+        const b = body(req);
+        if (b.confirm !== true) throw new BadRequest('Confirm publishing to Azure DevOps.');
+        const c = publishContext((req.params as { id: string }).id, b.adoProject);
+        const items = (Array.isArray(b.items) ? b.items : []).slice(0, 2000).map((x) => {
+            const it = (x ?? {}) as Record<string, unknown>;
+            const points = (Array.isArray(it.points) ? it.points : []).map((p) => posInt(p, 'test point'));
+            const keys = (Array.isArray(it.scenarios) ? it.scenarios : []).map((k) => String(k));
+            return { plan: posInt(it.plan, 'plan'), suite: posInt(it.suite, 'suite'), testCase: posInt(it.testCase, 'test case'), points, keys };
+        }).filter((x) => x.points.length);
+        if (!items.length) throw new BadRequest('Tick at least one test point.');
+        const byKey = new Map(c.scenarios.map((s) => [s.key, s]));
+        for (const it of items) {
+            if (!it.keys.length) throw new BadRequest(`Choose the scenario whose result goes to test case ${it.testCase}.`);
+            for (const k of it.keys) if (!byKey.has(k)) throw new BadRequest(`"${k}" is not a scenario of this run.`);
+        }
+        const name = (typeof b.runName === 'string' && b.runName.trim() ? b.runName.trim() : `${c.project} ${c.env} – Studio run ${c.r.id}${c.r.commit ? ` @ ${c.r.commit.slice(0, 8)}${c.r.dirty ? '+changes' : ''}` : ''}`).slice(0, 250);
+        // Every ticked point belongs to its suite and test case (checked before anything is written).
+        const bySuite = new Map<string, typeof items>();
+        for (const it of items) bySuite.set(`${it.plan}/${it.suite}`, [...(bySuite.get(`${it.plan}/${it.suite}`) ?? []), it]);
+        for (const list of bySuite.values()) {
+            const { plan, suite } = list[0];
+            const pts = await c.tp.points(plan, suite);
+            for (const it of list) for (const p of it.points) {
+                const found = pts.find((x) => x.id === p);
+                if (!found || found.testCase !== it.testCase) throw new BadRequest(`Test point ${p} is not a point of test case ${it.testCase} in suite ${suite} of plan ${plan}.`);
+            }
+        }
+        // One test run per test plan, as the framework does: suites of the same plan share it.
+        const byPlan = new Map<number, typeof items>();
+        for (const it of items) byPlan.set(it.plan, [...(byPlan.get(it.plan) ?? []), it]);
+        const published: Array<{ plan: number; suites: number[]; runId: number; url: string; published: number; testCases: number }> = [];
+        for (const [plan, list] of byPlan) {
+            const suites = [...new Set(list.map((it) => it.suite))];
+            const entries = list.map((it) => entryFor(it.testCase, it.points, it.keys.map((k) => byKey.get(k)!)));
+            try { published.push({ plan, suites, testCases: new Set(list.map((it) => it.testCase)).size, ...(await c.tp.publishTo(plan, name, entries, `Published from CS Test Studio by ${opts.userName}${c.r.dirty ? ' (the working copy had changes not committed)' : ''}.`)) }); }
+            catch (e) { throw new BadRequest(`Plan ${plan}: ${(e as Error).message}${published.length ? ` (already published: ${published.map((x) => `test run ${x.runId}`).join(', ')})` : ''}`); }
+        }
+        log('ado.publish', `Published run ${c.r.id} to Azure DevOps ${c.ado.projectName}: ${published.map((x) => `run ${x.runId} (plan ${x.plan}, suite ${x.suites.join(', ')}, ${x.published} results)`).join('; ')}`, { id: c.r.id });
+        // Optionally the mapping goes back into the feature files: each scenario gets the test cases it was
+        // published to (with those it already had), and the plan and suite when its tags would send it elsewhere.
+        const tagged: Array<{ file: string; line: number; name: string; tags: string[] }> = [];
+        const notTagged: Array<{ scenario: string; reason: string }> = [];
+        const skip = (scenario: string, reason: string) => { if (!notTagged.some((x) => x.scenario === scenario)) notTagged.push({ scenario, reason }); };
+        if (b.writeTags === true) {
+            const per = new Map<string, { s: (typeof c.scenarios)[number]; ids: Set<number>; targets: Set<string> }>();
+            for (const it of items) for (const k of it.keys) {
+                const s = byKey.get(k)!;
+                if (!s.file || !s.line) { skip(`${s.feature}: ${s.name}`, 'not found in the feature files'); continue; }
+                if (!per.has(k)) per.set(k, { s, ids: new Set(s.testCases), targets: new Set() });
+                per.get(k)!.ids.add(it.testCase); per.get(k)!.targets.add(`${it.plan}/${it.suite}`);
+            }
+            const byFile = new Map<string, Array<{ s: (typeof c.scenarios)[number]; ids: Set<number>; targets: Set<string> }>>();
+            for (const v of per.values()) byFile.set(v.s.file!, [...(byFile.get(v.s.file!) ?? []), v]);
+            for (const [file, list] of byFile) {
+                let cur = ws.read(file);
+                if (cur.binary) continue;
+                let text = cur.content;
+                // Bottom up: a tag line added above one scenario does not move the ones above it.
+                for (const v of list.sort((a, b2) => b2.s.line! - a.s.line!)) {
+                    const label = `${v.s.feature}: ${v.s.name}`;
+                    const d = tagsForMapping(v.s, v.ids, v.targets);
+                    if ('skip' in d) { skip(label, d.skip); continue; }
+                    const tags = d.tags;
+                    if (!tags.length) continue;
+                    try { text = withScenarioTags(text, v.s.line!, v.s.name, tags); tagged.push({ file, line: v.s.line!, name: v.s.name, tags }); }
+                    catch (e) { skip(label, (e as Error).message); }
+                }
+                if (text !== cur.content) { ws.write(file, text, cur.hash); cur = ws.read(file); }
+            }
+            if (tagged.length) log('ado.publish.tags', `Tagged ${tagged.length} scenario(s) with their Azure DevOps test cases`, { files: [...new Set(tagged.map((t) => t.file))].join(', ') });
+        }
+        return { published, tagged, notTagged };
     });
 
     // ---- Quality: results across runs, classification, failure groups, quarantine, gate

@@ -83,15 +83,16 @@ export class TestPlans {
     }
 
     /** Automation fields of test cases (state, automation status, the automated test's name). */
-    async testCases(ids: number[]): Promise<Map<number, { automationStatus?: string; automatedTestName?: string; steps?: string }>> {
-        const out = new Map<number, { automationStatus?: string; automatedTestName?: string; steps?: string }>();
+    async testCases(ids: number[]): Promise<Map<number, { title?: string; automationStatus?: string; automatedTestName?: string; steps?: string }>> {
+        const out = new Map<number, { title?: string; automationStatus?: string; automatedTestName?: string; steps?: string }>();
         for (let i = 0; i < ids.length; i += 200) {
             const chunk = ids.slice(i, i + 200);
             if (!chunk.length) break;
             const r = await this.ado.post<{ value: Array<{ id: number; fields: Record<string, unknown> }> }>('wit/workitemsbatch', {
-                ids: chunk, fields: ['System.Id', 'Microsoft.VSTS.TCM.AutomationStatus', 'Microsoft.VSTS.TCM.AutomatedTestName', 'Microsoft.VSTS.TCM.Steps'], errorPolicy: 'omit',
+                ids: chunk, fields: ['System.Id', 'System.Title', 'Microsoft.VSTS.TCM.AutomationStatus', 'Microsoft.VSTS.TCM.AutomatedTestName', 'Microsoft.VSTS.TCM.Steps'], errorPolicy: 'omit',
             }, 'project', 'Work Items (Read)');
             for (const w of r.value ?? []) if (w) out.set(w.id, {
+                title: w.fields['System.Title'] as string | undefined,
                 automationStatus: w.fields['Microsoft.VSTS.TCM.AutomationStatus'] as string | undefined,
                 automatedTestName: w.fields['Microsoft.VSTS.TCM.AutomatedTestName'] as string | undefined,
                 steps: w.fields['Microsoft.VSTS.TCM.Steps'] as string | undefined,
@@ -124,37 +125,28 @@ export class TestPlans {
     }
 
     /**
-     * Publish results to a test plan's suite: a test run on the suite's test points for these test cases (every
-     * configuration), each point's outcome, duration and error, then the run completed. Test cases without a
-     * point in the suite are returned as missing.
+     * Publish results to a test plan: one test run on exactly these test points (of one or more of its suites), each point's outcome,
+     * duration, error and comment (the scenario, and each data iteration as the framework writes them), then the
+     * run completed. Every point must belong to the plan and to its entry's test case (checked by the caller).
      */
-    async publishRun(plan: number, suite: number, name: string, results: PublishResult[], comment?: string): Promise<{ runId: number; url: string; published: number; missing: number[] }> {
+    async publishTo(plan: number, name: string, entries: PublishEntry[], comment?: string): Promise<{ runId: number; url: string; published: number }> {
         const TM = 'Test Management (Read & write)';
-        const points = (await this.points(plan, suite)).filter((p) => p.active);
-        const byCase = new Map<number, number[]>();
-        for (const p of points) byCase.set(p.testCase, [...(byCase.get(p.testCase) ?? []), p.id]);
-        const missing = [...new Set(results.map((r) => r.testCase))].filter((tc) => !byCase.has(tc));
-        const pointIds = [...new Set(results.flatMap((r) => byCase.get(r.testCase) ?? []))];
-        if (!pointIds.length) throw new Error(`None of the run's test cases (${[...new Set(results.map((r) => r.testCase))].join(', ')}) has a test point in suite ${suite} of plan ${plan}.`);
+        const byPoint = new Map<number, PublishEntry>();
+        for (const e of entries) for (const p of e.pointIds) byPoint.set(p, e);
+        if (!byPoint.size) throw new Error('Choose at least one test point.');
         const run = await this.ado.post<{ id: number; webAccessUrl?: string }>('test/runs', {
-            name: name.slice(0, 250), plan: { id: String(plan) }, pointIds, automated: true, state: 'InProgress', ...(comment ? { comment: comment.slice(0, 1000) } : {}),
+            name: name.slice(0, 250), plan: { id: String(plan) }, pointIds: [...byPoint.keys()], automated: true, state: 'InProgress', ...(comment ? { comment: comment.slice(0, 1000) } : {}),
         }, 'project', TM);
         const created = await this.ado.get<{ value: Array<{ id: number; testPoint?: { id: string }; testCase?: { id: string } }> }>(`test/runs/${run.id}/results?$top=1000`, 'project', TM);
-        // A test case automated by several scenarios: failed if any failed, the durations added.
-        const merged = new Map<number, PublishResult>();
-        for (const r of results) {
-            const had = merged.get(r.testCase);
-            merged.set(r.testCase, !had ? { ...r } : { ...had, outcome: worst(had.outcome, r.outcome), durationMs: had.durationMs + r.durationMs, error: [had.error, r.error].filter(Boolean).join('\n\n') || undefined, scenario: `${had.scenario}; ${r.scenario}` });
-        }
         const updates = (created.value ?? []).map((res) => {
-            const r = merged.get(Number(res.testCase?.id));
-            if (!r) return null;
-            return { id: res.id, state: 'Completed', outcome: r.outcome, durationInMs: Math.round(r.durationMs), automatedTestName: r.scenario.slice(0, 250),
-                ...(r.error ? { errorMessage: r.error.slice(0, 4000) } : {}), comment: `Scenario: ${r.scenario}`.slice(0, 1000) };
+            const e = byPoint.get(Number(res.testPoint?.id)) ?? entries.find((x) => x.testCase === Number(res.testCase?.id));
+            if (!e) return null;
+            return { id: res.id, state: 'Completed', outcome: e.outcome, durationInMs: Math.round(e.durationMs), automatedTestName: e.scenario.slice(0, 250),
+                ...(e.error ? { errorMessage: e.error.slice(0, 4000) } : {}), comment: e.comment.slice(0, 1000) };
         }).filter(Boolean);
         if (updates.length) await this.ado.patch(`test/runs/${run.id}/results`, updates, 'project', TM);
         await this.ado.patch(`test/runs/${run.id}`, { state: 'Completed' }, 'project', TM);
-        return { runId: run.id, url: run.webAccessUrl ?? `${this.webBase}/_testManagement/runs?_a=resultQuery&runId=${run.id}`, published: updates.length, missing };
+        return { runId: run.id, url: run.webAccessUrl ?? `${this.webBase}/_testManagement/runs?_a=resultQuery&runId=${run.id}`, published: updates.length };
     }
 
     /** Add test cases to a static suite (a test point per configuration of the suite). */
@@ -177,34 +169,97 @@ function automationOps(name?: string, storage?: string): Array<{ op: 'add'; path
     ];
 }
 
-export interface PublishResult { testCase: number; outcome: 'Passed' | 'Failed' | 'NotExecuted' | 'Blocked'; durationMs: number; error?: string; scenario: string }
-const RANK = { Failed: 3, Blocked: 2, NotExecuted: 1, Passed: 0 } as const;
-const worst = (a: PublishResult['outcome'], b: PublishResult['outcome']) => (RANK[a] >= RANK[b] ? a : b);
+/** One test case's result as sent to its chosen test points. */
+export interface PublishEntry { testCase: number; pointIds: number[]; outcome: Outcome; durationMs: number; error?: string; comment: string; scenario: string }
+export type Outcome = 'Passed' | 'Failed' | 'NotExecuted' | 'Blocked';
+const RANK: Record<Outcome, number> = { Failed: 3, Blocked: 2, NotExecuted: 1, Passed: 0 };
+const worst = (list: Outcome[]): Outcome => list.reduce<Outcome>((a, b) => (RANK[a] >= RANK[b] ? a : b), 'Passed');
+const outcomeOfStatus = (s: string): Outcome => { const st = s.toLowerCase(); return st === 'passed' ? 'Passed' : st === 'failed' || st === 'broken' ? 'Failed' : st === 'blocked' ? 'Blocked' : 'NotExecuted'; };
 
 /**
- * A finished run's scenarios as test results, grouped by the plan and suite each scenario publishes to (its
- * @TestPlanId / @TestSuiteId, the feature's, the configured ones, or the plan and suite chosen now, which win).
- * Scenarios without @TestCaseId are listed as not linked.
+ * A scenario of a finished run, as one thing to publish: a data-driven scenario's iterations ("…_Iteration-2",
+ * "… (Example 2)") are one scenario with its iterations, as the framework publishes them. `key` is the
+ * scenario's place in the repository (file:line) when it is found there, else its feature and name.
  */
-export function resultsToPublish(scenarios: Array<{ name: string; feature: string; status: string; duration: number; error?: string }>, targets: PublishTarget[], chosen: { plan?: number; suite?: number } = {}):
-    { groups: Array<{ plan: number; suite: number; results: PublishResult[] }>; notLinked: string[]; noPlan: string[] } {
-    const groups = new Map<string, { plan: number; suite: number; results: PublishResult[] }>();
-    const notLinked: string[] = [], noPlan: string[] = [];
+export interface RunScenario {
+    key: string; name: string; feature: string; file?: string; line?: number;
+    outcome: Outcome; durationMs: number; error?: string;
+    iterations: Array<{ n: number; outcome: Outcome; durationMs: number; error?: string }>;
+    /** Where its tags send it (empty / undefined when it has no @TestCaseId, plan or suite). */
+    testCases: number[]; plan?: number; suite?: number; planFrom?: PublishTarget['planFrom']; suiteFrom?: PublishTarget['suiteFrom'];
+}
+const ITER = /^(.*?)(?:_Iteration-(\d+)|\s*\(Example (\d+)\))$/i;
+export function runScenarios(results: Array<{ name: string; feature: string; status: string; duration: number; error?: string }>, targets: PublishTarget[], prefer: (file: string) => number = () => 0): RunScenario[] {
     const norm = (x: string) => x.trim().toLowerCase();
-    for (const sc of scenarios) {
-        // An outline's examples run as "<name> (Example 2)" or with the values: the target is the scenario whose name starts it.
-        const t = targets.find((x) => norm(x.feature) === norm(sc.feature) && norm(x.name) === norm(sc.name))
-            ?? targets.filter((x) => norm(x.feature) === norm(sc.feature) && norm(sc.name).startsWith(norm(x.name))).sort((a, b) => b.name.length - a.name.length)[0];
-        if (!t || !t.testCases.length) { notLinked.push(`${sc.feature}: ${sc.name}`); continue; }
-        const plan = chosen.plan ?? t.plan, suite = chosen.suite ?? t.suite;
-        if (!plan || !suite) { noPlan.push(`${sc.feature}: ${sc.name}`); continue; }
-        const st = sc.status.toLowerCase();
-        const outcome: PublishResult['outcome'] = st === 'passed' ? 'Passed' : st === 'failed' || st === 'broken' ? 'Failed' : st === 'blocked' ? 'Blocked' : 'NotExecuted';
-        const key = `${plan}/${suite}`;
-        if (!groups.has(key)) groups.set(key, { plan, suite, results: [] });
-        for (const tc of t.testCases) groups.get(key)!.results.push({ testCase: tc, outcome, durationMs: Math.max(0, Number(sc.duration) || 0), ...(sc.error ? { error: sc.error } : {}), scenario: `${sc.feature}: ${sc.name}` });
+    const out = new Map<string, RunScenario>();
+    for (const sc of results) {
+        const m = ITER.exec(sc.name);
+        const n = m ? parseInt(m[2] ?? m[3], 10) : 0;
+        // The scenario in the repository: same name, else the longest one whose name starts it (outlines,
+        // iterations). A feature copied into another folder has the same names: the run's own files win.
+        const best = (list: PublishTarget[]) => list.sort((a, b) => prefer(b.file) - prefer(a.file) || b.name.length - a.name.length)[0];
+        const t = best(targets.filter((x) => norm(x.feature) === norm(sc.feature) && norm(x.name) === norm(sc.name)))
+            ?? best(targets.filter((x) => norm(x.feature) === norm(sc.feature) && norm(sc.name).startsWith(norm(x.name))));
+        const name = t?.name ?? (m ? m[1].trim() : sc.name);
+        const key = t ? `${t.file}:${t.line}` : `${sc.feature}: ${name}`;
+        const it = { n, outcome: outcomeOfStatus(sc.status), durationMs: Math.max(0, Number(sc.duration) || 0), ...(sc.error ? { error: sc.error } : {}) };
+        const cur = out.get(key);
+        if (!cur) {
+            out.set(key, { key, name, feature: sc.feature, ...(t ? { file: t.file, line: t.line } : {}), outcome: it.outcome, durationMs: it.durationMs, ...(it.error ? { error: it.error } : {}), iterations: n ? [it] : [],
+                testCases: t?.testCases ?? [], ...(t?.plan ? { plan: t.plan, planFrom: t.planFrom } : {}), ...(t?.suite ? { suite: t.suite, suiteFrom: t.suiteFrom } : {}) });
+            continue;
+        }
+        // Another iteration (or example) of the same scenario.
+        if (!cur.iterations.length) cur.iterations.push({ n: 1, outcome: cur.outcome, durationMs: cur.durationMs, ...(cur.error ? { error: cur.error } : {}) });
+        cur.iterations.push({ ...it, n: n || cur.iterations.length + 1 });
+        cur.outcome = worst([cur.outcome, it.outcome]);
+        cur.durationMs += it.durationMs;
     }
-    return { groups: [...groups.values()], notLinked, noPlan };
+    for (const s of out.values()) if (s.iterations.length > 1) {
+        s.iterations.sort((a, b) => a.n - b.n);
+        const failed = s.iterations.filter((i) => i.outcome === 'Failed');
+        s.error = failed.length ? `${failed.length} of ${s.iterations.length} iterations failed. See comment for details.` : undefined;
+    }
+    return [...out.values()];
+}
+
+/** A test case's result from the scenarios chosen for it (failed if any failed; iterations listed as the framework does). */
+export function entryFor(testCase: number, pointIds: number[], scenarios: RunScenario[]): PublishEntry {
+    const lines: string[] = [];
+    for (const s of scenarios) {
+        if (s.iterations.length > 1) {
+            lines.push(`Data-Driven Test Results (${s.iterations.length} iterations): ${s.feature}: ${s.name}`, `Overall Status: ${s.outcome}`, '', 'Iteration Results:');
+            for (const i of s.iterations) lines.push(`Iteration ${i.n}: ${i.outcome === 'Passed' ? '✅ Passed' : i.outcome === 'Failed' ? '❌ Failed' : i.outcome}${i.error ? ` — ${i.error.split('\n')[0].slice(0, 200)}` : ''}`);
+        } else lines.push(`Scenario: ${s.feature}: ${s.name} — ${s.outcome}`);
+    }
+    const errs = scenarios.map((s) => (s.iterations.length > 1 ? [s.error, ...s.iterations.filter((i) => i.error).map((i) => `Iteration ${i.n}: ${i.error}`)].filter(Boolean).join('\n') : s.error)).filter(Boolean) as string[];
+    return {
+        testCase, pointIds, outcome: worst(scenarios.map((s) => s.outcome)), durationMs: scenarios.reduce((n, s) => n + s.durationMs, 0),
+        ...(errs.length ? { error: errs.join('\n\n') } : {}), comment: lines.join('\n'), scenario: scenarios.map((s) => `${s.feature}: ${s.name}`).join('; '),
+    };
+}
+
+/**
+ * The tags that make a scenario publish to the test cases it was mapped to (`ids`, with those it had) in the
+ * suite(s) it was published to (`targets`, "plan/suite"). A scenario's tags name one plan and suite, as the
+ * framework reads them: one that already sends test cases to another suite is left as it is (moving it would
+ * stop those results), as is one published to several suites.
+ */
+export function tagsForMapping(s: Pick<RunScenario, 'testCases' | 'plan' | 'suite'>, ids: Set<number>, targets: Set<string>): { tags: string[] } | { skip: string } {
+    if (targets.size > 1) return { skip: `published to ${targets.size} suites; a scenario's tags hold one plan and suite` };
+    const [plan, suite] = [...targets][0].split('/').map(Number);
+    if (s.testCases.length && s.plan && s.suite && (s.plan !== plan || s.suite !== suite)) {
+        return { skip: `its tags send test case${s.testCases.length === 1 ? '' : 's'} ${s.testCases.join(', ')} to plan ${s.plan} / suite ${s.suite}; changing them would stop those results` };
+    }
+    const all = new Set([...s.testCases, ...ids]);
+    const unchanged = all.size === s.testCases.length;
+    return { tags: [...(unchanged ? [] : [testCaseTag([...all])]), ...tagsToPublishTo(s, plan, suite)] };
+}
+
+/** The @TestCaseId tag for these ids (one id, or {a,b}). */
+export function testCaseTag(ids: number[]): string {
+    const u = [...new Set(ids)].sort((a, b) => a - b);
+    return u.length === 1 ? `@TestCaseId:${u[0]}` : `@TestCaseId:{${u.join(',')}}`;
 }
 
 /** A GUID made from a name (the same name gives the same GUID). */

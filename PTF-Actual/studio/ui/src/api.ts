@@ -112,8 +112,15 @@ async function confirmedRun<T>(method: string, url: string, b: object): Promise<
         throw e;
     }
 }
-export interface PublishPreviewDef { groups: Array<{ plan: number; suite: number; testCases: number; results: Array<{ testCase: number; outcome: string; scenario: string }> }>; notLinked: string[]; noPlan: string[];
-    published?: Array<{ plan: number; suite: number; runId: number; url: string; published: number; missing: number[] }> }
+export type PublishOutcome = 'Passed' | 'Failed' | 'NotExecuted' | 'Blocked';
+export interface PublishScenarioDef { key: string; name: string; feature: string; file?: string; line?: number; outcome: PublishOutcome; durationMs: number; error?: string;
+    iterations: Array<{ n: number; outcome: PublishOutcome; durationMs: number; error?: string }>; testCases: number[]; plan?: number; suite?: number; planFrom?: string; suiteFrom?: string }
+export interface PublishCaseDef { testCase: number; title: string; inSuite: boolean; points: Array<{ id: number; configuration: string; tester?: string }>; scenarios: string[] }
+export interface PublishGroupDef { plan: number; planName?: string; suite: number; suiteName?: string; from: string[]; cases: PublishCaseDef[]; error?: string }
+export interface PublishPreviewDef { ado: { org: string; project: string; configured: string; from: { project: string; env: string } }; run: { id: string; name: string };
+    scenarios: PublishScenarioDef[]; groups: PublishGroupDef[]; notLinked: string[]; noPlan: string[] }
+export interface PublishItemDef { plan: number; suite: number; testCase: number; points: number[]; scenarios: string[] }
+export interface PublishDoneDef { published: Array<{ plan: number; suites: number[]; runId: number; url: string; published: number; testCases: number }>; tagged: Array<{ file: string; line: number; name: string; tags: string[] }>; notTagged: Array<{ scenario: string; reason: string }> }
 export interface MissionInputDef { key: string; label: string; required?: boolean; multiline?: boolean; placeholder?: string; kind?: 'project' | 'env' | 'run' | 'text' | 'number' }
 export interface MissionBudgetDef { minutes: number; modelCalls: number; attempts: number }
 export interface MissionTemplateDef { key: string; title: string; about: string; inputs: MissionInputDef[]; oneOf?: string[]; writes: boolean; budget: MissionBudgetDef; team?: Array<{ id: string; name: string }> }
@@ -1044,7 +1051,7 @@ export const api = {
     loadExplain: (id: string) => request<LoadExplainDef>('GET', `/api/load/runs/${encodeURIComponent(id)}/explain`),
     loadCompare: (a: string, b: string) => request<LoadCompareDef>('GET', '/api/load/compare' + q({ a, b })),
     loadDeleteRun: (id: string) => request<{ removed: boolean }>('DELETE', `/api/load/runs/${encodeURIComponent(id)}`),
-    adoProjects: () => request<{ projects: string[]; configured: string }>('GET', '/api/ado/projects'),
+    adoProjects: (s: AdoScope = {}) => request<{ projects: string[]; configured: string }>('GET', '/api/ado/projects' + q({ ...s })),
     pipelineDefinitions: (o: { adoProject?: string; search?: string; folder?: string; next?: string }) => request<{ items: PipelineDef[]; next?: string; folders?: string[] }>('GET', '/api/ado/pipelines/definitions' + q(o)),
     pipelines: (o: { adoProject?: string; pipeline?: number; branch?: string; result?: string; mine?: boolean; next?: string } = {}) =>
         request<{ runs: PipelineRun[]; next?: string; project: string; env: string; adoProject: string }>('GET', '/api/ado/pipelines' + q({ ...o, mine: o.mine ? 'true' : undefined })),
@@ -1126,8 +1133,8 @@ export const api = {
     bisectStop: () => request<{ bisect: BisectInfo | null }>('POST', '/api/bisect/stop'),
     runCatalog: () => request<RunCatalog>('GET', '/api/runs/catalog'),
     startRun: (r: RunRequest) => confirmedRun<RunInfo>('POST', '/api/runs', r),
-    publishRunPreview: (id: string, b: { plan?: number; suite?: number }) => request<PublishPreviewDef>('POST', `/api/runs/${encodeURIComponent(id)}/publish-ado`, b),
-    publishRun: (id: string, b: { plan?: number; suite?: number }) => request<PublishPreviewDef>('POST', `/api/runs/${encodeURIComponent(id)}/publish-ado`, { ...b, publish: true }),
+    publishRunPreview: (id: string, b: { adoProject?: string; plan?: number; suite?: number }) => request<PublishPreviewDef>('POST', `/api/runs/${encodeURIComponent(id)}/publish-ado/preview`, b),
+    publishRun: (id: string, b: { adoProject?: string; items: PublishItemDef[]; writeTags: boolean; runName?: string }) => request<PublishDoneDef>('POST', `/api/runs/${encodeURIComponent(id)}/publish-ado`, { ...b, confirm: true }),
     doctor: (t: { project?: string; env?: string }) => request<DoctorDef>('GET', '/api/doctor' + q({ project: t.project, env: t.env })),
     notifications: () => request<NotifyDef>('GET', '/api/notifications'),
     saveNotifications: (channels: NotifyChannelDef[], webhooks: Record<string, string>) => request<NotifyDef>('PUT', '/api/notifications', { channels, webhooks }),
@@ -1211,7 +1218,7 @@ export const api = {
     healPreview: (key: string, healed: string) => request<HealPreview>('POST', '/api/healing/preview', { key, healed }),
     healApply: (key: string, healed: string, baseHash: string) => request<{ ok: true; file: string; line: number }>('POST', '/api/healing/apply', { key, healed, baseHash }),
     healDismiss: (key: string, healed?: string, undo?: boolean) => request<{ ok: true }>('POST', '/api/healing/dismiss', { key, healed, undo }),
-    testPlans: (s: AdoScope) => request<{ project: string; env: string; adoProject: string; plans: TestPlanDef[] }>('GET', '/api/ado/testplans' + q({ ...s })),
+    testPlans: (s: AdoScope & { inactive?: boolean }) => request<{ project: string; env: string; adoProject: string; plans: TestPlanDef[] }>('GET', '/api/ado/testplans' + q({ ...s })),
     testSuites: (plan: number, s: AdoScope) => request<{ suites: TestSuiteDef[] }>('GET', `/api/ado/testplans/${plan}/suites` + q({ ...s })),
     testPoints: (plan: number, suite: number, s: AdoScope) => request<{ points: TestPointDef[]; publishing: AdoPublishing; missing: Array<{ testCase: number; file: string; line: number; name: string }> }>('GET', `/api/ado/testplans/${plan}/suites/${suite}/points` + q({ ...s })),
     repoScenarios: (s: AdoScope) => request<{ scenarios: RepoScenario[] }>('GET', '/api/ado/testplans/scenarios' + q({ ...s })),
