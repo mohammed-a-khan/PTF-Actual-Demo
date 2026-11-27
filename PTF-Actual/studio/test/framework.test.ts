@@ -175,3 +175,12 @@ export class UsersPage extends CSBasePage {
     const g = checkPlan(ts, { title: '', warnings: [], files: [{ path: 'test/shop/steps/home.steps.ts', kind: 'steps', text: `@CSBDDStepDef('the user opens the Home page')` }] }, model({ allSteps: [...model().allSteps, ...other] }));
     assert.deepEqual(rules(g), []);
 });
+
+test('raw-locator: a page object that finds elements with Playwright\'s own locators (only what the change adds; comments ignored)', () => {
+    const before = `import { CSBasePage, CSPage } from 'x/core';\n@CSPage('pay')\nexport class PayPage extends CSBasePage {\n    async old() { await this.page.getByText('Old').click(); }\n}\n`;
+    const after = before.replace('}\n}', `}\n    async pay() { await this.page.getByRole('button', { name: 'Pay' }).click(); }\n    // this.page.getByLabel('Card') was the first idea\n    async rows() { return this.page.locator('.row').count(); }\n}`);
+    const f = checkPlan(ts, { title: '', warnings: [], files: [{ path: 'test/shop/pages/PayPage.ts', kind: 'page', text: after }] }, model(), { before: () => before })
+        .filter((x) => x.rule === 'raw-locator');
+    assert.deepEqual(f.map((x) => [x.level, x.line]), [['error', 5], ['error', 7]], JSON.stringify(f));
+    assert.match(f[0].message, /@CSGetElement[\s\S]*CSElementFactory/);
+});

@@ -14,6 +14,7 @@
  *  - invalid-data: a test data file that is not valid JSON.
  *  - fragile-locator: a new element located by position, generated class names or a long chain.
  *  - empty-feature: a feature without scenarios.
+ *  - raw-locator: a page object that finds elements with Playwright's own page.getByRole(…) / page.locator(…).
  */
 import * as fs from 'fs';
 import * as os from 'os';
@@ -28,6 +29,7 @@ import type { ChangePlan, Finding } from './plan';
 export const SENSITIVE_KEY = /pass(word|code|phrase)?|pwd|secret|\bpin\b|otp|token|api.?key|ssn|card.?number|cvv|security.?code/i;
 const SAFE_VALUE = /^(ENCRYPTED:|\{env:|\{config:|<[^>]+>$|\$\{|__CS_ENCRYPT_\d+__$|\*+$)/;
 
+const RAW_GET_BY = /\bpage\s*\.\s*getBy(Role|Text|Label|Placeholder|TestId|AltText|Title)\s*\(/;
 const lineOf = (text: string, index: number) => text.slice(0, index).split('\n').length;
 const isComment = (l: string) => /^\s*(\/\/|\*|\/\*|#)/.test(l);
 
@@ -169,6 +171,13 @@ export function checkPlan(ts: typeof TS, plan: ChangePlan, model: ProjectModel, 
                                 : loc.split(' >> ').filter((p) => !p.startsWith('internal:')).some((p) => (p.match(/\s*>\s*|\s+(?=[.#\w[])/g) ?? []).length > 4) ? 'a long chain of elements' : '';
                     if (why) out.push({ level: 'warning', rule: 'fragile-locator', file: f.path, line: lineOf(f.text, Math.max(0, f.text.indexOf(`${e.prop}!`))), message: `${e.prop} is found by ${why} (${loc.slice(0, 80)}): prefer a test id, id, label or role where the page has one.` });
                 }
+                // Playwright's own locators in a page object (page.getByRole(…), and page.locator(…) when the framework's
+                // linter does not report it): no self-healing, alternatives or element evidence in the report.
+                const raw = linted ? RAW_GET_BY : new RegExp(`${RAW_GET_BY.source}|\\bpage\\s*\\.\\s*locator\\s*\\(`);
+                lines.forEach((l, i) => {
+                    if (!added(l) || isComment(l) || !raw.test(l)) return;
+                    out.push({ level: 'error', rule: 'raw-locator', file: f.path, line: i + 1, message: `${l.trim().slice(0, 80)}: a page object finds elements with @CSGetElement / @CSGetElements (role, text, label or test id locators); for an element known only while the test runs (a row or option by its text), CSElementFactory.createByText / createByCSS.` });
+                });
             }
         }
         if (f.kind === 'data' && f.path.endsWith('.json')) {

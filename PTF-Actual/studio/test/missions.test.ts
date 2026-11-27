@@ -492,3 +492,43 @@ test('unattended mission sessions refuse what would ask the person, at once, and
         await host.stop();
     } finally { delete (global as { __fakeCopilot?: unknown }).__fakeCopilot; fs.rmSync(home, { recursive: true, force: true }); }
 });
+
+test('written code that breaks the framework\'s standards goes back to the agent before any test runs; notes reach the report', async () => {
+    const { tmp, dir, gitDir } = await repo();
+    try {
+        let ran = 0;
+        const seen: Array<Array<{ path: string; text: string }>> = [];
+        const a = fakeAgent([
+            async ({ tool, dir: wd }) => {
+                fs.mkdirSync(path.join(wd, 'test/shop/pages'), { recursive: true });
+                fs.writeFileSync(path.join(wd, 'test/shop/features/pay.feature'), 'Feature: Pay\n');
+                fs.writeFileSync(path.join(wd, 'test/shop/pages/PayPage.ts'), 'await this.page.getByRole("button").click();\n');
+                await tool('mission_report', { outcome: 'done', summary: 'v1' });
+            },
+            async ({ tool, dir: wd, text }) => {
+                assert.match(text, /standards check found 1 problem[\s\S]*PayPage\.ts:1 \(raw-locator\): use @CSGetElement/);
+                fs.writeFileSync(path.join(wd, 'test/shop/pages/PayPage.ts'), '@CSGetElement({ css: ".pay" }) pay;\n');
+                await tool('mission_report', { outcome: 'done', summary: 'v2' });
+            },
+        ]);
+        const e = new MissionEngine({ repoRoot: dir, gitDir, agent: a.agent, log: () => undefined, tickMs: 50, runInfo: () => undefined,
+            standards: (files, project, env) => {
+                assert.deepEqual([project, env], ['shop', 'qa']);
+                seen.push(files);
+                const page = files.find((f) => f.path.endsWith('PayPage.ts'))!;
+                return /getByRole/.test(page.text)
+                    ? [{ level: 'error', rule: 'raw-locator', file: page.path, line: 1, message: 'use @CSGetElement' }, { level: 'error', rule: 'locator-lint', file: page.path, line: 1, message: 'The framework\'s locator linter scores css ".x" 30 (anti-pattern): anchor on a role' }]
+                    : [{ level: 'warning', rule: 'locator-lint', file: page.path, line: 1, message: 'The framework\'s locator linter scores css ".pay" 45 (fragile): a test id would score 100' }];
+            },
+            runTests: async () => { ran++; return { id: 'r1', state: 'passed', summary: summary([['Pay', 'passed']]) }; } });
+        const m = await e.start('automate-story', { project: 'shop', env: 'qa', story: 'x' });
+        await until(() => m.state === 'succeeded');
+        assert.deepEqual(m.verifications.map((v) => v.passed), [false, true]);
+        assert.equal(m.verifications[0].runs.length, 0, 'no test ran while the standards were broken');
+        assert.equal(ran, 1);
+        assert.deepEqual(seen[0].map((f) => f.path).sort(), ['test/shop/features/pay.feature', 'test/shop/pages/PayPage.ts']);
+        assert.match(m.verifications[1].standards?.[0].message ?? '', /45 \(fragile\)/, 'the linter\'s scores do not block; they are notes');
+        const { missionMarkdown } = await import('../src/agents/missions');
+        assert.match(missionMarkdown(m), /### Standards notes[\s\S]*PayPage\.ts:1` \(locator-lint\)/);
+    } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+});

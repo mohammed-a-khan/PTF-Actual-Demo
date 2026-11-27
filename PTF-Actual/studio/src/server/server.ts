@@ -108,7 +108,7 @@ import { applyChanges, formatGherkin, planRename, renameProblem, stepUsages } fr
 import { mcpToken, registerMcp } from '../mcp/http';
 import { alignRows, cellValue, DATE_PRECISIONS, ignoreRule, compareRows, CompareOptions, CompareResult, compareVitals, describeComparison } from '../db/compare';
 import { loadProjectModel, ModelDeps, ProjectModel } from '../framework/model';
-import { applyPlan, ChangePlan, Finding, PlanConflictError, reviewPlan, safePath } from '../framework/plan';
+import { applyPlan, ChangePlan, FileKind, Finding, PlanConflictError, reviewPlan, safePath } from '../framework/plan';
 import { checkPlan } from '../framework/standards';
 import { DB_TYPES, NewProject, scaffoldProject } from '../framework/scaffold';
 import { frameworkPackage, frameworkPackageName } from '../framework/package';
@@ -6250,6 +6250,13 @@ export function createServer(opts: ServerOptions): StudioServer {
         agent: missionAgent,
         runTests: missionRunTests, runInfo: (id) => runner.get(id), notify: missionNotify, outputDirs: () => outputDirs(), log: (a, t, d) => log(a, t, d),
         browser: studioBrowser,
+        // Written code is checked against the framework's standards before its tests run (what the Recorder applies).
+        standards: (files, project, env) => {
+            const kind = (p: string): FileKind => p.endsWith('.feature') ? 'feature' : p.endsWith('.json') ? 'data' : p.endsWith('.env') ? 'config'
+                : isStepFile(path.basename(p)) ? 'steps' : /(^|\/)pages?\//.test(p) || /Page\.ts$/.test(p) ? 'page' : 'other';
+            const plan: ChangePlan = { title: 'Mission', warnings: [], files: files.map((f) => ({ path: f.path, kind: kind(f.path), text: f.text })) };
+            return checkPlan(require('typescript') as typeof import('typescript'), plan, projectModel(project, env), { secretValues: secretValues(), before: beforeOf, repoRoot: opts.repoRoot });
+        },
         // A team member that explores gets a browser of its own (headless, the same network settings).
         newBrowser: () => new StudioBrowser({ repoRoot: opts.repoRoot, headless: true, ...(() => { const n = personal().network; return n.proxyMode === 'manual' && n.proxyUrl ? { proxy: { server: n.proxyUrl, bypass: n.bypass.join(',') } } : {}; })() }),
     });

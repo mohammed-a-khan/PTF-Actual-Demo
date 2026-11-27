@@ -296,7 +296,10 @@ export const FINISHED: MissionState[] = ['succeeded', 'partial', 'failed', 'bloc
 
 export interface Verification { at: string; attempt: number; passed: boolean; why: string;
     /** Accepted on the report alone (a mission that only reads): nothing was run to verify it. */
-    reportOnly?: boolean; runs: Array<{ id: string; state: string; passed?: number; failed?: number }>; failures: Array<{ name: string; error?: string }> }
+    reportOnly?: boolean; runs: Array<{ id: string; state: string; passed?: number; failed?: number }>; failures: Array<{ name: string; error?: string }>;
+    /** The framework's standards on the changed files: what did not block (notes for the review). */
+    standards?: StandardsFinding[] }
+export interface StandardsFinding { level: 'error' | 'warning' | 'info'; rule: string; file?: string; line?: number; message: string }
 export interface Checkpoint { id: string; kind: 'question' | 'plan'; question: string; content?: string; options?: string[]; at: string; answer?: string; answeredAt?: string; by?: string }
 
 export interface MissionRun {
@@ -367,6 +370,8 @@ export interface MissionDeps {
     browser?: Pick<StudioBrowser, 'screenshot' | 'pageNow'>;
     /** A browser of its own for a team member that explores (closed when its task ends). */
     newBrowser?: () => StudioBrowser;
+    /** The framework's standards check on files written in the mission's copy (as the Recorder and generators apply it). */
+    standards?: (files: Array<{ path: string; text: string }>, project: string, env: string) => StandardsFinding[];
 }
 
 const now = () => new Date().toISOString();
@@ -957,8 +962,13 @@ export class MissionEngine {
         const plan = live.template.verify(ctx, m.report!);
         this.note(m, `Verifying (attempt ${m.used.attempts} of ${m.budget.attempts}): ${plan.why}`, 'verify');
         const v: Verification = { at: now(), attempt: m.used.attempts, passed: false, why: plan.why, runs: [], failures: [] };
+        // The framework's standards first: written code that breaks them goes back before any test runs.
+        const blocking = plan.kind === 'tests' ? this.standardsOf(m, ctx, plan.request, v) : [];
         if (plan.kind === 'report') { v.passed = true; v.reportOnly = true; }
-        else if (plan.kind === 'tests') {
+        else if (blocking.length) {
+            v.why = `The framework's standards check found ${blocking.length} problem(s) in the written code.`;
+            v.failures = blocking.map((f) => ({ name: `${f.file ?? ''}${f.line ? `:${f.line}` : ''} (${f.rule})`, error: f.message }));
+        } else if (plan.kind === 'tests') {
             for (let i = 0; i < plan.repeat; i++) {
                 const r = await this.d.runTests(plan.request, m.copy?.rel);
                 v.runs.push({ id: r.id, state: r.state, passed: r.summary?.passed, failed: r.summary?.failed });
@@ -983,7 +993,29 @@ export class MissionEngine {
         m.report = undefined;
         m.state = 'working';
         this.changed(m);
-        await this.d.agent.send(m.session!, `The Studio's verification failed (${plan.why}):\n${v.failures.map((f) => `- ${f.name}${f.error ? `: ${f.error.slice(0, 1500)}` : ''}`).join('\n')}\nFix it and call mission_report again (attempt ${m.used.attempts + 1} of ${m.budget.attempts}).`);
+        await this.d.agent.send(m.session!, `The Studio's verification failed (${v.why}):\n${v.failures.map((f) => `- ${f.name}${f.error ? `: ${f.error.slice(0, 1500)}` : ''}`).join('\n')}\nFix it and call mission_report again (attempt ${m.used.attempts + 1} of ${m.budget.attempts}).`);
+    }
+
+    /**
+     * The standards check on the copy's changed feature, data, page, step and configuration files. Returns what blocks
+     * (errors, except the locator linter's scores: many applications have no test ids to aim for); the rest is kept
+     * on the verification as notes.
+     */
+    private standardsOf(m: MissionRun, ctx: MissionContext, req: RunRequest, v: Verification): StandardsFinding[] {
+        if (!m.copy || !this.d.standards) return [];
+        const project = req.project ?? ctx.inputs.project; const env = req.env ?? ctx.inputs.env;
+        if (!project || !env) return [];
+        const dir = this.copyDir(m);
+        const files = ctx.changedFiles.filter((f) => /\.(feature|ts|json|env)$/.test(f) && !f.startsWith('node_modules/')).flatMap((f) => {
+            try { return [{ path: f, text: fs.readFileSync(path.join(dir, f), 'utf8') }]; } catch { return []; }
+        });
+        if (!files.length) return [];
+        let found: StandardsFinding[];
+        try { found = this.d.standards(files, project, env); } catch { return []; }
+        const blocks = (f: StandardsFinding) => f.level === 'error' && !(f.rule === 'locator-lint' && /^The framework's locator linter scores/.test(f.message));
+        const notes = found.filter((f) => !blocks(f) && f.level !== 'info');
+        if (notes.length) v.standards = notes.slice(0, 50);
+        return found.filter(blocks).slice(0, 30);
     }
 
     private async finish(m: MissionRun, state: MissionState, reason: string) {
@@ -1269,6 +1301,8 @@ export function missionMarkdown(m: MissionRun): string {
     if (m.report?.findings?.length) out.push('### Findings', '', '| Scenario | Cause | Finding | Fixed |', '|---|---|---|---|', ...m.report.findings.map((f) => `| ${(f.scenario ?? '—').replace(/\|/g, '\\|')} | ${f.cause ?? ''} | ${f.detail.replace(/\|/g, '\\|').replace(/\n/g, ' ')} | ${f.fixed ? 'yes' : ''} |`), '');
     if (m.report?.bugs?.length) out.push('### Application bugs found', '', ...m.report.bugs.map((b) => `- **${b.title}**${b.filed ? ` (bug ${b.filed.id})` : ''}: ${b.detail}`), '');
     if (m.verifications.length) out.push('### Verification', '', ...m.verifications.map((x) => `- Attempt ${x.attempt}: ${x.reportOnly ? 'report accepted (not run)' : x.passed ? 'passed' : 'failed'} — ${x.why}${x.runs.length ? ` (${x.runs.map((r) => `run ${r.id}: ${r.passed ?? 0} passed, ${r.failed ?? 0} failed`).join('; ')})` : ''}${x.failures.length ? `\n  ${x.failures.map((f) => `${f.name}${f.error ? `: ${f.error.split('\n')[0].slice(0, 300)}` : ''}`).join('\n  ')}` : ''}`), '');
+    const notes = m.verifications.at(-1)?.standards ?? [];
+    if (notes.length) out.push('### Standards notes', '', ...notes.map((f) => `- \`${f.file ?? ''}${f.line ? `:${f.line}` : ''}\` (${f.rule}): ${f.message.slice(0, 300)}`), '');
     if (m.changes.length) out.push('### Changes', '', ...m.changes.map((c) => `- ${c.status === 'A' ? 'new' : c.status === 'D' ? 'deleted' : 'changed'}: \`${c.path}\``), '');
     return out.join('\n');
 }
