@@ -1947,6 +1947,7 @@ export function createServer(opts: ServerOptions): StudioServer {
         const b = body(req);
         const list = (v: unknown) => Array.isArray(v) && v.every((x) => typeof x === 'string') ? v as string[] : undefined;
         const rr: RunRequest = {
+            ...(typeof b.rerunOf === 'string' && /^[\w-]{1,64}$/.test(b.rerunOf) ? { rerunOf: b.rerunOf } : {}),
             project: configProjectParam(b.project), env: envParam(b.env),
             features: list(b.features)?.map((f) => { ws.abs(f); return f; }),
             tags: str(b.tags, 'tags', { optional: true, max: 500 }) || undefined,

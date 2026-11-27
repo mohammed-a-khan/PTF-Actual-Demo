@@ -527,7 +527,7 @@ export interface LoadGeneratorDef { name: string; url: string; zone?: string; to
 export interface LoadGeneratorHealth { name: string; zone?: string; url: string; state: string; users?: number; requests?: number; errors?: number; cpu?: number; memory?: number; error?: string; lastSeen?: string }
 export interface LoadRunDetailDef extends LoadRunInfoDef { live?: LoadSnapshot; result?: LoadResult; definition: LoadScenarioDef; generators?: LoadGeneratorHealth[] }
 
-export interface RunRequest { project: string; env: string; features?: string[]; tags?: string; scenario?: string; scenarios?: string[]; headless?: boolean; browser?: string; workers?: number;
+export interface RunRequest { rerunOf?: string; project: string; env: string; features?: string[]; tags?: string; scenario?: string; scenarios?: string[]; headless?: boolean; browser?: string; workers?: number;
     retries?: number; device?: string; viewport?: { width: number; height: number }; variables?: Record<string, string>;
     /** Send results to Azure DevOps for this run; not set: as the project is configured. */
     ado?: boolean;

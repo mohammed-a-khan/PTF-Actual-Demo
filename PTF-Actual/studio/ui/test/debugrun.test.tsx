@@ -82,3 +82,16 @@ test('debugger keys go to the newest screen that takes them, once per press, and
     assert.equal(handleDebugKey(f5), false, 'no debug run: the key is left alone');
     assert.equal(prevented, 2);
 });
+
+test('Run again / Rerun failed: the mode is chosen each time; "Run again" after a rerun can go back to what the first run ran', async () => {
+    const { inMode, originOf } = await import('../src/runChoice');
+    const dbg = { project: 'p', env: 'qa', features: ['a.feature'], scenarios: ['x'], debug: { steps: true, pauseOnFailure: true, breakpoints: [] } };
+    assert.deepEqual(inMode(dbg, { mode: 'run', steps: true, pauseOnFailure: true }), { project: 'p', env: 'qa', features: ['a.feature'], scenarios: ['x'] }, 'a debug run run again as a plain run: no debug settings left');
+    assert.deepEqual(inMode({ project: 'p', env: 'qa' } as { project: string; env: string; debug?: unknown }, { mode: 'debug', steps: false, pauseOnFailure: true }), { project: 'p', env: 'qa', debug: { steps: false, pauseOnFailure: true } });
+    const runs = [
+        { id: 'c', request: { rerunOf: 'b' } }, { id: 'b', request: { rerunOf: 'a' } }, { id: 'a', request: {} }, { id: 'z', request: { rerunOf: 'gone' } },
+    ];
+    assert.equal(originOf(runs[0], runs)?.id, 'a', 'a rerun of a rerun: the first run');
+    assert.equal(originOf(runs[2], runs), null, 'not a rerun');
+    assert.equal(originOf(runs[3], runs), null, 'its first run is no longer listed');
+});

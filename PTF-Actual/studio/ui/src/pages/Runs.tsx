@@ -4,7 +4,7 @@
  * Secrets for the chosen environment are given to the run automatically (never shown).
  */
 import React from 'react';
-import { Alert, App, Button, Card, Checkbox, Col, Empty, Form, Input, InputNumber, List, Modal, Popconfirm, Row, Select, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Card, Checkbox, Col, Empty, Form, Input, InputNumber, List, Modal, Popconfirm, Radio, Row, Select, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { SearchOutlined, BugOutlined, StepForwardOutlined, VerticalAlignBottomOutlined, VerticalAlignTopOutlined, WarningOutlined, CaretRightOutlined, CommentOutlined, FileTextOutlined, LoadingOutlined, LockOutlined, DeleteOutlined, CloudUploadOutlined, ReloadOutlined, StopOutlined } from '@ant-design/icons';
 import { api, BisectInfo, Breakpoint, followRun, LogLine, RunCatalog, RunConfigDef, RunEvidence, RunInfo, RunRequest, ScenarioResult } from '../api';
 import { errText, loadRunTarget, openInEditor, saveRunTarget, unsavedFiles, useStudio } from '../state';
@@ -23,7 +23,7 @@ import { currentRoute, navigate, useRoute } from '../route';
 import { TAB_MARK } from '../apiperf-ui';
 import { onRunsChanged, runsChanged, saveEditorFiles } from '../runSignals';
 import { askChangedElsewhere, isChangedElsewhere } from '../components/ChangedElsewhere';
-import { debugPlan, targetForProject } from '../runChoice';
+import { debugPlan, inMode, originOf, RerunMode, targetForProject } from '../runChoice';
 import { commandFor, DebugAction, registerDebugKeys } from '../debugKeys';
 import { StrictWholeNumber } from '../components/StrictWholeNumber';
 import '../styles-tests.css';
@@ -369,6 +369,25 @@ export function Runs() {
         return () => { live = false; clearInterval(t); };
     }, [debugging]);
     const [debugOpen, setDebugOpen] = React.useState(false);
+    // "Run again" / "Rerun failed": the person chooses run or debug (and, after a rerun of failed scenarios, what to run).
+    const [again, setAgain] = React.useState<{ run: RunInfo; kind: 'again' | 'failed' } | null>(null);
+    const [againWhat, setAgainWhat] = React.useState<'same' | 'origin'>('same');
+    const [againMode, setAgainMode] = React.useState<RerunMode>({ mode: 'run', steps: true, pauseOnFailure: true });
+    const askAgain = (run: RunInfo, kind: 'again' | 'failed') => {
+        setAgain({ run, kind }); setAgainWhat('same');
+        setAgainMode({ mode: run.request.debug ? 'debug' : 'run', steps: run.request.debug?.steps ?? true, pauseOnFailure: run.request.debug?.pauseOnFailure ?? true });
+    };
+    const againOrigin = again?.kind === 'again' ? originOf(again.run, runs) : null;
+    const startAgain = () => {
+        if (!again) return;
+        const { run, kind } = again;
+        setAgain(null);
+        const base: RunRequest = kind === 'failed' ? { ...rerunFailed(run, ev), rerunOf: run.id } : againWhat === 'origin' && againOrigin ? againOrigin.request : run.request;
+        void start(inMode(base, againMode));
+    };
+    /** What a run request runs, in a few words. */
+    const whatRuns = (q: RunRequest) => q.scenarios?.length ? `${q.scenarios.length} scenario${q.scenarios.length === 1 ? '' : 's'}${q.features?.length ? ` in ${q.features.length} feature${q.features.length === 1 ? '' : 's'}` : ''}`
+        : [q.features?.length ? `${q.features.length} feature${q.features.length === 1 ? '' : 's'}` : `all features of ${q.project}`, q.tags ? `tags ${q.tags}` : '', q.scenario ? `scenarios named "${q.scenario}"` : ''].filter(Boolean).join(', ');
     const [debugOpts, setDebugOpts] = React.useState({ steps: true, pauseOnFailure: true, slowMo: 0 });
     const debugCmd = async (id: string, cmd: Parameters<typeof api.debugRun>[1]) => {
         setRuns((rs) => rs.map((x) => (x.id === id ? { ...x, paused: null, codePaused: null } : x)));
@@ -604,9 +623,9 @@ export function Runs() {
                                     {current.state === 'running' && <Button size="small" danger icon={<StopOutlined />} onClick={() => api.stopRun(current.id)}>Stop</Button>}
                                     {current.reportKey && (!current.bisect || current.state === 'running') && <Button size="small" icon={<FileTextOutlined />} href={`/report/${current.id}/${current.reportKey}/${current.reportIndex ?? 'index.html'}`} target="_blank" rel="noreferrer">Open report</Button>}
                                     {s && !running && current.state !== 'running' && !current.bisect && <Tooltip title="Publish these results to Azure DevOps Test Plans (test runs on the test cases the scenarios automate)"><Button size="small" icon={<CloudUploadOutlined />} onClick={() => setPublishOpen(true)}>Publish to Azure DevOps</Button></Tooltip>}
-                                    {s && s.failed > 0 && !running && <Tooltip title="Run only the scenarios that failed"><Button size="small" onClick={() => current.pr ? void rerunPr(current) : start(rerunFailed(current, ev))}>Rerun failed</Button></Tooltip>}
+                                    {s && s.failed > 0 && !running && <Tooltip title="Run only the scenarios that failed"><Button size="small" onClick={() => current.pr ? void rerunPr(current) : askAgain(current, 'failed')}>Rerun failed</Button></Tooltip>}
                                     {s && s.failed > 0 && !running && !current.pr && !current.bisect && bisect?.state !== 'running' && <Tooltip title="Run this scenario on earlier commits to find the one where it started failing"><Button size="small" icon={<SearchOutlined />} onClick={() => setBisectOpen(true)}>Which commit broke it?</Button></Tooltip>}
-                                    {!running && current.state !== 'running' && !current.pr && <Button size="small" icon={<CaretRightOutlined />} onClick={() => start(current.request)}>Run again</Button>}
+                                    {!running && current.state !== 'running' && !current.pr && <Button size="small" icon={<CaretRightOutlined />} onClick={() => askAgain(current, 'again')}>Run again</Button>}
                                     {current.pr && current.state !== 'running' && <>
                                         {s && <Button size="small" type="primary" icon={<CommentOutlined />} onClick={() => setPosting(current.id)}>Post results to the PR</Button>}
                                         <Button size="small" onClick={() => navigate(['prs', current.pr!.repository, current.pr!.id, 'tests'])}>Back to the pull request</Button>
@@ -671,6 +690,34 @@ export function Runs() {
                         {resultsCard}
                     </>
                 )}
+                <Modal open={!!again} title={again?.kind === 'failed' ? 'Rerun the failed scenarios' : 'Run again'} onCancel={() => setAgain(null)} destroyOnClose
+                    footer={<Space><Button onClick={() => setAgain(null)}>Cancel</Button>
+                        <Button type="primary" icon={againMode.mode === 'debug' ? <BugOutlined /> : <CaretRightOutlined />} onClick={startAgain} data-testid="again-start">{againMode.mode === 'debug' ? 'Start debugging' : 'Run'}</Button></Space>}>
+                    {again && <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                        {again.kind === 'failed'
+                            ? <Typography.Text>{(again.run.summary?.scenarios ?? []).filter((x) => x.status === 'failed' || x.status === 'broken').length} failed scenario(s) of this run.</Typography.Text>
+                            : againOrigin ? <div>
+                                <div className="cs-field-label">What to run</div>
+                                <Radio.Group value={againWhat} onChange={(e) => setAgainWhat(e.target.value)} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                    <Radio value="same" data-testid="again-same">The same as this run: {whatRuns(again.run.request)}</Radio>
+                                    <Radio value="origin" data-testid="again-origin">What the first run ran: {whatRuns(againOrigin.request)}</Radio>
+                                </Radio.Group>
+                            </div> : <Typography.Text>{whatRuns(again.run.request)}, as this run.</Typography.Text>}
+                        <div>
+                            <div className="cs-field-label">How</div>
+                            <Radio.Group value={againMode.mode} onChange={(e) => setAgainMode((m) => ({ ...m, mode: e.target.value }))} optionType="button" buttonStyle="solid">
+                                <Radio.Button value="run" data-testid="again-run"><CaretRightOutlined /> Run</Radio.Button>
+                                <Radio.Button value="debug" data-testid="again-debug"><BugOutlined /> Debug</Radio.Button>
+                            </Radio.Group>
+                            {again.run.request.debug && <Typography.Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>This run was a debug run.</Typography.Text>}
+                        </div>
+                        {againMode.mode === 'debug' && <Space direction="vertical" size={2}>
+                            <Checkbox checked={againMode.steps} onChange={(e) => setAgainMode((m) => ({ ...m, steps: e.target.checked }))}>Pause before each step</Checkbox>
+                            <Checkbox checked={againMode.pauseOnFailure} onChange={(e) => setAgainMode((m) => ({ ...m, pauseOnFailure: e.target.checked }))}>Pause when a step fails</Checkbox>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>Breakpoints set in the Code screen pause it too. Scenarios run one at a time in a visible browser.</Typography.Text>
+                        </Space>}
+                    </Space>}
+                </Modal>
                 <Modal open={debugOpen} title="Debug run" onCancel={() => setDebugOpen(false)}
                     footer={<Space>
                         <Button onClick={() => setDebugOpen(false)}>Cancel</Button>

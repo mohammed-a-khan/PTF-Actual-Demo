@@ -22,6 +22,8 @@ import { frameworkPackages } from '../lang/steps';
 import { systemTool } from '../secrets/protector';
 
 export interface RunRequest {
+    /** A rerun of another run's failed scenarios: that run (so "Run again" can offer what it ran). */
+    rerunOf?: string;
     project: string;
     env: string;
     features?: string[];

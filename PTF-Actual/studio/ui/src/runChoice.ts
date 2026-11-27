@@ -43,3 +43,21 @@ export function debugPlan(all: Breakpoint[], runFeatures: string[] | null, opts:
         : `Nothing would pause the run: there are no breakpoints${skipped ? ` in what runs (${skipped} in feature files that do not run)` : ''} and neither box is ticked. Set a breakpoint (click a line number in the Code screen) or tick a box.`;
     return { breakpoints: bps, files, startable, reason };
 }
+
+/** How a run is started again: run it, or debug it (with these pauses). */
+export interface RerunMode { mode: 'run' | 'debug'; steps: boolean; pauseOnFailure: boolean }
+/** The first run of a chain of "Rerun failed" runs (what was chosen originally), when it is still listed. */
+export function originOf<R extends { id: string; request: { rerunOf?: string } }>(run: R, runs: R[]): R | null {
+    let cur: R | undefined = run;
+    const seen = new Set<string>();
+    while (cur?.request.rerunOf && !seen.has(cur.id)) { seen.add(cur.id); const up: R | undefined = runs.find((r) => r.id === cur!.request.rerunOf); if (!up) return null; cur = up; }
+    return cur && cur !== run ? cur : null;
+}
+/**
+ * The request to start: `base` (what to run) in the mode chosen. A debug run gets the chosen pauses (and its
+ * breakpoints, added by the server); a plain run loses the debug settings of the run it repeats.
+ */
+export function inMode<T extends { debug?: unknown }>(base: T, m: RerunMode): T {
+    const { debug: _d, ...rest } = base; void _d;
+    return (m.mode === 'debug' ? { ...rest, debug: { steps: m.steps, pauseOnFailure: m.pauseOnFailure } } : rest) as T;
+}
