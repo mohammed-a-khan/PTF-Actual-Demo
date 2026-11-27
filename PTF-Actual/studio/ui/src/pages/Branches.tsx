@@ -1,7 +1,7 @@
 /** Branches & tags (TortoiseGit "Browse references"). */
 import React from 'react';
 import { useSwitchBranch } from '../branchSwitch';
-import { App, Button, Dropdown, Empty, Form, Input, Modal, Segmented, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Dropdown, Empty, Form, Input, Modal, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { MenuProps } from 'antd';
 import { BranchesOutlined, CloudUploadOutlined, DeleteOutlined, MoreOutlined, PlusOutlined, SearchOutlined, TagOutlined } from '@ant-design/icons';
 import { api, BranchInfo, NameStatus, TagInfo } from '../api';
@@ -126,16 +126,35 @@ export function Branches() {
         catch (e) { setRenameErr(errText(e)); }
         finally { setRenameBusy(false); }
     };
-    const del = (b: BranchInfo) => modal.confirm({
+    /** Delete, asking again when it has commits no other branch has. */
+    const deleteNow = async (name: string) => {
+        const r = await api.deleteBranch(name);
+        if (r.status === 'not-merged') {
+            modal.confirm({ title: `${name} has unmerged commits`, content: r.message, okText: 'Delete anyway', okButtonProps: { danger: true },
+                onOk: () => run(`Deleted ${name}`, () => api.deleteBranch(name, true)) });
+        } else { message.success(`Deleted ${name}`); await refresh(); }
+    };
+    const del = (b: BranchInfo) => b.current ? setDelCurrent({ branch: b.name, to: otherBranch(b.name) }) : modal.confirm({
         title: `Delete branch ${b.name}?`, okText: 'Delete', okButtonProps: { danger: true },
-        content: 'Only the branch name is removed on this computer. Commits that are also on other branches stay.',
-        onOk: async () => {
-            const r = await api.deleteBranch(b.name);
-            if (r.status === 'not-merged') {
-                modal.confirm({ title: `${b.name} has unmerged commits`, content: r.message, okText: 'Delete anyway', okButtonProps: { danger: true },
-                    onOk: () => run(`Deleted ${b.name}`, () => api.deleteBranch(b.name, true)) });
-            } else { message.success(`Deleted ${b.name}`); await refresh(); }
-        },
+        content: `Only the branch is removed on this computer${b.upstreamGone ? ' (it was already deleted on the remote)' : ''}. Commits that are also on other branches stay.`,
+        onOk: () => deleteNow(b.name),
+    });
+    // The branch you are on cannot be deleted (Git refuses): switch to another first, then delete it.
+    const [delCurrent, setDelCurrent] = React.useState<{ branch: string; to: string | undefined } | null>(null);
+    const otherBranch = (name: string) => { const o = branches.filter((x) => !x.remote && x.name !== name).map((x) => x.name); return o.find((x) => x === 'main') ?? o.find((x) => x === 'master') ?? o.find((x) => x === 'develop') ?? o[0]; };
+    const switchAndDelete = async () => {
+        if (!delCurrent?.to) return;
+        const { branch, to } = delCurrent;
+        setDelCurrent(null);
+        if (await switchBranch(to)) await deleteNow(branch);
+    };
+    // Branches deleted on the remote (merged pull requests, usually): deleted here too, in one go.
+    const cleanUpGone = (list: BranchInfo[]) => modal.confirm({
+        title: `Delete ${list.length} branch${list.length === 1 ? '' : 'es'} deleted on the remote?`,
+        content: <><ul style={{ margin: '6px 0 0 16px', padding: 0 }}>{list.map((b) => <li key={b.name}><Typography.Text code>{b.name}</Typography.Text></li>)}</ul>
+            A branch with commits that are on no other branch is asked about on its own.</>,
+        okText: 'Delete them', okButtonProps: { danger: true },
+        onOk: async () => { for (const b of list) { try { await deleteNow(b.name); } catch (e) { message.error(`${b.name}: ${errText(e)}`); } } await refresh(); },
     });
 
     const compare = async (a: string, b: string) => {
@@ -157,7 +176,7 @@ export function Branches() {
             { type: 'divider' },
             { key: 'rename', label: 'Rename…' },
             { key: 'upstream', label: 'Track a remote branch…', disabled: !b.current },
-            { key: 'delete', label: 'Delete…', danger: true, disabled: b.current },
+            { key: 'delete', label: b.current ? 'Switch to another branch and delete this one…' : 'Delete…', danger: true },
         ],
         onClick: ({ key }) => {
             if (key === 'switch') void switchBranch(b.name).then(() => loadTags());
@@ -208,7 +227,14 @@ export function Branches() {
                 {part !== 'remotes' && <Input allowClear prefix={<SearchOutlined />} placeholder={part === 'tags' ? 'Find a tag' : 'Find a branch'} aria-label={part === 'tags' ? 'Find a tag' : 'Find a branch'} value={find} onChange={(e) => setFind(e.target.value)} style={{ width: 240 }} />}
                 <span className="dg-spacer" />
                 {part === 'tags' && <Button icon={<PlusOutlined />} onClick={() => setNewTag({ name: '', rev: 'HEAD', message: '' })}>New tag</Button>}
+                {part === 'local' && (() => { const gone = local.filter((b) => b.upstreamGone && !b.current); return gone.length > 1 ? <Tooltip title="Branches whose remote branch was deleted (their pull requests were usually completed)"><Button icon={<DeleteOutlined />} onClick={() => cleanUpGone(gone)}>Clean up {gone.length} deleted on the remote</Button></Tooltip> : null; })()}
             </div>
+            <Modal open={!!delCurrent} title={`Delete ${delCurrent?.branch ?? ''}?`} onCancel={() => setDelCurrent(null)} okText="Switch and delete" okButtonProps={{ danger: true, disabled: !delCurrent?.to }} onOk={() => void switchAndDelete()} destroyOnClose>
+                <Typography.Paragraph>You are on <b>{delCurrent?.branch}</b>, and Git cannot delete the branch you are on. Switch to another branch first; then {delCurrent?.branch} is deleted on this computer.</Typography.Paragraph>
+                <Space><span>Switch to</span><Select style={{ minWidth: 240 }} value={delCurrent?.to} aria-label="Branch to switch to" onChange={(v) => setDelCurrent((d) => (d ? { ...d, to: v } : d))}
+                    options={local.filter((b) => b.name !== delCurrent?.branch).map((b) => ({ value: b.name, label: b.name }))} /></Space>
+                <Typography.Paragraph type="secondary" style={{ marginTop: 10, marginBottom: 0, fontSize: 12 }}>Uncommitted changes: you are asked whether to keep them on {delCurrent?.branch} (they are stashed, and stay in Stashes after it is deleted) or take them along.</Typography.Paragraph>
+            </Modal>
             {part === 'local' && <>
             <Table<BranchInfo> size="small" rowKey="name" dataSource={local.filter(match)} pagination={false}
                 locale={{ emptyText: q ? 'No branch matches.' : 'No branches.' }}
@@ -216,7 +242,8 @@ export function Branches() {
                     { title: 'Branch', dataIndex: 'name', render: (n: string, b) => <Space><Typography.Text strong={b.current}>{n}</Typography.Text>{b.current && <Tag color="magenta">current</Tag>}</Space> },
                     { title: 'Tracks', dataIndex: 'upstream', render: (u: string | null, b) => !u ? <Typography.Text type="secondary">not published</Typography.Text>
                         // The remote branch was deleted: say so here (not only in the header), struck through.
-                        : b.upstreamGone ? <Tooltip title={`${u} was deleted on the remote. Push publishes ${b.name} again; or delete this branch if it was merged.`}><Space size={4} wrap><Tag style={{ textDecoration: 'line-through' }}>{u}</Tag><Typography.Text type="warning">deleted on the remote</Typography.Text></Space></Tooltip>
+                        : b.upstreamGone ? <Space size={4} wrap><Tooltip title={`${u} was deleted on the remote (usually: its pull request was completed). Publish publishes ${b.name} again; or delete it here too.`}><Tag style={{ textDecoration: 'line-through' }}>{u}</Tag><Typography.Text type="warning">deleted on the remote</Typography.Text></Tooltip>
+                            <Button size="small" type="link" danger icon={<DeleteOutlined />} onClick={() => del(b)} data-testid={`delete-gone-${b.name}`}>{b.current ? 'Switch and delete here too' : 'Delete here too'}</Button></Space>
                         : <Tag color="orange">{u}</Tag> },
                     { title: 'Last commit', dataIndex: 'sha', width: 120, render: (s: string) => <Typography.Text code>{s.slice(0, 7)}</Typography.Text> },
                     { title: '', width: 220, render: (_: unknown, b) => (
