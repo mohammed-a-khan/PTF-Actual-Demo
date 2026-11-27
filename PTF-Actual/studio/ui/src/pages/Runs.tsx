@@ -581,10 +581,10 @@ export function Runs() {
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0, minWidth: 0, flex: 1 }}>
                 {bisect && <BisectPanel value={bisect} onChange={(b) => { setBisect(b); void loadRuns(); }} onOpenRun={(id) => navigate(runsAddr(id))} />}
-                {bisectOpen && current?.summary && <BisectStart project={current.request.project} env={current.request.env} browser={current.request.browser} onClose={() => setBisectOpen(false)}
+                {bisectOpen && current?.summary && <BisectStart runId={current.id} project={current.request.project} env={current.request.env} browser={current.request.browser} onClose={() => setBisectOpen(false)}
                     onStarted={(b) => { setBisectOpen(false); setBisect(b); }}
                     failed={current.summary.scenarios.filter((x) => x.status === 'failed' || x.status === 'broken').filter((x, i, a) => a.findIndex((y) => y.name === x.name) === i)
-                        .map((x) => ({ name: x.name, file: ev?.scenarios.find((e) => e.name === x.name && e.feature === x.feature)?.location?.file ?? current.request.features?.find((f) => f.endsWith('.feature') && current.request.features!.length === 1) }))} />}
+                        .map((x) => ({ name: x.name, feature: x.feature, file: ev?.scenarios.find((e) => e.name === x.name && e.feature === x.feature)?.location?.file ?? current.request.features?.find((f) => f.endsWith('.feature') && current.request.features!.length === 1) }))} />}
                 {pipelineOpen && <MakePipeline open={pipelineOpen} onClose={() => setPipelineOpen(false)} request={request()} envs={envs} />}
                 {current && publishOpen && <PublishToAdo run={current} open={publishOpen} onClose={() => setPublishOpen(false)} />}
                 {current?.pr && <PrPostResults repo={current.pr.repository} id={current.pr.id} run={posting} open={!!posting} onClose={() => setPosting(null)} />}

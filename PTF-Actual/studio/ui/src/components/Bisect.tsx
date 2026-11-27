@@ -9,17 +9,28 @@ import { CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined, MinusCircleO
 import { api, BisectInfo } from '../api';
 import { errText } from '../state';
 import { navigate } from '../route';
+import { locateFailed } from '../bisectLocate';
 
 const short = (c: string) => c.slice(0, 8);
 const when = (iso: string) => new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 
-export function BisectStart({ failed, project, env, browser, onClose, onStarted }: {
-    failed: Array<{ name: string; file?: string }>; project: string; env: string; browser?: string;
+export function BisectStart({ runId, failed, project, env, browser, onClose, onStarted }: {
+    runId: string; failed: Array<{ name: string; feature?: string; file?: string }>; project: string; env: string; browser?: string;
     onClose: () => void; onStarted: (b: BisectInfo) => void;
 }) {
     const { message } = App.useApp();
-    const usable = failed.filter((f) => f.file);
-    const [scenario, setScenario] = React.useState(usable[0]?.name ?? '');
+    // Where each failed scenario is: worked out here (the run's evidence, else the feature files), not left to what the page had loaded.
+    const [located, setLocated] = React.useState<Array<{ name: string; file?: string }> | null>(null);
+    React.useEffect(() => {
+        let live = true;
+        void Promise.all([api.runEvidence(runId).catch(() => null), api.runCatalog().catch(() => null)]).then(([ev, cat]) => {
+            if (live) setLocated(locateFailed(failed, project, ev?.scenarios ?? [], cat?.features ?? []));
+        });
+        return () => { live = false; };
+    }, [runId]); // eslint-disable-line react-hooks/exhaustive-deps
+    const usable = (located ?? []).filter((f) => f.file);
+    const [scenario, setScenario] = React.useState('');
+    React.useEffect(() => { if (located && !scenario && usable[0]) setScenario(usable[0].name); }, [located]); // eslint-disable-line react-hooks/exhaustive-deps
     const [sug, setSug] = React.useState<Awaited<ReturnType<typeof api.bisectSuggest>> | null>(null);
     const [good, setGood] = React.useState<string | undefined>();
     const [range, setRange] = React.useState<{ commits: number; estimate: number } | null>(null);
@@ -51,14 +62,14 @@ export function BisectStart({ failed, project, env, browser, onClose, onStarted 
             <Typography.Paragraph type="secondary" style={{ marginTop: 0 }}>
                 The scenario is run on commits between one where it passed and this one, halving the range each time, until the first commit where it fails is found. It runs in a separate copy of the repository: your branch and files stay as they are.
             </Typography.Paragraph>
-            {!usable.length && <Alert type="warning" showIcon message="The run's report does not say which feature file the failed scenarios are in, so they cannot be searched." />}
+            {located && !usable.length && <Alert type="warning" showIcon message="The failed scenarios were not found in this project's feature files (renamed or deleted since the run?), so they cannot be searched." />}
             <Form layout="vertical">
                 <Form.Item label="Failing scenario" htmlFor="cs-bisect-scenario">
-                    <Select id="cs-bisect-scenario" value={scenario || undefined} onChange={setScenario} options={usable.map((f) => ({ value: f.name, label: <span>{f.name} <Typography.Text type="secondary">· {f.file}</Typography.Text></span> }))} />
+                    <Select id="cs-bisect-scenario" loading={!located} placeholder={!located ? 'Finding the failed scenarios…' : undefined} value={scenario || undefined} onChange={setScenario} options={usable.map((f) => ({ value: f.name, label: <span>{f.name} <Typography.Text type="secondary">· {f.file}</Typography.Text></span> }))} />
                 </Form.Item>
                 <Form.Item label="A commit where it passed" htmlFor="cs-bisect-good"
                     extra={sug && !sug.good ? 'No earlier run of this scenario passed on a commit of this branch: pick one where you know it worked.' : sug?.goodRun ? `From the run of ${when(sug.goodRun.at)}.` : undefined}>
-                    <Select id="cs-bisect-good" showSearch loading={!sug} value={good} onChange={setGood} placeholder="Choose a commit" options={options}
+                    <Select id="cs-bisect-good" showSearch loading={!!scenario && !sug} disabled={!scenario} value={good} onChange={setGood} placeholder="Choose a commit" options={options}
                         filterOption={(input, o) => String((o as { search?: string }).search ?? '').toLowerCase().includes(input.toLowerCase())} />
                 </Form.Item>
             </Form>
