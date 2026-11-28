@@ -33,6 +33,8 @@ import { EvalRunner, EVALS_DIR, readSuite, saveSuite, suiteVersion, validateSuit
 import { AGENT_TEMPLATES, deleteAgent, getAgent, listAgents, profileOf, saveAgent, TOOL_GROUPS, AGENTS_DIR, teamCandidates, teamMember } from '../agents/builder';
 import { FINISHED as MISSION_FINISHED, label as missionLabel, MissionAgent, MissionDeps, MissionEngine, MissionRun, MissionTriggers, MISSIONS_FILE, PolledTriggers, readMissionsFile, TEMPLATES as BUILT_IN_MISSIONS, templates as missionTemplates } from '../agents/missions';
 import { TEAM_MEMORY_FILE } from '../agents/host';
+import { BASELINE_MAX } from '../agents/baselines';
+import { changeCount } from '../agents/hunks';
 import { ChangedElsewhere, checkVersion as checkAgentVersion, fileVersion as agentFileVersion, textVersion } from '../agents/version';
 import { htmlText, KnowledgeBase, KnowledgeDoc, KNOWLEDGE_FILE } from '../agents/knowledge';
 import { deliver, deliverInbox, Delivery, NotifyChannel, NotifyStore, previousState, runNote, secretName as notifySecret, shouldNotify, validateChannels, validateWebhook } from '../notify/notify';
@@ -6557,6 +6559,76 @@ export function createServer(opts: ServerOptions): StudioServer {
             const state = !f ? (fs.existsSync(path.join(opts.repoRoot, p)) ? 'unchanged' : 'gone') : f.untracked ? 'new' : f.unstaged === 'D' || f.staged === 'D' ? 'deleted' : f.staged === 'A' ? 'new' : 'modified';
             return { path: p, state, staged: !!f && f.staged !== '.' && !f.untracked };
         }) };
+    });
+    // Review of an agent's edits in the editor (as VS Code's Keep / Undo): each file against its state before the
+    // conversation first changed it (src/agents/baselines.ts), with the changed blocks (src/agents/hunks.ts).
+    const readNowOrNull = (rel: string): string | null => {
+        try { const abs = safePath(opts.repoRoot, rel); const st = fs.statSync(abs); if (!st.isFile() || st.size > BASELINE_MAX) return null; return fs.readFileSync(abs, 'utf8'); } catch { return null; }
+    };
+    const baselineOf = async (id: string, rel: string): Promise<string | null | undefined> => {
+        const b = agents.baselines.get(id, rel);
+        if (b) return b.text;
+        // Changed before baselines were kept (or named only in a Studio answer): the last commit.
+        const r = await runGit(['show', `HEAD:${rel}`], { cwd: opts.repoRoot, allowFailure: true });
+        return r.code === 0 ? r.stdout : null;
+    };
+    const reviewFiles = async (id: string) => {
+        const out: Array<{ path: string; state: 'new' | 'modified' | 'deleted'; added: number; removed: number; before: string | null; after: string | null }> = [];
+        for (const rel of agents.changes(id).slice(0, 200)) {
+            const before = await baselineOf(id, rel);
+            if (before === undefined) continue;
+            const after = readNowOrNull(rel);
+            if (before === after || (after === null && !fs.existsSync(path.join(opts.repoRoot, rel)) && before === null)) continue;
+            const exists = fs.existsSync(path.join(opts.repoRoot, rel));
+            if (exists && after === null) continue; // too large or not text: Source control shows it
+            const n = changeCount(before, after);
+            out.push({ path: rel, state: before === null ? 'new' : !exists ? 'deleted' : 'modified', added: n.added, removed: n.removed, before, after });
+        }
+        return out;
+    };
+    /** Every conversation's edits waiting for review (not missions: theirs are on their own branch). */
+    app.get('/api/agents/review', async () => {
+        const sessions = agents.list().filter((x) => !x.id.startsWith('mission-') && x.changes > 0).slice(0, 30);
+        const files: Array<{ session: string; title: string; busy: boolean } & Awaited<ReturnType<typeof reviewFiles>>[number]> = [];
+        for (const x of sessions) for (const f of await reviewFiles(x.id)) files.push({ session: x.id, title: x.title, busy: !!x.busy, ...f });
+        return { files };
+    });
+    app.post('/api/agents/sessions/:id/review/keep', async (req) => {
+        const id = str((req.params as { id: string }).id, 'id', { max: 80 });
+        const b = body(req);
+        const mine = new Set(agents.changes(id));
+        const paths = b.path === undefined ? [...mine] : [filePath(b.path)];
+        for (const p of paths) {
+            if (!mine.has(p)) throw new BadRequest(`${p} was not changed by this conversation.`);
+            // One change kept: the baseline with it taken in (the client sends it); else the whole file as it is now.
+            if (b.baseline !== undefined && b.path !== undefined) agents.baselines.set(id, p, b.baseline === null ? null : content(b.baseline));
+            else agents.baselines.set(id, p, fs.existsSync(path.join(opts.repoRoot, p)) ? readNowOrNull(p) : null);
+        }
+        log('agent.keep', `Kept ${paths.length === 1 ? (b.baseline !== undefined ? `a change in ${paths[0]}` : paths[0]) : `${paths.length} files`} an agent changed`, { agentSession: id });
+        return { ok: true };
+    });
+    app.post('/api/agents/sessions/:id/review/undo', async (req) => {
+        const id = str((req.params as { id: string }).id, 'id', { max: 80 });
+        const b = body(req);
+        const mine = new Set(agents.changes(id));
+        const paths = b.path === undefined ? [...mine] : [filePath(b.path)];
+        const recoveryDir = path.join(gitDirOf(opts.repoRoot), 'cs-studio', 'recovery', `${new Date().toISOString().replace(/[:.]/g, '-')}-agent-undo`);
+        let n = 0;
+        for (const p of paths) {
+            if (!mine.has(p)) throw new BadRequest(`${p} was not changed by this conversation.`);
+            const before = await baselineOf(id, p);
+            if (before === undefined) continue;
+            const abs = safePath(opts.repoRoot, p);
+            const now = fs.existsSync(abs) ? fs.readFileSync(abs) : null;
+            if (now !== null && before !== null && now.toString('utf8') === before) continue;
+            if (now !== null) { const d = path.join(recoveryDir, p); fs.mkdirSync(path.dirname(d), { recursive: true }); fs.writeFileSync(d, now); }
+            if (before === null) fs.rmSync(abs, { force: true });
+            else { fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, before); }
+            n++;
+        }
+        stepCache = null;
+        log('agent.undo', `Undid an agent's changes to ${n} file(s); copies kept`, { agentSession: id, recoveryDir });
+        return { ok: true, files: n, recoveryDir: n ? recoveryDir : undefined };
     });
     app.get('/api/agents/sessions/:id/transcript', async (req, reply) => {
         const id = str((req.params as { id: string }).id, 'id', { max: 80 });

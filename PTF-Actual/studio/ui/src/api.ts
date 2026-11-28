@@ -506,6 +506,8 @@ export interface AgentStatus { sdk: { installed: boolean; version?: string; sour
 export interface AgentUsage { calls: number; inputTokens: number; outputTokens: number; cost: number; model?: string }
 export interface AgentSessionInfo { id: string; title: string; createdAt: string; workflow?: string; model: string; active: boolean; busy: boolean; changes: number; usage: AgentUsage; agent?: { id: string; name: string } }
 export interface AgentChange { path: string; state: 'new' | 'modified' | 'deleted' | 'unchanged' | 'gone'; staged: boolean }
+/** A file an agent conversation changed and nobody kept or undid yet: before = as it was before the conversation's first change (null: new). */
+export interface AgentReviewFile { session: string; title: string; busy: boolean; path: string; state: 'new' | 'modified' | 'deleted'; added: number; removed: number; before: string | null; after: string | null }
 export type AgentEventDef = { seq: number; at: number } & (
     | { type: 'user'; text: string; context?: string } | { type: 'delta'; text: string } | { type: 'assistant'; text: string } | { type: 'reasoning'; text: string }
     | { type: 'tool-start'; id: string; tool: string; args: string; server?: string } | { type: 'tool-end'; id: string; ok: boolean; result: string }
@@ -941,6 +943,11 @@ export const api = {
     agentDelete: (id: string) => request<{ ok: boolean }>('DELETE', `/api/agents/sessions/${encodeURIComponent(id)}`),
     agentSend: (id: string, text: string, context?: Record<string, unknown>) => request<{ ok: boolean }>('POST', `/api/agents/sessions/${encodeURIComponent(id)}/messages`, { text, context }),
     agentChanges: (id: string) => request<{ files: AgentChange[] }>('GET', `/api/agents/sessions/${encodeURIComponent(id)}/changes`),
+    agentReview: () => request<{ files: AgentReviewFile[] }>('GET', '/api/agents/review'),
+    /** Keep a conversation's changes: one file (baseline: with only one change taken in), or all of them (no path). */
+    agentKeep: (id: string, path?: string, baseline?: string | null) => request<{ ok: true }>('POST', `/api/agents/sessions/${encodeURIComponent(id)}/review/keep`, { ...(path !== undefined ? { path } : {}), ...(baseline !== undefined ? { baseline } : {}) }),
+    /** Undo a conversation's changes to one file or all of them: back to before its first change (a copy is kept). */
+    agentUndo: (id: string, path?: string) => request<{ ok: true; files: number; recoveryDir?: string }>('POST', `/api/agents/sessions/${encodeURIComponent(id)}/review/undo`, path !== undefined ? { path } : {}),
     agentTranscript: (id: string) => request<string>('GET', `/api/agents/sessions/${encodeURIComponent(id)}/transcript`),
     agentEvents: (id: string, after: number) => request<{ events: AgentEventDef[]; busy: boolean; known?: boolean; usage?: AgentUsage; changes?: number }>('GET', `/api/agents/sessions/${encodeURIComponent(id)}/events?after=${after}`),
     agentAbort: (id: string) => request<{ ok: boolean }>('POST', `/api/agents/sessions/${encodeURIComponent(id)}/abort`, {}),

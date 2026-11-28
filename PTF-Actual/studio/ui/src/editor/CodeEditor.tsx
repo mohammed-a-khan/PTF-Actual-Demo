@@ -19,6 +19,7 @@ import { ArrowDownOutlined, ArrowUpOutlined, CloseOutlined } from '@ant-design/i
 import { commentPrefix, Highlighter, Lang } from './highlight';
 import { completionText, editBetween, ghostOf, inlineFits, InlineSuggestion, needsDetails, nextWordLength, parseSnippet, snippetAfterEdit, SnippetMode } from './assist';
 import { editorMenu, MenuEntry } from '../contextMenus';
+import type { Hunk } from '../../../src/agents/hunks';
 import { useContextMenu } from '../components/ContextMenu';
 
 export interface EditorDiagnostic { line: number; column: number; endLine: number; endColumn: number; message: string; severity: 'error' | 'warning' | 'info' | string; source?: string }
@@ -76,6 +77,8 @@ export interface CodeEditorProps {
      * `file` (copy path, history, …) at the end. The editor's own items (clipboard, find, format, …) are always there.
      */
     contextMenu?: (at: { line: number; offset: number; text: string }) => { actions?: MenuEntry[]; file?: MenuEntry[] };
+    /** An agent's changes to review (as VS Code's Keep / Undo): changed lines marked, removed lines on hover, Keep / Undo on each change. */
+    review?: { hunks: Hunk[]; onKeep: (id: string) => void; onUndo: (id: string) => void; who?: string } | null;
 }
 
 export interface CodeEditorHandle {
@@ -986,6 +989,10 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                             <button type="button" className="ed-gutter-act" aria-label={a.title} style={{ top: PAD_T + (a.line - 1) * LH }} onClick={a.onClick}>▶</button>
                         </Tooltip>
                     ))}
+                    {(props.review?.hunks ?? []).filter((h) => h.afterStart + Math.max(1, h.afterCount) > first && h.afterStart < last).map((h) => (
+                        <div key={'rv' + h.id} className={`ed-rv-bar ${h.afterCount === 0 ? 'del' : h.removed.length ? 'mod' : 'add'}`} aria-hidden
+                            style={{ top: PAD_T + h.afterStart * LH - (h.afterCount === 0 ? 3 : 0), height: h.afterCount === 0 ? 6 : h.afterCount * LH }} />
+                    ))}
                     {Array.from({ length: last - first }, (_, k) => first + k).map((l) => (
                         <div key={l} className={`ed-ln${l === caretPos.line ? ' cur' : ''}${props.onToggleBreakpoint ? ' bp-able' : ''}${l + 1 === props.execLine ? ' exec' : ''}`} style={{ top: PAD_T + l * LH, height: LH, lineHeight: `${LH}px` }}
                             onClick={props.onToggleBreakpoint && (bpSet.has(l + 1) || !blankOrComment(lines[l] ?? '')) ? () => props.onToggleBreakpoint!(l + 1) : undefined}
@@ -1001,6 +1008,9 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                 <div className="ed-overlay" aria-hidden style={{ transform: `translate(${-scroll.left}px, ${-scroll.top}px)` }}>
                     <div className="ed-curline" style={{ top: PAD_T + caretPos.line * LH, height: LH }} />
                     {props.execLine ? <div className="ed-execline" style={{ top: PAD_T + (props.execLine - 1) * LH, height: LH }} /> : null}
+                    {(props.review?.hunks ?? []).filter((h) => h.afterStart + Math.max(1, h.afterCount) > first && h.afterStart < last).map((h) => h.afterCount > 0
+                        ? <div key={'rva' + h.id} className="ed-rv-add" style={{ top: PAD_T + h.afterStart * LH, height: h.afterCount * LH }} />
+                        : <div key={'rvd' + h.id} className="ed-rv-del" style={{ top: PAD_T + h.afterStart * LH - 1 }} />)}
                     {visibleMatches.map(([s, e], i) => {
                         const p = posOf(starts, s);
                         const l = lines[p.line];
@@ -1053,6 +1063,22 @@ export const CodeEditor = React.forwardRef<CodeEditorHandle, CodeEditorProps>(fu
                         return segs;
                     })}
                 </div>
+                {props.review && props.review.hunks.length > 0 && (
+                    <div className="ed-rv-layer" style={{ transform: `translateY(${-scroll.top}px)` }}>
+                        {props.review.hunks.filter((h) => h.afterStart + Math.max(1, h.afterCount) > first && h.afterStart < last).map((h, i) => (
+                            <div key={'rvw' + h.id} className="ed-rv-pill" data-testid="review-pill" style={{ top: PAD_T + Math.max(0, h.afterStart - (h.afterCount === 0 ? 1 : 0)) * LH + 1 }}>
+                                {h.removed.length > 0 && (
+                                    <Tooltip placement="left" overlayClassName="ed-rv-tip" title={<pre className="ed-rv-removed">{h.removed.slice(0, 40).join('\n')}{h.removed.length > 40 ? `\n… ${h.removed.length - 40} more` : ''}</pre>}>
+                                        <span className="ed-rv-count del" tabIndex={0} aria-label={`${h.removed.length} line(s) removed: hover to see them`}>−{h.removed.length}</span>
+                                    </Tooltip>
+                                )}
+                                {h.added.length > 0 && <span className="ed-rv-count add">+{h.added.length}</span>}
+                                <button type="button" className="ed-rv-btn keep" title={`Keep this change${props.review!.who ? ` by ${props.review!.who}` : ''}`} aria-label={`Keep change ${i + 1}`} onMouseDown={(e) => e.preventDefault()} onClick={() => props.review!.onKeep(h.id)}>Keep</button>
+                                <button type="button" className="ed-rv-btn undo" title="Undo this change (back to the lines before it)" aria-label={`Undo change ${i + 1}`} onMouseDown={(e) => e.preventDefault()} disabled={readOnly} onClick={() => props.review!.onUndo(h.id)}>Undo</button>
+                            </div>
+                        ))}
+                    </div>
+                )}
                 <textarea ref={ta} className="ed-ta" value={value} wrap="off" spellCheck={false} autoCapitalize="off" autoComplete="off" autoCorrect="off" readOnly={readOnly}
                     aria-label="Code editor" aria-multiline="true"
                     onChange={(e) => { onEdit(e.target, e.nativeEvent); onChange(e.target.value); setCaret(e.target.selectionStart); }}

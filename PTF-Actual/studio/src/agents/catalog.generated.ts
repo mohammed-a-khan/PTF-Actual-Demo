@@ -3398,6 +3398,7 @@ export const TYPES: Record<string, string> = {
  "AgentUsage": "export interface AgentUsage { calls: number; inputTokens: number; outputTokens: number; cost: number; model?: string }",
  "AgentSessionInfo": "export interface AgentSessionInfo { id: string; title: string; createdAt: string; workflow?: string; model: string; active: boolean; busy: boolean; changes: number; usage: AgentUsage; agent?: { id: string; name: string } }",
  "AgentChange": "export interface AgentChange { path: string; state: 'new' | 'modified' | 'deleted' | 'unchanged' | 'gone'; staged: boolean }",
+ "AgentReviewFile": "export interface AgentReviewFile { session: string; title: string; busy: boolean; path: string; state: 'new' | 'modified' | 'deleted'; added: number; removed: number; before: string | null; after: string | null }",
  "AgentEventDef": "export type AgentEventDef = { seq: number; at: number } & (\n    | { type: 'user'; text: string; context?: string } | { type: 'delta'; text: string } | { type: 'assistant'; text: string } | { type: 'reasoning'; text: string }",
  "BrowserFrame": "export interface BrowserFrame { running: boolean; actor: 'agent' | 'person' | null; frame: { data: string; seq: number; url: string; width: number; height: number; at: number } | null }",
  "BrowserPathInfo": "export interface BrowserPathInfo { project: string; file: string; name: string; startUrl: string; actions: number }",

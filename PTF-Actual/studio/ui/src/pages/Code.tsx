@@ -16,6 +16,9 @@ import { useUnsaved } from '../unsaved';
 import { errText, loadRunTarget, saveRunTarget, showRun, unsavedFiles, useStudio } from '../state';
 import { handlesSaveFiles, SAVE_FILES_EVENT, SaveFilesRequest } from '../runSignals';
 import { CodeEditor, CodeEditorHandle } from '../editor/CodeEditor';
+import { refreshAgentReview, reviewOf, useAgentReview } from '../agentReview';
+import { hunksOf, keepHunk, undoHunk, changeCount } from '../../../src/agents/hunks';
+import type { AgentReviewFile } from '../api';
 import { copilotProvider, CopilotStatusItem } from '../editor/copilot';
 import { DebugPanel, ExecLocation, ValueTree } from '../components/DebugPanel';
 import { debugHoverContext, hoverExpression, sameFile } from '../debugHover';
@@ -54,6 +57,9 @@ interface TabHandlers {
     toggleBreakpoint: (path: string, line: number) => void;
     /** The page's items in the editor's right-click menu. */
     editorMenu: (path: string, at: { line: number; offset: number; text: string }) => { actions?: MenuEntry[]; file?: MenuEntry[] };
+    /** Keep / undo one change an agent made (the review in the editor). */
+    keepChange: (rv: AgentReviewFile, text: string, id: string) => void;
+    undoChange: (path: string, rv: AgentReviewFile, text: string, id: string) => void;
 }
 const NO_DIAGS: Diag[] = [];
 /** The bottom panel's tabs (also the address's last segment, ~<tab>). */
@@ -67,12 +73,18 @@ const canBreak = (path: string) => /\.(feature|ts|js|mjs|cjs)$/.test(path) && !p
  * The editor of one open tab. Memoized with stable handlers, so typing in one tab re-renders only
  * that tab's editor (all tabs stay mounted to keep their undo history, scroll and caret).
  */
-const TabEditor = React.memo(function TabEditor({ tab, active, diagnostics, reveal, gutterActions, h, breakpoints, execLine }: {
+const TabEditor = React.memo(function TabEditor({ tab, active, diagnostics, reveal, gutterActions, h, breakpoints, execLine, rv }: {
     tab: OpenFile; active: boolean; diagnostics: Diag[]; reveal: { line: number; column?: number; nonce: number; soft?: boolean } | null;
     gutterActions?: Array<{ line: number; title: string; onClick: () => void }>; h: React.MutableRefObject<TabHandlers>;
-    breakpoints?: number[]; execLine?: number | null;
+    breakpoints?: number[]; execLine?: number | null; rv?: AgentReviewFile;
 }) {
     const path = tab.path;
+    // An agent's changes to this file, against the file before its first change (follows edits as they are typed).
+    const review = React.useMemo(() => {
+        if (!rv) return null;
+        const hunks = hunksOf(rv.before, tab.content);
+        return hunks.length ? { hunks, who: rv.title, onKeep: (id: string) => h.current.keepChange(rv, tab.content, id), onUndo: (id: string) => h.current.undoChange(path, rv, tab.content, id) } : null;
+    }, [rv, tab.content, path, h]);
     const register = React.useCallback((e: CodeEditorHandle | null) => { if (e) h.current.editors.set(path, e); else h.current.editors.delete(path); }, [path, h]);
     const lang = langOf(path);
     // Copilot's ghost text for code files (asks only once Copilot is set up and signed in).
@@ -102,7 +114,7 @@ const TabEditor = React.memo(function TabEditor({ tab, active, diagnostics, reve
             format={(text) => h.current.format(path, text)}
             usages={(text, off) => h.current.usages(path, text, off)}
             rename={(text, off) => h.current.rename(path, text, off)}
-            contextMenu={(at) => h.current.editorMenu(path, at)} />
+            contextMenu={(at) => h.current.editorMenu(path, at)} review={review} />
     );
 });
 
@@ -1040,6 +1052,59 @@ export function Code() {
         if (loc) { setBottom('debug'); void openRef.current?.(loc.file, loc.line, undefined, true); }
     }, []);
 
+    // ---------------------------------------------------------------- review of an agent's edits (Keep / Undo)
+    const agentReview = useAgentReview();
+    /** Undo one change: back in the editor (Ctrl+Z brings it back) and saved, so the file on disk loses it too. */
+    const undoChange = async (path: string, rv: AgentReviewFile, text: string, id: string) => {
+        const t = tabsRef.current.find((x) => x.path === path); if (!t) return;
+        const next = undoHunk(rv.before, text, id);
+        editors.current.get(path)?.applyEdit(next);
+        try {
+            const r = await api.saveFile(path, toDisk({ content: next, eol: t.eol }), t.hash);
+            setTabs((ts) => ts.map((x) => (x.path === path ? { ...x, content: next, savedContent: next, hash: r.hash } : x)));
+        } catch (e) { message.error(errText(e)); }
+        void refreshAgentReview();
+    };
+    /** Reload a tab from disk after the Studio changed the file (Undo file). */
+    const reloadTab = async (path: string) => {
+        const f = await api.readFile(path).catch(() => null);
+        if (!f) { setTabs((ts) => ts.filter((x) => x.path !== path)); return; }
+        const d = fromDisk(f.content);
+        setTabs((ts) => ts.map((x) => (x.path === path ? { ...x, content: d.content, savedContent: d.content, hash: f.hash, eol: d.eol } : x)));
+    };
+    const keepFile = async (rv: AgentReviewFile) => { try { await api.agentKeep(rv.session, rv.path); await refreshAgentReview(); } catch (e) { message.error(errText(e)); } };
+    const keepAll = async (rv: AgentReviewFile) => {
+        try { await api.agentKeep(rv.session); await refreshAgentReview(); message.success(`Kept every change of "${rv.title}"`); } catch (e) { message.error(errText(e)); }
+    };
+    const undoFile = (rv: AgentReviewFile) => {
+        const t = tabsRef.current.find((x) => x.path === rv.path);
+        const go = async () => {
+            try { const r = await api.agentUndo(rv.session, rv.path); await reloadTab(rv.path); await refreshAgentReview(); loadFiles(); message.success(r.files ? `Undid the agent's changes to ${rv.path.split('/').pop()}` : 'Nothing to undo'); }
+            catch (e) { message.error(errText(e)); }
+        };
+        modal.confirm({
+            title: `Undo every change "${rv.title}" made to ${rv.path.split('/').pop()}?`,
+            content: <>{rv.state === 'new' ? 'The agent created this file: it is removed.' : 'The file goes back to how it was before the agent first changed it.'}{t && t.content !== t.savedContent ? ' Your unsaved edits in this tab are lost too.' : ''} A copy is kept in the Studio's recovery folder.</>,
+            okText: 'Undo the changes', okButtonProps: { danger: true }, onOk: go,
+        });
+    };
+    /** The next (or previous) change in the file, from the caret's line (wraps around). */
+    const goChange = (path: string, rv: AgentReviewFile, step: 1 | -1) => {
+        const t = tabsRef.current.find((x) => x.path === path); if (!t) return;
+        const hs = hunksOf(rv.before, t.content); if (!hs.length) return;
+        const caret = (editors.current.get(path)?.caretLine() ?? 1) - 1;
+        const next = step === 1 ? (hs.find((h) => h.afterStart > caret) ?? hs[0]) : ([...hs].reverse().find((h) => h.afterStart < caret) ?? hs[hs.length - 1]);
+        goFile(path, next.afterStart + 1);
+    };
+    /** The next (or previous) file waiting for review: opened at its first change. */
+    const goReview = (from: string | undefined, step: 1 | -1) => {
+        if (!agentReview.length) return;
+        const i = agentReview.findIndex((f) => f.path === from);
+        const next = agentReview[(i < 0 ? 0 : i + step + agentReview.length) % agentReview.length];
+        const h = hunksOf(next.before, next.after);
+        goFile(next.path, (h[0]?.afterStart ?? 0) + 1);
+    };
+
     handlers.current = {
         setContent, editors: editors.current, toggleBreakpoint,
         save: (path) => void save(path),
@@ -1048,6 +1113,8 @@ export function Code() {
         usages: (path, text, off) => void findUsages(path, text, off),
         rename: (path, text, off) => void startRename(path, text, off),
         editorMenu,
+        keepChange: (rv, text, id) => { void api.agentKeep(rv.session, rv.path, keepHunk(rv.before, text, id)).then(() => refreshAgentReview()).catch((e) => message.error(errText(e))); },
+        undoChange: (path, rv, text, id) => void undoChange(path, rv, text, id),
     };
     openRef.current = open;
     treeMenuRef.current = showTreeMenu;
@@ -1149,13 +1216,43 @@ export function Code() {
                                     return { key: t.path, label: <Tooltip title={t.readOnly ? `${t.path} (library file, read-only)` : t.path}><span>{t.readOnly && <LockOutlined aria-label="read-only" style={{ marginRight: 4, fontSize: 11 }} />}{name}{twin && dir && <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>{t.path.split('/').slice(-3, -1).join('/')}</Typography.Text>}{dirty(t) && <Badge status="processing" style={{ marginLeft: 6 }} />}</span></Tooltip>, closable: true };
                                 })} />
                             </div>
+                            {cur && !cur.binary && (() => {
+                                const rv = reviewOf(agentReview, cur.path);
+                                if (!rv) return null;
+                                const n = changeCount(rv.before, cur.content);
+                                const blocks = hunksOf(rv.before, cur.content).length;
+                                if (!blocks) return null;
+                                const pos = agentReview.findIndex((f) => f.path === cur.path);
+                                const mine = agentReview.filter((f) => f.session === rv.session).length;
+                                return (
+                                    <div className="rv-bar" role="region" aria-label="Agent changes to review">
+                                        <span><span className="rv-who">{rv.title}</span> {rv.state === 'new' ? 'created this file' : 'changed this file'}{rv.busy ? ' (still working)' : ''}</span>
+                                        <Typography.Text type="secondary" style={{ fontSize: 12 }}><span style={{ color: '#1a7f37' }}>+{n.added}</span> <span style={{ color: '#cf222e' }}>−{n.removed}</span> · {blocks} change{blocks === 1 ? '' : 's'}</Typography.Text>
+                                        <Space size={0}>
+                                            <Tooltip title="Previous change"><Button size="small" type="text" aria-label="Previous change" onClick={() => goChange(cur.path, rv, -1)}>↑</Button></Tooltip>
+                                            <Tooltip title="Next change"><Button size="small" type="text" aria-label="Next change" onClick={() => goChange(cur.path, rv, 1)}>↓</Button></Tooltip>
+                                        </Space>
+                                        <span style={{ flex: 1 }} />
+                                        <Button size="small" type="primary" onClick={() => void keepFile(rv)}>Keep file</Button>
+                                        <Button size="small" onClick={() => undoFile(rv)} disabled={cur.readOnly}>Undo file</Button>
+                                        {mine > 1 && <Button size="small" type="text" onClick={() => void keepAll(rv)}>Keep all {mine} files</Button>}
+                                        {agentReview.length > 1 && (
+                                            <Space size={2}>
+                                                <Button size="small" type="text" aria-label="Previous file to review" onClick={() => goReview(cur.path, -1)}>‹</Button>
+                                                <Typography.Text type="secondary" style={{ fontSize: 12 }}>{pos + 1} of {agentReview.length} files</Typography.Text>
+                                                <Button size="small" type="text" aria-label="Next file to review" onClick={() => goReview(cur.path, 1)}>›</Button>
+                                            </Space>
+                                        )}
+                                    </div>
+                                );
+                            })()}
                             <div style={{ flex: 1, minHeight: 0 }}>
                                 {cur?.binary && <Alert style={{ margin: 16 }} type="info" showIcon message="This is a binary file and cannot be edited as text." />}
                                 {/* One editor per open tab, kept mounted: undo history, scroll and caret survive tab switches. */}
                                 {tabs.filter((t) => !t.binary).map((t) => (
                                     <TabEditor key={t.path} tab={t} active={t.path === active} h={handlers} diagnostics={diags[t.path] ?? NO_DIAGS}
                                         reveal={reveal?.path === t.path ? reveal : null} gutterActions={t.path === active ? gutterActions : undefined}
-                                        breakpoints={bpLines(t.path)} execLine={exec?.file === t.path ? exec.line : null} />
+                                        breakpoints={bpLines(t.path)} execLine={exec?.file === t.path ? exec.line : null} rv={reviewOf(agentReview, t.path)} />
                                 ))}
                             </div>
                         </>

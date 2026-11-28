@@ -16,6 +16,7 @@ import { Markdown } from './Markdown';
 import { AgentBrowser } from './AgentBrowser';
 import { agentContext, subscribeAgentContext, takePendingAsk } from '../agentContext';
 import { tokens, toItems } from '../agentEvents';
+import { WorkingSet } from './WorkingSet';
 export { toItems };
 
 const ctxLabel = (c: Record<string, unknown>) => [c.page, c.project, c.file ?? c.collection ?? c.scenario ?? c.connection ?? c.run].filter(Boolean).map(String).join(' · ');
@@ -256,6 +257,7 @@ export function AgentPanel({ open, initialSession, onClose }: { open: boolean; i
                         </div>
                         {usage && usage.calls > 0 && <Typography.Text type="secondary" style={{ fontSize: 11, marginTop: 4 }}>{usage.model ? `${usage.model} · ` : ''}{usage.calls} model call{usage.calls === 1 ? '' : 's'} · {tokens(usage.inputTokens + usage.outputTokens)}{usage.cost ? ` · ${Math.round(usage.cost * 100) / 100} premium requests` : ''}</Typography.Text>}
                         {ctxLabel(ctx) && <Tooltip title={<pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{JSON.stringify(ctx, null, 1)}</pre>}><Tag bordered={false} style={{ alignSelf: 'flex-start', marginTop: 6 }}>Screen: {ctxLabel(ctx)}</Tag></Tooltip>}
+                        {current && <WorkingSet session={current} />}
                         {current?.startsWith('mcp-') ? <Typography.Text type="secondary" style={{ fontSize: 12, marginTop: 6 }}>An assistant outside the Studio (over MCP) works here: write to it in that app. Its tool calls show above; approve or reject its changes here.</Typography.Text>
                         : <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
                             <Input.TextArea autoSize={{ minRows: 2, maxRows: 8 }} value={text} onChange={(e) => setText(e.target.value)} placeholder={ready ? 'Ask or give a task (Enter sends, Shift+Enter: new line)' : notReady} aria-label="Message to the agent" disabled={!ready}

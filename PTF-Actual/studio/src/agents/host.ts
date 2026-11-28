@@ -13,6 +13,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomBytes } from 'crypto';
+import { Baselines } from './baselines';
 import type { StudioBrowser } from './browser';
 import { isReadOnlyCall, studioTools, ToolDeps, ToolDef } from './tools';
 import { getAgent, profileOf, TOOL_GROUPS, type AgentProfile } from './builder';
@@ -366,7 +367,11 @@ export class AgentHost {
     private installApplied = 0;
     private signin: { state: SignInState; session: any; flowId: string | null; gen: number } = { state: { active: false }, session: null, flowId: null, gen: 0 };
 
+    /** Files as they were before each conversation's first change (the review of its edits in the editor). */
+    readonly baselines: Baselines;
+
     constructor(private readonly d: HostDeps) {
+        this.baselines = new Baselines(path.join(d.home, 'agent-baselines'));
         this.settingsFile = path.join(d.home, 'agents.json');
         this.listFile = path.join(d.home, 'agent-sessions.json');
         this.installer = new RuntimeInstaller(d.runtimeDir ?? path.join(d.home, 'agents-runtime'));
@@ -665,7 +670,21 @@ export class AgentHost {
         const abs = path.resolve(base, p.trim());
         const rel = path.relative(base, abs).split(path.sep).join('/');
         if (!rel || rel.startsWith('..') || path.isAbsolute(rel) || rel.startsWith('.git/')) return;
+        // The file before the conversation's first change to it (for the review in the editor): not a mission's (its own copy).
+        if (!s.mission) { try { this.baselines.capture(s.id, base, rel); } catch { /* not reviewable in the editor */ } }
         if (!s.changes.has(rel)) { s.changes.add(rel); this.saveList(); }
+    }
+
+    /** Before a Studio call that changes files: the files it names, as they are now (their baseline). */
+    private beforeCall(s: SessionState, method: string, url: string, body: unknown) {
+        if (method === 'GET' || s.mission) return;
+        const q = new URLSearchParams(url.split('?')[1] ?? '');
+        const b = (body ?? {}) as Record<string, unknown>;
+        for (const v of [q.get('path'), q.get('file'), b.path, b.file]) {
+            if (typeof v !== 'string' || !v.trim()) continue;
+            const rel = path.relative(this.d.repoRoot, path.resolve(this.d.repoRoot, v.trim())).split(path.sep).join('/');
+            if (rel && !rel.startsWith('..') && !path.isAbsolute(rel) && !rel.startsWith('.git/')) { try { this.baselines.capture(s.id, this.d.repoRoot, rel); } catch { /* not reviewable */ } }
+        }
     }
 
     /** Files a Studio change wrote: path / file in the request; file(s) in the answer. */
@@ -811,7 +830,7 @@ export class AgentHost {
             const st = () => this.effective().settings;
             tools = guardTools(studioTools({
                 repoRoot: this.d.repoRoot, browser: this.d.browser, context: () => this.context,
-                call: async (m, u, b) => { const r = await this.d.call(m, u, b, { session: s.id, title: s.title }); if (r.status >= 200 && r.status < 300) this.changedBy(s, m, u, b, r.body); return r; },
+                call: async (m, u, b) => { this.beforeCall(s, m, u, b); const r = await this.d.call(m, u, b, { session: s.id, title: s.title }); if (r.status >= 200 && r.status < 300) this.changedBy(s, m, u, b, r.body); return r; },
                 approve: async (title, detail, kind) => (st().approvals.studio === 'auto' && kind === 'studio') ? true : (await this.ask(s, title, detail, kind)) !== 'reject',
                 changesNeedApproval: () => st().approvals.studio !== 'auto', appsDir: path.join(this.d.home, 'apps', path.basename(this.d.repoRoot)),
                 blockedAreas: policy.blockedAreas, allowedHosts: policy.allowedHosts,
@@ -894,7 +913,7 @@ How to work:
             unattended: () => !!m0?.unattended,
             refuse: (m, u) => (m0?.readOnly && !isReadOnlyCall(m, u, undefined) ? `This session only reads (an evaluation): ${m} ${u.split('?')[0]} would change something. Say what you would do instead.` : null) ?? (prof && !may('studio-change') && !isReadOnlyCall(m, u, undefined) ? `The agent "${prof.name}" may only read through the Studio (${m} ${u.split('?')[0]} changes something).` : null) ?? (m0?.isolated && m !== 'GET' && !ISOLATED_OK.some((re) => re.test(u)) ? `In this mission you work in your own copy of the repository (${m0.workdir}): change files with your file tools there, and run tests with tests_run. Studio calls that write into the person's working copy (${m} ${u.split('?')[0]}) are not available.` : null),
             call: async (m, u, b) => {
-                const r = await this.d.call(m, u, b, { session: s.id, title: s.title }); if (r.status >= 200 && r.status < 300) this.changedBy(s, m, u, b, r.body); return r; },
+                this.beforeCall(s, m, u, b); const r = await this.d.call(m, u, b, { session: s.id, title: s.title }); if (r.status >= 200 && r.status < 300) this.changedBy(s, m, u, b, r.body); return r; },
             approve: async (title, detail, kind) => {
                 if (m0?.unattended) { this.push(s, { type: 'info', text: `Refused (unattended): ${title}` }); return false; }
                 // After injected content, nothing is allowed without the person.
@@ -1290,6 +1309,7 @@ How to work:
         if (s) { await this.abort(id); try { await s.sdk?.disconnect(); } catch { /* gone */ } this.sessions.delete(id); }
         try { await this.client?.deleteSession(id); } catch { /* not stored */ }
         try { fs.rmSync(this.eventsFile(id), { force: true }); } catch { /* gone */ }
+        this.baselines.forget(id);
         let saved: Array<{ id: string }> = [];
         try { saved = JSON.parse(fs.readFileSync(this.listFile, 'utf8')); } catch { /* none */ }
         fs.mkdirSync(this.d.home, { recursive: true });
